@@ -1,0 +1,120 @@
+"""Локальная запись аудио для Krab Ear backend.
+
+Сервис хранит данные чанками в памяти до команды stop, чтобы затем передать
+единый numpy-массив в транскрибатор.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+import numpy as np
+import sounddevice as sd
+
+logger = logging.getLogger("KrabEar.Backend.Recorder")
+
+
+class AudioRecorder:
+    """Потокобезопасный рекордер c режимом start/stop."""
+
+    def __init__(self, sample_rate: int = 16000, channels: int = 1) -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.chunk_size = int(self.sample_rate * 0.1)
+
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._chunks: list[np.ndarray] = []
+        self._is_recording = False
+        self._started_at: float = 0.0
+
+    @property
+    def is_recording(self) -> bool:
+        """Флаг активной записи."""
+        with self._lock:
+            return self._is_recording
+
+    def start(self) -> bool:
+        """Запускает запись, если рекордер сейчас в idle состоянии."""
+        with self._lock:
+            if self._is_recording:
+                return False
+            self._chunks = []
+            self._stop_event.clear()
+            self._is_recording = True
+            self._started_at = time.monotonic()
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
+            return True
+
+    def stop(self, timeout_sec: float = 3.0) -> tuple[np.ndarray, float] | None:
+        """Останавливает запись и возвращает (audio, duration)."""
+        with self._lock:
+            if not self._is_recording:
+                return None
+            self._is_recording = False
+            thread = self._thread
+
+        self._stop_event.set()
+        if thread is not None:
+            thread.join(timeout=timeout_sec)
+
+        with self._lock:
+            duration = max(0.0, time.monotonic() - self._started_at)
+            chunks = list(self._chunks)
+            self._chunks = []
+            self._thread = None
+
+        if not chunks:
+            return np.array([], dtype=np.float32), duration
+
+        audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
+        return audio, duration
+
+    def get_duration_sec(self) -> float:
+        """Возвращает длительность текущей записи в секундах."""
+        with self._lock:
+            if not self._is_recording:
+                return 0.0
+            return max(0.0, time.monotonic() - self._started_at)
+
+    def snapshot_audio(self, max_duration_sec: float = 12.0) -> tuple[np.ndarray, float]:
+        """Возвращает срез последнего аудио для realtime preview без остановки записи."""
+        with self._lock:
+            duration = max(0.0, time.monotonic() - self._started_at) if self._is_recording else 0.0
+            chunks = list(self._chunks)
+
+        if not chunks:
+            return np.array([], dtype=np.float32), duration
+
+        audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
+        if max_duration_sec > 0:
+            max_samples = int(self.sample_rate * max_duration_sec)
+            if max_samples > 0 and audio.size > max_samples:
+                audio = audio[-max_samples:]
+        return audio, duration
+
+    def _worker(self) -> None:
+        """Фоновый цикл чтения чанков из микрофона."""
+        try:
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="float32",
+                blocksize=self.chunk_size,
+            ) as stream:
+                while not self._stop_event.is_set():
+                    data, overflowed = stream.read(self.chunk_size)
+                    if overflowed:
+                        logger.warning("Переполнение аудиобуфера во время записи")
+                    with self._lock:
+                        self._chunks.append(data.copy())
+        except Exception:
+            logger.exception("Ошибка в потоке аудиозаписи")
+        finally:
+            with self._lock:
+                self._is_recording = False

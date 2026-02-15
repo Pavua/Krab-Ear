@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Python virtualenv и кэш
+.venv/
+.venv_krab_ear/
+KrabEar/.venv_krab_ear/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# Swift build/runtime
+native/KrabEarAgent/.build/
+native/runtime/
+
+# Runtime-логи и pid
+*.log
+*.pid
+KrabEar/krab_ear.log
+krab_ear_manual.log
+
+# Временные данные и отчеты
+voice_cache/
+KrabEar/voice_cache/
+docs/reports/*.md
+docs/reports/*.json
+
+# Архивы и бэкапы
+_ARCHIVE_NON_KRAB_EAR_2026-02-11/
+_STABLE_BACKUPS/
+
+# Локальные служебные каталоги
+.coordination/

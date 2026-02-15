@@ -1,0 +1,74 @@
+{
+  "version": "2026-02-12",
+  "description": "Зоны ответственности Codex и Antigravity для Krab Voice stack",
+  "zones": [
+    {
+      "name": "Krab Ear Backend",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Ear/KrabEar/backend"
+    },
+    {
+      "name": "Krab Ear Tests",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Ear/KrabEar/tests"
+    },
+    {
+      "name": "Krab Ear Scripts",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Ear/scripts"
+    },
+    {
+      "name": "Voice Gateway Core",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway/app"
+    },
+    {
+      "name": "Voice Gateway Tests",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway/tests"
+    },
+    {
+      "name": "Voice Gateway Scripts",
+      "owner": "codex",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway/scripts"
+    },
+    {
+      "name": "Krab Ear Native UI",
+      "owner": "antigravity",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent"
+    },
+    {
+      "name": "Voice Gateway iOS",
+      "owner": "antigravity",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway/ios"
+    },
+    {
+      "name": "OpenClaw Integration",
+      "owner": "antigravity",
+      "prefix": "/Users/pablito/Antigravity_AGENTS/Краб/src",
+      "monitor": false
+    }
+  ],
+  "shared_prefixes": [
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/docs",
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/ANTIGRAVITY_HANDOFF",
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/README.md",
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/Start Krab Voice Gateway.command",
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/Stop Krab Voice Gateway.command",
+    "/Users/pablito/Antigravity_AGENTS/Krab Ear/Run Agent Boundary Check.command",
+    "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway/README.md"
+  ],
+  "exclude_globs": [
+    "**/.DS_Store",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.venv_krab_ear/**",
+    "**/.venv_krab_voice_gateway/**",
+    "**/.build/**",
+    "**/docs/reports/**",
+    "**/*.log",
+    "**/*.pid",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**"
+  ]
+}

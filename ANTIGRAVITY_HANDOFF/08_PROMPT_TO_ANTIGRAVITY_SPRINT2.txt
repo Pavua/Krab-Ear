@@ -1,0 +1,19 @@
+Запусти Sprint 2 из handoff-пакета.
+
+1) Прочитай:
+- 00_START_HERE.md
+- 01_BOUNDARIES.md
+- 05_WORK_SPLIT_PERCENTAGES.md
+- 06_SPRINT2_PLAN_FOR_ANTIGRAVITY.md
+- 03_DONE_DEFINITION.md
+
+2) Выполняй только зоны Antigravity.
+
+3) Перед началом:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/Run Agent Boundary Check.command antigravity
+
+4) После выполнения:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/ANTIGRAVITY_HANDOFF/Run Antigravity Acceptance.command
+
+5) Сдай отчёт в:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/docs/reports/antigravity_handoff_report_YYYYMMDD_HHMM.md

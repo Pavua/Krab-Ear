@@ -1,0 +1,8 @@
+mlx-whisper
+numpy
+sounddevice
+requests
+python-dotenv
+pyperclip
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+pyobjc-framework-Vision; sys_platform == "darwin"

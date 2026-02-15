@@ -1,0 +1,9 @@
+Выполни Batch B из файла:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/ANTIGRAVITY_HANDOFF/10_TASKS_BATCH_B.md
+
+Правила:
+1) Не трогай codex-owned backend зоны.
+2) После изменений запусти проверки из DoD.
+3) Отчёт сохрани в:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/docs/reports/antigravity_batch_b_report_YYYYMMDD_HHMM.md
+4) Если что-то не сделал — честно перечисли блокеры.

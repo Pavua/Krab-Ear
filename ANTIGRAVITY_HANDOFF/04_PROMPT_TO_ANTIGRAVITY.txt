@@ -1,0 +1,14 @@
+Работай только по файлам из папки:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/ANTIGRAVITY_HANDOFF
+
+Строго соблюдай:
+1) зоны из 01_BOUNDARIES.md;
+2) задачи из 02_TASKS_FOR_ANTIGRAVITY.md;
+3) DoD из 03_DONE_DEFINITION.md.
+
+Перед началом и после завершения запусти:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/Run Agent Boundary Check.command antigravity
+
+Если нужен новый backend-контракт, не меняй backend напрямую.
+Внеси предложение в:
+/Users/pablito/Antigravity_AGENTS/Krab Ear/docs/API.md
