@@ -34,7 +34,9 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/transcriber.py`** — Thin wrapper over `AudioEngine` for profile/vocabulary management.
 - **`backend/translator.py`** — Offline-first translator (RU↔ES, EN→RU, Auto, Bilingual modes) with in-memory cache.
 - **`backend/rest_server.py`** — Flask REST API (port 5005) for HTTP-based transcription and metrics. Separate from the IPC service.
+- **`backend/event_bus.py`** — In-process pub/sub EventBus with SSE streaming. Supports both untyped `emit(str, dict)` and typed `emit_typed(EventType, BaseModel)`.
 - **`backend/metrics_collector.py`** — Thread-safe sliding-window metrics (latency percentiles, confidence).
+- **`contracts/`** — Pydantic models for event payloads (STT, Translation). `EventType` enum + `EVENT_SCHEMA_MAP` for runtime dispatch. JSON Schema export via `python -m contracts.export`.
 
 ### Native agent (`native/KrabEarAgent/`):
 - Swift Package (swift-tools-version 6.0, macOS 13+). Single executable target.
@@ -99,6 +101,8 @@ cd native/KrabEarAgent && swift build -c release
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
+- **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
+- **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
 
 ## Non-goals (from PRD)
 
