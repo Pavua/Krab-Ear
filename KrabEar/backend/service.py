@@ -38,6 +38,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
+from contracts.stt_events import SttFailed, SttFinal
+from contracts.registry import EventType
 from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
@@ -358,7 +360,7 @@ class BackendService:
         transcription_error = self._extract_transcribed_error(transcribe_payload)
         if not text:
             if transcription_error:
-                event_bus.emit("stt.failed", {"reason": transcription_error, "duration_sec": duration_sec})
+                event_bus.emit_typed(EventType.STT_FAILED, SttFailed(reason=transcription_error, duration_sec=duration_sec))
             return {
                 "status": "empty_text",
                 "duration_sec": duration_sec,
@@ -423,13 +425,13 @@ class BackendService:
             "background_guard_rejected": background_guard_rejected,
         }
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
-        event_bus.emit("stt.final", {
-            "history_id": item.id,
-            "text": final_text,
-            "duration_sec": duration_sec,
-            "language": tp.get("language"),
-            "confidence": tp.get("confidence"),
-        })
+        event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
+            history_id=item.id,
+            text=final_text,
+            duration_sec=duration_sec,
+            language=tp.get("language"),
+            confidence=tp.get("confidence"),
+        ))
         return result_payload
 
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
