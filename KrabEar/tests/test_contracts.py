@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -244,6 +246,28 @@ class EventBusTypedEmitTest(unittest.TestCase):
         self.assertEqual(etype, EventType.STT_FINAL)
         self.assertEqual(parsed.text, "hello")
         bus.unsubscribe(q)
+
+
+class SchemaExportTest(unittest.TestCase):
+
+    def test_export_creates_schema_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            from contracts.export import export_schemas
+            export_schemas(out)
+            expected_files = [
+                "stt.partial.schema.json",
+                "stt.final.schema.json",
+                "stt.failed.schema.json",
+                "translation.completed.schema.json",
+                "translation.failed.schema.json",
+            ]
+            for fname in expected_files:
+                fpath = out / fname
+                self.assertTrue(fpath.exists(), f"Missing {fname}")
+                data = json.loads(fpath.read_text())
+                self.assertIn("properties", data)
+                self.assertEqual(data["type"], "object")
 
 
 if __name__ == "__main__":
