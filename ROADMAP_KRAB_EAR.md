@@ -68,6 +68,6 @@
 
 ## Definition of Done
 
-- Есть независимый smoke-тест `Krab Ear`.
-- Есть контрактные тесты совместимости с `Krab`.
-- Есть отдельный релизный чеклист.
+- [x] Есть независимый smoke-тест `Krab Ear` (`tests/test_rest_smoke.py`, `scripts/run_smoke_release.command`).
+- [x] Есть контрактные тесты совместимости с `Krab` (`tests/test_contract_compatibility.py`).
+- [x] Есть отдельный релизный чеклист (`RELEASE_CHECKLIST.md`).
