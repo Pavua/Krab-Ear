@@ -9,11 +9,18 @@
 import Foundation
 
 /// Управляет жизненным циклом Python backend-процесса.
+///
+/// Поддерживает автоматический перезапуск при обнаружении мёртвого backend
+/// (например, после macOS Jetsam SIGKILL из-за нехватки памяти).
 final class BackendSupervisor {
     private(set) var backendProcess: Process?
     let projectRoot: String
     let dataDir: String
     let socketPath: String
+
+    /// Счётчик последовательных перезапусков (сбрасывается при успешном ping).
+    private var consecutiveRestarts = 0
+    private static let maxConsecutiveRestarts = 3
 
     init(projectRoot: String) {
         self.projectRoot = projectRoot
@@ -21,11 +28,22 @@ final class BackendSupervisor {
         self.socketPath = (self.dataDir as NSString).appendingPathComponent("krabear.sock")
     }
 
+    /// Проверяет, жив ли backend (процесс запущен + отвечает на ping).
+    func isBackendAlive() -> Bool {
+        guard let proc = backendProcess, proc.isRunning else { return false }
+        let client = IPCClient(socketPath: socketPath)
+        return (try? client.call(method: "ping")) != nil
+    }
+
     func ensureBackendRunning() throws {
         let client = IPCClient(socketPath: socketPath)
         if (try? client.call(method: "ping")) != nil {
+            consecutiveRestarts = 0
             return
         }
+
+        // Если процесс мёртв — чистим stale socket
+        cleanupStaleSocket()
 
         try startBackendProcess()
 
@@ -33,6 +51,7 @@ final class BackendSupervisor {
         for _ in 0..<30 {
             usleep(200_000)
             if (try? client.call(method: "ping")) != nil {
+                consecutiveRestarts = 0
                 return
             }
         }
@@ -40,9 +59,42 @@ final class BackendSupervisor {
         throw IPCError.socketConnectFailed("backend не ответил после запуска")
     }
 
+    /// Перезапускает backend, если он мёртв. Возвращает true при успешном восстановлении.
+    ///
+    /// Ограничен `maxConsecutiveRestarts` попытками подряд — при превышении
+    /// возвращает false, чтобы не зациклить перезапуски при системном OOM.
+    func restartIfDead() -> Bool {
+        if isBackendAlive() {
+            consecutiveRestarts = 0
+            return true
+        }
+
+        guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
+            return false
+        }
+
+        consecutiveRestarts += 1
+        stopBackend()
+
+        do {
+            try ensureBackendRunning()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func stopBackend() {
         backendProcess?.terminate()
         backendProcess = nil
+    }
+
+    /// Удаляет stale Unix socket, оставшийся после убитого процесса.
+    private func cleanupStaleSocket() {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: socketPath) {
+            try? fm.removeItem(atPath: socketPath)
+        }
     }
 
     private func startBackendProcess() throws {

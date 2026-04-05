@@ -227,6 +227,36 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Backend recovery
+
+    /// Обёртка над IPC-вызовом с автоматическим перезапуском backend при ошибке соединения.
+    ///
+    /// Если первый вызов падает с socketConnectFailed/writeFailed/readFailed,
+    /// пробуем `backendSupervisor.restartIfDead()` и повторяем запрос один раз.
+    func callWithRecovery(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+        do {
+            return try ipcClient.call(method: method, params: params)
+        } catch let error as IPCError where Self.isConnectionError(error) {
+            logger.warn("IPC ошибка соединения (\(error.localizedDescription)), пытаюсь перезапустить backend...")
+            if backendSupervisor.restartIfDead() {
+                logger.info("Backend перезапущен, повторяю вызов \(method)")
+                return try ipcClient.call(method: method, params: params)
+            } else {
+                logger.error("Не удалось перезапустить backend (лимит перезапусков)")
+                throw error
+            }
+        }
+    }
+
+    private static func isConnectionError(_ error: IPCError) -> Bool {
+        switch error {
+        case .socketCreateFailed, .socketConnectFailed, .writeFailed, .readFailed:
+            return true
+        case .invalidResponse, .backendError:
+            return false
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -748,7 +778,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     private func syncRecordingStateWithBackend() -> Bool {
         guard
-            let stateResponse = try? ipcClient.call(method: "get_recording_state", params: [:]),
+            let stateResponse = try? callWithRecovery(method: "get_recording_state", params: [:]),
             let state = stateResponse["result"] as? [String: Any]
         else {
             return isRecording
@@ -781,7 +811,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 enabled: settings.audioDuckingEnabled,
                 duckPercent: effectiveDuckingPercent
             )
-            let response = try ipcClient.call(method: "start_recording", params: [:])
+            let response = try callWithRecovery(method: "start_recording", params: [:])
             let result = response["result"] as? [String: Any]
             let status = (result?["status"] as? String) ?? "recording"
             if status == "already_recording" {
@@ -836,7 +866,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            let response = try ipcClient.call(
+            let response = try callWithRecovery(
                 method: "stop_recording",
                 params: [
                     "quality_profile": settings.qualityProfile,
@@ -1082,7 +1112,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     private func loadSettings() -> AgentSettings {
         do {
-            let response = try ipcClient.call(method: "get_settings", params: [:])
+            let response = try callWithRecovery(method: "get_settings", params: [:])
             guard let result = response["result"] as? [String: Any] else {
                 return .default
             }
@@ -1095,7 +1125,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private func persistSettingsPayload(_ payload: [String: Any]) {
         let previous = settings
         do {
-            let response = try ipcClient.call(method: "set_settings", params: payload)
+            let response = try callWithRecovery(method: "set_settings", params: payload)
             guard let result = response["result"] as? [String: Any] else {
                 return
             }

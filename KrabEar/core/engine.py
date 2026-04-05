@@ -7,8 +7,10 @@ AudioEngine управляет жизненным циклом STT-моделе�
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
+import re as _re
 import subprocess
 import tempfile
 import time
@@ -26,6 +28,41 @@ from .config import settings
 from .utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Engine")
+
+# ---------------------------------------------------------------------------
+# Утилита: проверка доступной памяти macOS через vm_stat
+# ---------------------------------------------------------------------------
+
+# Минимум свободной (free + inactive) памяти для загрузки тяжёлых моделей.
+# whisper-large-v3-mlx занимает ~3GB, pyannote ~1.5GB. Оставляем запас.
+_HEAVY_MODEL_MIN_FREE_GB = 4.0
+
+
+def _get_available_memory_gb() -> float:
+    """Возвращает примерный объём доступной памяти (free + inactive) в GB.
+
+    Использует macOS `vm_stat` — это дешёвый вызов без зависимостей.
+    При ошибке возвращает -1 (не блокируем работу если не macOS).
+    """
+    try:
+        result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2)
+        if result.returncode != 0:
+            return -1.0
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        free_pages = 0
+        inactive_pages = 0
+        for line in result.stdout.splitlines():
+            if "Pages free" in line:
+                m = _re.search(r"(\d+)", line.split(":")[1])
+                if m:
+                    free_pages = int(m.group(1))
+            elif "Pages inactive" in line:
+                m = _re.search(r"(\d+)", line.split(":")[1])
+                if m:
+                    inactive_pages = int(m.group(1))
+        return (free_pages + inactive_pages) * page_size / (1024 ** 3)
+    except Exception:
+        return -1.0
 
 class AudioEngine:
     """Сервисный слой для STT ( Speech-to-Text) и TTS (Text-to-Speech)."""
@@ -208,18 +245,55 @@ class AudioEngine:
             return {"text": "", "error": str(exc), "status": "error"}
 
     def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
-        """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM)."""
+        """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
+
+        Перед загрузкой тяжёлых моделей (не balanced) проверяет свободную память
+        через vm_stat, чтобы macOS Jetsam не убил процесс (SIGKILL).
+        """
         candidates = [self.current_model]
         if self.quality_profile == "max":
             candidates = list(dict.fromkeys(settings.model_max_list))
 
+        balanced_model = settings.MODEL_BALANCED
+
         for model_name in candidates:
             if model_name in self._unavailable_models:
                 continue
+
+            # Проверка памяти перед тяжёлыми моделями (не balanced)
+            if model_name != balanced_model:
+                avail_gb = _get_available_memory_gb()
+                if 0 < avail_gb < _HEAVY_MODEL_MIN_FREE_GB:
+                    logger.warning(
+                        "Пропускаю тяжёлую модель %s: доступно %.1f GB, нужно >= %.1f GB",
+                        model_name, avail_gb, _HEAVY_MODEL_MIN_FREE_GB,
+                    )
+                    continue
+
             try:
-                result = self._transcribe_model(audio_data, model_name, prompt, language=language)
+                timeout = settings.TRANSCRIBE_TIMEOUT_SEC
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                    result = future.result(timeout=timeout)
                 result["model_used"] = model_name
                 return result
+            except concurrent.futures.TimeoutError:
+                logger.error(
+                    "Таймаут %ds при транскрибации моделью %s — пропускаю",
+                    settings.TRANSCRIBE_TIMEOUT_SEC, model_name,
+                )
+                self._unavailable_models.add(model_name)
+            except MemoryError:
+                logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
+                self._unavailable_models.add(model_name)
+            except OSError as e:
+                # errno 12 = Cannot allocate memory — ядро отказало в mmap
+                if e.errno == 12 or "Cannot allocate memory" in str(e):
+                    logger.error("OOM (OSError) при модели %s: %s — помечаю как недоступную", model_name, e)
+                    self._unavailable_models.add(model_name)
+                else:
+                    logger.warning("Модель %s не сработала (OSError): %s", model_name, e)
+                    self._unavailable_models.add(model_name)
             except Exception as e:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
                 self._unavailable_models.add(model_name)

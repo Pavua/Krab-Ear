@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Лимиты
     MAX_AUDIO_MB: int = 50
     MAX_DURATION_SEC: int = 300
+    TRANSCRIBE_TIMEOUT_SEC: int = 60
     
     # TTS
     SAY_VOICE: str = ""
