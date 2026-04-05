@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from contracts.stt_events import SttPartial, SttFinal, SttFailed
+from contracts.translation_events import TranslationCompleted, TranslationFailed
 from pydantic import ValidationError
 
 
@@ -73,6 +74,53 @@ class SttFailedTest(unittest.TestCase):
     def test_missing_reason_raises(self):
         with self.assertRaises(ValidationError):
             SttFailed()
+
+
+class TranslationCompletedTest(unittest.TestCase):
+
+    def test_valid(self):
+        e = TranslationCompleted(
+            history_id="abc-123",
+            source_text="hola mundo",
+            translated_text="hello world",
+            source_lang="es",
+            target_lang="en",
+            engine="local",
+            mode="es_en",
+        )
+        self.assertEqual(e.source_text, "hola mundo")
+        self.assertEqual(e.translated_text, "hello world")
+        self.assertEqual(e.engine, "local")
+
+    def test_missing_required_raises(self):
+        with self.assertRaises(ValidationError):
+            TranslationCompleted(
+                history_id="abc",
+                source_text="hola",
+            )
+
+
+class TranslationFailedTest(unittest.TestCase):
+
+    def test_valid_minimal(self):
+        e = TranslationFailed(source_text="hola", reason="engine_unavailable")
+        self.assertEqual(e.reason, "engine_unavailable")
+        self.assertIsNone(e.history_id)
+        self.assertIsNone(e.source_lang)
+
+    def test_valid_full(self):
+        e = TranslationFailed(
+            history_id="abc-123",
+            source_text="hola",
+            reason="timeout",
+            source_lang="es",
+            target_lang="en",
+        )
+        self.assertEqual(e.history_id, "abc-123")
+
+    def test_missing_required_raises(self):
+        with self.assertRaises(ValidationError):
+            TranslationFailed()
 
 
 if __name__ == "__main__":
