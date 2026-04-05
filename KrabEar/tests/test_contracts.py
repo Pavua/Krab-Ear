@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from contracts.stt_events import SttPartial, SttFinal, SttFailed
 from contracts.translation_events import TranslationCompleted, TranslationFailed
+from contracts.registry import EventType, EVENT_SCHEMA_MAP
 from pydantic import ValidationError
 
 
@@ -121,6 +122,33 @@ class TranslationFailedTest(unittest.TestCase):
     def test_missing_required_raises(self):
         with self.assertRaises(ValidationError):
             TranslationFailed()
+
+
+class EventRegistryTest(unittest.TestCase):
+
+    def test_all_event_types_have_schema(self):
+        """Каждый EventType имеет маппинг в EVENT_SCHEMA_MAP."""
+        for etype in EventType:
+            self.assertIn(etype, EVENT_SCHEMA_MAP, f"{etype.value} missing from EVENT_SCHEMA_MAP")
+
+    def test_no_orphan_schemas(self):
+        """Нет записей в EVENT_SCHEMA_MAP без EventType."""
+        for key in EVENT_SCHEMA_MAP:
+            self.assertIn(key, EventType.__members__.values())
+
+    def test_event_type_values(self):
+        self.assertEqual(EventType.STT_PARTIAL.value, "stt.partial")
+        self.assertEqual(EventType.STT_FINAL.value, "stt.final")
+        self.assertEqual(EventType.STT_FAILED.value, "stt.failed")
+        self.assertEqual(EventType.TRANSLATION_COMPLETED.value, "translation.completed")
+        self.assertEqual(EventType.TRANSLATION_FAILED.value, "translation.failed")
+
+    def test_schema_map_types(self):
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.STT_FINAL], SttFinal)
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.STT_FAILED], SttFailed)
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.STT_PARTIAL], SttPartial)
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.TRANSLATION_COMPLETED], TranslationCompleted)
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.TRANSLATION_FAILED], TranslationFailed)
 
 
 if __name__ == "__main__":
