@@ -51,7 +51,7 @@ class AudioRecorder:
             self._thread.start()
             return True
 
-    def stop(self, timeout_sec: float = 3.0) -> tuple[np.ndarray, float] | None:
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0) -> tuple[np.ndarray, float] | None:
         """Останавливает запись и возвращает (audio, duration)."""
         with self._lock:
             if not self._is_recording:
@@ -73,6 +73,17 @@ class AudioRecorder:
             return np.array([], dtype=np.float32), duration
 
         audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
+
+        # Мягко отрезаем хвост записи, чтобы уменьшить риск захвата фонового аудио
+        # в момент отпускания hotkey и переключения фокуса.
+        trim_ms = max(0, int(trim_tail_ms))
+        if trim_ms > 0:
+            trim_samples = int((self.sample_rate * trim_ms) / 1000)
+            if trim_samples > 0:
+                if audio.size > trim_samples:
+                    audio = audio[:-trim_samples]
+                else:
+                    audio = np.array([], dtype=np.float32)
         return audio, duration
 
     def get_duration_sec(self) -> float:

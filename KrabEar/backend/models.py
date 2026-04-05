@@ -19,7 +19,7 @@ class HistoryItem:
     id: str
     ts: str
     text: str
-    paste_status: str
+    paste_status: str = "failed"
     source_text: str = ""
     translated_text: str = ""
     translation_mode: str = "off"
@@ -27,6 +27,8 @@ class HistoryItem:
     target_lang: str = ""
     translation_status: str = "not_requested"
     translation_engine: str = ""
+    chat_id: str = ""
+    message_id: str = ""
 
     @classmethod
     def create(
@@ -40,6 +42,8 @@ class HistoryItem:
         target_lang: str = "",
         translation_status: str = "not_requested",
         translation_engine: str = "",
+        chat_id: str = "",
+        message_id: str = "",
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -54,6 +58,8 @@ class HistoryItem:
             target_lang=target_lang.strip(),
             translation_status=translation_status.strip() or "not_requested",
             translation_engine=translation_engine.strip(),
+            chat_id=str(chat_id).strip(),
+            message_id=str(message_id).strip(),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,58 +81,9 @@ class HistoryItem:
             target_lang=str(payload.get("target_lang", "")).strip(),
             translation_status=str(payload.get("translation_status", "not_requested")).strip() or "not_requested",
             translation_engine=str(payload.get("translation_engine", "")).strip(),
+            chat_id=str(payload.get("chat_id", "")).strip(),
+            message_id=str(payload.get("message_id", "")).strip(),
         )
 
 
-DEFAULT_SETTINGS: dict[str, Any] = {
-    "mode": "headless",
-    "show_dock_icon": True,
-    "auto_start_enabled": False,
-    "auto_paste": True,
-    "play_start_sound": True,
-    "quality_profile": "balanced",
-    "network_mode": "offline_default",
-    "hotkey": "right_option_toggle",
-    "hotkey_profile": "default",
-    "history_policy": "unlimited",
-    "history_page_size": 50,
-    "history_text_density": "normal",
-    "realtime_preview_enabled": True,
-    "cleanup_profile": "soft",
-    "translation_mode": "off",
-    "translate_and_paste": False,
-    "translation_style": "neutral",
-    "translation_glossary": {},
-    "text_templates": {
-        "follow_up_ru": "Здравствуйте! Подтверждаю: {text}. Следующий шаг: {next_step}.",
-        "follow_up_es": "Hola. Confirmo: {text}. Siguiente paso: {next_step}.",
-    },
-    "clipboard_mode": "always_copy",
-    "audio_ducking_enabled": True,
-    "audio_ducking_percent": 50,
-    "overlay_opacity_percent": 45,
-    "voice_gateway_url": "http://127.0.0.1:8090",
-    "voice_gateway_api_key": "",
-    "update_channel": "stable",
-    "call_notify_default": True,
-    "call_auto_summary": True,
-    "call_budget_usd": 2.0,
-    "call_quick_templates": [
-        {
-            "name": "Повтори медленно",
-            "text": "Повторите, пожалуйста, медленнее.",
-            "source_lang": "ru",
-            "target_lang": "es",
-        },
-        {
-            "name": "Жду ответ",
-            "text": "Буду ждать вашего ответа до конца дня.",
-            "source_lang": "ru",
-            "target_lang": "ru",
-        },
-    ],
-    "capture_source_mode": "mic",
-    "ui_last_tab": "history",
-    "history_focus_mode": True,
-    "onboarding_completed": False,
-}
+from core.config import DEFAULT_SETTINGS

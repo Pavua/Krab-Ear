@@ -27,6 +27,8 @@ class FakeRecorder:
         self.is_recording = False
         self.sample_rate = 16000
         self._snapshot_counter = 0
+        self.last_stop_trim_ms = 0
+        self.last_stop_timeout_sec = 3.0
 
     def start(self) -> bool:
         if self.is_recording:
@@ -34,15 +36,61 @@ class FakeRecorder:
         self.is_recording = True
         return True
 
-    def stop(self):
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0):
         if not self.is_recording:
             return None
         self.is_recording = False
-        return np.ones(1600, dtype=np.float32), 1.0
+        self.last_stop_timeout_sec = timeout_sec
+        self.last_stop_trim_ms = trim_tail_ms
+        t = np.linspace(0.0, 1.0, 16000, endpoint=False, dtype=np.float32)
+        carrier = np.sin(2.0 * np.pi * 210.0 * t)
+        envelope = 0.45 + 0.55 * np.sin(2.0 * np.pi * 2.4 * t)
+        wobble = 0.08 * np.sin(2.0 * np.pi * 23.0 * t)
+        speech_like = 0.06 * carrier * envelope + wobble
+        return speech_like.astype(np.float32), 1.0
 
     def snapshot_audio(self, max_duration_sec: float = 12.0):
         self._snapshot_counter += 1
         return np.ones(32000, dtype=np.float32), float(self._snapshot_counter)
+
+
+class SilentRecorder(FakeRecorder):
+    """Фейковый рекордер, который возвращает тишину для проверки silence-guard."""
+
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        self.last_stop_timeout_sec = timeout_sec
+        self.last_stop_trim_ms = trim_tail_ms
+        return np.zeros(32000, dtype=np.float32), 1.0
+
+
+class LowBackgroundRecorder(FakeRecorder):
+    """Фейковый рекордер с низкоуровневым равномерным фоном (похоже на ТВ издалека)."""
+
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        self.last_stop_timeout_sec = timeout_sec
+        self.last_stop_trim_ms = trim_tail_ms
+        # Низкая амплитуда + равномерная энергия, чтобы сработал background guard.
+        data = np.full(32000, 0.0025, dtype=np.float32)
+        return data, 1.0
+
+
+class LoudUniformBackgroundRecorder(FakeRecorder):
+    """Фейковый рекордер с громким, но равномерным фоном (ролик без микропауз)."""
+
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        self.last_stop_timeout_sec = timeout_sec
+        self.last_stop_trim_ms = trim_tail_ms
+        data = np.full(96000, 0.015, dtype=np.float32)
+        return data, 6.0
 
 
 class FakeTranscriber:
@@ -183,6 +231,16 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(get_settings["result"]["ui_last_tab"], "history")
         self.assertTrue(get_settings["result"]["history_focus_mode"])
         self.assertEqual(get_settings["result"]["history_text_density"], "normal")
+        self.assertEqual(get_settings["result"]["stop_tail_trim_ms"], 180)
+        self.assertTrue(get_settings["result"]["silence_guard_enabled"])
+        self.assertEqual(get_settings["result"]["silence_guard_rms_threshold"], 0.0020)
+        self.assertEqual(get_settings["result"]["silence_guard_peak_threshold"], 0.0120)
+        self.assertEqual(get_settings["result"]["silence_guard_active_ratio_threshold"], 0.015)
+        self.assertTrue(get_settings["result"]["background_guard_enabled"])
+        self.assertEqual(get_settings["result"]["background_guard_min_peak"], 0.025)
+        self.assertEqual(get_settings["result"]["background_guard_min_rms"], 0.0040)
+        self.assertEqual(get_settings["result"]["background_guard_uniform_frame_threshold"], 0.0060)
+        self.assertEqual(get_settings["result"]["background_guard_max_uniform_active_ratio"], 0.92)
 
         set_settings = self.request(
             "set_settings",
@@ -196,6 +254,16 @@ class BackendServiceTestCase(unittest.TestCase):
                 "clipboard_mode": "copy_on_fail",
                 "audio_ducking_enabled": False,
                 "audio_ducking_percent": 75,
+                "stop_tail_trim_ms": 260,
+                "silence_guard_enabled": False,
+                "silence_guard_rms_threshold": 0.0035,
+                "silence_guard_peak_threshold": 0.0200,
+                "silence_guard_active_ratio_threshold": 0.030,
+                "background_guard_enabled": False,
+                "background_guard_min_peak": 0.03,
+                "background_guard_min_rms": 0.005,
+                "background_guard_uniform_frame_threshold": 0.007,
+                "background_guard_max_uniform_active_ratio": 0.88,
                 "overlay_opacity_percent": 60,
                 "voice_gateway_url": "http://127.0.0.1:9000",
                 "voice_gateway_api_key": "token",
@@ -218,6 +286,16 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(set_settings["result"]["clipboard_mode"], "copy_on_fail")
         self.assertFalse(set_settings["result"]["audio_ducking_enabled"])
         self.assertEqual(set_settings["result"]["audio_ducking_percent"], 75)
+        self.assertEqual(set_settings["result"]["stop_tail_trim_ms"], 260)
+        self.assertFalse(set_settings["result"]["silence_guard_enabled"])
+        self.assertEqual(set_settings["result"]["silence_guard_rms_threshold"], 0.0035)
+        self.assertEqual(set_settings["result"]["silence_guard_peak_threshold"], 0.0200)
+        self.assertEqual(set_settings["result"]["silence_guard_active_ratio_threshold"], 0.030)
+        self.assertFalse(set_settings["result"]["background_guard_enabled"])
+        self.assertEqual(set_settings["result"]["background_guard_min_peak"], 0.03)
+        self.assertEqual(set_settings["result"]["background_guard_min_rms"], 0.005)
+        self.assertEqual(set_settings["result"]["background_guard_uniform_frame_threshold"], 0.007)
+        self.assertEqual(set_settings["result"]["background_guard_max_uniform_active_ratio"], 0.88)
         self.assertEqual(set_settings["result"]["overlay_opacity_percent"], 60)
         self.assertEqual(set_settings["result"]["voice_gateway_url"], "http://127.0.0.1:9000")
         self.assertEqual(set_settings["result"]["voice_gateway_api_key"], "token")
@@ -235,6 +313,9 @@ class BackendServiceTestCase(unittest.TestCase):
         result = response["result"]
         self.assertIn("translation", result)
         self.assertIn("modes", result["translation"])
+        self.assertIn("stt", result)
+        self.assertIn("silence_guard_enabled", result["stt"])
+        self.assertIn("background_guard_enabled", result["stt"])
         self.assertIn("hotkey", result)
         self.assertIn("profiles", result["hotkey"])
         self.assertIn("ru_to_es", result["translation"]["modes"])
@@ -385,6 +466,72 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(bad_type["ok"])
         self.assertEqual(bad_type["result"]["audio_ducking_percent"], 50)
 
+    def test_settings_normalize_stop_tail_trim_ms(self) -> None:
+        too_high = self.request("set_settings", {"stop_tail_trim_ms": 9999})
+        self.assertTrue(too_high["ok"])
+        self.assertEqual(too_high["result"]["stop_tail_trim_ms"], 1200)
+        bad_type = self.request("set_settings", {"stop_tail_trim_ms": "oops"})
+        self.assertTrue(bad_type["ok"])
+        self.assertEqual(bad_type["result"]["stop_tail_trim_ms"], 180)
+
+    def test_settings_normalize_silence_guard_thresholds(self) -> None:
+        invalid = self.request(
+            "set_settings",
+            {
+                "silence_guard_rms_threshold": "oops",
+                "silence_guard_peak_threshold": "oops",
+                "silence_guard_active_ratio_threshold": "oops",
+            },
+        )
+        self.assertTrue(invalid["ok"])
+        self.assertEqual(invalid["result"]["silence_guard_rms_threshold"], 0.0020)
+        self.assertEqual(invalid["result"]["silence_guard_peak_threshold"], 0.0120)
+        self.assertEqual(invalid["result"]["silence_guard_active_ratio_threshold"], 0.015)
+
+        too_high = self.request(
+            "set_settings",
+            {
+                "silence_guard_rms_threshold": 9.0,
+                "silence_guard_peak_threshold": 9.0,
+                "silence_guard_active_ratio_threshold": 9.0,
+            },
+        )
+        self.assertTrue(too_high["ok"])
+        self.assertEqual(too_high["result"]["silence_guard_rms_threshold"], 0.05)
+        self.assertEqual(too_high["result"]["silence_guard_peak_threshold"], 0.2)
+        self.assertEqual(too_high["result"]["silence_guard_active_ratio_threshold"], 0.30)
+
+    def test_settings_normalize_background_guard_thresholds(self) -> None:
+        invalid = self.request(
+            "set_settings",
+            {
+                "background_guard_min_peak": "oops",
+                "background_guard_min_rms": "oops",
+                "background_guard_uniform_frame_threshold": "oops",
+                "background_guard_max_uniform_active_ratio": "oops",
+            },
+        )
+        self.assertTrue(invalid["ok"])
+        self.assertEqual(invalid["result"]["background_guard_min_peak"], 0.025)
+        self.assertEqual(invalid["result"]["background_guard_min_rms"], 0.0040)
+        self.assertEqual(invalid["result"]["background_guard_uniform_frame_threshold"], 0.0060)
+        self.assertEqual(invalid["result"]["background_guard_max_uniform_active_ratio"], 0.92)
+
+        too_high = self.request(
+            "set_settings",
+            {
+                "background_guard_min_peak": 9.0,
+                "background_guard_min_rms": 9.0,
+                "background_guard_uniform_frame_threshold": 9.0,
+                "background_guard_max_uniform_active_ratio": 9.0,
+            },
+        )
+        self.assertTrue(too_high["ok"])
+        self.assertEqual(too_high["result"]["background_guard_min_peak"], 0.25)
+        self.assertEqual(too_high["result"]["background_guard_min_rms"], 0.08)
+        self.assertEqual(too_high["result"]["background_guard_uniform_frame_threshold"], 0.2)
+        self.assertEqual(too_high["result"]["background_guard_max_uniform_active_ratio"], 0.99)
+
     def test_settings_normalize_overlay_opacity_percent(self) -> None:
         too_low = self.request("set_settings", {"overlay_opacity_percent": 1})
         self.assertTrue(too_low["ok"])
@@ -402,9 +549,147 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertIn("preview_text", state["result"])
         stop = self.request("stop_recording", {"quality_profile": "max"})
         self.assertTrue(stop["ok"])
-        self.assertTrue(stop["result"]["text"].startswith("тестовая строка"))
+        self.assertTrue(stop["result"]["text"].lower().startswith("тестовая строка"))
         self.assertIsNotNone(stop["result"]["history_id"])
         self.assertEqual(stop["result"]["cleanup_profile"], "soft")
+        self.assertEqual(stop["result"]["stop_tail_trim_ms"], 180)
+        self.assertEqual(self.service.recorder.last_stop_trim_ms, 180)
+
+    def test_recording_flow_accepts_stop_tail_trim_override(self) -> None:
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "max", "stop_tail_trim_ms": 320})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["stop_tail_trim_ms"], 320)
+        self.assertEqual(self.service.recorder.last_stop_trim_ms, 320)
+
+    def test_stop_recording_silence_guard_skips_transcription(self) -> None:
+        self.service.recorder = SilentRecorder()
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "empty_audio")
+        self.assertTrue(stop["result"]["silence_detected"])
+        self.assertEqual(self.service.transcriber.counter, 0)
+
+    def test_stop_recording_background_guard_skips_distant_audio(self) -> None:
+        self.service.recorder = LowBackgroundRecorder()
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "empty_audio")
+        self.assertTrue(
+            bool(stop["result"].get("background_guard_rejected"))
+            or bool(stop["result"].get("silence_detected"))
+        )
+        self.assertEqual(self.service.transcriber.counter, 0)
+
+    def test_stop_recording_background_guard_skips_loud_uniform_background(self) -> None:
+        self.service.recorder = LoudUniformBackgroundRecorder()
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "empty_audio")
+        self.assertTrue(bool(stop["result"].get("background_guard_rejected")))
+        self.assertEqual(self.service.transcriber.counter, 0)
+
+    def test_stop_recording_postprocesses_punctuation_and_case(self) -> None:
+        self.service.transcriber.transcribe = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile, cleanup_profile="soft": {
+                "text": "это быстрый тест без пауз и запятых",
+                "status": "ok",
+                "engine": "fake",
+            }
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "ok")
+        self.assertEqual(stop["result"]["original_text"], "Это быстрый тест без пауз и запятых.")
+
+    def test_stop_recording_drops_repeated_prompt_artifact(self) -> None:
+        self.service.transcriber.transcribe = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile, cleanup_profile="soft": {
+                "text": (
+                    "Сохраняй смысл, ставь корректную пунктуацию, "
+                    "сохраняй смысл, ставь корректную пунктуацию, "
+                    "сохраняй смысл, ставь корректную пунктуацию."
+                ),
+                "status": "ok",
+                "engine": "fake",
+            }
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "empty_text")
+
+    def test_stop_recording_drops_prompt_echo_inside_longer_phrase(self) -> None:
+        self.service.transcriber.transcribe = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile, cleanup_profile="soft": {
+                "text": (
+                    "Ну а вот это было с хмыком без речи, "
+                    "сохраняй смысл, ставь корректную пункту, "
+                    "сохраняй смысл, ставь корректную пункту."
+                ),
+                "status": "ok",
+                "engine": "fake",
+            }
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "empty_text")
+
+    def test_stop_recording_accepts_dict_transcriber_payload(self) -> None:
+        self.service.transcriber.transcribe = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile, cleanup_profile="soft": {
+                "text": f"dict payload ({quality_profile}/{cleanup_profile})",
+                "status": "ok",
+                "engine": "fake",
+            }
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        stop = self.request("stop_recording", {"quality_profile": "balanced", "cleanup_profile": "soft"})
+        self.assertTrue(stop["ok"])
+        self.assertEqual(stop["result"]["status"], "ok")
+        self.assertTrue(stop["result"]["text"].lower().startswith("dict payload"))
+        self.assertIsNotNone(stop["result"]["history_id"])
+
+    def test_preview_accepts_dict_transcriber_payload(self) -> None:
+        self.service.transcriber.transcribe_preview = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile="balanced": {"text": f"preview-dict ({quality_profile})"}
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        time.sleep(1.2)
+        state = self.request("get_recording_state")
+        self.assertTrue(state["ok"])
+        self.assertIn("preview-dict", state["result"]["preview_text"])
+        self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
+
+    def test_preview_drops_prompt_echo_and_clears_state(self) -> None:
+        self.service.transcriber.transcribe_preview = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile="balanced": (
+                "Сохраняй смысл, ставь корректную пунктуацию, "
+                "сохраняй смысл, ставь корректную пунктуацию."
+            )
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        time.sleep(1.8)
+        state = self.request("get_recording_state")
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["result"]["preview_text"], "")
+        self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
+
+    def test_preview_drops_looping_noise(self) -> None:
+        self.service.transcriber.transcribe_preview = (  # type: ignore[method-assign]
+            lambda audio_data, quality_profile="balanced": "ой ой ой ой ой ой ой ой"
+        )
+        self.assertTrue(self.request("start_recording")["ok"])
+        time.sleep(1.8)
+        state = self.request("get_recording_state")
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["result"]["preview_text"], "")
+        self.assertTrue(self.request("stop_recording", {"quality_profile": "balanced"})["ok"])
 
     def test_start_recording_is_idempotent(self) -> None:
         first = self.request("start_recording")
@@ -415,6 +700,17 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(second["ok"])
         self.assertEqual(second["result"]["status"], "already_recording")
         self.assertTrue(second["result"]["is_recording"])
+
+    def test_stop_recording_is_idempotent(self) -> None:
+        first = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["result"]["status"], "already_stopped")
+        self.assertFalse(first["result"]["is_recording"])
+
+        self.assertTrue(self.request("start_recording")["ok"])
+        second = self.request("stop_recording", {"quality_profile": "balanced"})
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["result"]["status"], "ok")
 
     def test_translation_pipeline_and_inserted_text(self) -> None:
         self.assertTrue(
@@ -434,7 +730,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(stop["result"]["translation_status"], "ok")
         self.assertTrue(stop["result"]["translated_text"].startswith("ES:"))
         self.assertEqual(stop["result"]["text"], stop["result"]["translated_text"])
-        self.assertTrue(stop["result"]["original_text"].startswith("тестовая строка"))
+        self.assertTrue(stop["result"]["original_text"].lower().startswith("тестовая строка"))
 
     def test_translate_text_method(self) -> None:
         response = self.request(

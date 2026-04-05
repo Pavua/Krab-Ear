@@ -1,8 +1,10 @@
 mlx-whisper
+pyannote.audio
 numpy
 sounddevice
 requests
-python-dotenv
+pydantic-settings
+soundfile
 pyperclip
 pyobjc-framework-Cocoa; sys_platform == "darwin"
 pyobjc-framework-Vision; sys_platform == "darwin"

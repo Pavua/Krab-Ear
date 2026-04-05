@@ -51,6 +51,16 @@ class EngineCleanupTestCase(unittest.TestCase):
         cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="strict")
         self.assertEqual(cleaned, "Сегодня обсудили три важных вопроса и договорились о сроках")
 
+    def test_soft_removes_continuation_hallucination_tail(self) -> None:
+        raw = "Сейчас закончу мысль и отправлю итог. Продолжение следует..."
+        cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="soft")
+        self.assertEqual(cleaned, "Сейчас закончу мысль и отправлю итог")
+
+    def test_soft_drops_pure_continuation_hallucination(self) -> None:
+        raw = "Продолжение следует..."
+        cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="soft")
+        self.assertEqual(cleaned, "")
+
 
 if __name__ == "__main__":
     unittest.main()

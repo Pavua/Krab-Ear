@@ -122,7 +122,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private var isRecording = false
     private var isProcessing = false
     private var lastToggleRequestAt: TimeInterval = 0
-    private let toggleDebounceSec: TimeInterval = 0.2
+    private let toggleDebounceSec: TimeInterval = 0.35
     private var recordingTargetApp: NSRunningApplication?
     private var lastExternalApp: NSRunningApplication?
     private var hasShownAccessibilityHint = false
@@ -719,6 +719,16 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             logger.warn("Десинхрон состояния записи: local=\(wasRecordingLocally), backend=\(backendRecording)")
         }
 
+        // Если локально считалось, что пишем, но backend уже idle — не стартуем новую
+        // запись этим же нажатием. Сначала фиксируем состояние, следующий toggle начнёт запись явно.
+        if wasRecordingLocally && !backendRecording {
+            notify(
+                title: "Krab Ear",
+                body: "Запись уже остановлена в backend. Состояние синхронизировано."
+            )
+            return
+        }
+
         // Если backend пишет, а локально флаг был сбит, сначала корректно завершаем зависшую запись.
         if !wasRecordingLocally && backendRecording {
             notify(
@@ -758,10 +768,18 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         let targetBundle = recordingTargetApp?.bundleIdentifier ?? "nil"
         logger.info("Старт записи. targetApp=\(targetBundle)")
         do {
-            // Сначала приглушаем системный звук, чтобы в начало записи не попали внешние звуки.
+            // Сначала приглушаем системный звук, чтобы в запись не попадали внешние звуки.
+            // В режиме mic принудительно используем mute (100), иначе даже 25%/50%
+            // может физически пробиваться в микрофон и давать ложную транскрипцию.
+            let effectiveDuckingPercent: Int
+            if settings.captureSourceMode == "mic" {
+                effectiveDuckingPercent = 100
+            } else {
+                effectiveDuckingPercent = settings.audioDuckingPercent
+            }
             audioDuckingService.duckForRecording(
                 enabled: settings.audioDuckingEnabled,
-                duckPercent: settings.audioDuckingPercent
+                duckPercent: effectiveDuckingPercent
             )
             let response = try ipcClient.call(method: "start_recording", params: [:])
             let result = response["result"] as? [String: Any]
@@ -772,10 +790,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 startRealtimeOverlayPolling()
                 refreshStatusItemTitle()
                 rebuildStatusMenu()
-                notify(
-                    title: "Krab Ear",
-                    body: "Запись уже активна в backend. Состояние синхронизировано."
-                )
+                // Это штатная идемпотентная синхронизация, не показываем шумный алерт.
                 return
             }
             if status != "recording" {
@@ -806,12 +821,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         logger.info("Остановка записи запрошена")
         stopRealtimeOverlayPolling()
         isRecording = false
-        audioDuckingService.restoreAfterRecording()
         isProcessing = true
         refreshStatusItemTitle()
         rebuildStatusMenu()
 
         defer {
+            // Важно: восстанавливаем системный звук только после завершения stop-пайплайна,
+            // чтобы хвост фонового аудио не попадал в запись при отпускании hotkey.
+            audioDuckingService.restoreAfterRecording()
             isProcessing = false
             refreshStatusItemTitle()
             rebuildStatusMenu()
@@ -862,6 +879,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                     translationStatus: translationStatus
                 )
                 handleTranscriptionResult(text: text, historyId: historyId)
+            case "already_stopped":
+                // Идемпотентный stop: backend уже в idle, лишние уведомления пользователю не нужны.
+                logger.info("stop_recording: backend уже idle (already_stopped), синхронизирую состояние")
+                _ = syncRecordingStateWithBackend()
             case "empty_audio":
                 logger.warn("stop_recording вернул empty_audio")
                 notify(title: "Krab Ear", body: "Аудио пустое, попробуйте ещё раз")
@@ -878,6 +899,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             }
         } catch {
             logger.error("Ошибка stop_recording: \(error.localizedDescription)")
+            if isBackendNotRecordingError(error) {
+                logger.warn("stop_recording: backend уже в idle, fallback не нужен")
+                _ = syncRecordingStateWithBackend()
+                return
+            }
             if !recoverFromPreviewFallback(reason: "Ошибка stop_recording: \(error.localizedDescription)") {
                 notify(
                     title: "Krab Ear",
@@ -1703,7 +1729,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
-        let previewText = ((state["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawPreviewText = ((state["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let previewText = sanitizePreviewFallbackText(rawPreviewText)
         guard previewText.count >= 8 else {
             logger.warn("Fallback отменён: previewText слишком короткий")
             return false
@@ -1726,6 +1753,122 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             body: "Использован fallback realtime-текста: \(reason)"
         )
         return true
+    }
+
+    private func sanitizePreviewFallbackText(_ text: String) -> String {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return "" }
+
+        let lowered = clean.lowercased()
+        if lowered.contains("<begin_of_box>") || lowered.contains("<end_of_box>") || lowered.contains("\"action\":") {
+            return ""
+        }
+
+        let normalized = normalizeForHeuristic(clean)
+        let blockedFragments = [
+            "продолжение следует",
+            "to be continued",
+            "сохраняй смысл ставь корректную пунктуац",
+            "сохраняй смысл ставь корректную пункту",
+            "ставь корректную пунктуац",
+            "ставь корректную пункту",
+        ]
+        if blockedFragments.contains(where: { normalized.contains($0) }) {
+            return ""
+        }
+
+        let tokens = normalized.split(separator: " ").map(String.init)
+        let hasSaveMeaningEcho = tokens.contains("сохраняй")
+            && tokens.contains("смысл")
+            && tokens.contains(where: { $0.hasPrefix("корр") })
+            && tokens.contains(where: { $0.hasPrefix("пункт") })
+        if hasSaveMeaningEcho {
+            return ""
+        }
+        if looksLikeLoopingFallback(tokens: tokens) {
+            return ""
+        }
+        return clean
+    }
+
+    private func normalizeForHeuristic(_ text: String) -> String {
+        let lowered = text.lowercased()
+        let allowed = lowered.map { char -> Character in
+            if char.isLetter || char.isNumber || char == " " || char == "-" {
+                return char
+            }
+            return " "
+        }
+        let compact = String(allowed).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return compact.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func looksLikeLoopingFallback(tokens: [String]) -> Bool {
+        guard tokens.count >= 6 else { return false }
+
+        var frequency: [String: Int] = [:]
+        for token in tokens {
+            frequency[token, default: 0] += 1
+        }
+
+        let maxFreq = frequency.values.max() ?? 0
+        let uniqueRatio = Double(frequency.count) / Double(max(tokens.count, 1))
+        if uniqueRatio <= 0.42 && maxFreq >= max(3, Int(Double(tokens.count) * 0.34)) {
+            return true
+        }
+
+        if frequency.count <= 2 && tokens.count >= 5 && maxFreq >= 4 {
+            return true
+        }
+
+        var bigrams: [String: Int] = [:]
+        if tokens.count >= 2 {
+            for idx in 0..<(tokens.count - 1) {
+                let key = "\(tokens[idx]) \(tokens[idx + 1])"
+                bigrams[key, default: 0] += 1
+            }
+        }
+        let topBigram = bigrams.values.max() ?? 0
+        if topBigram >= max(3, tokens.count / 5) {
+            return true
+        }
+
+        return containsRepeatedChunk(tokens: tokens, minRepeats: 3)
+    }
+
+    private func containsRepeatedChunk(tokens: [String], minRepeats: Int) -> Bool {
+        let total = tokens.count
+        guard total >= 6 else { return false }
+
+        let maxChunk = min(7, total / max(minRepeats, 1))
+        guard maxChunk >= 2 else { return false }
+
+        for chunkSize in 2...maxChunk {
+            var start = 0
+            while start + (chunkSize * minRepeats) <= total {
+                let chunk = Array(tokens[start..<(start + chunkSize)])
+                var repeats = 1
+                while start + (chunkSize * (repeats + 1)) <= total {
+                    let nextChunk = Array(tokens[(start + chunkSize * repeats)..<(start + chunkSize * (repeats + 1))])
+                    if nextChunk != chunk {
+                        break
+                    }
+                    repeats += 1
+                }
+                if repeats >= minRepeats {
+                    return true
+                }
+                start += 1
+            }
+        }
+        return false
+    }
+
+    private func isBackendNotRecordingError(_ error: Error) -> Bool {
+        let lowered = error.localizedDescription.lowercased()
+        return lowered.contains("запись не была запущена")
+            || lowered.contains("recording was not started")
+            || lowered.contains("not recording")
     }
 
     private func stopAgent() {

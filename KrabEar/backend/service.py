@@ -25,6 +25,8 @@ from urllib import parse as urllib_parse
 from urllib import error as urllib_error, request as urllib_request
 import uuid
 
+import numpy as np
+
 # Обеспечиваем корректный импорт модулей KrabEar при запуске как standalone скрипта.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
@@ -38,6 +40,7 @@ from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.translator import Translator
+from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -154,12 +157,28 @@ class BackendService:
 
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
-        stopped = self.recorder.stop()
+        settings = self.store.load_settings()
+        stop_tail_trim_ms = self._coerce_bounded_int(
+            value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
+            default=180,
+            min_value=0,
+            max_value=1200,
+        )
+        stopped = self._stop_recorder_guarded(stop_tail_trim_ms=stop_tail_trim_ms)
         if stopped is None:
-            raise RuntimeError("Запись не была запущена")
+            # Идемпотентный контракт: повторный stop не считается ошибкой.
+            with self._preview_lock:
+                preview_text = self._preview_text
+                preview_duration = self._preview_duration_sec
+            return {
+                "status": "already_stopped",
+                "is_recording": False,
+                "duration_sec": preview_duration,
+                "preview_text": preview_text,
+                "stop_tail_trim_ms": stop_tail_trim_ms,
+            }
 
         audio, duration_sec = stopped
-        settings = self.store.load_settings()
         quality_profile = str(
             params.get("quality_profile") or settings.get("quality_profile", "balanced")
         )
@@ -179,6 +198,56 @@ class BackendService:
             else settings.get("translate_and_paste", False)
         )
         network_mode = str(settings.get("network_mode", "offline_default"))
+        silence_guard_enabled = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
+        silence_rms_threshold = self._coerce_bounded_float(
+            value=settings.get("silence_guard_rms_threshold", 0.0020),
+            default=0.0020,
+            min_value=0.0003,
+            max_value=0.05,
+        )
+        silence_peak_threshold = self._coerce_bounded_float(
+            value=settings.get("silence_guard_peak_threshold", 0.0120),
+            default=0.0120,
+            min_value=0.001,
+            max_value=0.2,
+        )
+        silence_active_ratio_threshold = self._coerce_bounded_float(
+            value=settings.get("silence_guard_active_ratio_threshold", 0.015),
+            default=0.015,
+            min_value=0.001,
+            max_value=0.30,
+        )
+        background_guard_enabled = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
+        background_guard_min_peak = self._coerce_bounded_float(
+            value=settings.get("background_guard_min_peak", 0.025),
+            default=0.025,
+            min_value=0.003,
+            max_value=0.25,
+        )
+        background_guard_min_rms = self._coerce_bounded_float(
+            value=settings.get("background_guard_min_rms", 0.0040),
+            default=0.0040,
+            min_value=0.0008,
+            max_value=0.08,
+        )
+        background_guard_uniform_frame_threshold = self._coerce_bounded_float(
+            value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
+            default=0.0060,
+            min_value=0.001,
+            max_value=0.20,
+        )
+        background_guard_max_uniform_active_ratio = self._coerce_bounded_float(
+            value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
+            default=0.92,
+            min_value=0.40,
+            max_value=0.99,
+        )
+        sample_rate = self._coerce_bounded_int(
+            value=getattr(self.recorder, "sample_rate", 16000),
+            default=16000,
+            min_value=8000,
+            max_value=192000,
+        )
 
         if getattr(audio, "size", 0) == 0:
             return {
@@ -193,13 +262,95 @@ class BackendService:
                 "translated_text": "",
                 "translation_status": "not_requested",
                 "history_id": None,
+                "stop_tail_trim_ms": stop_tail_trim_ms,
+                "silence_detected": False,
+                "silence_guard_enabled": silence_guard_enabled,
+                "background_guard_rejected": False,
             }
 
-        text = self.transcriber.transcribe(
+        silence_detected = False
+        if silence_guard_enabled:
+            silence_detected = self._looks_like_silence_audio(
+                audio=audio,
+                sample_rate=sample_rate,
+                rms_threshold=silence_rms_threshold,
+                peak_threshold=silence_peak_threshold,
+                active_ratio_threshold=silence_active_ratio_threshold,
+            )
+            if silence_detected:
+                logger.info(
+                    "Silence guard: stop_recording классифицирован как тишина, STT пропущен",
+                    extra={
+                        "duration_sec": round(float(duration_sec), 3),
+                        "rms_threshold": silence_rms_threshold,
+                        "peak_threshold": silence_peak_threshold,
+                        "active_ratio_threshold": silence_active_ratio_threshold,
+                    },
+                )
+                return {
+                    "status": "empty_audio",
+                    "duration_sec": duration_sec,
+                    "quality_profile": quality_profile,
+                    "cleanup_profile": cleanup_profile,
+                    "translation_mode": translation_mode,
+                    "translate_and_paste": translate_and_paste,
+                    "text": "",
+                    "original_text": "",
+                    "translated_text": "",
+                    "translation_status": "not_requested",
+                    "history_id": None,
+                    "stop_tail_trim_ms": stop_tail_trim_ms,
+                    "silence_detected": True,
+                    "silence_guard_enabled": True,
+                    "background_guard_rejected": False,
+                }
+
+        background_guard_rejected = False
+        if background_guard_enabled:
+            background_guard_rejected = self._looks_like_distant_background_speech(
+                audio=audio,
+                sample_rate=sample_rate,
+                min_peak=background_guard_min_peak,
+                min_rms=background_guard_min_rms,
+                uniform_frame_threshold=background_guard_uniform_frame_threshold,
+                max_uniform_active_ratio=background_guard_max_uniform_active_ratio,
+            )
+            if background_guard_rejected:
+                logger.info(
+                    "Background guard: stop_recording отклонен как фоновая речь",
+                    extra={
+                        "duration_sec": round(float(duration_sec), 3),
+                        "min_peak": background_guard_min_peak,
+                        "min_rms": background_guard_min_rms,
+                        "uniform_frame_threshold": background_guard_uniform_frame_threshold,
+                        "max_uniform_active_ratio": background_guard_max_uniform_active_ratio,
+                    },
+                )
+                return {
+                    "status": "empty_audio",
+                    "duration_sec": duration_sec,
+                    "quality_profile": quality_profile,
+                    "cleanup_profile": cleanup_profile,
+                    "translation_mode": translation_mode,
+                    "translate_and_paste": translate_and_paste,
+                    "text": "",
+                    "original_text": "",
+                    "translated_text": "",
+                    "translation_status": "not_requested",
+                    "history_id": None,
+                    "stop_tail_trim_ms": stop_tail_trim_ms,
+                    "silence_detected": False,
+                    "silence_guard_enabled": silence_guard_enabled,
+                    "background_guard_rejected": True,
+                }
+
+        transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
             cleanup_profile=cleanup_profile,
-        ).strip()
+        )
+        text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
+        transcription_error = self._extract_transcribed_error(transcribe_payload)
         if not text:
             return {
                 "status": "empty_text",
@@ -213,6 +364,11 @@ class BackendService:
                 "translated_text": "",
                 "translation_status": "not_requested",
                 "history_id": None,
+                "transcription_error": transcription_error,
+                "stop_tail_trim_ms": stop_tail_trim_ms,
+                "silence_detected": silence_detected,
+                "silence_guard_enabled": silence_guard_enabled,
+                "background_guard_rejected": background_guard_rejected,
             }
 
         translation = self.translator.translate(
@@ -254,6 +410,10 @@ class BackendService:
             "translated_text": translated_text,
             "history_id": item.id,
             "ts": item.ts,
+            "stop_tail_trim_ms": stop_tail_trim_ms,
+            "silence_detected": silence_detected,
+            "silence_guard_enabled": silence_guard_enabled,
+            "background_guard_rejected": background_guard_rejected,
         }
 
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -419,6 +579,8 @@ class BackendService:
         settings["translate_and_paste"] = bool(settings.get("translate_and_paste", False))
         settings["onboarding_completed"] = bool(settings.get("onboarding_completed", False))
         settings["audio_ducking_enabled"] = bool(settings.get("audio_ducking_enabled", True))
+        settings["silence_guard_enabled"] = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
+        settings["background_guard_enabled"] = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
         settings["call_notify_default"] = self._coerce_bool(settings.get("call_notify_default", True), default=True)
         settings["call_auto_summary"] = self._coerce_bool(settings.get("call_auto_summary", True), default=True)
         settings["history_focus_mode"] = self._coerce_bool(settings.get("history_focus_mode", True), default=True)
@@ -436,6 +598,55 @@ class BackendService:
         except (TypeError, ValueError):
             duck_percent = 50
         settings["audio_ducking_percent"] = max(0, min(duck_percent, 100))
+
+        settings["stop_tail_trim_ms"] = self._coerce_bounded_int(
+            value=settings.get("stop_tail_trim_ms", 180),
+            default=180,
+            min_value=0,
+            max_value=1200,
+        )
+        settings["silence_guard_rms_threshold"] = self._coerce_bounded_float(
+            value=settings.get("silence_guard_rms_threshold", 0.0020),
+            default=0.0020,
+            min_value=0.0003,
+            max_value=0.05,
+        )
+        settings["silence_guard_peak_threshold"] = self._coerce_bounded_float(
+            value=settings.get("silence_guard_peak_threshold", 0.0120),
+            default=0.0120,
+            min_value=0.001,
+            max_value=0.2,
+        )
+        settings["silence_guard_active_ratio_threshold"] = self._coerce_bounded_float(
+            value=settings.get("silence_guard_active_ratio_threshold", 0.015),
+            default=0.015,
+            min_value=0.001,
+            max_value=0.30,
+        )
+        settings["background_guard_min_peak"] = self._coerce_bounded_float(
+            value=settings.get("background_guard_min_peak", 0.025),
+            default=0.025,
+            min_value=0.003,
+            max_value=0.25,
+        )
+        settings["background_guard_min_rms"] = self._coerce_bounded_float(
+            value=settings.get("background_guard_min_rms", 0.0040),
+            default=0.0040,
+            min_value=0.0008,
+            max_value=0.08,
+        )
+        settings["background_guard_uniform_frame_threshold"] = self._coerce_bounded_float(
+            value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
+            default=0.0060,
+            min_value=0.001,
+            max_value=0.20,
+        )
+        settings["background_guard_max_uniform_active_ratio"] = self._coerce_bounded_float(
+            value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
+            default=0.92,
+            min_value=0.40,
+            max_value=0.99,
+        )
 
         try:
             overlay_percent = int(settings.get("overlay_opacity_percent", 45))
@@ -477,6 +688,21 @@ class BackendService:
             "stt": {
                 "offline": True,
                 "realtime_preview": True,
+                "silence_guard_enabled": bool(settings.get("silence_guard_enabled", True)),
+                "silence_guard_rms_threshold": float(settings.get("silence_guard_rms_threshold", 0.0020)),
+                "silence_guard_peak_threshold": float(settings.get("silence_guard_peak_threshold", 0.0120)),
+                "silence_guard_active_ratio_threshold": float(
+                    settings.get("silence_guard_active_ratio_threshold", 0.015)
+                ),
+                "background_guard_enabled": bool(settings.get("background_guard_enabled", True)),
+                "background_guard_min_peak": float(settings.get("background_guard_min_peak", 0.025)),
+                "background_guard_min_rms": float(settings.get("background_guard_min_rms", 0.0040)),
+                "background_guard_uniform_frame_threshold": float(
+                    settings.get("background_guard_uniform_frame_threshold", 0.0060)
+                ),
+                "background_guard_max_uniform_active_ratio": float(
+                    settings.get("background_guard_max_uniform_active_ratio", 0.92)
+                ),
             },
             "translation": {
                 "modes": ["off", "ru_to_es", "es_to_ru", "en_to_ru", "auto", "auto_to_ru", "bilingual_ru_es"],
@@ -500,6 +726,7 @@ class BackendService:
             "audio_ducking": {
                 "enabled": bool(settings.get("audio_ducking_enabled", True)),
                 "percent": int(settings.get("audio_ducking_percent", 50)),
+                "stop_tail_trim_ms": int(settings.get("stop_tail_trim_ms", 180)),
             },
             "overlay": {
                 "opacity_percent": int(settings.get("overlay_opacity_percent", 45)),
@@ -672,10 +899,11 @@ class BackendService:
 
                 # Транскрибируем preview (быстро)
                 logger.debug(f"Call Assist: transcribing {current_size} samples")
-                text = self.transcriber.transcribe_preview(
+                preview_payload = self.transcriber.transcribe_preview(
                     audio_data, 
                     quality_profile="balanced"
-                ).strip()
+                )
+                text = self._extract_transcribed_text(preview_payload)
 
                 if text and text != last_sent_text:
                     logger.debug(f"Call Assist: sending text='{text}'")
@@ -1552,14 +1780,19 @@ class BackendService:
         for audio_path in audio_paths:
             started_at = time.monotonic()
             try:
-                text = self.transcriber.transcribe(
+                transcribe_payload = self.transcriber.transcribe(
                     audio_path,
                     quality_profile=quality_profile,
                     cleanup_profile=cleanup_profile,
-                ).strip()
+                )
+                text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
-                    errors.append(f"{audio_path}: пустой результат")
+                    err = self._extract_transcribed_error(transcribe_payload)
+                    if err:
+                        errors.append(f"{audio_path}: {err}")
+                    else:
+                        errors.append(f"{audio_path}: пустой результат")
                     continue
                 translation = self.translator.translate(
                     text=text,
@@ -1719,10 +1952,12 @@ class BackendService:
                 continue
 
             try:
-                preview_text = self.transcriber.transcribe_preview(
+                preview_payload = self.transcriber.transcribe_preview(
                     audio_data,
                     quality_profile=quality_profile,
-                ).strip()
+                )
+                preview_text = self._extract_transcribed_text(preview_payload)
+                preview_text = self._postprocess_preview_text(preview_text)
             except Exception:
                 logger.exception("Realtime preview: ошибка transcribe_preview")
                 self._preview_stop_event.wait(0.8)
@@ -1731,6 +1966,12 @@ class BackendService:
             if preview_text:
                 with self._preview_lock:
                     self._preview_text = preview_text[-900:]
+                    self._preview_updated_at = float(duration_sec)
+            else:
+                # Не держим stale preview: если актуальный срез пустой/артефактный,
+                # очищаем текст, чтобы fallback не подхватил мусор.
+                with self._preview_lock:
+                    self._preview_text = ""
                     self._preview_updated_at = float(duration_sec)
             last_refresh_duration = float(duration_sec)
             self._preview_stop_event.wait(0.8)
@@ -1954,6 +2195,373 @@ class BackendService:
             if normalized in {"0", "false", "off", "no"}:
                 return False
         return default
+
+    @staticmethod
+    def _coerce_bounded_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+        """Нормализует целое значение в допустимый диапазон."""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return max(min_value, min(parsed, max_value))
+
+    @staticmethod
+    def _coerce_bounded_float(value: Any, default: float, min_value: float, max_value: float) -> float:
+        """Нормализует float-значение в допустимый диапазон."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = float(default)
+        return max(min_value, min(parsed, max_value))
+
+    def _stop_recorder_guarded(self, stop_tail_trim_ms: int) -> tuple[Any, float] | None:
+        """
+        Останавливает рекордер с поддержкой старых сигнатур stop().
+
+        Нужен для совместимости фейков/старых реализаций, где метод `stop`
+        ещё не принимает `trim_tail_ms`.
+        """
+        stop_callable = getattr(self.recorder, "stop", None)
+        if not callable(stop_callable):
+            raise RuntimeError("Рекордер не поддерживает stop()")
+        try:
+            return stop_callable(trim_tail_ms=stop_tail_trim_ms)
+        except TypeError:
+            return stop_callable()
+
+    @staticmethod
+    def _looks_like_silence_audio(
+        audio: Any,
+        sample_rate: int,
+        rms_threshold: float,
+        peak_threshold: float,
+        active_ratio_threshold: float,
+    ) -> bool:
+        """
+        Эвристически определяет, есть ли в буфере реальная речь.
+
+        Логика:
+        - очень низкие peak/rms -> считаем тишиной;
+        - иначе считаем долю «активных» 20мс фреймов и отсекаем фоновой шум.
+        """
+        try:
+            data = np.asarray(audio, dtype=np.float32).reshape(-1)
+        except Exception:
+            return False
+        if data.size == 0:
+            return True
+
+        abs_data = np.abs(data)
+        peak = float(abs_data.max(initial=0.0))
+        rms = float(np.sqrt(np.mean(np.square(data), dtype=np.float64)))
+        if peak <= peak_threshold and rms <= rms_threshold:
+            return True
+
+        frame_size = max(1, int(sample_rate * 0.02))  # 20мс
+        frame_count = int(data.size // frame_size)
+        if frame_count <= 0:
+            return peak <= (peak_threshold * 1.2) and rms <= (rms_threshold * 1.4)
+
+        shaped = data[: frame_count * frame_size].reshape(frame_count, frame_size)
+        frame_rms = np.sqrt(np.mean(np.square(shaped), axis=1, dtype=np.float64))
+        activity_threshold = max(rms_threshold * 2.0, 0.0035)
+        active_ratio = float(np.mean(frame_rms >= activity_threshold))
+
+        return active_ratio < active_ratio_threshold and peak <= (peak_threshold * 1.5)
+
+    @staticmethod
+    def _looks_like_distant_background_speech(
+        audio: Any,
+        sample_rate: int,
+        min_peak: float,
+        min_rms: float,
+        uniform_frame_threshold: float,
+        max_uniform_active_ratio: float,
+    ) -> bool:
+        """
+        Эвристика "дальняя фоновая речь", чтобы не коммитить ТВ/видео вместо диктовки.
+
+        Идея:
+        - если уровень слишком низкий (нет близкой речи);
+        - и при этом энергия распределена почти равномерно без естественных пауз,
+          что характерно для далёкого источника/фона.
+        """
+        try:
+            data = np.asarray(audio, dtype=np.float32).reshape(-1)
+        except Exception:
+            return False
+        if data.size == 0:
+            return False
+
+        abs_data = np.abs(data)
+        peak = float(abs_data.max(initial=0.0))
+        rms = float(np.sqrt(np.mean(np.square(data), dtype=np.float64)))
+        low_level = peak < min_peak and rms < min_rms
+
+        frame_size = max(1, int(sample_rate * 0.02))  # 20мс
+        frame_count = int(data.size // frame_size)
+        if frame_count <= 0:
+            return low_level
+
+        shaped = data[: frame_count * frame_size].reshape(frame_count, frame_size)
+        frame_rms = np.sqrt(np.mean(np.square(shaped), axis=1, dtype=np.float64))
+        mean_rms = float(np.mean(frame_rms))
+        std_rms = float(np.std(frame_rms))
+        variation_coeff = std_rms / max(mean_rms, 1e-8)
+        duration_sec = float(data.size) / max(float(sample_rate), 1.0)
+
+        # Для тихих сигналов опускаем порог активности, иначе равномерный фон
+        # может казаться "неактивным" и проскальзывать мимо фильтра.
+        dynamic_uniform_threshold = max(0.0012, min(uniform_frame_threshold, max(min_rms * 0.35, 0.0012)))
+        active_ratio = float(np.mean(frame_rms >= dynamic_uniform_threshold))
+
+        # Равномерный плотный поток без естественных пауз считаем фоном даже при чуть
+        # более высоком уровне: это типичный паттерн "ролик на фоне".
+        background_pattern = active_ratio >= max_uniform_active_ratio and variation_coeff < 0.35
+        very_uniform = active_ratio >= 0.96 and variation_coeff < 0.18
+        return background_pattern and (low_level or (very_uniform and duration_sec >= 4.0))
+
+    @staticmethod
+    def _is_known_prompt_echo(normalized_text: str) -> bool:
+        """
+        Отлавливает типовые фразы-артефакты, которые не должны попадать в финальный текст.
+
+        Проверяем как точные совпадения, так и вхождения фрагментов: в реальности
+        артефакт часто приходит с обрывами или повтором одной и той же инструкции.
+        """
+        normalized = str(normalized_text or "").strip()
+        if not normalized:
+            return True
+
+        blocked_fragments = (
+            "продолжение следует",
+            "to be continued",
+            "сохраняй смысл ставь корректную пунктуац",
+            "сохраняй смысл ставь корректную пункту",
+            "ставь корректную пунктуац",
+            "ставь корректную пункту",
+        )
+        if any(fragment in normalized for fragment in blocked_fragments):
+            return True
+
+        words = normalized.split()
+        compact = " ".join(words)
+        if (
+            "сохраняй" in words
+            and "смысл" in words
+            and any(token.startswith("корр") for token in words)
+            and any(token.startswith("пункт") for token in words)
+        ):
+            return True
+
+        return bool(re.search(r"сохраняй\s+смысл.*корр\w*.*пункт\w*", compact))
+
+    @staticmethod
+    def _contains_repeated_chunk(words: list[str], min_repeats: int = 3) -> bool:
+        """
+        Ищет подряд повторяющиеся куски фразы (типичный зацикленный артефакт модели).
+        """
+        total = len(words)
+        if total < 6:
+            return False
+
+        max_chunk = min(7, total // min_repeats)
+        for chunk_size in range(2, max_chunk + 1):
+            start = 0
+            while start + (chunk_size * min_repeats) <= total:
+                chunk = words[start : start + chunk_size]
+                repeats = 1
+                while start + (chunk_size * (repeats + 1)) <= total:
+                    next_chunk = words[
+                        start + (chunk_size * repeats) : start + (chunk_size * (repeats + 1))
+                    ]
+                    if next_chunk != chunk:
+                        break
+                    repeats += 1
+                if repeats >= min_repeats:
+                    return True
+                start += 1
+        return False
+
+    @staticmethod
+    def _looks_like_looping_artifact(words: list[str], min_words: int, min_bigram_hits: int) -> bool:
+        """
+        Детектирует «петли» и низкоинформативные повторы в транскрибе.
+        """
+        if len(words) < min_words:
+            return False
+
+        counts: dict[str, int] = {}
+        for token in words:
+            counts[token] = counts.get(token, 0) + 1
+
+        unique_ratio = len(counts) / max(1, len(words))
+        max_freq = max(counts.values()) if counts else 0
+        if unique_ratio <= 0.42 and max_freq >= max(3, int(len(words) * 0.34)):
+            return True
+
+        if len(counts) <= 2 and len(words) >= 5 and max_freq >= 4:
+            return True
+
+        bigram_counts: dict[tuple[str, str], int] = {}
+        for idx in range(len(words) - 1):
+            key = (words[idx], words[idx + 1])
+            bigram_counts[key] = bigram_counts.get(key, 0) + 1
+        top_bigram_freq = max(bigram_counts.values()) if bigram_counts else 0
+        if top_bigram_freq >= max(min_bigram_hits, len(words) // 5):
+            return True
+
+        return BackendService._contains_repeated_chunk(words)
+
+    @staticmethod
+    def _postprocess_transcribed_text(text: str) -> str:
+        """
+        Дополнительная фильтрация и базовая нормализация пунктуации.
+
+        Цель: уменьшить артефакты на пустом/шумовом вводе и чуть улучшить читаемость.
+        """
+        clean = str(text or "").strip()
+        if not clean:
+            return ""
+
+        lowered = clean.lower()
+        # Явные тех-артефакты инструментального вывода.
+        if "<begin_of_box>" in lowered or "<end_of_box>" in lowered or "\"action\":" in lowered:
+            return ""
+
+        normalized = TextUtils.normalize_phrase(clean)
+        if BackendService._is_known_prompt_echo(normalized):
+            return ""
+
+        collapsed_duplicate = BackendService._collapse_immediate_duplicate_phrase(normalized)
+        if collapsed_duplicate:
+            clean = collapsed_duplicate
+            normalized = TextUtils.normalize_phrase(clean)
+
+        words = re.findall(r"[A-Za-zА-Яа-я0-9'-]+", clean.lower())
+        if BackendService._looks_like_looping_artifact(words, min_words=8, min_bigram_hits=4):
+            return ""
+
+        clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
+        clean = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+
+        first_alpha_idx = next((idx for idx, char in enumerate(clean) if char.isalpha()), -1)
+        if first_alpha_idx >= 0:
+            clean = clean[:first_alpha_idx] + clean[first_alpha_idx].upper() + clean[first_alpha_idx + 1 :]
+
+        if not re.search(r"[.!?…]$", clean):
+            if len(words) >= 4:
+                clean = f"{clean}."
+
+        return clean.strip()
+
+    @staticmethod
+    def _collapse_immediate_duplicate_phrase(normalized_text: str) -> str:
+        """
+        Схлопывает паттерн «одна и та же фраза подряд два раза».
+
+        Пример:
+        «ну он просто два раза теперь пишет ну он просто два раза теперь пишет»
+        -> «Ну он просто два раза теперь пишет.»
+        """
+        normalized = str(normalized_text or "").strip()
+        if not normalized:
+            return ""
+
+        words = normalized.split()
+        total = len(words)
+        if total < 8:
+            return ""
+
+        # Базовый сценарий: точное дублирование 1-в-1.
+        if total % 2 == 0:
+            half = total // 2
+            if words[:half] == words[half:]:
+                collapsed = " ".join(words[:half]).strip()
+                if not collapsed:
+                    return ""
+                return f"{collapsed[0].upper()}{collapsed[1:]}."
+
+        # Допуск ±1 токен на хвосте (из-за пунктуации/обрезки).
+        for shift in (-1, 1):
+            left = total // 2
+            right = total - left
+            if abs(left - right) != 1:
+                continue
+            if shift < 0 and left > right:
+                if words[:right] == words[left:]:
+                    collapsed = " ".join(words[:right]).strip()
+                    if collapsed:
+                        return f"{collapsed[0].upper()}{collapsed[1:]}."
+            if shift > 0 and right > left:
+                if words[:left] == words[right:]:
+                    collapsed = " ".join(words[:left]).strip()
+                    if collapsed:
+                        return f"{collapsed[0].upper()}{collapsed[1:]}."
+
+        return ""
+
+    @staticmethod
+    def _postprocess_preview_text(text: str) -> str:
+        """
+        Лёгкая фильтрация realtime-preview без агрессивной пунктуации.
+
+        Нужна, чтобы в live-subtitles не проскакивали тех-артефакты/промпт-эхо.
+        """
+        clean = str(text or "").strip()
+        if not clean:
+            return ""
+
+        lowered = clean.lower()
+        if "<begin_of_box>" in lowered or "<end_of_box>" in lowered or "\"action\":" in lowered:
+            return ""
+
+        normalized = TextUtils.normalize_phrase(clean)
+        if BackendService._is_known_prompt_echo(normalized):
+            return ""
+
+        words = re.findall(r"[A-Za-zА-Яа-я0-9'-]+", clean.lower())
+        if BackendService._looks_like_looping_artifact(words, min_words=6, min_bigram_hits=3):
+            return ""
+
+        clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
+        clean = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean
+
+    @staticmethod
+    def _extract_transcribed_text(payload: Any) -> str:
+        """
+        Нормализует результат транскрибации в строку.
+
+        Исторически backend получал `str`, но текущий Transcriber отдает `dict`.
+        Метод поддерживает оба контракта, чтобы не ломать stop/preview pipelines.
+        """
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, dict):
+            direct_text = payload.get("text")
+            if direct_text is not None:
+                return str(direct_text).strip()
+            nested = payload.get("result")
+            if isinstance(nested, dict):
+                nested_text = nested.get("text")
+                if nested_text is not None:
+                    return str(nested_text).strip()
+            return ""
+        return str(payload).strip()
+
+    @staticmethod
+    def _extract_transcribed_error(payload: Any) -> str:
+        """Извлекает текст ошибки из payload транскрибации, если он присутствует."""
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if error is not None:
+                return str(error).strip()
+        return ""
 
 
 class IPCServer:
