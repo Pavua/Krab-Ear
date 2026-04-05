@@ -10,9 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from datetime import datetime, timezone
+
 from contracts.stt_events import SttPartial, SttFinal, SttFailed
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from contracts.registry import EventType, EVENT_SCHEMA_MAP
+from contracts.envelope import KrabEventEnvelope, parse_event, parse_and_validate, UnknownEventType
 from pydantic import ValidationError
 
 
@@ -149,6 +152,67 @@ class EventRegistryTest(unittest.TestCase):
         self.assertIs(EVENT_SCHEMA_MAP[EventType.STT_PARTIAL], SttPartial)
         self.assertIs(EVENT_SCHEMA_MAP[EventType.TRANSLATION_COMPLETED], TranslationCompleted)
         self.assertIs(EVENT_SCHEMA_MAP[EventType.TRANSLATION_FAILED], TranslationFailed)
+
+
+class EnvelopeTest(unittest.TestCase):
+
+    def test_valid_envelope(self):
+        now = datetime.now(timezone.utc)
+        e = KrabEventEnvelope(type="stt.final", ts=now, data={"text": "hi"})
+        self.assertEqual(e.type, "stt.final")
+        self.assertEqual(e.data, {"text": "hi"})
+
+    def test_missing_type_raises(self):
+        with self.assertRaises(ValidationError):
+            KrabEventEnvelope(ts=datetime.now(timezone.utc), data={})
+
+
+class ParseEventTest(unittest.TestCase):
+
+    def test_parse_valid(self):
+        raw = {
+            "type": "stt.final",
+            "ts": "2026-04-06T12:00:00+00:00",
+            "data": {"history_id": "x", "text": "hi", "duration_sec": 1.0},
+        }
+        env = parse_event(raw)
+        self.assertEqual(env.type, "stt.final")
+
+    def test_parse_invalid_raises(self):
+        with self.assertRaises(ValidationError):
+            parse_event({"data": {}})  # missing type and ts
+
+
+class ParseAndValidateTest(unittest.TestCase):
+
+    def test_known_event(self):
+        raw = {
+            "type": "stt.failed",
+            "ts": "2026-04-06T12:00:00+00:00",
+            "data": {"reason": "timeout"},
+        }
+        etype, payload = parse_and_validate(raw)
+        self.assertEqual(etype, EventType.STT_FAILED)
+        self.assertIsInstance(payload, SttFailed)
+        self.assertEqual(payload.reason, "timeout")
+
+    def test_unknown_event_raises(self):
+        raw = {
+            "type": "tts.completed",
+            "ts": "2026-04-06T12:00:00+00:00",
+            "data": {"audio_url": "file.mp3"},
+        }
+        with self.assertRaises(UnknownEventType):
+            parse_and_validate(raw)
+
+    def test_known_event_bad_data_raises(self):
+        raw = {
+            "type": "stt.final",
+            "ts": "2026-04-06T12:00:00+00:00",
+            "data": {"wrong_field": "x"},
+        }
+        with self.assertRaises(ValidationError):
+            parse_and_validate(raw)
 
 
 if __name__ == "__main__":
