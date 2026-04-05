@@ -33,7 +33,7 @@
 - [x] Авто-реакции с kill-switch и rate-limit.
 
 ### E4. Voice/Ear Interop (P1)
-- [ ] Контракт событий STT/TTS и унифицированные payload schema.
+- [x] Контракт событий STT/TTS и унифицированные payload schema.
 - [ ] E2E сценарий `voice input -> chat reasoning -> voice output`.
 - [ ] API-bridge для удалённого режима (вне локальной сети).
 
