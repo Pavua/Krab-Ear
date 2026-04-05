@@ -3,8 +3,11 @@
 Реализует простой pub/sub через очереди Python. Каждый SSE-подписчик
 регистрирует свою очередь; при эмите события оно попадает во все активные очереди.
 
+Формат событий — унифицированный конверт экосистемы Krab (EVENT_CONTRACT_V1):
+  {type: str, ts: ISO 8601 UTC, data: dict}
+
 Поддерживаемые события:
-- stt.completed  — транскрибация завершена успешно
+- stt.final      — транскрибация завершена успешно
 - stt.failed     — транскрибация завершилась с ошибкой
 """
 
@@ -14,7 +17,7 @@ import json
 import logging
 import queue
 import threading
-import time
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 logger = logging.getLogger("KrabEar.Backend.EventBus")
@@ -60,8 +63,8 @@ class EventBus:
         """
         event = {
             "type": event_type,
-            "ts": time.time(),
-            "payload": payload,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "data": payload,
         }
         with self._lock:
             active = list(self._subscribers)
@@ -99,7 +102,7 @@ def sse_stream(bus: EventBus) -> Iterator[str]:
                 # Сигнал завершения от сервера
                 break
 
-            yield f"event: {event['type']}\ndata: {json.dumps(event['payload'])}\n\n"
+            yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
     finally:
         bus.unsubscribe(q)
 

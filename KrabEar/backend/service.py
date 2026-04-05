@@ -423,7 +423,7 @@ class BackendService:
             "background_guard_rejected": background_guard_rejected,
         }
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
-        event_bus.emit("stt.completed", {
+        event_bus.emit("stt.final", {
             "history_id": item.id,
             "text": final_text,
             "duration_sec": duration_sec,

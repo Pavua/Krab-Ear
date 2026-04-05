@@ -164,7 +164,7 @@ def events_stream():
     """Server-Sent Events stream для событий STT pipeline.
 
     Клиент подключается один раз и получает поток событий:
-      event: stt.completed
+      event: stt.final
       data: {"history_id": "...", "text": "...", "duration_sec": 1.2, ...}
 
       event: stt.failed
