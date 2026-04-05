@@ -124,6 +124,26 @@ class AudioEngine:
         """Совместимый алиас общей очистки транскрипта."""
         return TextUtils.cleanup_transcript(text, profile=cleanup_profile)
 
+    # Допустимые языковые коды для lang_hint (ISO 639-1).
+    # None означает автоопределение whisper'ом по первым 30с аудио.
+    _VALID_LANG_HINTS: frozenset[str] = frozenset({"ru", "es", "en", "auto"})
+
+    @staticmethod
+    def _resolve_language(lang_hint: str | None) -> str | None:
+        """Преобразует lang_hint в параметр whisper language.
+
+        - None / "auto" → None (whisper сам определяет язык)
+        - "ru" / "es" / "en" → передаётся напрямую
+        - неизвестное значение → None с предупреждением
+        """
+        if lang_hint is None or lang_hint.strip().lower() in ("auto", ""):
+            return None
+        clean = lang_hint.strip().lower()
+        if clean in AudioEngine._VALID_LANG_HINTS - {"auto"}:
+            return clean
+        logger.warning("Неизвестный lang_hint=%r, используем авто-определение", lang_hint)
+        return None
+
     def transcribe(
         self,
         audio_data: Any,
@@ -131,10 +151,17 @@ class AudioEngine:
         is_preview: bool = False,
         domain: str = "casual",
         extra_vocabulary: list[str] | None = None,
+        lang_hint: str | None = None,
     ) -> dict[str, Any]:
-        """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки."""
+        """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
+
+        Args:
+            lang_hint: ISO 639-1 код языка ("ru", "es", "en") или None/"auto" для
+                       автоопределения whisper'ом. По умолчанию берётся из конфига (settings.TRANSCRIBE_LANGUAGE).
+        """
         start_time = time.time()
-        
+        resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
+
         # 1. Формирование динамического промпта
         domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
         dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
@@ -149,21 +176,21 @@ class AudioEngine:
 
         try:
             # 3. Вызов распознавания с механизмом деградации (fallback)
-            result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt)
+            result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
             raw_text = str(result.get("text", "")).strip()
             segments = result.get("segments", [])
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview)
-            
+
             # 4. Очистка результата через утилиты
             text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
-            
+
             # 5. Расчет метрик уверенности
             confidence = 0.0
             if segments:
                 confidence = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
 
             duration = time.time() - start_time
-            logger.info("STT готово: %.2fs, уверенность: %.2f", duration, confidence)
+            logger.info("STT готово: %.2fs, уверенность: %.2f, язык: %s", duration, confidence, resolved_lang or "auto")
 
             return {
                 "text": text,
@@ -172,6 +199,7 @@ class AudioEngine:
                 "duration_ms": int(duration * 1000),
                 "engine": result.get("engine", "mlx-whisper"),
                 "model": result.get("model_used", self.current_model),
+                "language": result.get("language", resolved_lang),
                 "segments": segments if not is_preview else [],
                 "diarization": diarization,
             }
@@ -179,44 +207,46 @@ class AudioEngine:
             logger.exception("Критическая ошибка распознавания")
             return {"text": "", "error": str(exc), "status": "error"}
 
-    def _transcribe_with_fallback(self, audio_data: Any, prompt: str) -> dict[str, Any]:
+    def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM)."""
         candidates = [self.current_model]
         if self.quality_profile == "max":
             candidates = list(dict.fromkeys(settings.model_max_list))
-        
+
         for model_name in candidates:
-            if model_name in self._unavailable_models: continue
+            if model_name in self._unavailable_models:
+                continue
             try:
-                result = self._transcribe_model(audio_data, model_name, prompt)
+                result = self._transcribe_model(audio_data, model_name, prompt, language=language)
                 result["model_used"] = model_name
                 return result
             except Exception as e:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
                 self._unavailable_models.add(model_name)
 
-        # Если локально ничего не вышло - пробуем облако (если разрешено)
+        # Если локально ничего не вышло — пробуем облако (если разрешено)
         if settings.NETWORK_MODE != "offline_strict":
             logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
             return self._transcribe_remote(audio_data, prompt)
 
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
-    def _transcribe_model(self, audio_data: Any, model_name: str, prompt: str) -> dict[str, Any]:
+    def _transcribe_model(self, audio_data: Any, model_name: str, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов."""
+        effective_language = language if language is not None else settings.TRANSCRIBE_LANGUAGE
         base_params = {
             "path_or_hf_repo": model_name,
             "initial_prompt": prompt,
-            "language": settings.TRANSCRIBE_LANGUAGE,
+            "language": effective_language,
             "temperature": 0.0,
             "verbose": False,
         }
-        
+
         # Варианты аргументов для разных версий библиотеки
         variants = [
             {**base_params, "condition_on_previous_text": False, "no_speech_threshold": 0.6},
             {**base_params, "condition_on_previous_text": False},
-            base_params
+            base_params,
         ]
 
         last_err = None

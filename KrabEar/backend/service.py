@@ -13,6 +13,7 @@ import argparse
 from datetime import datetime
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import signal
@@ -35,6 +36,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
 from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
@@ -113,6 +115,7 @@ class BackendService:
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,
             "translate_text": self._handle_translate_text,
             "get_capabilities": self._handle_get_capabilities,
+            "get_readiness": self._handle_get_readiness,
             "set_translation_glossary_item": self._handle_set_translation_glossary_item,
             "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,
             "import_history_ndjson": self._handle_import_history_ndjson,
@@ -185,6 +188,7 @@ class BackendService:
         cleanup_profile = str(
             params.get("cleanup_profile") or settings.get("cleanup_profile", "soft")
         )
+        lang_hint: str | None = params.get("lang_hint") or None
         translation_mode = str(
             params.get("translation_mode") or settings.get("translation_mode", "off")
         )
@@ -348,10 +352,13 @@ class BackendService:
             audio,
             quality_profile=quality_profile,
             cleanup_profile=cleanup_profile,
+            lang_hint=lang_hint,
         )
         text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
         transcription_error = self._extract_transcribed_error(transcribe_payload)
         if not text:
+            if transcription_error:
+                event_bus.emit("stt.failed", {"reason": transcription_error, "duration_sec": duration_sec})
             return {
                 "status": "empty_text",
                 "duration_sec": duration_sec,
@@ -393,7 +400,7 @@ class BackendService:
             translation_status=translation_status,
             translation_engine=translation.engine,
         )
-        return {
+        result_payload = {
             "status": "ok",
             "duration_sec": duration_sec,
             "quality_profile": quality_profile,
@@ -415,6 +422,15 @@ class BackendService:
             "silence_guard_enabled": silence_guard_enabled,
             "background_guard_rejected": background_guard_rejected,
         }
+        tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
+        event_bus.emit("stt.completed", {
+            "history_id": item.id,
+            "text": final_text,
+            "duration_sec": duration_sec,
+            "language": tp.get("language"),
+            "confidence": tp.get("confidence"),
+        })
+        return result_payload
 
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._preview_lock:
@@ -681,9 +697,93 @@ class BackendService:
             "engine": result.engine,
         }
 
+    # ------------------------------------------------------------------
+    # Readiness probing — честная проверка доступности компонентов
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _hf_model_cached(hf_repo: str) -> bool:
+        """Проверяет наличие модели в локальном кэше HuggingFace Hub."""
+        cache_base = Path.home() / ".cache" / "huggingface" / "hub"
+        folder = "models--" + hf_repo.replace("/", "--")
+        return (cache_base / folder).exists()
+
+    @staticmethod
+    def _probe_stt() -> dict[str, Any]:
+        """Проверяет доступность STT моделей без их загрузки."""
+        from core.config import settings as cfg
+        balanced_cached = BackendService._hf_model_cached(cfg.MODEL_BALANCED)
+        max_cached = [m for m in cfg.model_max_list if BackendService._hf_model_cached(m)]
+        return {
+            "balanced_model": cfg.MODEL_BALANCED,
+            "balanced_cached": balanced_cached,
+            "max_models_cached": max_cached,
+            "ready": balanced_cached,
+        }
+
+    @staticmethod
+    def _probe_diarization() -> dict[str, Any]:
+        """Проверяет доступность pyannote diarization без загрузки pipeline."""
+        from core.config import settings as cfg
+        hf_token = os.environ.get("HF_TOKEN") or cfg.HF_TOKEN
+        has_token = bool(hf_token)
+        model_cached = BackendService._hf_model_cached(cfg.DIARIZATION_MODEL)
+        return {
+            "model": cfg.DIARIZATION_MODEL,
+            "has_hf_token": has_token,
+            "model_cached": model_cached,
+            "ready": has_token and model_cached,
+        }
+
+    @staticmethod
+    def _probe_translation() -> dict[str, Any]:
+        """Проверяет наличие моделей перевода Helsinki-NLP в локальном кэше."""
+        _TRANSLATION_MODELS = {
+            "ru_to_es": "Helsinki-NLP/opus-mt-ru-es",
+            "es_to_ru": "Helsinki-NLP/opus-mt-es-ru",
+            "en_to_ru": "Helsinki-NLP/opus-mt-en-ru",
+        }
+        cache_base = Path.home() / ".cache" / "huggingface" / "hub"
+        cached: list[str] = []
+        missing: list[str] = []
+        for mode, repo in _TRANSLATION_MODELS.items():
+            folder = "models--" + repo.replace("/", "--")
+            if (cache_base / folder).exists():
+                cached.append(mode)
+            else:
+                missing.append(mode)
+        return {
+            "modes_cached": cached,
+            "modes_missing_offline": missing,
+            "any_ready": bool(cached),
+        }
+
+    @staticmethod
+    def _build_readiness_report_static() -> dict[str, Any]:
+        """Собирает полный отчёт о готовности всех компонентов.
+
+        Статический метод: вызывается и из IPC-сервиса, и из REST server
+        без необходимости создавать полный инстанс BackendService.
+        """
+        stt = BackendService._probe_stt()
+        diarization = BackendService._probe_diarization()
+        translation = BackendService._probe_translation()
+        return {
+            "overall_ready": stt["ready"],
+            "stt": stt,
+            "diarization": diarization,
+            "translation": translation,
+        }
+
+    def _handle_get_readiness(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает детальный отчёт о реальной готовности компонентов."""
+        return self._build_readiness_report_static()
+
     def _handle_get_capabilities(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает матрицу доступных возможностей текущей сборки."""
         settings = self.store.load_settings()
+        diarization_probe = BackendService._probe_diarization()
+        translation_probe = BackendService._probe_translation()
         return {
             "stt": {
                 "offline": True,
@@ -709,6 +809,8 @@ class BackendService:
                 "styles": ["neutral", "chat", "formal"],
                 "offline_default": True,
                 "network_mode": str(settings.get("network_mode", "offline_default")),
+                "modes_cached_locally": translation_probe["modes_cached"],
+                "modes_missing_offline": translation_probe["modes_missing_offline"],
             },
             "summarization": {
                 "available": True,
@@ -732,8 +834,10 @@ class BackendService:
                 "opacity_percent": int(settings.get("overlay_opacity_percent", 45)),
             },
             "diarization": {
-                "import_audio_beta": False,
+                "import_audio_beta": diarization_probe["ready"],
                 "realtime": False,
+                "has_hf_token": diarization_probe["has_hf_token"],
+                "model_cached": diarization_probe["model_cached"],
             },
             "batch_import": {
                 "drag_drop_queue": True,
@@ -1760,6 +1864,7 @@ class BackendService:
         settings = self.store.load_settings()
         quality_profile = str(params.get("quality_profile") or settings.get("quality_profile", "balanced"))
         cleanup_profile = str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft"))
+        lang_hint: str | None = params.get("lang_hint") or None
         translation_mode = str(params.get("translation_mode") or settings.get("translation_mode", "off"))
         translation_style = str(params.get("translation_style") or settings.get("translation_style", "neutral"))
         translation_glossary = settings.get("translation_glossary", {})
@@ -1784,6 +1889,7 @@ class BackendService:
                     audio_path,
                     quality_profile=quality_profile,
                     cleanup_profile=cleanup_profile,
+                    lang_hint=lang_hint,
                 )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)

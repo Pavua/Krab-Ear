@@ -27,15 +27,21 @@ class Transcriber:
         cleanup_profile: str = "soft",
         domain: str = "casual",
         extra_vocabulary: list[str] | None = None,
+        lang_hint: str | None = None,
     ) -> dict[str, Any]:
-        """Транскрибирует аудио с учётом выбранного профиля и контекста."""
+        """Транскрибирует аудио с учётом выбранного профиля и контекста.
+
+        Args:
+            lang_hint: ISO 639-1 код языка или None/"auto" для авто-определения whisper'ом.
+        """
         self.engine.set_quality_profile(quality_profile)
         return self.engine.transcribe(
-            audio_data, 
-            cleanup_profile=cleanup_profile, 
+            audio_data,
+            cleanup_profile=cleanup_profile,
             is_preview=False,
             domain=domain,
-            extra_vocabulary=extra_vocabulary
+            extra_vocabulary=extra_vocabulary,
+            lang_hint=lang_hint,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

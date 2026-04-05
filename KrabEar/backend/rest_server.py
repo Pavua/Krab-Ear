@@ -7,11 +7,13 @@ import os
 import time
 import logging
 from pathlib import Path
-from flask import Flask, request, jsonify
+from flask import Flask, Response, request, jsonify, stream_with_context
 from werkzeug.utils import secure_filename
 
 from core.config import settings
 from core.engine import AudioEngine
+from backend.event_bus import bus as event_bus, sse_stream
+from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.metrics_collector import metrics
@@ -35,6 +37,17 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 def health():
     """Проверка доступности сервиса."""
     return jsonify({"status": "ok", "service": "krab-ear", "profile": engine.quality_profile})
+
+@app.route("/v1/readiness", methods=["GET"])
+def readiness():
+    """Реальная проверка готовности компонентов (STT, diarization, translation).
+
+    В отличие от /health не возвращает оптимистичный статус:
+    каждый компонент проверяется через filesystem probe кэша HuggingFace.
+    """
+    report = BackendService._build_readiness_report_static()
+    status_code = 200 if report["overall_ready"] else 503
+    return jsonify(report), status_code
 
 @app.route("/metrics", methods=["GET"])
 def get_metrics():
@@ -87,19 +100,21 @@ def transcribe_audio():
         quality = request.form.get("quality_profile", "balanced")
         cleanup = request.form.get("cleanup_profile", "soft")
         domain = request.form.get("domain", "casual")
-        
+        lang_hint = request.form.get("lang_hint") or None  # None = авто-определение whisper'ом
+
         # Интеграция словарей
         req_vocab_raw = request.form.get("vocabulary", "")
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
         full_vocabulary = list(set(store.load_vocabulary() + req_vocab))
-        
+
         start_ts = time.monotonic()
         result = transcriber.transcribe(
-            str(temp_path), 
-            quality_profile=quality, 
+            str(temp_path),
+            quality_profile=quality,
             cleanup_profile=cleanup,
             domain=domain,
-            extra_vocabulary=full_vocabulary
+            extra_vocabulary=full_vocabulary,
+            lang_hint=lang_hint,
         )
         elapsed_sec = time.monotonic() - start_ts
         
@@ -125,8 +140,9 @@ def transcribe_audio():
             "duration_ms": result.get("duration_ms", int(elapsed_sec * 1000)),
             "engine": result.get("engine", "mlx-whisper"),
             "model": result.get("model", ""),
+            "language": result.get("language"),
             "segments": result.get("segments", []),
-            "history_id": history_item.id
+            "history_id": history_item.id,
         })
 
     except Exception as e:
@@ -142,6 +158,29 @@ def transcribe_audio():
                 temp_path.unlink()
             except Exception as e:
                 logger.warning("Не удалось удалить временный файл %s: %s", temp_path, e)
+
+@app.route("/v1/events", methods=["GET"])
+def events_stream():
+    """Server-Sent Events stream для событий STT pipeline.
+
+    Клиент подключается один раз и получает поток событий:
+      event: stt.completed
+      data: {"history_id": "...", "text": "...", "duration_sec": 1.2, ...}
+
+      event: stt.failed
+      data: {"reason": "...", "duration_sec": 0.0}
+
+    Keepalive-комментарий отправляется каждые ~15 секунд при отсутствии событий.
+    """
+    return Response(
+        stream_with_context(sse_stream(event_bus)),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 if __name__ == "__main__":
     # Запуск сервера на локальном интерфейсе

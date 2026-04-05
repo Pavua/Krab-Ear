@@ -100,7 +100,8 @@ class FakeTranscriber:
         self.counter = 0
         self.preview_counter = 0
 
-    def transcribe(self, audio_data, quality_profile: str, cleanup_profile: str = "soft") -> str:
+    def transcribe(self, audio_data, quality_profile: str = "balanced", cleanup_profile: str = "soft",
+                   domain: str = "casual", extra_vocabulary=None, lang_hint=None) -> str:
         self.counter += 1
         return f"тестовая строка #{self.counter} ({quality_profile}/{cleanup_profile})"
 
@@ -594,7 +595,7 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_stop_recording_postprocesses_punctuation_and_case(self) -> None:
         self.service.transcriber.transcribe = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile, cleanup_profile="soft": {
+            lambda audio_data, quality_profile="balanced", cleanup_profile="soft", **kw: {
                 "text": "это быстрый тест без пауз и запятых",
                 "status": "ok",
                 "engine": "fake",
@@ -608,7 +609,7 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_stop_recording_drops_repeated_prompt_artifact(self) -> None:
         self.service.transcriber.transcribe = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile, cleanup_profile="soft": {
+            lambda audio_data, quality_profile="balanced", cleanup_profile="soft", **kw: {
                 "text": (
                     "Сохраняй смысл, ставь корректную пунктуацию, "
                     "сохраняй смысл, ставь корректную пунктуацию, "
@@ -625,7 +626,7 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_stop_recording_drops_prompt_echo_inside_longer_phrase(self) -> None:
         self.service.transcriber.transcribe = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile, cleanup_profile="soft": {
+            lambda audio_data, quality_profile="balanced", cleanup_profile="soft", **kw: {
                 "text": (
                     "Ну а вот это было с хмыком без речи, "
                     "сохраняй смысл, ставь корректную пункту, "
@@ -642,7 +643,7 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_stop_recording_accepts_dict_transcriber_payload(self) -> None:
         self.service.transcriber.transcribe = (  # type: ignore[method-assign]
-            lambda audio_data, quality_profile, cleanup_profile="soft": {
+            lambda audio_data, quality_profile="balanced", cleanup_profile="soft", **kw: {
                 "text": f"dict payload ({quality_profile}/{cleanup_profile})",
                 "status": "ok",
                 "engine": "fake",

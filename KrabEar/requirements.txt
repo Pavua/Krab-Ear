@@ -6,5 +6,6 @@ requests
 pydantic-settings
 soundfile
 pyperclip
+flask
 pyobjc-framework-Cocoa; sys_platform == "darwin"
 pyobjc-framework-Vision; sys_platform == "darwin"
