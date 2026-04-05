@@ -20,6 +20,9 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from contracts.registry import EventType
+from pydantic import BaseModel
+
 logger = logging.getLogger("KrabEar.Backend.EventBus")
 
 # Таймаут ожидания события в SSE-итераторе (секунды).
@@ -76,6 +79,10 @@ class EventBus:
                 dropped += 1
         if dropped:
             logger.warning("EventBus: %d подписчик(ов) пропустили событие %s (очередь полна)", dropped, event_type)
+
+    def emit_typed(self, event_type: EventType, payload: BaseModel) -> None:
+        """Типизированный emit — валидирует payload через Pydantic модель."""
+        self.emit(event_type.value, payload.model_dump(mode="json"))
 
     def subscriber_count(self) -> int:
         with self._lock:

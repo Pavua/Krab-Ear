@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from datetime import datetime, timezone
 
+from backend.event_bus import EventBus
 from contracts.stt_events import SttPartial, SttFinal, SttFailed
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from contracts.registry import EventType, EVENT_SCHEMA_MAP
@@ -213,6 +214,36 @@ class ParseAndValidateTest(unittest.TestCase):
         }
         with self.assertRaises(ValidationError):
             parse_and_validate(raw)
+
+
+class EventBusTypedEmitTest(unittest.TestCase):
+
+    def test_emit_typed_creates_valid_envelope(self):
+        bus = EventBus()
+        q = bus.subscribe()
+        payload = SttFailed(reason="timeout", duration_sec=1.5)
+        bus.emit_typed(EventType.STT_FAILED, payload)
+        event = q.get_nowait()
+        self.assertEqual(event["type"], "stt.failed")
+        self.assertIn("ts", event)
+        self.assertEqual(event["data"]["reason"], "timeout")
+        self.assertEqual(event["data"]["duration_sec"], 1.5)
+        bus.unsubscribe(q)
+
+    def test_emit_typed_roundtrip_validates(self):
+        """emit_typed output can be parsed back by parse_and_validate."""
+        bus = EventBus()
+        q = bus.subscribe()
+        payload = SttFinal(
+            history_id="abc", text="hello", duration_sec=2.0,
+            language="en", confidence=0.9,
+        )
+        bus.emit_typed(EventType.STT_FINAL, payload)
+        event = q.get_nowait()
+        etype, parsed = parse_and_validate(event)
+        self.assertEqual(etype, EventType.STT_FINAL)
+        self.assertEqual(parsed.text, "hello")
+        bus.unsubscribe(q)
 
 
 if __name__ == "__main__":
