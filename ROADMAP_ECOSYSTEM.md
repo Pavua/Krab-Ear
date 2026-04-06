@@ -34,8 +34,8 @@
 
 ### E4. Voice/Ear Interop (P1)
 - [x] Контракт событий STT/TTS и унифицированные payload schema.
-- [ ] E2E сценарий `voice input -> chat reasoning -> voice output`.
-- [ ] API-bridge для удалённого режима (вне локальной сети).
+- [x] E2E сценарий `voice input -> chat reasoning -> voice output`.
+- [x] API-bridge для удалённого режима (вне локальной сети).
 
 ### E5. iOS Companion Track (P1)
 - [ ] Отдельный roadmap для PSTN-перевода на iOS.
