@@ -982,52 +982,56 @@ class BackendService:
         return {"mode": mode, "summary": summary, "bullets": bullets}
 
     def _call_assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
-        """Фоновый цикл отправки транскрибации в Voice Gateway."""
-        last_sent_text = ""
-        last_sent_ts = 0.0
+        """Фоновый цикл: WS-подписка на VG + отправка аудио-снапшотов."""
+        import asyncio
+        import httpx
+        import numpy as np
+        from backend.vg_ws_client import VGWebSocketClient
 
-        while True:
-            with self._call_assist_lock:
-                if not self._call_assist_state.get("active"):
-                    break
-            
-            # Если запись остановлена - выходим
-            if not self.recorder.is_recording:
-                break
-                
+        loop = asyncio.new_event_loop()
+        client = VGWebSocketClient(gateway_url, session_id, api_key)
+
+        async def _audio_send_loop() -> None:
+            """Отправляет аудио-снапшоты в VG каждые 2 секунды."""
+            mic_audio_url = f"{gateway_url.rstrip('/')}/v1/sessions/{session_id}/mic-audio"
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                while not client._stop.is_set():
+                    await asyncio.sleep(2.0)
+                    if not self.recorder.is_recording:
+                        continue
+                    try:
+                        audio_data, duration_sec = self.recorder.snapshot_audio(max_duration_sec=25.0)
+                        current_size = getattr(audio_data, "size", 0)
+                        if current_size < 16000:  # < 1 sec
+                            continue
+                        pcm_bytes = (audio_data * 32767).astype(np.int16).tobytes()
+                        await http.post(mic_audio_url, content=pcm_bytes, headers=headers)
+                    except Exception:
+                        logger.exception("call_assist audio send error")
+
+        async def _run() -> None:
+            ws_task = asyncio.create_task(client.run())
+            audio_task = asyncio.create_task(_audio_send_loop())
             try:
-                # Берем последние 25 сек для контекста
-                audio_data, duration_sec = self.recorder.snapshot_audio(max_duration_sec=25.0)
-                current_size = getattr(audio_data, "size", 0)
-                if current_size < 16000:  # < 1 sec
-                    time.sleep(1.0)
-                    continue
+                while True:
+                    await asyncio.sleep(0.5)
+                    with self._call_assist_lock:
+                        if not self._call_assist_state.get("active"):
+                            break
+            finally:
+                client.stop()
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except asyncio.CancelledError:
+                    pass
+                await ws_task
 
-                # Транскрибируем preview (быстро)
-                logger.debug(f"Call Assist: transcribing {current_size} samples")
-                preview_payload = self.transcriber.transcribe_preview(
-                    audio_data, 
-                    quality_profile="balanced"
-                )
-                text = self._extract_transcribed_text(preview_payload)
-
-                if text and text != last_sent_text:
-                    logger.debug(f"Call Assist: sending text='{text}'")
-                    # Отправляем событие stt.partial
-                    resp = self._request_voice_gateway_post(
-                        gateway_url, 
-                        api_key, 
-                        f"/v1/sessions/{session_id}/events", 
-                        {"type": "stt.partial", "data": {"text": text}}
-                    )
-                    logger.debug(f"Call Assist: post result={resp}")
-                    last_sent_text = text
-                    last_sent_ts = duration_sec
-
-            except Exception:
-                logger.exception("Call Assist loop error")
-            
-            time.sleep(1.5)
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
 
     def _request_voice_gateway_post(self, voice_gateway_url: str, api_key: str, path: str, payload: dict) -> dict:
         """POST helper для событий."""
