@@ -31,3 +31,25 @@ _STABLE_BACKUPS/
 
 # Локальные служебные каталоги
 .coordination/
+
+# Дополнительные venv (новые)
+.venv_krab_ear_clean/
+venv_clean/
+venv/
+
+# Agent / session state
+.claude/
+.ralphy/
+.remember/
+
+# Runtime artifacts из E4/E5
+data/
+server_log.txt
+test_*.wav
+test_audio.wav
+test_whisper.wav
+check_status.command
+KrabEar/tests/benchmark_results.json
+
+# poc_diarization — отдельный sub-git, не трогаем
+poc_diarization/
