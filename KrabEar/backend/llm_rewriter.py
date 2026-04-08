@@ -28,6 +28,13 @@ class CircuitState(Enum):
 class CircuitBreaker:
     """3-state circuit breaker с exponential backoff.
 
+    ВАЖНО — контракт вызывающей стороны: если allow_request() вернул True
+    в состоянии HALF_OPEN, вызывающий ОБЯЗАН затем вызвать record_success()
+    или record_failure() (обернуть в try/finally). Иначе флаг пробы
+    останется поднятым навсегда и circuit никогда не восстановится без
+    рестарта процесса. LLMRewriter.rewrite() гарантирует это через свой
+    "never raises" контракт.
+
     Thread safety: не требуется — IPC server в Krab Ear однопоточный.
     Если появится multi-threaded access, обернуть в threading.Lock.
     """
@@ -59,7 +66,7 @@ class CircuitBreaker:
 
         if self._state == CircuitState.OPEN:
             if self._opened_at is None:
-                return True
+                return False
             elapsed = time.monotonic() - self._opened_at
             if elapsed >= self._current_reset_sec:
                 self._transition_to(CircuitState.HALF_OPEN)
