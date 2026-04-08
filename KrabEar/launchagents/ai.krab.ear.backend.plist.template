@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template for ai.krab.ear.backend launchd job (Variant B supervisor).
+
+  Why launchd instead of Swift hand-rolled supervisor:
+  - Swift BackendSupervisor only triggers restart on IPC call failure;
+    many call sites bypass `callWithRecovery()`, so the GUI "freezes" while
+    backend is dead until the user clicks "Restart".
+  - launchd KeepAlive=true respawns the process within ThrottleInterval (5s)
+    of any death (crash, OOM, kill -9, exit), independent of any IPC traffic.
+  - This is the same supervision model Apple uses for system daemons.
+
+  Install via: scripts/install_backend_launchagent.command
+  Stop via:    launchctl bootout gui/$UID/ai.krab.ear.backend
+  Status via:  launchctl print gui/$UID/ai.krab.ear.backend
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.krab.ear.backend</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
+    <string>__PROJECT_ROOT__/KrabEar/backend/service.py</string>
+    <string>--data-dir</string>
+    <string>__HOME__/Library/Application Support/KrabEar</string>
+    <string>--socket-path</string>
+    <string>__HOME__/Library/Application Support/KrabEar/krabear.sock</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 5s — компромисс: достаточно быстро для пользователя, недостаточно
+       часто чтобы macOS считал «спам перезапусков» (>10/мин = throttle). -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- Backend стартует ~5-8 секунд (загружает Whisper + pyannote модели).
+       Дать запас на graceful shutdown при bootout. -->
+  <key>ExitTimeOut</key>
+  <integer>15</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>__PROJECT_ROOT__/KrabEar</string>
+
+    <!-- Diarization (pyannote/speaker-diarization-3.1) требует HF token. -->
+    <key>HF_TOKEN</key>
+    <string>__HF_TOKEN__</string>
+    <key>KRAB_EAR_HF_TOKEN</key>
+    <string>__HF_TOKEN__</string>
+
+    <!-- D.7 dictation prompt: пунктуация, числа, бренды латиницей. -->
+    <key>KRAB_EAR_TRANSCRIBE_PROMPT</key>
+    <string>Ты транскрибируешь русскую речь владельца по имени Pablito. Пиши грамотно и с пунктуацией. Ставь точки в конце предложений, запятые перед "что", "который", "если", "но", "потому что", "чтобы", "когда". Вопросы заканчивай знаком вопроса. Числа всегда пиши цифрами (47 евро, 30 минут). Время пиши в формате ЧЧ:ММ (15:00, 14:30), не 15.00. Названия брендов и продуктов пиши латиницей: Mercadona, Krab, Krab Ear, Krab Voice Gateway, Antigravity, OpenClaw, Hammerspoon, Pyannote, Pyrofork, Telegram, GitHub, FastAPI, Claude, Anthropic, MacBook, Python, Whisper, MLX. Имена: Pablito, yung_nagato, p0lrd. Сохраняй смысл и естественные паузы. Не добавляй слов которых нет, не повторяй фразы.</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-backend.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-backend.err.log</string>
+</dict>
+</plist>

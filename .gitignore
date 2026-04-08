@@ -53,3 +53,8 @@ KrabEar/tests/benchmark_results.json
 
 # poc_diarization — отдельный sub-git, не трогаем
 poc_diarization/
+
+# Secrets
+.env
+.env.*
+KrabEar/.env

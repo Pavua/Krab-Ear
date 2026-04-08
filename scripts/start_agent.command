@@ -193,6 +193,19 @@ if [ "$NEED_RUNTIME_SYNC" -eq 1 ]; then
   codesign --force --sign - --timestamp=none --identifier com.krabear.agent "$AGENT_RUNTIME_BIN" >/dev/null 2>&1 || true
 fi
 
+# Backend launchd job: bootstrap, если plist установлен но не загружен в launchd.
+# launchd с KeepAlive=true мгновенно (~1с) респавнит backend при любой смерти,
+# что устраняет «GUI висит, hotkey не работает». Если plist отсутствует —
+# Swift agent сам поднимет backend через ad-hoc Process() (legacy fallback).
+BACKEND_PLIST="$HOME/Library/LaunchAgents/ai.krab.ear.backend.plist"
+if [ -f "$BACKEND_PLIST" ]; then
+  UID_NUM="$(id -u)"
+  if ! launchctl print "gui/$UID_NUM/ai.krab.ear.backend" >/dev/null 2>&1; then
+    log "Bootstrap backend launchd job (ai.krab.ear.backend)"
+    launchctl bootstrap "gui/$UID_NUM" "$BACKEND_PLIST" 2>&1 | grep -v "already loaded" || true
+  fi
+fi
+
 export KRAB_EAR_PROJECT_ROOT="$ROOT_DIR"
 log "Запускаю Krab Ear Agent"
 exec "$AGENT_RUNTIME_BIN" --project-root "$ROOT_DIR" "${EXTRA_ARGS[@]}"

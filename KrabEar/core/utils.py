@@ -8,6 +8,41 @@ import logging
 
 logger = logging.getLogger("KrabEar.Utils")
 
+# Кириллические искажения имён собственных → каноническая латиница.
+# Whisper на русской речи транскрибирует бренды в кириллицу; возвращаем их в латиницу
+# детерминированно, независимо от того, сработал ли initial_prompt.
+BRAND_REPLACEMENTS: list[tuple[str, str]] = [
+    # Порядок важен: более длинные/составные варианты идут раньше.
+    (r"\bKrab\s*Voice\s*Gateway\b", "Krab Voice Gateway"),
+    (r"\bКраб\s*Войс\s*Гейтвей\b", "Krab Voice Gateway"),
+    (r"\bCrab\s*Ear\b", "Krab Ear"),
+    (r"\bКраб\s*Ир\b", "Krab Ear"),
+    (r"\bКрабИр\b", "Krab Ear"),
+    # Ловим все падежи: Меркадона/-ы/-е/-у/-ой/-ной + удвоенное «нн».
+    (r"\bМеркадонн?(?:а|ы|е|у|ой|ою)\b", "Mercadona"),
+    (r"\bАнти[-\s]?Гравити\b", "Antigravity"),
+    (r"\bAnti[-\s]?Gravity\b", "Antigravity"),
+    (r"\bХаммер[-\s]?Спун\b", "Hammerspoon"),
+    (r"\bHammer\s*Spoon\b", "Hammerspoon"),
+    (r"\bОпен[-\s]?Клоу\b", "OpenClaw"),
+    (r"\bПианот\b", "Pyannote"),
+    (r"\bПайрофорк\b", "Pyrofork"),
+    (r"\bПайрайт\b", "Pyright"),
+    (r"\bПаблито\b", "Pablito"),
+    (r"\bТелеграм\b", "Telegram"),
+    (r"\bВиспер\b", "Whisper"),
+    (r"\bКлод\b", "Claude"),
+    (r"\bЭм\s*Эл\s*Икс\b", "MLX"),
+    (r"\bФаст\s*АПИ\b", "FastAPI"),
+    (r"\bГит[-\s]?Хаб\b", "GitHub"),
+    (r"\bМак[-\s]?Бук\b", "MacBook"),
+]
+
+# Время "15.00" / "15 00" после цифр → "15:00" (только в диапазоне часов).
+# Не трогаем числа с плавающей точкой: условие — час 0-23 и минуты 00-59.
+TIME_NORMALIZE_RE = re.compile(r"\b([01]?\d|2[0-3])\s*[.:]\s*([0-5]\d)(?!\d)")
+
+
 class TextUtils:
     """Статичный набор инструментов для нормализации и очистки текста."""
 
@@ -36,6 +71,8 @@ class TextUtils:
         clean = TextUtils._cleanup_soft(clean)
         # Базовая фильтрация известных артефактов нужна и в soft-профиле.
         clean = TextUtils._strip_hallucinations(clean)
+        # Нормализация брендов/имён и времени — всегда, чтобы диктовка не требовала ручной правки.
+        clean = TextUtils.normalize_entities(clean)
         
         # Строгая очистка
         if profile.lower() == "strict":
@@ -100,6 +137,21 @@ class TextUtils:
         # 4. Удаление известных фраз-галлюцинаций (YouTube-стайл)
         clean = TextUtils._strip_hallucinations(clean)
         return clean.strip()
+
+    @staticmethod
+    def normalize_entities(text: str) -> str:
+        """Канонизация брендов/имён (кириллица→латиница) и формата времени (ЧЧ:ММ).
+
+        Применяется детерминированно поверх вывода Whisper, чтобы диктовка не
+        требовала ручной правки «Меркадонна→Mercadona» и «15.00→15:00».
+        """
+        if not text:
+            return text
+        result = text
+        for pattern, replacement in BRAND_REPLACEMENTS:
+            result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+        result = TIME_NORMALIZE_RE.sub(r"\1:\2", result)
+        return result
 
     @staticmethod
     def _strip_hallucinations(clean: str) -> str:

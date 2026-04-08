@@ -198,6 +198,32 @@ async def get_history_page(self, page: int = 0, limit: int = 50) -> dict:
 
 ---
 
+## D.7. Dictation quality tuning (1 сессия, 30-60 мин)
+
+**Контекст:** профиль уже `max` (whisper-large-v3-mlx + multi-candidate rerank), punctuation prompt в `KrabEar/core/config.py`, silence/background guard включены, hotkey `right_option_toggle`. Можно поднять качество ещё на ~5-10%.
+
+### Шаги
+
+1. **Расширить `~/Library/Application Support/KrabEar/vocabulary.txt`** — добавить персональные термины: имена (Pablito, yung_nagato, p0lrd), бренды (Mercadona, OpenClaw, Krab, Pyrofork, Pyannote, MLX, Antigravity), частые тех-слова (gateway, runtime, swarm, pyright, ruff, edge_tts). Каждое слово на новой строке. Это initial bias для whisper — резко улучшает распознавание этих токенов.
+
+2. **Усилить `TRANSCRIBE_PROMPT`** через plist `EnvironmentVariables` в `~/Library/LaunchAgents/ai.krab.ear.rest.plist`:
+   ```xml
+   <key>KRAB_EAR_TRANSCRIBE_PROMPT</key>
+   <string>Ты транскрибируешь русскую речь владельца. Ставь точки в конце предложений, запятые перед "что", "который", "если", "но", "потому что". Числа пиши цифрами. Названия компаний, продуктов и людей — с заглавной буквы. Сохраняй смысл и естественные паузы. Не добавляй слова которых нет.</string>
+   ```
+   Перезагрузить: `launchctl bootout gui/$(id -u)/ai.krab.ear.rest && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.krab.ear.rest.plist`
+
+3. **(опц.)** Поднять `stop_tail_trim_ms` 180→250 если режется конец фразы. Через IPC `set_settings` или прямой edit `~/Library/Application Support/KrabEar/settings.json` (требует рестарт).
+
+4. **Smoke test:** записать 2-3 пробные диктовки с числами, именами, длинными предложениями — проверить пунктуацию и капитализацию.
+
+### Verification
+- `cat ~/Library/Application Support/KrabEar/vocabulary.txt` → видны новые термины
+- `launchctl print gui/$(id -u)/ai.krab.ear.rest | grep KRAB_EAR_TRANSCRIBE_PROMPT` → новый промпт виден
+- Пробная диктовка через правый Option → текст с точками/запятыми/заглавными
+
+---
+
 ## D.5. Critical files map
 
 ```
