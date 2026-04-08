@@ -9,15 +9,17 @@ from pathlib import Path
 from typing import List, Any
 
 # Абсолютный путь к .secrets — backend загружает его на старте через
-# pydantic-settings env_file tuple. Env vars из launchd plist всё равно
-# имеют более высокий приоритет (env > env_file).
+# pydantic-settings env_file tuple. Порядок загрузки в env_file:
+# сначала repo-local .env, затем .secrets — в pydantic-settings v2
+# последний файл в tuple побеждает при конфликте ключей. Env vars из
+# launchd plist всё равно имеют более высокий приоритет (env > env_file).
 _SECRETS_FILE = Path.home() / "Library" / "Application Support" / "KrabEar" / ".secrets"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
-        env_file=(str(_SECRETS_FILE), ".env"),
+        env_file=(".env", str(_SECRETS_FILE)),
         extra="ignore",
     )
 

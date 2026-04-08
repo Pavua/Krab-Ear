@@ -15,54 +15,75 @@ class ConfigSecretsLoadingTestCase(unittest.TestCase):
         self.assertEqual(_SECRETS_FILE, expected)
 
     def test_env_file_tuple_contains_secrets_and_dotenv(self):
-        """model_config.env_file должен быть tuple из .secrets + .env."""
+        """model_config.env_file должен быть tuple (.env, .secrets) — .secrets последним,
+        чтобы в pydantic-settings v2 иметь высший приоритет среди файлов."""
         from core.config import Settings, _SECRETS_FILE
         env_file = Settings.model_config.get("env_file")
         self.assertIsInstance(env_file, tuple)
-        self.assertIn(str(_SECRETS_FILE), env_file)
-        self.assertIn(".env", env_file)
+        self.assertEqual(env_file[0], ".env")
+        self.assertEqual(env_file[1], str(_SECRETS_FILE))
 
 
 class ConfigLLMFieldsTestCase(unittest.TestCase):
     """Проверяет что новые LLM поля существуют с правильными дефолтами."""
 
     def test_llm_enabled_default_false(self):
-        from core.config import Settings
-        s = Settings()
-        self.assertFalse(s.LLM_ENABLED)
+        """LLM_ENABLED должен быть False по умолчанию."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_ENABLED", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertFalse(s.LLM_ENABLED)
 
     def test_llm_base_url_default(self):
-        from core.config import Settings
-        s = Settings()
-        self.assertEqual(s.LLM_BASE_URL, "http://localhost:1234/v1")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_BASE_URL", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertEqual(s.LLM_BASE_URL, "http://localhost:1234/v1")
 
     def test_llm_model_default(self):
-        from core.config import Settings
         # Убираем возможный override из .secrets / окружения
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("KRAB_EAR_LLM_MODEL", None)
+            from core.config import Settings
             s = Settings(_env_file=())
             self.assertEqual(s.LLM_MODEL, "qwen3.5-9b@6bit")
 
-    def test_llm_timeout_sec_default(self):
+    def test_llm_api_key_default(self):
+        """LLM_API_KEY должен быть пустой строкой по умолчанию (security-sensitive)."""
+        os.environ.pop("KRAB_EAR_LLM_API_KEY", None)
         from core.config import Settings
-        s = Settings()
-        self.assertEqual(s.LLM_TIMEOUT_SEC, 4.0)
+        s = Settings(_env_file=())
+        self.assertEqual(s.LLM_API_KEY, "")
+
+    def test_llm_timeout_sec_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_TIMEOUT_SEC", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertEqual(s.LLM_TIMEOUT_SEC, 4.0)
 
     def test_llm_circuit_fail_threshold_default(self):
-        from core.config import Settings
-        s = Settings()
-        self.assertEqual(s.LLM_CIRCUIT_FAIL_THRESHOLD, 3)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_CIRCUIT_FAIL_THRESHOLD", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertEqual(s.LLM_CIRCUIT_FAIL_THRESHOLD, 3)
 
     def test_llm_circuit_initial_reset_sec_default(self):
-        from core.config import Settings
-        s = Settings()
-        self.assertEqual(s.LLM_CIRCUIT_INITIAL_RESET_SEC, 60)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_CIRCUIT_INITIAL_RESET_SEC", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertEqual(s.LLM_CIRCUIT_INITIAL_RESET_SEC, 60)
 
     def test_llm_circuit_max_reset_sec_default(self):
-        from core.config import Settings
-        s = Settings()
-        self.assertEqual(s.LLM_CIRCUIT_MAX_RESET_SEC, 600)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRAB_EAR_LLM_CIRCUIT_MAX_RESET_SEC", None)
+            from core.config import Settings
+            s = Settings(_env_file=())
+            self.assertEqual(s.LLM_CIRCUIT_MAX_RESET_SEC, 600)
 
     def test_env_var_override(self):
         """KRAB_EAR_LLM_ENABLED=true переопределяет дефолт."""
