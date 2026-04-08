@@ -326,3 +326,29 @@ class LLMRewriter:
         return LLMRewriteResult(
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
+
+    def ping(self) -> bool:
+        """Проверка доступности LM Studio через GET /models.
+
+        Не трогает circuit breaker — это отдельный health check, используется
+        только на старте backend'а. Возвращает False на любую ошибку.
+        """
+        try:
+            response = requests.get(
+                f"{self._base_url}/models",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=self._timeout,
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def status(self) -> dict:
+        """Health info для llm_status IPC метода."""
+        return {
+            "reachable": self._circuit.state != "open",
+            "model": self._model,
+            "circuit_state": self._circuit.state,
+            "last_latency_ms": self._last_latency_ms,
+            "last_error": self._last_error,
+        }

@@ -443,5 +443,100 @@ class LLMRewriterCircuitIntegrationTestCase(unittest.TestCase):
         self.assertTrue(result.ok)
 
 
+class LLMRewriterPingTestCase(unittest.TestCase):
+    """Тесты ping() health check метода."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=2.0,
+        )
+
+    @patch("backend.llm_rewriter.requests.get")
+    def test_ping_returns_true_on_200(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_get.return_value = mock_resp
+        self.assertTrue(self.rewriter.ping())
+
+    @patch("backend.llm_rewriter.requests.get")
+    def test_ping_returns_false_on_connection_error(self, mock_get):
+        import requests
+        mock_get.side_effect = requests.ConnectionError("refused")
+        self.assertFalse(self.rewriter.ping())
+
+    @patch("backend.llm_rewriter.requests.get")
+    def test_ping_returns_false_on_timeout(self, mock_get):
+        import requests
+        mock_get.side_effect = requests.Timeout()
+        self.assertFalse(self.rewriter.ping())
+
+    @patch("backend.llm_rewriter.requests.get")
+    def test_ping_returns_false_on_http_error(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_get.return_value = mock_resp
+        self.assertFalse(self.rewriter.ping())
+
+    @patch("backend.llm_rewriter.requests.get")
+    def test_ping_uses_models_endpoint(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_get.return_value = mock_resp
+        self.rewriter.ping()
+        args, _ = mock_get.call_args
+        self.assertEqual(args[0], "http://localhost:1234/v1/models")
+
+
+class LLMRewriterStatusTestCase(unittest.TestCase):
+    """Тесты status() diagnostic метода."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="qwen3.5-9b@6bit",
+        )
+
+    def test_status_returns_dict_with_required_keys(self):
+        status = self.rewriter.status()
+        self.assertIn("reachable", status)
+        self.assertIn("model", status)
+        self.assertIn("circuit_state", status)
+        self.assertIn("last_latency_ms", status)
+        self.assertIn("last_error", status)
+
+    def test_status_model_matches_init(self):
+        status = self.rewriter.status()
+        self.assertEqual(status["model"], "qwen3.5-9b@6bit")
+
+    def test_status_initial_circuit_state_is_closed(self):
+        status = self.rewriter.status()
+        self.assertEqual(status["circuit_state"], "closed")
+
+    def test_status_initial_last_error_is_none(self):
+        status = self.rewriter.status()
+        self.assertIsNone(status["last_error"])
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_status_reachable_true_when_circuit_closed(self, mock_post):
+        status = self.rewriter.status()
+        self.assertTrue(status["reachable"])
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_status_reachable_false_when_circuit_open(self, mock_post):
+        import requests
+        mock_post.side_effect = requests.ConnectionError()
+        for _ in range(3):
+            self.rewriter.rewrite("test")
+        status = self.rewriter.status()
+        self.assertEqual(status["circuit_state"], "open")
+        self.assertFalse(status["reachable"])
+
+
 if __name__ == "__main__":
     unittest.main()
