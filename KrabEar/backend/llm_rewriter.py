@@ -123,3 +123,109 @@ class CircuitBreaker:
             self._consecutive_failures = 0
             self._current_reset_sec = self._initial_reset_sec
             self._half_open_probe_in_flight = False
+
+
+SYSTEM_PROMPT = """Ты — редактор русской диктовки. Твоя задача — исправить пунктуацию, орфографию и грамматику в тексте, сохранив смысл и стиль автора.
+
+Жёсткие правила:
+1. НЕ добавляй слов, которых нет в оригинале.
+2. НЕ удаляй слов, кроме явных filler'ов в начале ("э-э", "ну", "вот").
+3. НЕ меняй порядок слов, кроме случаев когда этого требует грамматика.
+4. НЕ переформулируй фразы — только исправляй ошибки.
+5. Бренды и технические термины оставляй латиницей: Spotify, YouTube, GitHub, Claude, OpenAI, Docker, Python, Swift, macOS, iPhone, iPad, Mac, Telegram, WhatsApp, Slack, Notion, Figma, VS Code, Xcode, Linux, Linear, Jira.
+6. Расставь правильные знаки препинания: запятые, точки, тире, двоеточия.
+7. Заглавные буквы в начале предложений и у имён собственных.
+8. Если текст пустой или бессмысленный — верни его без изменений.
+
+Верни ТОЛЬКО исправленный текст. Без пояснений. Без кавычек. Без префиксов типа "Исправленный текст:"."""
+
+_QUOTE_OPENERS = ('"', "«", "\u201c")
+_QUOTE_CLOSERS = ('"', "»", "\u201d")
+_EXPLANATORY_PREFIXES = (
+    "Исправленный текст:",
+    "Исправлено:",
+    "Результат:",
+    "Вот:",
+)
+
+
+@dataclass
+class LLMRewriteResult:
+    """Результат попытки rewrite'а. Всегда возвращается, никогда не raises."""
+
+    ok: bool
+    text: Optional[str]
+    fallback_reason: Optional[str]
+    latency_ms: Optional[int]
+
+    def text_or_fallback(self, fallback: str) -> str:
+        """Helper: вернуть rewritten text если ok=True и text непустой, иначе fallback."""
+        if self.ok and self.text:
+            return self.text
+        return fallback
+
+
+class LLMRewriter:
+    """HTTP-клиент к OpenAI-compatible LLM endpoint'у (LM Studio).
+
+    Контракт: rewrite() НИКОГДА не raises. Все ошибки возвращаются как
+    LLMRewriteResult(ok=False, fallback_reason=...).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_sec: float = 4.0,
+        circuit_fail_threshold: int = 3,
+        circuit_initial_reset_sec: int = 60,
+        circuit_max_reset_sec: int = 600,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout_sec
+        self._circuit = CircuitBreaker(
+            fail_threshold=circuit_fail_threshold,
+            initial_reset_sec=circuit_initial_reset_sec,
+            max_reset_sec=circuit_max_reset_sec,
+        )
+        self._last_latency_ms: Optional[int] = None
+        self._last_error: Optional[str] = None
+
+    def _postprocess(self, content: str) -> str:
+        """Убирает типичный мусор в ответе LLM (кавычки, префиксы, multi-paragraph)."""
+        s = (content or "").strip()
+        if not s:
+            return ""
+
+        if len(s) >= 2 and s[0] in _QUOTE_OPENERS and s[-1] in _QUOTE_CLOSERS:
+            s = s[1:-1].strip()
+
+        for prefix in _EXPLANATORY_PREFIXES:
+            if s.lower().startswith(prefix.lower()):
+                s = s[len(prefix):].strip()
+                break
+
+        if "\n\n" in s:
+            s = s.split("\n\n", 1)[0].strip()
+
+        return s
+
+    def _estimate_max_tokens(self, text: str) -> int:
+        """Динамический output cap на базе длины input'а.
+
+        Русский ~2.5-3 токена на слово, output ≈ input по длине.
+        30% headroom + 50 токенов буфера на знаки препинания.
+        """
+        word_count = len((text or "").split())
+        input_tokens_estimate = word_count * 3
+        max_tokens = int(input_tokens_estimate * 1.3) + 50
+        return max(256, min(max_tokens, 4096))
+
+    def _build_messages(self, text: str) -> list:
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]

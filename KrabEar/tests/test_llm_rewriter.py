@@ -153,5 +153,113 @@ class CircuitBreakerTestCase(unittest.TestCase):
         self.assertTrue(breaker.allow_request())
 
 
+class LLMRewriteResultTestCase(unittest.TestCase):
+    def test_ok_result_returns_text(self):
+        from backend.llm_rewriter import LLMRewriteResult
+        r = LLMRewriteResult(ok=True, text="clean", fallback_reason=None, latency_ms=100)
+        self.assertEqual(r.text_or_fallback("raw"), "clean")
+
+    def test_failed_result_returns_fallback(self):
+        from backend.llm_rewriter import LLMRewriteResult
+        r = LLMRewriteResult(ok=False, text=None, fallback_reason="timeout", latency_ms=None)
+        self.assertEqual(r.text_or_fallback("raw"), "raw")
+
+    def test_ok_but_none_text_returns_fallback(self):
+        """Edge case: ok=True но text=None (не должно случаться, но защищаемся)."""
+        from backend.llm_rewriter import LLMRewriteResult
+        r = LLMRewriteResult(ok=True, text=None, fallback_reason=None, latency_ms=100)
+        self.assertEqual(r.text_or_fallback("raw"), "raw")
+
+
+class LLMRewriterPostprocessTestCase(unittest.TestCase):
+    """Тесты приватного _postprocess метода."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+        )
+
+    def test_strips_double_quotes(self):
+        self.assertEqual(self.rewriter._postprocess('"Привет, мир."'), "Привет, мир.")
+
+    def test_strips_french_quotes(self):
+        self.assertEqual(self.rewriter._postprocess("«Привет, мир.»"), "Привет, мир.")
+
+    def test_strips_curly_quotes(self):
+        self.assertEqual(self.rewriter._postprocess("\u201cПривет, мир.\u201d"), "Привет, мир.")
+
+    def test_strips_explanatory_prefix_ispravlenny(self):
+        self.assertEqual(
+            self.rewriter._postprocess("Исправленный текст: Привет, мир."),
+            "Привет, мир.",
+        )
+
+    def test_strips_explanatory_prefix_ispravleno(self):
+        self.assertEqual(
+            self.rewriter._postprocess("Исправлено: Привет, мир."),
+            "Привет, мир.",
+        )
+
+    def test_strips_explanatory_prefix_case_insensitive(self):
+        self.assertEqual(
+            self.rewriter._postprocess("исправленный текст: Привет, мир."),
+            "Привет, мир.",
+        )
+
+    def test_takes_first_paragraph_on_double_newline(self):
+        self.assertEqual(
+            self.rewriter._postprocess("Привет, мир.\n\n**Пояснение**: я убрал запятую."),
+            "Привет, мир.",
+        )
+
+    def test_empty_string_stays_empty(self):
+        self.assertEqual(self.rewriter._postprocess(""), "")
+
+    def test_whitespace_only_stays_empty(self):
+        self.assertEqual(self.rewriter._postprocess("   \n  "), "")
+
+    def test_passes_through_normal_text(self):
+        self.assertEqual(
+            self.rewriter._postprocess("Привет, как дела?"),
+            "Привет, как дела?",
+        )
+
+
+class LLMRewriterMaxTokensTestCase(unittest.TestCase):
+    """Тесты dynamic max_tokens estimator."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+        )
+
+    def test_short_text_hits_floor(self):
+        """Короткий текст (5 слов) → max_tokens = 256 (floor)."""
+        result = self.rewriter._estimate_max_tokens("Привет как дела мой друг")
+        self.assertEqual(result, 256)
+
+    def test_medium_text_scales_linearly(self):
+        """100 слов → примерно 100 * 3 * 1.3 + 50 = 440."""
+        text = " ".join(["слово"] * 100)
+        result = self.rewriter._estimate_max_tokens(text)
+        self.assertEqual(result, 440)
+
+    def test_long_text_hits_ceiling(self):
+        """2000 слов → max_tokens = 4096 (ceiling)."""
+        text = " ".join(["слово"] * 2000)
+        result = self.rewriter._estimate_max_tokens(text)
+        self.assertEqual(result, 4096)
+
+    def test_empty_text_returns_floor(self):
+        result = self.rewriter._estimate_max_tokens("")
+        self.assertEqual(result, 256)
+
+
 if __name__ == "__main__":
     unittest.main()
