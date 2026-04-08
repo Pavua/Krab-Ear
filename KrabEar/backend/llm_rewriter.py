@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+
+import requests
 from enum import Enum
 from typing import Optional
 
@@ -229,3 +231,98 @@ class LLMRewriter:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ]
+
+    def rewrite(self, text: str) -> LLMRewriteResult:
+        """Отправляет текст в LLM и возвращает исправленную версию.
+
+        Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
+        """
+        # 1. Валидация входа
+        cleaned_input = (text or "").strip()
+        if not cleaned_input:
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="empty_input", latency_ms=None
+            )
+
+        # 2. Circuit breaker check
+        if not self._circuit.allow_request():
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
+            )
+
+        # 3. Подготовка запроса
+        payload = {
+            "model": self._model,
+            "messages": self._build_messages(cleaned_input),
+            "temperature": 0.0,
+            "max_tokens": self._estimate_max_tokens(cleaned_input),
+            "stream": False,
+            "stop": ["\n\n", "Исправленный текст:", "Исходный текст:"],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        # 4. HTTP call with timing
+        start = time.monotonic()
+        try:
+            response = requests.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self._timeout,
+            )
+        except requests.Timeout:
+            self._circuit.record_failure()
+            self._last_error = "timeout"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="timeout", latency_ms=None
+            )
+        except (requests.ConnectionError, requests.RequestException) as exc:
+            self._circuit.record_failure()
+            self._last_error = f"connection_error: {exc}"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="connection_error", latency_ms=None
+            )
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        self._last_latency_ms = latency_ms
+
+        # 5. HTTP status check
+        if response.status_code != 200:
+            self._circuit.record_failure()
+            self._last_error = f"http_{response.status_code}"
+            return LLMRewriteResult(
+                ok=False,
+                text=None,
+                fallback_reason=f"http_{response.status_code}",
+                latency_ms=latency_ms,
+            )
+
+        # 6. Parse JSON response
+        try:
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            self._circuit.record_failure()
+            self._last_error = f"parse_error: {exc}"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="parse_error", latency_ms=latency_ms
+            )
+
+        # 7. Postprocess
+        cleaned = self._postprocess(content)
+        if not cleaned:
+            self._circuit.record_failure()
+            self._last_error = "empty_response"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="empty_response", latency_ms=latency_ms
+            )
+
+        # 8. Success
+        self._circuit.record_success()
+        self._last_error = None
+        return LLMRewriteResult(
+            ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
+        )
