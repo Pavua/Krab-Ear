@@ -159,6 +159,19 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let controlRow = NSStackView()
     private let bottomBar1 = NSStackView()
     private let bottomBar2 = NSStackView()
+    private let settingsBar = NSStackView()
+    private let settingsRow1 = NSStackView()
+    private let settingsRow2 = NSStackView()
+    private let settingsRow3 = NSStackView()
+    private let settingsRow4 = NSStackView()
+    private let settingsRow5 = NSStackView()
+    private let settingsRow6 = NSStackView()
+    private let settingsRow7 = NSStackView()
+    private let aiSettingsRow1 = NSStackView()
+    private let aiSettingsRow2 = NSStackView()
+    private let startStopButton = NSButton(title: "Старт/Стоп", target: nil, action: nil)
+    private let restartButton = NSButton(title: "Перезапуск", target: nil, action: nil)
+    private let stopButton = NSButton(title: "Остановить", target: nil, action: nil)
     private let loadMoreButton = NSButton(title: "Показать ещё", target: nil, action: nil)
     private let jumpToLatestButton = NSButton(title: "К последней", target: nil, action: nil)
     private let loadAllButton = NSButton(title: "Загрузить всё", target: nil, action: nil)
@@ -481,17 +494,19 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         toolsRow.addArrangedSubview(glossaryStatusLabel)
         toolsRow.addArrangedSubview(NSView())
 
-        let toggleRecordButton = NSButton(title: "Старт/Стоп", target: self, action: #selector(onToggleRecordFromPanel))
-        controlRow.addArrangedSubview(toggleRecordButton)
+        startStopButton.target = self
+        startStopButton.action = #selector(onToggleRecordFromPanel)
+        controlRow.addArrangedSubview(startStopButton)
 
-        let restartButton = NSButton(title: "Перезапуск", target: self, action: #selector(onRestartFromPanel))
+        restartButton.target = self
+        restartButton.action = #selector(onRestartFromPanel)
         controlRow.addArrangedSubview(restartButton)
 
-        let stopButton = NSButton(title: "Остановить", target: self, action: #selector(onStopFromPanel))
+        stopButton.target = self
+        stopButton.action = #selector(onStopFromPanel)
         controlRow.addArrangedSubview(stopButton)
         controlRow.addArrangedSubview(NSView())
 
-        let settingsBar = NSStackView()
         settingsBar.orientation = .vertical
         settingsBar.spacing = 6
         settingsBar.alignment = .leading
@@ -502,43 +517,36 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveSettingsBar.alignment = .leading
         liveSettingsBar.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow1 = NSStackView()
         settingsRow1.orientation = .horizontal
         settingsRow1.spacing = 10
         settingsRow1.alignment = .centerY
         settingsRow1.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow2 = NSStackView()
         settingsRow2.orientation = .horizontal
         settingsRow2.spacing = 10
         settingsRow2.alignment = .centerY
         settingsRow2.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow3 = NSStackView()
         settingsRow3.orientation = .horizontal
         settingsRow3.spacing = 10
         settingsRow3.alignment = .centerY
         settingsRow3.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow4 = NSStackView()
         settingsRow4.orientation = .horizontal
         settingsRow4.spacing = 10
         settingsRow4.alignment = .centerY
         settingsRow4.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow5 = NSStackView()
         settingsRow5.orientation = .horizontal
         settingsRow5.spacing = 10
         settingsRow5.alignment = .centerY
         settingsRow5.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow6 = NSStackView()
         settingsRow6.orientation = .horizontal
         settingsRow6.spacing = 10
         settingsRow6.alignment = .centerY
         settingsRow6.translatesAutoresizingMaskIntoConstraints = false
 
-        let settingsRow7 = NSStackView()
         settingsRow7.orientation = .horizontal
         settingsRow7.spacing = 10
         settingsRow7.alignment = .centerY
@@ -694,11 +702,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         llmModelSelector.target = self
         llmModelSelector.action = #selector(onLlmModelChanged)
 
-        let aiSettingsRow1 = NSStackView(views: [diarizationButton])
+        aiSettingsRow1.addArrangedSubview(diarizationButton)
         aiSettingsRow1.orientation = .horizontal
         aiSettingsRow1.alignment = .centerY
 
-        let aiSettingsRow2 = NSStackView(views: [llmRewriteButton, llmModelSelector])
+        aiSettingsRow2.addArrangedSubview(llmRewriteButton)
+        aiSettingsRow2.addArrangedSubview(llmModelSelector)
         aiSettingsRow2.orientation = .horizontal
         aiSettingsRow2.spacing = 10
         aiSettingsRow2.alignment = .centerY
@@ -1167,6 +1176,47 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
+
+        applyVisualTheme()
+    }
+
+    @MainActor
+    private func applyVisualTheme() {
+        guard let window = self.window else { return }
+        KrabEarTheme.applyTheme(to: window)
+
+        settingsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        settingsBar.spacing = KrabEarTheme.Metrics.sectionSpacing
+
+        let generalCard = ThemeCardView()
+        generalCard.title = "Основные настройки"
+        let generalRows = [settingsRow1, settingsRow2, settingsRow3, settingsRow4, settingsRow5, settingsRow6]
+        for row in generalRows {
+            generalCard.contentStackView.addArrangedSubview(row)
+        }
+
+        let aiCard = ThemeCardView()
+        aiCard.title = aiSectionLabel.stringValue.isEmpty ? "Настройки AI" : aiSectionLabel.stringValue
+        let aiRows = [aiSettingsRow1, aiSettingsRow2]
+        for row in aiRows {
+            aiCard.contentStackView.addArrangedSubview(row)
+        }
+
+        settingsBar.addArrangedSubview(generalCard)
+        settingsBar.addArrangedSubview(aiCard)
+
+        startStopButton.bezelStyle = .push
+        startStopButton.isBordered = true
+        startStopButton.bezelColor = KrabEarTheme.Colors.accent
+        startStopButton.font = KrabEarTheme.Typography.controlLabel
+
+        let secondaryButtons = [restartButton, stopButton]
+        for button in secondaryButtons {
+            button.bezelStyle = .push
+            button.isBordered = true
+            button.bezelColor = nil
+            button.font = KrabEarTheme.Typography.controlLabel
+        }
     }
 
     @objc private func onSearch() {
