@@ -1391,6 +1391,45 @@ class LLMStatusIPCTestCase(unittest.TestCase):
             self.assertFalse(result["runtime_enabled"])
             self.assertFalse(result["enabled"])
 
+    def test_llm_status_enabled_false_when_circuit_open(self):
+        """Даже если admin+runtime=True, OPEN circuit → reachable=False, enabled=False."""
+        from unittest.mock import patch
+        import requests
+        with patch("backend.service.settings") as mock_settings, \
+             patch("backend.llm_rewriter.requests.get") as mock_get, \
+             patch("backend.llm_rewriter.requests.post") as mock_post:
+            mock_settings.LLM_ENABLED = True
+            mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
+            mock_settings.LLM_API_KEY = "sk-test"
+            mock_settings.LLM_MODEL = "test"
+            mock_settings.LLM_TIMEOUT_SEC = 4.0
+            mock_settings.LLM_CIRCUIT_FAIL_THRESHOLD = 3
+            mock_settings.LLM_CIRCUIT_INITIAL_RESET_SEC = 60
+            mock_settings.LLM_CIRCUIT_MAX_RESET_SEC = 600
+            mock_get.return_value.status_code = 200
+            mock_post.side_effect = requests.ConnectionError("refused")
+
+            from backend.service import BackendService
+            service = BackendService(store=self.store)
+
+            # Runtime toggle ON
+            current = self.store.load_settings()
+            current["llm_rewrite_enabled"] = True
+            self.store.save_settings(current)
+
+            # Open circuit через 3 consecutive failures (black-box — не трогаем state напрямую)
+            for _ in range(3):
+                service._llm_rewriter.rewrite("test")
+
+            response = service.handle_request({"id": "4", "method": "llm_status"})
+            self.assertTrue(response["ok"])
+            result = response["result"]
+            self.assertEqual(result["circuit_state"], "open")
+            self.assertFalse(result["reachable"])
+            self.assertFalse(result["enabled"])
+            self.assertTrue(result["admin_enabled"])
+            self.assertTrue(result["runtime_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

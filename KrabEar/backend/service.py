@@ -1063,13 +1063,15 @@ class BackendService:
                 "last_error": "llm_rewriter не инициализирован",
             }
 
-        status = self._llm_rewriter.status()
-        status["admin_enabled"] = True
-        status["runtime_enabled"] = runtime_enabled
-        status["enabled"] = bool(
-            status["admin_enabled"] and status["runtime_enabled"] and status["reachable"]
-        )
-        return status
+        inner = self._llm_rewriter.status()
+        reachable = bool(inner.get("reachable", False))
+        admin_enabled = True  # если мы здесь, settings.LLM_ENABLED=True (инвариант _init_llm_rewriter)
+        return {
+            **inner,
+            "admin_enabled": admin_enabled,
+            "runtime_enabled": runtime_enabled,
+            "enabled": bool(admin_enabled and runtime_enabled and reachable),
+        }
 
     def _call_assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
         """Фоновый цикл: WS-подписка на VG + отправка аудио-снапшотов."""
