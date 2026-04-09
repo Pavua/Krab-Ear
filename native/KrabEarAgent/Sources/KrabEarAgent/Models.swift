@@ -42,6 +42,9 @@ struct AgentSettings {
     var uiLastTab: String
     var historyFocusMode: Bool
     var onboardingCompleted: Bool
+    var diarizationEnabled: Bool
+    var llmRewriteEnabled: Bool
+    var llmModel: String
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -78,7 +81,10 @@ struct AgentSettings {
         captureSourceMode: "mic",
         uiLastTab: "history",
         historyFocusMode: true,
-        onboardingCompleted: false
+        onboardingCompleted: false,
+        diarizationEnabled: true,
+        llmRewriteEnabled: false,
+        llmModel: "qwen3.5-9b@6bit"
     )
 
     init(from payload: [String: Any]) {
@@ -138,6 +144,9 @@ struct AgentSettings {
         self.uiLastTab = (payload["ui_last_tab"] as? String) ?? Self.default.uiLastTab
         self.historyFocusMode = (payload["history_focus_mode"] as? Bool) ?? Self.default.historyFocusMode
         self.onboardingCompleted = (payload["onboarding_completed"] as? Bool) ?? Self.default.onboardingCompleted
+        self.diarizationEnabled = (payload["diarization_enabled"] as? Bool) ?? Self.default.diarizationEnabled
+        self.llmRewriteEnabled = (payload["llm_rewrite_enabled"] as? Bool) ?? Self.default.llmRewriteEnabled
+        self.llmModel = (payload["llm_model"] as? String) ?? Self.default.llmModel
     }
 
     init(
@@ -172,7 +181,10 @@ struct AgentSettings {
         captureSourceMode: String,
         uiLastTab: String,
         historyFocusMode: Bool,
-        onboardingCompleted: Bool
+        onboardingCompleted: Bool,
+        diarizationEnabled: Bool,
+        llmRewriteEnabled: Bool,
+        llmModel: String
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -206,6 +218,9 @@ struct AgentSettings {
         self.uiLastTab = uiLastTab
         self.historyFocusMode = historyFocusMode
         self.onboardingCompleted = onboardingCompleted
+        self.diarizationEnabled = diarizationEnabled
+        self.llmRewriteEnabled = llmRewriteEnabled
+        self.llmModel = llmModel
     }
 
     func toPayload() -> [String: Any] {
@@ -242,6 +257,9 @@ struct AgentSettings {
             "ui_last_tab": uiLastTab,
             "history_focus_mode": historyFocusMode,
             "onboarding_completed": onboardingCompleted,
+            "diarization_enabled": diarizationEnabled,
+            "llm_rewrite_enabled": llmRewriteEnabled,
+            "llm_model": llmModel,
         ]
     }
 }
