@@ -4,128 +4,499 @@
  Связи модуля:
  1) main.swift: показывает и обновляет оверлей во время активной записи.
  2) IPC get_recording_state: источник промежуточного текста и таймера.
+
+ Redesign: Liquid Glass aesthetic (NSVisualEffectView + near-cursor + reveal animation).
+ - macOS 13+ target, Swift 6.0 strict concurrency.
 */
 
 import AppKit
 import Foundation
+import QuartzCore
 
-/// Лёгкое плавающее окно внизу экрана для realtime-превью диктовки.
+// MARK: - State
+
+private enum OverlayState {
+    case hidden
+    case live        // during recording, pulsing text
+    case reveal      // 3-stage progression after stop_recording
+}
+
+// MARK: - RealtimeOverlayController
+
+/// Плавающий Liquid Glass оверлей для realtime-превью диктовки.
+/// Near-cursor positioning, анимированное появление/исчезновение,
+/// поддержка 3-стадийного reveal после окончания записи.
 @MainActor
-final class RealtimeOverlayController {
-    private let panel: NSPanel
-    private let modeLabel = NSTextField(labelWithString: "OFF")
-    private let statusLabel = NSTextField(labelWithString: "00:00")
-    private let textView = NSTextView()
-    private var opacityPercent: Int = 45
+public final class RealtimeOverlayController {
 
-    init() {
-        let initialRect = NSRect(x: 0, y: 0, width: 700, height: 128)
+    // MARK: Panel + Views
+
+    private let panel: NSPanel
+
+    /// Glass background — NSVisualEffectView с виброй
+    private let effectView: NSVisualEffectView
+
+    /// Hairline inner border поверх effectView
+    private let borderLayer = CALayer()
+
+    /// Status row: duration + mode
+    private let statusLabel  = NSTextField(labelWithString: "00:00")
+    private let modeLabel    = NSTextField(labelWithString: "—")
+
+    /// Stage label для reveal animation ("Распознано" / "Очищено" / "LLM")
+    private let stageLabel   = NSTextField(labelWithString: "")
+
+    /// Основной текст (preview / stage text)
+    private let primaryLabel = NSTextField(wrappingLabelWithString: "")
+
+    // MARK: State
+
+    private var overlayState: OverlayState = .hidden
+    private var opacityPercent: Int = 100
+    
+    private var targetAlpha: CGFloat {
+        CGFloat(opacityPercent) / 100.0
+    }
+
+    /// Таймер пульсации во время live mode
+    private var pulseTimer: Timer?
+    private var pulseFadeOut: Bool = true
+    
+    /// Таск для управления стадиями reveal анимации
+    private var revealTask: Task<Void, Never>?
+
+    /// Флаг — нужно ли уважать reduce-motion
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    // MARK: Layout constants
+
+    private let minWidth:   CGFloat = 420
+    private let maxWidth:   CGFloat = 640
+    private let minHeight:  CGFloat = 80
+    private let maxHeight:  CGFloat = 180
+    private let cornerRadius: CGFloat = 16
+
+    // MARK: Init
+
+    public init() {
+        let initialRect = NSRect(x: 0, y: 0, width: 520, height: 80)
         self.panel = NSPanel(
             contentRect: initialRect,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+
+        self.effectView = NSVisualEffectView(frame: initialRect)
+
         setupPanel()
+        setupEffectView()
         setupUI()
     }
 
-    func show() {
-        positionAtBottomCenter()
+    // MARK: - Public API
+
+    public func show() {
+        revealTask?.cancel()
+        guard overlayState == .hidden else { return }
+        overlayState = .live
+        stageLabel.isHidden = true
+        positionNearCursor()
+        panel.alphaValue = 0
         panel.orderFront(nil)
+        animateShow()
+        startPulse()
     }
 
-    func hide() {
-        panel.orderOut(nil)
+    public func hide() {
+        revealTask?.cancel()
+        stopPulse()
+        if overlayState == .hidden { return }
+        overlayState = .hidden
+        animateHide { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.panel.orderOut(nil)
+            }
+        }
     }
 
-    func update(previewText: String, translatedText: String?, durationText: String, modeHint: String) {
+    public func update(previewText: String, translatedText: String?, durationText: String, modeHint: String) {
+        guard overlayState == .live else { return }
+        
         statusLabel.stringValue = durationText
-        modeLabel.stringValue = "Mode: \(modeHint)"
-        let cleanPreview = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleanPreview.isEmpty {
-            textView.string = "Слушаю... промежуточный текст появится через 1-2 секунды."
+        modeLabel.stringValue   = modeHint.isEmpty ? "—" : modeHint
+
+        let clean = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty {
+            primaryLabel.stringValue = "Слушаю…"
         } else {
-            let cleanTranslation = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleanTranslation.isEmpty {
-                textView.string = cleanPreview
+            let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleanTrans.isEmpty {
+                primaryLabel.stringValue = clean
             } else {
-                textView.string = "\(cleanPreview)\n\n↔ Перевод\n\(cleanTranslation)"
+                primaryLabel.stringValue = "\(clean)\n\n↔ Перевод\n\(cleanTrans)"
             }
         }
         if panel.isVisible {
-            positionAtBottomCenter()
+            adjustHeight()
+            positionNearCursor()
         }
     }
 
-    func setOpacityPercent(_ value: Int) {
-        let safe = max(15, min(90, value))
+    public func setOpacityPercent(_ value: Int) {
+        let safe = max(15, min(100, value))
         opacityPercent = safe
-        panel.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: CGFloat(Double(safe) / 100.0))
+        if panel.isVisible && overlayState != .hidden {
+            panel.alphaValue = targetAlpha
+        }
     }
 
+    // MARK: - Reveal Animation API
+
+    /// Показывает 3-стадийный reveal после stop_recording.
+    /// Stage 1 (raw Whisper) → Stage 2 (D.7 cleaned) → Stage 3 (LLM/итог).
+    /// По истечении `duration` автоматически вызывает hide().
+    public func showRevealAnimation(
+        rawText: String,
+        cleanedText: String,
+        finalText: String,
+        llmApplied: Bool,
+        duration: TimeInterval = 2.5
+    ) {
+        revealTask?.cancel()
+        stopPulse()
+        
+        if overlayState == .hidden {
+            primaryLabel.stringValue = rawText.isEmpty ? "…" : rawText
+            positionNearCursor()
+            panel.alphaValue = 0
+            panel.orderFront(nil)
+            animateShow()
+        }
+
+        overlayState = .reveal
+        let stageInterval = duration / 3.0
+
+        revealTask = Task { @MainActor in
+            // Stage 1 — Распознано
+            showStage(text: rawText.isEmpty ? "…" : rawText, label: "Распознано")
+            
+            try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+
+            // Stage 2 — Очищено
+            crossfadeStage(
+                text: cleanedText.isEmpty ? rawText : cleanedText,
+                label: "Очищено"
+            )
+            
+            try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+
+            // Stage 3 — LLM или Итог
+            let finalLabel = llmApplied ? "LLM rewrite" : "Итог"
+            let finalContent = finalText.isEmpty ? (cleanedText.isEmpty ? rawText : cleanedText) : finalText
+            crossfadeStage(text: finalContent, label: finalLabel)
+            
+            try? await Task.sleep(nanoseconds: UInt64((stageInterval + 0.4) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            
+            hide()
+        }
+    }
+
+    // MARK: - Panel / View Setup
+
     private func setupPanel() {
-        panel.level = .statusBar
-        panel.isFloatingPanel = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.hidesOnDeactivate = false
-        panel.isOpaque = false
-        panel.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.45)
-        panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        panel.level               = .statusBar
+        panel.isFloatingPanel     = true
+        panel.collectionBehavior  = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate   = false
+        panel.isOpaque            = false
+        panel.backgroundColor     = .clear
+        panel.hasShadow           = false
+        panel.ignoresMouseEvents  = true
+    }
+
+    private func setupEffectView() {
+        effectView.material      = .hudWindow
+        effectView.blendingMode  = .behindWindow
+        effectView.state         = .active
+        effectView.isEmphasized  = true
+        effectView.wantsLayer    = true
+
+        effectView.layer?.cornerRadius  = cornerRadius
+        effectView.layer?.masksToBounds = true
+
+        panel.contentView?.wantsLayer = true
+        if let rootLayer = panel.contentView?.layer {
+            rootLayer.masksToBounds   = false
+            rootLayer.shadowColor     = NSColor.black.cgColor
+            rootLayer.shadowOpacity   = 0.25
+            rootLayer.shadowRadius    = 28
+            rootLayer.shadowOffset    = CGSize(width: 0, height: -4)
+        }
+
+        borderLayer.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        borderLayer.borderWidth = 1.0
+        borderLayer.cornerRadius = cornerRadius
+        borderLayer.frame = effectView.bounds
+
+        effectView.layer?.addSublayer(borderLayer)
+
+        panel.contentView?.addSubview(effectView)
+        effectView.translatesAutoresizingMaskIntoConstraints = false
+        if let cv = panel.contentView {
+            NSLayoutConstraint.activate([
+                effectView.topAnchor.constraint(equalTo: cv.topAnchor),
+                effectView.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+                effectView.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+                effectView.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
+            ])
+        }
     }
 
     private func setupUI() {
-        guard let contentView = panel.contentView else { return }
-
-        modeLabel.textColor = NSColor(calibratedWhite: 0.82, alpha: 1.0)
-        modeLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        modeLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        statusLabel.textColor = NSColor(calibratedWhite: 0.86, alpha: 1.0)
-        statusLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        statusLabel.font      = roundedFont(size: 11, weight: .medium)
+        statusLabel.textColor = .tertiaryLabelColor
         statusLabel.alignment = .right
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let textScroll = NSScrollView()
-        textScroll.translatesAutoresizingMaskIntoConstraints = false
-        textScroll.hasVerticalScroller = true
-        textScroll.borderType = .noBorder
-        textScroll.drawsBackground = false
+        modeLabel.font      = roundedFont(size: 11, weight: .medium)
+        modeLabel.textColor = .tertiaryLabelColor
+        modeLabel.alignment = .left
+        modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        textView.isEditable = false
-        textView.drawsBackground = false
-        textView.textColor = NSColor(calibratedWhite: 0.95, alpha: 1.0)
-        textView.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        textView.string = "Слушаю... промежуточный текст появится через 1-2 секунды."
-        textView.textContainerInset = NSSize(width: 4, height: 6)
-        textScroll.documentView = textView
+        stageLabel.font      = roundedFont(size: 10, weight: .medium)
+        stageLabel.textColor = .secondaryLabelColor
+        stageLabel.alignment = .left
+        stageLabel.isHidden  = true
+        stageLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        contentView.addSubview(modeLabel)
-        contentView.addSubview(statusLabel)
-        contentView.addSubview(textScroll)
+        primaryLabel.font            = NSFont.systemFont(ofSize: 17, weight: .regular)
+        primaryLabel.textColor       = .labelColor
+        primaryLabel.alignment       = .left
+        primaryLabel.maximumNumberOfLines = 0
+        primaryLabel.lineBreakMode   = .byWordWrapping
+        primaryLabel.stringValue     = "Слушаю…"
+        primaryLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        effectView.addSubview(statusLabel)
+        effectView.addSubview(modeLabel)
+        effectView.addSubview(stageLabel)
+        effectView.addSubview(primaryLabel)
 
         NSLayoutConstraint.activate([
-            modeLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            modeLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            modeLabel.topAnchor.constraint(equalTo: effectView.topAnchor, constant: 10),
+            modeLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
 
             statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
 
-            textScroll.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
-            textScroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            textScroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
-            textScroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            stageLabel.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
+            stageLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
+
+            primaryLabel.topAnchor.constraint(equalTo: stageLabel.bottomAnchor, constant: 2),
+            primaryLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
+            primaryLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
+            primaryLabel.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -12),
         ])
     }
 
-    private func positionAtBottomCenter() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+    // MARK: - Animations
+
+    private func animateShow() {
+        if reduceMotion {
+            panel.alphaValue = targetAlpha
+            return
+        }
+        if let layer = panel.contentView?.layer {
+            let scaleT = CATransform3DMakeScale(0.98, 0.98, 1.0)
+            let translateT = CATransform3DMakeTranslation(0, -10, 0)
+            layer.transform = CATransform3DConcat(scaleT, translateT)
+        }
+        panel.alphaValue = 0
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            panel.animator().alphaValue = targetAlpha
+            panel.contentView?.layer?.transform = CATransform3DIdentity
+        })
+    }
+
+    private func animateHide(completion: @escaping @Sendable () -> Void) {
+        if reduceMotion {
+            panel.alphaValue = 0
+            completion()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.20
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ctx.allowsImplicitAnimation = true
+            panel.animator().alphaValue = 0
+            if let layer = panel.contentView?.layer {
+                var t = CATransform3DIdentity
+                t = CATransform3DScale(t, 0.96, 0.96, 1.0)
+                t = CATransform3DTranslate(t, 0, 8, 0)
+                layer.transform = t
+            }
+        }, completionHandler: {
+            Task { @MainActor in completion() }
+        })
+    }
+
+    private func startPulse() {
+        guard !reduceMotion else { return }
+        stopPulse()
+        pulseFadeOut = true
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.overlayState == .live else { return }
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.7
+                    ctx.allowsImplicitAnimation = true
+                    self.primaryLabel.animator().alphaValue = self.pulseFadeOut ? 0.65 : 1.0
+                }
+                self.pulseFadeOut.toggle()
+            }
+        }
+        if let t = pulseTimer { RunLoop.main.add(t, forMode: .common) }
+    }
+
+    private func stopPulse() {
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        primaryLabel.alphaValue = 1.0
+    }
+
+    // MARK: - Reveal animation helpers
+
+    private func showStage(text: String, label: String) {
+        stageLabel.isHidden  = false
+        stageLabel.stringValue = label
+        primaryLabel.stringValue = text
+        adjustHeight()
+    }
+
+    private func crossfadeStage(text: String, label: String) {
+        if reduceMotion {
+            stageLabel.stringValue   = label
+            primaryLabel.stringValue = text
+            adjustHeight()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.3
+            ctx.allowsImplicitAnimation = true
+            primaryLabel.animator().alphaValue = 0
+            stageLabel.animator().alphaValue   = 0
+        }, completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.stageLabel.stringValue   = label
+                self.primaryLabel.stringValue = text
+                self.adjustHeight()
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.3
+                    ctx.allowsImplicitAnimation = true
+                    self.primaryLabel.animator().alphaValue = 1.0
+                    self.stageLabel.animator().alphaValue   = 1.0
+                }
+            }
+        })
+    }
+
+    // MARK: - Positioning
+
+    private func positionNearCursor() {
+        let cursor = NSEvent.mouseLocation
+
+        let screen = NSScreen.screens.first { $0.frame.contains(cursor) }
+                  ?? NSScreen.main
+                  ?? NSScreen.screens.first
+
+        guard let screen else { return }
         let visible = screen.visibleFrame
-        let width = min(760, max(500, visible.width * 0.48))
-        let height: CGFloat = 128
-        let x = visible.midX - width / 2
-        let y = visible.minY + 36
+
+        let width = clamp(value: 520, min: minWidth, max: maxWidth)
+        let height = currentPanelHeight()
+
+        var x = cursor.x + 50
+        var y = cursor.y - height - 30
+
+        if x + width > visible.maxX {
+            x = cursor.x - width - 10
+        }
+        if x < visible.minX {
+            x = visible.minX + 8
+        }
+        if y < visible.minY {
+            y = cursor.y + 30
+        }
+        if y + height > visible.maxY {
+            y = visible.maxY - height - 8
+        }
+
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        borderLayer.frame = effectView.bounds
+    }
+
+    private func adjustHeight() {
+        let width = clamp(value: 520, min: minWidth, max: maxWidth)
+        let insets: CGFloat = 14 * 2
+        let topRowH: CGFloat = 26
+        let stageLabelH: CGFloat = stageLabel.isHidden ? 0 : 18
+        let padding: CGFloat = 10 + 8 + 2 + 12
+        let textWidth = width - insets
+
+        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? NSFont.systemFont(ofSize: 17), width: textWidth)
+        let total = topRowH + stageLabelH + padding + textH
+        let height = clamp(value: total, min: minHeight, max: maxHeight)
+
+        var frame = panel.frame
+        frame.size.height = height
+        panel.setFrame(frame, display: true)
+
+        borderLayer.frame = effectView.bounds
+    }
+
+    private func currentPanelHeight() -> CGFloat {
+        let width: CGFloat = 520
+        let insets: CGFloat = 14 * 2
+        let topRowH: CGFloat = 26
+        let stageLabelH: CGFloat = stageLabel.isHidden ? 0 : 18
+        let padding: CGFloat = 10 + 8 + 2 + 12
+        let textWidth = width - insets
+        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? NSFont.systemFont(ofSize: 17), width: textWidth)
+        let total = topRowH + stageLabelH + padding + textH
+        return clamp(value: total, min: minHeight, max: maxHeight)
+    }
+
+    // MARK: - Helpers
+
+    private func roundedFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        let descriptor = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+        return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
+    private func heightForString(_ string: String, font: NSFont, width: CGFloat) -> CGFloat {
+        guard !string.isEmpty, width > 0 else { return 22 }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let boundingRect = (string as NSString).boundingRect(
+            with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attrs
+        )
+        return ceil(boundingRect.height)
+    }
+
+    private func clamp(value: CGFloat, min minV: CGFloat, max maxV: CGFloat) -> CGFloat {
+        Swift.max(minV, Swift.min(maxV, value))
     }
 }

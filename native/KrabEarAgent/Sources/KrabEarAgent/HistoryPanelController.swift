@@ -99,6 +99,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let audioDuckingButton = NSButton(checkboxWithTitle: "Приглушать звук", target: nil, action: nil)
     private let audioDuckingSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
     private let audioDuckingValueLabel = NSTextField(labelWithString: "50%")
+    // D.10a: AI Settings Controls
+    private let aiSectionLabel: NSTextField = {
+        let label = NSTextField(labelWithString: "AI и обработка")
+        label.font = .boldSystemFont(ofSize: 13)
+        return label
+    }()
+    private let diarizationButton = NSButton(checkboxWithTitle: "Диаризация (определение говорящих)", target: nil, action: nil)
+    private let llmRewriteButton = NSButton(checkboxWithTitle: "LLM постобработка текста", target: nil, action: nil)
+    private let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
     private let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
     private let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -673,6 +682,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(audioDuckingValueLabel)
         settingsRow6.addArrangedSubview(NSView())
 
+        // D.10a: AI Settings Row Setup
+        llmModelSelector.addItems(withTitles: ["qwen3.5-4b-mlx", "qwen3.5-9b@6bit", "qwen3.5-27b-mlx@6bit"])
+
+        diarizationButton.target = self
+        diarizationButton.action = #selector(onDiarizationChanged)
+
+        llmRewriteButton.target = self
+        llmRewriteButton.action = #selector(onLlmRewriteChanged)
+
+        llmModelSelector.target = self
+        llmModelSelector.action = #selector(onLlmModelChanged)
+
+        let aiSettingsRow1 = NSStackView(views: [diarizationButton])
+        aiSettingsRow1.orientation = .horizontal
+        aiSettingsRow1.alignment = .centerY
+
+        let aiSettingsRow2 = NSStackView(views: [llmRewriteButton, llmModelSelector])
+        aiSettingsRow2.orientation = .horizontal
+        aiSettingsRow2.spacing = 10
+        aiSettingsRow2.alignment = .centerY
+
         settingsRow7.addArrangedSubview(NSTextField(labelWithString: "Прозрачность оверлея:"))
         overlayOpacitySlider.target = self
         overlayOpacitySlider.action = #selector(onOverlayOpacityChanged)
@@ -803,6 +833,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.addArrangedSubview(settingsRow4)
         settingsBar.addArrangedSubview(settingsRow5)
         settingsBar.addArrangedSubview(settingsRow6)
+        settingsBar.addArrangedSubview(aiSectionLabel)
+        settingsBar.addArrangedSubview(aiSettingsRow1)
+        settingsBar.addArrangedSubview(aiSettingsRow2)
         liveSettingsBar.addArrangedSubview(settingsRow2)
         liveSettingsBar.addArrangedSubview(settingsRow7)
         liveSettingsBar.addArrangedSubview(voiceGatewayRow)
@@ -1494,6 +1527,25 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let percent = Int(audioDuckingSlider.doubleValue.rounded())
         audioDuckingValueLabel.stringValue = "\(percent)%"
         applySettingsPatch(["audio_ducking_percent": percent])
+    }
+
+    @objc private func onDiarizationChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = diarizationButton.state == .on
+        applySettingsPatch(["diarization_enabled": enabled])
+    }
+
+    @objc private func onLlmRewriteChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = llmRewriteButton.state == .on
+        llmModelSelector.isEnabled = enabled
+        applySettingsPatch(["llm_rewrite_enabled": enabled])
+    }
+
+    @objc private func onLlmModelChanged() {
+        guard !isSyncingSettings else { return }
+        guard let selectedModel = llmModelSelector.titleOfSelectedItem else { return }
+        applySettingsPatch(["llm_model": selectedModel])
     }
 
     @objc private func onOverlayOpacityChanged() {
@@ -3080,6 +3132,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let safeOverlayPercent = max(15, min(settings.overlayOpacityPercent, 90))
         overlayOpacitySlider.doubleValue = Double(safeOverlayPercent)
         overlayOpacityValueLabel.stringValue = "\(safeOverlayPercent)%"
+        // D.10a: AI Settings Sync
+        diarizationButton.state = settings.diarizationEnabled ? .on : .off
+        llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
+        if let idx = llmModelSelector.itemTitles.firstIndex(of: settings.llmModel) {
+            llmModelSelector.selectItem(at: idx)
+        }
+        llmModelSelector.isEnabled = settings.llmRewriteEnabled
         glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
 
         switch settings.hotkey {
