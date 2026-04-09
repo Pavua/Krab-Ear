@@ -532,16 +532,41 @@ class AudioEngine:
         return turns
 
     def _transcribe_remote(self, audio_data: Any, prompt: str) -> dict[str, Any]:
-        """Обращение к внешнему OpenAI-совместимому API."""
+        """Обращение к внешнему OpenAI-совместимому API.
+
+        audio_data может быть str (путь к существующему WAV файлу) или
+        numpy.ndarray (raw audio buffer из live recording). Для ndarray мы
+        сериализуем во временный WAV, отправляем, и гарантированно удаляем
+        temp-файл в finally-блоке.
+        """
+        import tempfile
+        import numpy as np
+
+        cleanup_temp_path: str | None = None
         try:
-            # Упрощенная логика: предполагаем, что audio_data - путь к файлу
-            with open(audio_data, "rb") as f:
+            if isinstance(audio_data, np.ndarray):
+                # Live buffer: пишем в temp WAV (16kHz mono float32 — whisper native rate)
+                import soundfile as sf
+                with tempfile.NamedTemporaryFile(
+                    suffix=".wav", delete=False, dir=str(settings.DATA_DIR)
+                ) as tmp:
+                    cleanup_temp_path = tmp.name
+                sf.write(cleanup_temp_path, audio_data, 16000)
+                audio_path = cleanup_temp_path
+            elif isinstance(audio_data, (str, bytes, os.PathLike)):
+                audio_path = str(audio_data)
+            else:
+                raise TypeError(
+                    f"_transcribe_remote: unsupported audio_data type {type(audio_data).__name__}"
+                )
+
+            with open(audio_path, "rb") as f:
                 resp = requests.post(
                     settings.STT_GATEWAY_URL,
-                    headers={"Authorization": f"Bearer token_here"}, # В реальности использовать правильный ключ
-                    files={"file": (os.path.basename(audio_data), f, "audio/wav")},
+                    headers={"Authorization": f"Bearer token_here"},  # TODO: settings.STT_GATEWAY_API_KEY
+                    files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=60
+                    timeout=60,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -549,6 +574,12 @@ class AudioEngine:
         except Exception as e:
             logger.error("Ошибка Remote STT: %s", e)
             raise
+        finally:
+            if cleanup_temp_path is not None:
+                try:
+                    os.unlink(cleanup_temp_path)
+                except OSError:
+                    pass
 
     def speak(self, text: str, rate: int = 185) -> None:
         """Озвучка текста через macOS `say`."""
