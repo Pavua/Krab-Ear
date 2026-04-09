@@ -199,11 +199,20 @@ class AudioEngine:
         start_time = time.time()
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
-        # 1. Формирование динамического промпта
-        domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
-        dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
-        if extra_vocabulary:
-            dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
+        # 1. Формирование динамического промпта.
+        # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
+        # провоцируют whisper на "leakage" initial_prompt'а в output как
+        # артефакта. Финальный stop_recording по-прежнему использует полный
+        # TRANSCRIBE_PROMPT для пунктуации/брендов/имён. Defense-in-depth:
+        # _postprocess_preview_text в service.py срезает известные фрагменты
+        # промпта как safety net.
+        if is_preview:
+            dynamic_prompt = ""
+        else:
+            domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
+            dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
+            if extra_vocabulary:
+                dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
 
         # 2. Проверка лимитов для файлов
         if isinstance(audio_data, (str, Path)) and os.path.exists(audio_data):

@@ -61,6 +61,35 @@ class EngineCleanupTestCase(unittest.TestCase):
         cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="soft")
         self.assertEqual(cleaned, "")
 
+    def test_soft_strips_extended_youtube_leakage(self) -> None:
+        """D-followup: проверка новых YouTube-leakage паттернов."""
+        cases = [
+            ("Я закончил доклад. Ставьте лайки!", "Я закончил доклад"),
+            ("Встречаемся завтра. Подписывайтесь на наш канал.", "Встречаемся завтра"),
+            ("Это была интересная тема. Смотрите в описании.", "Это была интересная тема"),
+            ("Идея понятна. Поддержите канал.", "Идея понятна"),
+            ("Всё хорошо. Приятного просмотра!", "Всё хорошо"),
+            ("До завтра. Увидимся в следующем видео.", "До завтра"),
+            ("На этом всё. Всем пока!", "На этом всё"),
+            ("Конец отчёта. Спасибо всем за внимание.", "Конец отчёта"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="soft")
+                self.assertEqual(cleaned, expected)
+
+    def test_soft_drops_pure_youtube_hallucination(self) -> None:
+        """Если весь текст это YouTube-галлюцинация, возвращается пустая строка."""
+        for raw in [
+            "Ставьте лайки",
+            "Смотрите в описании",
+            "Всем пока!",
+            "Приятного просмотра...",
+        ]:
+            with self.subTest(raw=raw):
+                cleaned = AudioEngine._cleanup_transcript(raw, cleanup_profile="soft")
+                self.assertEqual(cleaned, "")
+
 
 if __name__ == "__main__":
     unittest.main()
