@@ -44,6 +44,7 @@ from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.translator import Translator
+from core.config import settings
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.Service")
@@ -61,7 +62,23 @@ class BackendService:
     ) -> None:
         self.store = store
         self.recorder = recorder or AudioRecorder()
-        self.transcriber = transcriber or Transcriber()
+
+        # D.10a: LLM rewriter initialization (admin flag check via settings)
+        self._llm_rewriter = self._init_llm_rewriter()
+
+        if transcriber is None:
+            self.transcriber = Transcriber(
+                llm_rewriter=self._llm_rewriter,
+                settings_get=self._get_runtime_setting,
+            )
+        else:
+            self.transcriber = transcriber
+            if self._llm_rewriter is not None:
+                if hasattr(transcriber, "engine"):
+                    if transcriber.engine._llm_rewriter is None:
+                        transcriber.engine._llm_rewriter = self._llm_rewriter
+                    transcriber.engine._settings_get = self._get_runtime_setting
+
         self.translator = translator or Translator()
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
@@ -76,6 +93,48 @@ class BackendService:
             "session_id": None,
             "gateway_session_id": None,
         }
+
+    def _init_llm_rewriter(self):
+        """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
+        if not settings.LLM_ENABLED:
+            return None
+
+        try:
+            from backend.llm_rewriter import LLMRewriter
+            rewriter = LLMRewriter(
+                base_url=settings.LLM_BASE_URL,
+                api_key=settings.LLM_API_KEY,
+                model=settings.LLM_MODEL,
+                timeout_sec=settings.LLM_TIMEOUT_SEC,
+                circuit_fail_threshold=settings.LLM_CIRCUIT_FAIL_THRESHOLD,
+                circuit_initial_reset_sec=settings.LLM_CIRCUIT_INITIAL_RESET_SEC,
+                circuit_max_reset_sec=settings.LLM_CIRCUIT_MAX_RESET_SEC,
+            )
+            if rewriter.ping():
+                logger.info(
+                    "LLM rewriter инициализирован: %s @ %s",
+                    settings.LLM_MODEL,
+                    settings.LLM_BASE_URL,
+                )
+            else:
+                logger.warning(
+                    "LLM rewriter не отвечает на ping (%s), будет circuit-break'нут при первом rewrite",
+                    settings.LLM_BASE_URL,
+                )
+            return rewriter
+        except Exception as exc:
+            logger.exception("Не удалось инициализировать LLM rewriter: %s", exc)
+            return None
+
+    def _get_runtime_setting(self, key: str, default: Any) -> Any:
+        """Callback для AudioEngine: читает runtime toggle из StateStore.
+
+        Используется для проверки llm_rewrite_enabled на каждой транскрипции.
+        """
+        try:
+            return self.store.load_settings().get(key, default)
+        except Exception:
+            return default
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
