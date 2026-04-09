@@ -224,7 +224,10 @@ class LLMRewriter:
         word_count = len((text or "").split())
         input_tokens_estimate = word_count * 3
         max_tokens = int(input_tokens_estimate * 1.3) + 50
-        return max(256, min(max_tokens, 4096))
+        # Qwen 3.5 использует built-in reasoning (thinking tokens) перед ответом,
+        # потребляя ~400-600 tokens на chain-of-thought. Минимальный floor 2048
+        # гарантирует что после reasoning останется место для самого ответа.
+        return max(2048, min(max_tokens + 1500, 8192))
 
     def _build_messages(self, text: str) -> list:
         return [
