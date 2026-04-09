@@ -451,6 +451,7 @@ class BackendService:
         final_text = translated_text if (translate_and_paste and translated_text) else text
         translation_status = translation.status
 
+        tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
         item = self.store.add_history_item(
             text=final_text,
             paste_status="failed",
@@ -461,6 +462,9 @@ class BackendService:
             target_lang=translation.target_lang,
             translation_status=translation_status,
             translation_engine=translation.engine,
+            cleaned_text=tp.get("cleaned_text", ""),
+            llm_applied=bool(tp.get("llm_applied", False)),
+            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
         )
         result_payload = {
             "status": "ok",
@@ -484,7 +488,6 @@ class BackendService:
             "silence_guard_enabled": silence_guard_enabled,
             "background_guard_rejected": background_guard_rejected,
         }
-        tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
         event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
             history_id=item.id,
             text=final_text,

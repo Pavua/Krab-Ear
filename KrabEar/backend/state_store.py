@@ -119,6 +119,9 @@ class StateStore:
         translation_engine: str = "",
         chat_id: str = "",
         message_id: str = "",
+        cleaned_text: str = "",
+        llm_applied: bool = False,
+        llm_latency_ms: int = 0,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -133,6 +136,9 @@ class StateStore:
             translation_engine=translation_engine,
             chat_id=chat_id,
             message_id=message_id,
+            cleaned_text=cleaned_text,
+            llm_applied=llm_applied,
+            llm_latency_ms=llm_latency_ms,
         )
         with self._lock():
             self._append_ndjson(self.history_path, item.to_dict())
