@@ -1,17 +1,26 @@
 """Централизованная конфигурация Krab Ear на базе Pydantic-Settings.
 
-Все параметры могут быть переопределены через переменные окружения (.env).
+Все параметры могут быть переопределены через переменные окружения (.env
+или ~/Library/Application Support/KrabEar/.secrets).
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import List, Any
 
+# Абсолютный путь к .secrets — backend загружает его на старте через
+# pydantic-settings env_file tuple. Порядок загрузки в env_file:
+# сначала repo-local .env, затем .secrets — в pydantic-settings v2
+# последний файл в tuple побеждает при конфликте ключей. Env vars из
+# launchd plist всё равно имеют более высокий приоритет (env > env_file).
+_SECRETS_FILE = Path.home() / "Library" / "Application Support" / "KrabEar" / ".secrets"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
-        env_file=".env",
-        extra="ignore"
+        env_file=(".env", str(_SECRETS_FILE)),
+        extra="ignore",
     )
 
     # Директории
@@ -45,7 +54,17 @@ class Settings(BaseSettings):
     
     # Voice Gateway
     VOICE_GATEWAY_URL: str = "http://127.0.0.1:8090"
-    
+
+    # D.10a LM Studio integration (OpenAI-compatible LLM rewriter)
+    LLM_ENABLED: bool = False
+    LLM_BASE_URL: str = "http://localhost:1234/v1"
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "qwen3.5-9b@6bit"
+    LLM_TIMEOUT_SEC: float = 4.0
+    LLM_CIRCUIT_FAIL_THRESHOLD: int = 3
+    LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
+    LLM_CIRCUIT_MAX_RESET_SEC: int = 600
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -122,4 +141,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ui_last_tab": "history",
     "history_focus_mode": True,
     "onboarding_completed": False,
+    # D.10a runtime toggle: юзер может включать/выключать LLM rewriter через
+    # IPC update_settings без рестарта. Дефолт False — safety.
+    "llm_rewrite_enabled": False,
 }

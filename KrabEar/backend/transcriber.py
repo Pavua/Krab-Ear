@@ -7,18 +7,41 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from core.engine import AudioEngine
 
+if TYPE_CHECKING:
+    from backend.llm_rewriter import LLMRewriter
+
 logger = logging.getLogger("KrabEar.Backend.Transcriber")
+
 
 class Transcriber:
     """Обёртка над AudioEngine для удобного вызова из API и IPC."""
 
-    def __init__(self, engine: AudioEngine | None = None) -> None:
-        """Инициализация. Если engine не передан, создаёт новый инстанс."""
-        self.engine = engine or AudioEngine()
+    def __init__(
+        self,
+        engine: AudioEngine | None = None,
+        llm_rewriter: Optional["LLMRewriter"] = None,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
+        """Инициализация.
+
+        Args:
+            engine: опциональный AudioEngine. Если None — создаётся новый с
+                    инжекцией llm_rewriter и settings_get.
+            llm_rewriter: D.10a LLM клиент для post-cleanup rewrite'а (прокидывается в AudioEngine).
+            settings_get: callback для runtime toggle'ов (прокидывается в AudioEngine).
+        """
+        if engine is None:
+            self.engine = AudioEngine(llm_rewriter=llm_rewriter, settings_get=settings_get)
+        else:
+            self.engine = engine
+            if llm_rewriter is not None and engine._llm_rewriter is None:
+                engine._llm_rewriter = llm_rewriter
+            if settings_get is not None:
+                engine._settings_get = settings_get
 
     def transcribe(
         self,

@@ -14,8 +14,11 @@ import re as _re
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from backend.llm_rewriter import LLMRewriter, LLMRewriteResult
 
 import mlx_whisper
 import numpy as np
@@ -75,20 +78,42 @@ class AudioEngine:
         "legal": "Юридические термины, законы, кодексы, официальные документы."
     }
 
-    def __init__(self) -> None:
-        """Инициализирует двигатель, загружая настройки из централизованного конфига."""
+    def __init__(
+        self,
+        llm_rewriter: Optional["LLMRewriter"] = None,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
+        """Инициализирует двигатель, загружая настройки из централизованного конфига.
+
+        Args:
+            llm_rewriter: опциональный D.10a LLM клиент для post-cleanup rewrite'а.
+                          Если None — LLM hook отключён, работает как до D.10a.
+            settings_get: callback (key, default) -> value для runtime toggle'ов.
+                          Инжектируется из BackendService чтобы engine не знал про StateStore.
+        """
         self.current_model = settings.MODEL_BALANCED
         self.quality_profile = "balanced"
         self._unavailable_models: set[str] = set()
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
 
+        # D.10a: LLM rewriter integration
+        self._llm_rewriter = llm_rewriter
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+
         logger.info(
-            "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d",
+            "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d, LLM=%s",
             self.quality_profile,
             self.current_model,
             len(settings.model_max_list),
+            "enabled" if llm_rewriter is not None else "disabled",
         )
+
+    def _llm_rewrite_allowed(self) -> bool:
+        """Runtime check: включён ли LLM rewriter И user runtime toggle."""
+        if self._llm_rewriter is None:
+            return False
+        return bool(self._settings_get("llm_rewrite_enabled", False))
 
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
@@ -227,8 +252,26 @@ class AudioEngine:
             segments = result.get("segments", [])
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview)
 
-            # 4. Очистка результата через утилиты
-            text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
+            # 4. Очистка результата через утилиты (D.7 normalization)
+            cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
+            text = cleaned_text
+
+            # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
+            llm_result = None
+            if self._llm_rewrite_allowed():
+                llm_result = self._llm_rewriter.rewrite(cleaned_text)
+                if llm_result.ok:
+                    logger.info(
+                        "LLM rewrite: %d chars -> %d chars, %d ms",
+                        len(cleaned_text), len(llm_result.text), llm_result.latency_ms,
+                    )
+                    text = llm_result.text
+                else:
+                    logger.debug(
+                        "LLM rewrite fallback: %s (latency=%s ms)",
+                        llm_result.fallback_reason,
+                        llm_result.latency_ms,
+                    )
 
             # 5. Расчет метрик уверенности
             confidence = 0.0
@@ -241,6 +284,14 @@ class AudioEngine:
             return {
                 "text": text,
                 "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "llm_applied": bool(llm_result is not None and llm_result.ok),
+                "llm_latency_ms": llm_result.latency_ms if llm_result else None,
+                "llm_fallback_reason": (
+                    llm_result.fallback_reason
+                    if (llm_result is not None and not llm_result.ok)
+                    else None
+                ),
                 "confidence": round(confidence, 3),
                 "duration_ms": int(duration * 1000),
                 "engine": result.get("engine", "mlx-whisper"),

@@ -29,6 +29,10 @@ class HistoryItem:
     translation_engine: str = ""
     chat_id: str = ""
     message_id: str = ""
+    # D.10a: LLM rewrite tracking
+    cleaned_text: str = ""
+    llm_applied: bool = False
+    llm_latency_ms: int = 0
 
     @classmethod
     def create(
@@ -44,6 +48,9 @@ class HistoryItem:
         translation_engine: str = "",
         chat_id: str = "",
         message_id: str = "",
+        cleaned_text: str = "",
+        llm_applied: bool = False,
+        llm_latency_ms: int = 0,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -60,6 +67,9 @@ class HistoryItem:
             translation_engine=translation_engine.strip(),
             chat_id=str(chat_id).strip(),
             message_id=str(message_id).strip(),
+            cleaned_text=(cleaned_text or "").strip(),
+            llm_applied=bool(llm_applied),
+            llm_latency_ms=int(llm_latency_ms or 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +93,9 @@ class HistoryItem:
             translation_engine=str(payload.get("translation_engine", "")).strip(),
             chat_id=str(payload.get("chat_id", "")).strip(),
             message_id=str(payload.get("message_id", "")).strip(),
+            cleaned_text=str(payload.get("cleaned_text", "")).strip(),
+            llm_applied=bool(payload.get("llm_applied", False)),
+            llm_latency_ms=int(payload.get("llm_latency_ms", 0) or 0),
         )
 
 
