@@ -260,7 +260,9 @@ class LLMRewriter:
             "temperature": 0.0,
             "max_tokens": self._estimate_max_tokens(cleaned_input),
             "stream": False,
-            "stop": ["\n\n", "Исправленный текст:", "Исходный текст:"],
+            # Убран "\n\n" из stop — qwen3.5 с reasoning mode ставит \n\n
+            # между thinking и ответом, что обрезало content до пустоты.
+            "stop": ["Исправленный текст:", "Исходный текст:"],
         }
         headers = {
             "Content-Type": "application/json",
