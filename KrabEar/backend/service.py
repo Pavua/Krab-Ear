@@ -183,6 +183,7 @@ class BackendService:
             "get_history_stats": self._handle_get_history_stats,
             "get_history_overview": self._handle_get_history_overview,
             "summarize_text": self._handle_summarize_text,
+            "llm_status": self._handle_llm_status,
         }
 
         handler = handlers.get(method)
@@ -1039,6 +1040,33 @@ class BackendService:
                 bullets = chunks[:max_points]
             summary = head
         return {"mode": mode, "summary": summary, "bullets": bullets}
+
+    def _handle_llm_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает диагностическую информацию о LLM rewriter'е.
+
+        D.10a. Используется для Swift UI статус-индикатора и dev smoke тестов.
+        """
+        runtime_enabled = bool(self.store.load_settings().get("llm_rewrite_enabled", False))
+
+        if self._llm_rewriter is None:
+            return {
+                "enabled": False,
+                "admin_enabled": bool(settings.LLM_ENABLED),
+                "runtime_enabled": runtime_enabled,
+                "reachable": False,
+                "model": None,
+                "circuit_state": None,
+                "last_latency_ms": None,
+                "last_error": "llm_rewriter не инициализирован",
+            }
+
+        status = self._llm_rewriter.status()
+        status["admin_enabled"] = True
+        status["runtime_enabled"] = runtime_enabled
+        status["enabled"] = bool(
+            status["admin_enabled"] and status["runtime_enabled"] and status["reachable"]
+        )
+        return status
 
     def _call_assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
         """Фоновый цикл: WS-подписка на VG + отправка аудио-снапшотов."""

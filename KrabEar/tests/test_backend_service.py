@@ -1310,5 +1310,87 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
             self.assertIsInstance(service._llm_rewriter, LLMRewriter)
 
 
+class LLMStatusIPCTestCase(unittest.TestCase):
+    """Тесты IPC метода llm_status."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from backend.state_store import StateStore
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = StateStore(data_dir=Path(self.tmpdir))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_llm_status_returns_disabled_when_not_initialized(self):
+        """Без LLM_ENABLED → enabled=False, admin_enabled=False."""
+        from unittest.mock import patch
+        with patch("backend.service.settings") as mock_settings:
+            mock_settings.LLM_ENABLED = False
+            from backend.service import BackendService
+            service = BackendService(store=self.store)
+            response = service.handle_request({"id": "1", "method": "llm_status"})
+            self.assertTrue(response["ok"])
+            result = response["result"]
+            self.assertFalse(result["enabled"])
+            self.assertFalse(result["admin_enabled"])
+            self.assertIsNone(result["model"])
+
+    def test_llm_status_returns_full_info_when_initialized(self):
+        from unittest.mock import patch
+        with patch("backend.service.settings") as mock_settings, \
+             patch("backend.llm_rewriter.requests.get") as mock_get:
+            mock_settings.LLM_ENABLED = True
+            mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
+            mock_settings.LLM_API_KEY = "sk-test"
+            mock_settings.LLM_MODEL = "qwen3.5-9b@6bit"
+            mock_settings.LLM_TIMEOUT_SEC = 4.0
+            mock_settings.LLM_CIRCUIT_FAIL_THRESHOLD = 3
+            mock_settings.LLM_CIRCUIT_INITIAL_RESET_SEC = 60
+            mock_settings.LLM_CIRCUIT_MAX_RESET_SEC = 600
+            mock_get.return_value.status_code = 200
+
+            from backend.service import BackendService
+            service = BackendService(store=self.store)
+
+            current = self.store.load_settings()
+            current["llm_rewrite_enabled"] = True
+            self.store.save_settings(current)
+
+            response = service.handle_request({"id": "2", "method": "llm_status"})
+            self.assertTrue(response["ok"])
+            result = response["result"]
+            self.assertTrue(result["admin_enabled"])
+            self.assertTrue(result["runtime_enabled"])
+            self.assertEqual(result["model"], "qwen3.5-9b@6bit")
+            self.assertEqual(result["circuit_state"], "closed")
+            self.assertTrue(result["enabled"])
+
+    def test_llm_status_enabled_false_when_runtime_toggle_off(self):
+        from unittest.mock import patch
+        with patch("backend.service.settings") as mock_settings, \
+             patch("backend.llm_rewriter.requests.get") as mock_get:
+            mock_settings.LLM_ENABLED = True
+            mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
+            mock_settings.LLM_API_KEY = "sk-test"
+            mock_settings.LLM_MODEL = "test"
+            mock_settings.LLM_TIMEOUT_SEC = 4.0
+            mock_settings.LLM_CIRCUIT_FAIL_THRESHOLD = 3
+            mock_settings.LLM_CIRCUIT_INITIAL_RESET_SEC = 60
+            mock_settings.LLM_CIRCUIT_MAX_RESET_SEC = 600
+            mock_get.return_value.status_code = 200
+
+            from backend.service import BackendService
+            service = BackendService(store=self.store)
+
+            response = service.handle_request({"id": "3", "method": "llm_status"})
+            result = response["result"]
+            self.assertTrue(result["admin_enabled"])
+            self.assertFalse(result["runtime_enabled"])
+            self.assertFalse(result["enabled"])
+
+
 if __name__ == "__main__":
     unittest.main()
