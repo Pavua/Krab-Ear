@@ -96,6 +96,7 @@ class BackendService:
             "session_id": None,
             "gateway_session_id": None,
         }
+        self._preview_error_count: int = 0
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -162,45 +163,45 @@ class BackendService:
             return self._error(request_id, "invalid_params", "Параметр params должен быть объектом")
 
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-            "ping": self._handle_ping,
-            "start_recording": self._handle_start_recording,
-            "stop_recording": self._handle_stop_recording,
-            "get_recording_state": self._handle_get_recording_state,
-            "start_call_assist": self._handle_start_call_assist,
-            "stop_call_assist": self._handle_stop_call_assist,
-            "get_call_assist_state": self._handle_get_call_assist_state,
-            "call_assist_diagnostics": self._handle_call_assist_diagnostics,
-            "call_assist_summary": self._handle_call_assist_summary,
-            "call_assist_quick_phrase": self._handle_call_assist_quick_phrase,
-            "list_call_assist_quick_phrases": self._handle_list_call_assist_quick_phrases,
-            "call_assist_cost_estimate": self._handle_call_assist_cost_estimate,
-            "call_assist_timeline": self._handle_call_assist_timeline,
-            "call_assist_timeline_stats": self._handle_call_assist_timeline_stats,
-            "call_assist_timeline_summary": self._handle_call_assist_timeline_summary,
-            "call_assist_timeline_export": self._handle_call_assist_timeline_export,
-            "call_assist_timeline_clear": self._handle_call_assist_timeline_clear,
-            "call_assist_timeline_to_history": self._handle_call_assist_timeline_to_history,
-            "list_audio_inputs": self._handle_list_audio_inputs,
-            "get_history_page": self._handle_get_history_page,
-            "search_history": self._handle_search_history,
-            "delete_history_item": self._handle_delete_history_item,
-            "set_paste_status": self._handle_set_paste_status,
-            "get_settings": self._handle_get_settings,
-            "set_settings": self._handle_set_settings,
-            "compact_history": self._handle_compact_history,
-            "add_history_item": self._handle_add_history_item,
-            "transcribe_paths": self._handle_transcribe_paths,
-            "preview_transcribe_paths": self._handle_preview_transcribe_paths,
-            "translate_text": self._handle_translate_text,
-            "get_capabilities": self._handle_get_capabilities,
-            "get_readiness": self._handle_get_readiness,
-            "set_translation_glossary_item": self._handle_set_translation_glossary_item,
-            "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,
-            "import_history_ndjson": self._handle_import_history_ndjson,
-            "get_history_stats": self._handle_get_history_stats,
-            "get_history_overview": self._handle_get_history_overview,
-            "summarize_text": self._handle_summarize_text,
-            "llm_status": self._handle_llm_status,
+            "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
+            "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
+            "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
+            "get_recording_state": self._handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "start_call_assist": self._handle_start_call_assist,  # VERIFIED: called from Swift (HistoryPanel)
+            "stop_call_assist": self._handle_stop_call_assist,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_call_assist_state": self._handle_get_call_assist_state,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_diagnostics": self._handle_call_assist_diagnostics,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_summary": self._handle_call_assist_summary,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_quick_phrase": self._handle_call_assist_quick_phrase,  # VERIFIED: called from Swift (HistoryPanel)
+            "list_call_assist_quick_phrases": self._handle_list_call_assist_quick_phrases,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_cost_estimate": self._handle_call_assist_cost_estimate,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline": self._handle_call_assist_timeline,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_stats": self._handle_call_assist_timeline_stats,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_summary": self._handle_call_assist_timeline_summary,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_export": self._handle_call_assist_timeline_export,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_clear": self._handle_call_assist_timeline_clear,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_to_history": self._handle_call_assist_timeline_to_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_page": self._handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
+            "search_history": self._handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "delete_history_item": self._handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
+            "get_settings": self._handle_get_settings,  # VERIFIED: called from Swift (main)
+            "set_settings": self._handle_set_settings,  # VERIFIED: called from Swift (main)
+            "compact_history": self._handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "add_history_item": self._handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "translate_text": self._handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "get_capabilities": self._handle_get_capabilities,  # UNUSED: consider deprecation (no Swift callers)
+            "get_readiness": self._handle_get_readiness,  # UNUSED: consider deprecation (no Swift callers)
+            "set_translation_glossary_item": self._handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_stats": self._handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
+            "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
+            "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
         }
 
         handler = handlers.get(method)
@@ -2166,7 +2167,13 @@ class BackendService:
             try:
                 audio_data, duration_sec = snapshot_audio(max_duration_sec=12.0)
             except Exception:
+                self._preview_error_count += 1
                 logger.exception("Realtime preview: ошибка snapshot_audio")
+                if self._preview_error_count > 10:
+                    logger.warning(
+                        "Realtime preview: %d ошибок подряд, возможна системная проблема",
+                        self._preview_error_count,
+                    )
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
                 self._preview_stop_event.wait(poll_interval)
                 continue
@@ -2193,11 +2200,18 @@ class BackendService:
                 preview_text = self._extract_transcribed_text(preview_payload)
                 preview_text = self._postprocess_preview_text(preview_text)
             except Exception:
+                self._preview_error_count += 1
                 logger.exception("Realtime preview: ошибка transcribe_preview")
+                if self._preview_error_count > 10:
+                    logger.warning(
+                        "Realtime preview: %d ошибок подряд, возможна системная проблема",
+                        self._preview_error_count,
+                    )
                 poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
                 self._preview_stop_event.wait(poll_interval)
                 continue
 
+            self._preview_error_count = 0
             if preview_text:
                 with self._preview_lock:
                     self._preview_text = preview_text[-900:]
@@ -2216,7 +2230,8 @@ class BackendService:
         """Пытается безопасно получить список входных аудиоустройств."""
         try:
             import sounddevice as sd  # type: ignore
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to list audio inputs: %s", exc)
             return []
 
         try:

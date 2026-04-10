@@ -8,7 +8,7 @@
 import Foundation
 
 enum IPCError: Error, LocalizedError {
-    case socketCreateFailed
+    case socketCreateFailed(errno: Int32)
     case socketConnectFailed(String)
     case writeFailed
     case readFailed
@@ -17,8 +17,8 @@ enum IPCError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .socketCreateFailed:
-            return "Не удалось создать IPC сокет"
+        case .socketCreateFailed(let err):
+            return "Не удалось создать IPC сокет (errno=\(err): \(String(cString: strerror(err))))"
         case .socketConnectFailed(let reason):
             return "Не удалось подключиться к backend: \(reason)"
         case .writeFailed:
@@ -56,7 +56,7 @@ final class IPCClient {
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            throw IPCError.socketCreateFailed
+            throw IPCError.socketCreateFailed(errno: errno)
         }
         defer { close(fd) }
 

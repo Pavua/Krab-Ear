@@ -259,5 +259,20 @@ class HistoryStoreTestCase(unittest.TestCase):
         self.assertIsInstance(overview["top_modes"], list)
 
 
+    def test_load_settings_handles_corrupted_json(self) -> None:
+        """Проверяет, что load_settings возвращает дефолты при битом JSON."""
+        self.store.settings_path.write_text("{broken json!!!", encoding="utf-8")
+        result = self.store.load_settings()
+        from backend.models import DEFAULT_SETTINGS
+        self.assertEqual(result, dict(DEFAULT_SETTINGS))
+
+    def test_load_settings_handles_empty_file(self) -> None:
+        """Проверяет, что load_settings возвращает дефолты при пустом файле."""
+        self.store.settings_path.write_text("", encoding="utf-8")
+        result = self.store.load_settings()
+        from backend.models import DEFAULT_SETTINGS
+        self.assertEqual(result, dict(DEFAULT_SETTINGS))
+
+
 if __name__ == "__main__":
     unittest.main()
