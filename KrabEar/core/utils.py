@@ -8,10 +8,19 @@ import logging
 
 logger = logging.getLogger("KrabEar.Utils")
 
+# ── Precompiled regex patterns ──────────────────────────────────────────
+
+_WHITESPACE_RE = re.compile(r"\s+")
+_NORMALIZE_RE = re.compile(r"[^\w\s-]+")
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?…]+")
+_WORD_REPEAT_RE = re.compile(
+    r"(.+?)\s+([А-Яа-яA-Za-z0-9'-]+(?:\s+[А-Яа-яA-Za-z0-9'-]+){0,2})\s+\2[.!?…]*$"
+)
+
 # Кириллические искажения имён собственных → каноническая латиница.
 # Whisper на русской речи транскрибирует бренды в кириллицу; возвращаем их в латиницу
 # детерминированно, независимо от того, сработал ли initial_prompt.
-BRAND_REPLACEMENTS: list[tuple[str, str]] = [
+_BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     # Порядок важен: более длинные/составные варианты идут раньше.
     (r"\bKrab\s*Voice\s*Gateway\b", "Krab Voice Gateway"),
     (r"\bКраб\s*Войс\s*Гейтвей\b", "Krab Voice Gateway"),
@@ -37,10 +46,32 @@ BRAND_REPLACEMENTS: list[tuple[str, str]] = [
     (r"\bГит[-\s]?Хаб\b", "GitHub"),
     (r"\bМак[-\s]?Бук\b", "MacBook"),
 ]
+BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(pat, re.IGNORECASE), repl) for pat, repl in _BRAND_REPLACEMENTS_RAW
+]
 
 # Время "15.00" / "15 00" после цифр → "15:00" (только в диапазоне часов).
 # Не трогаем числа с плавающей точкой: условие — час 0-23 и минуты 00-59.
 TIME_NORMALIZE_RE = re.compile(r"\b([01]?\d|2[0-3])\s*[.:]\s*([0-5]\d)(?!\d)")
+
+_HALLUCINATION_PATTERNS: list[re.Pattern] = [
+    re.compile(pat) for pat in [
+        r"(?:спасибо за просмотр|спасибо за внимание)[.!?…]*$",
+        r"(?:субтитры сделал [^.!?…]{1,40})[.!?…]*$",
+        r"(?:подписывайтесь на канал)[.!?…]*$",
+        r"(?:до новых встреч)[.!?…]*$",
+        r"(?:продолжение следует)[.!?…]*$",
+        r"(?:to be continued)[.!?…]*$",
+        r"(?:подписывайтесь на наш канал)[.!?…]*$",
+        r"(?:ставьте лайки)[.!?…]*$",
+        r"(?:смотрите в описании)[.!?…]*$",
+        r"(?:поддержите канал)[.!?…]*$",
+        r"(?:приятного просмотра)[.!?…]*$",
+        r"(?:увидимся в следующем видео)[.!?…]*$",
+        r"(?:всем пока)[.!?…]*$",
+        r"(?:спасибо всем за внимание)[.!?…]*$",
+    ]
+]
 
 
 class TextUtils:
@@ -49,7 +80,7 @@ class TextUtils:
     @staticmethod
     def normalize_phrase(text: str) -> str:
         """Нормализует фразу для безопасного сравнения (нижний регистр, только буквы/цифры)."""
-        return re.sub(r"[^\w\s-]+", "", text.lower()).strip()
+        return _NORMALIZE_RE.sub("", text.lower()).strip()
 
     @staticmethod
     def same_short_phrase(a: str, b: str, max_words: int = 8) -> bool:
@@ -63,7 +94,7 @@ class TextUtils:
     @staticmethod
     def cleanup_transcript(text: str, profile: str = "soft") -> str:
         """Основной метод очистки транскрипции от артефактов Whispera."""
-        clean = re.sub(r"\s+", " ", text).strip()
+        clean = _WHITESPACE_RE.sub(" ", text).strip()
         if not clean:
             return clean
 
@@ -84,7 +115,7 @@ class TextUtils:
     def _cleanup_soft(clean: str) -> str:
         """Удаляет явные непосредственные повторы фраз в конце текста."""
         # 1. Повтор финальной фразы
-        segments = [part.strip() for part in re.split(r"[.!?…]+", clean) if part.strip()]
+        segments = [part.strip() for part in _SENTENCE_SPLIT_RE.split(clean) if part.strip()]
         if len(segments) >= 2:
             last = segments[-1]
             prev = segments[-2]
@@ -94,7 +125,7 @@ class TextUtils:
                     clean = clean[:tail].rstrip(" .,!?:;")
 
         # 2. Повтор 1-3 слов дважды в конце
-        match = re.search(r"(.+?)\s+([А-Яа-яA-Za-z0-9'-]+(?:\s+[А-Яа-яA-Za-z0-9'-]+){0,2})\s+\2[.!?…]*$", clean)
+        match = _WORD_REPEAT_RE.search(clean)
         if match:
             clean = match.group(1).rstrip(" .,!?:;")
 
@@ -104,7 +135,7 @@ class TextUtils:
     def _cleanup_strict(clean: str) -> str:
         """Более агрессивное удаление повторов и известных галлюцинаций."""
         # 0. Убираем повтор финального предложения, если оно уже встречалось ранее.
-        segments = [part.strip() for part in re.split(r"[.!?…]+", clean) if part.strip()]
+        segments = [part.strip() for part in _SENTENCE_SPLIT_RE.split(clean) if part.strip()]
         if len(segments) >= 2:
             last = segments[-1]
             normalized_last = TextUtils.normalize_phrase(last)
@@ -148,8 +179,8 @@ class TextUtils:
         if not text:
             return text
         result = text
-        for pattern, replacement in BRAND_REPLACEMENTS:
-            result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+        for compiled_re, replacement in BRAND_REPLACEMENTS:
+            result = compiled_re.sub(replacement, result)
         result = TIME_NORMALIZE_RE.sub(r"\1:\2", result)
         return result
 
@@ -157,25 +188,8 @@ class TextUtils:
     def _strip_hallucinations(clean: str) -> str:
         """Удаляет типичные шаблоны галлюцинаций Whispera."""
         lowered = clean.lower()
-        patterns = [
-            r"(?:спасибо за просмотр|спасибо за внимание)[.!?…]*$",
-            r"(?:субтитры сделал [^.!?…]{1,40})[.!?…]*$",
-            r"(?:подписывайтесь на канал)[.!?…]*$",
-            r"(?:до новых встреч)[.!?…]*$",
-            r"(?:продолжение следует)[.!?…]*$",
-            r"(?:to be continued)[.!?…]*$",
-            # D-followup 2026-04-09: расширенный YouTube-leakage набор
-            r"(?:подписывайтесь на наш канал)[.!?…]*$",
-            r"(?:ставьте лайки)[.!?…]*$",
-            r"(?:смотрите в описании)[.!?…]*$",
-            r"(?:поддержите канал)[.!?…]*$",
-            r"(?:приятного просмотра)[.!?…]*$",
-            r"(?:увидимся в следующем видео)[.!?…]*$",
-            r"(?:всем пока)[.!?…]*$",
-            r"(?:спасибо всем за внимание)[.!?…]*$",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, lowered)
+        for compiled_re in _HALLUCINATION_PATTERNS:
+            match = compiled_re.search(lowered)
             if not match:
                 continue
             if match.start() <= 0:

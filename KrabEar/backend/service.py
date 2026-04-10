@@ -80,6 +80,9 @@ class BackendService:
                     transcriber.engine._settings_get = self._get_runtime_setting
 
         self.translator = translator or Translator()
+        self._settings_cache: dict[str, Any] | None = None
+        self._settings_cache_ts: float = 0.0
+        self._settings_cache_ttl: float = 5.0
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
         self._preview_stop_event = threading.Event()
@@ -126,13 +129,27 @@ class BackendService:
             logger.exception("Не удалось инициализировать LLM rewriter: %s", exc)
             return None
 
+    def _cached_settings(self) -> dict[str, Any]:
+        """Возвращает копию настроек с TTL-кэшем (5 сек). Избегает повторного чтения файла."""
+        now = time.monotonic()
+        if self._settings_cache is not None and (now - self._settings_cache_ts) < self._settings_cache_ttl:
+            return dict(self._settings_cache)
+        self._settings_cache = self.store.load_settings()
+        self._settings_cache_ts = now
+        return dict(self._settings_cache)
+
+    def _invalidate_settings_cache(self) -> None:
+        """Сбрасывает кэш настроек (вызывать после save_settings)."""
+        self._settings_cache = None
+        self._settings_cache_ts = 0.0
+
     def _get_runtime_setting(self, key: str, default: Any) -> Any:
         """Callback для AudioEngine: читает runtime toggle из StateStore.
 
         Используется для проверки llm_rewrite_enabled на каждой транскрипции.
         """
         try:
-            return self.store.load_settings().get(key, default)
+            return self._cached_settings().get(key, default)
         except Exception:
             return default
 
@@ -214,7 +231,7 @@ class BackendService:
                 "preview_text": preview_text,
             }
         self._reset_preview_state()
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         if bool(settings.get("realtime_preview_enabled", True)):
             quality_profile = str(settings.get("quality_profile", "balanced"))
             self._start_preview_worker(quality_profile=quality_profile)
@@ -222,7 +239,7 @@ class BackendService:
 
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         stop_tail_trim_ms = self._coerce_bounded_int(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
             default=180,
@@ -593,10 +610,10 @@ class BackendService:
         return {"updated": True, "id": item_id, "paste_status": paste_status}
 
     def _handle_get_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.store.load_settings()
+        return self._cached_settings()
 
     def _handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         settings.update(params)
 
         # Нормализуем критичные поля, чтобы UI и агент не расходились по форматам.
@@ -735,14 +752,16 @@ class BackendService:
             overlay_percent = 45
         settings["overlay_opacity_percent"] = max(15, min(overlay_percent, 90))
 
-        return self.store.save_settings(settings)
+        result = self.store.save_settings(settings)
+        self._invalidate_settings_cache()
+        return result
 
     def _handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
         text = str(params.get("text", "")).strip()
         mode = str(params.get("translation_mode", "off"))
         translation_style = str(params.get("translation_style", "neutral"))
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         network_mode = str(params.get("network_mode") or settings.get("network_mode", "offline_default"))
         glossary = settings.get("translation_glossary", {})
         result = self.translator.translate(
@@ -846,7 +865,7 @@ class BackendService:
 
     def _handle_get_capabilities(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает матрицу доступных возможностей текущей сборки."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         diarization_probe = BackendService._probe_diarization()
         translation_probe = BackendService._probe_translation()
         return {
@@ -953,13 +972,14 @@ class BackendService:
         target = str(params.get("target", "")).strip()
         if not source or not target:
             raise RuntimeError("source и target обязательны")
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         glossary = settings.get("translation_glossary", {})
         if not isinstance(glossary, dict):
             glossary = {}
         glossary[source] = target
         settings["translation_glossary"] = glossary
         saved = self.store.save_settings(settings)
+        self._invalidate_settings_cache()
         return {"updated": True, "count": len(saved.get("translation_glossary", {}))}
 
     def _handle_remove_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -967,13 +987,14 @@ class BackendService:
         source = str(params.get("source", "")).strip()
         if not source:
             raise RuntimeError("source обязателен")
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         glossary = settings.get("translation_glossary", {})
         if not isinstance(glossary, dict):
             glossary = {}
         glossary.pop(source, None)
         settings["translation_glossary"] = glossary
         saved = self.store.save_settings(settings)
+        self._invalidate_settings_cache()
         return {"removed": True, "count": len(saved.get("translation_glossary", {}))}
 
     def _handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1049,7 +1070,7 @@ class BackendService:
 
         D.10a. Используется для Swift UI статус-индикатора и dev smoke тестов.
         """
-        runtime_enabled = bool(self.store.load_settings().get("llm_rewrite_enabled", False))
+        runtime_enabled = bool(self._cached_settings().get("llm_rewrite_enabled", False))
 
         if self._llm_rewriter is None:
             return {
@@ -1151,7 +1172,7 @@ class BackendService:
                 self._reset_preview_state()
                 self._start_preview_worker(quality_profile="balanced")
 
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         capture_source_mode = str(
             params.get("capture_source_mode") or settings.get("capture_source_mode", "mic")
         ).strip()
@@ -1261,7 +1282,7 @@ class BackendService:
             self._call_assist_state["stopped_at"] = stopped_at
             state = dict(self._call_assist_state)
 
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         if "auto_summary" in params:
@@ -1370,7 +1391,7 @@ class BackendService:
 
     def _handle_call_assist_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает diagnostics и explain-пакет почему перевод не появился."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1409,7 +1430,7 @@ class BackendService:
 
     def _handle_call_assist_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запрашивает summary текущей звонковой сессии в Voice Gateway."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1438,7 +1459,7 @@ class BackendService:
         if not text:
             raise RuntimeError("text обязателен")
 
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1472,7 +1493,7 @@ class BackendService:
 
     def _handle_list_call_assist_quick_phrases(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает библиотеку быстрых фраз из Voice Gateway."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
 
@@ -1497,7 +1518,7 @@ class BackendService:
 
     def _handle_list_call_assist_templates(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает локальные шаблоны быстрых реплик."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         templates = self._normalize_templates(settings.get("call_quick_templates", []))
         return {"templates": templates}
 
@@ -1509,7 +1530,7 @@ class BackendService:
         target_lang = str(params.get("target_lang", "ru")).strip().lower() or "ru"
         if not name or not text:
             raise RuntimeError("name и text обязательны для шаблона")
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         templates = self._normalize_templates(settings.get("call_quick_templates", []))
         if any(t["name"].lower() == name.lower() for t in templates):
             raise RuntimeError("Шаблон с таким именем уже существует")
@@ -1523,6 +1544,7 @@ class BackendService:
         )
         settings["call_quick_templates"] = templates
         self.store.save_settings(settings)
+        self._invalidate_settings_cache()
         return {"templates": templates}
 
     def _handle_remove_call_assist_template(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1530,13 +1552,14 @@ class BackendService:
         name = str(params.get("name", "")).strip()
         if not name:
             raise RuntimeError("name обязателен")
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         templates = self._normalize_templates(settings.get("call_quick_templates", []))
         filtered = [t for t in templates if t["name"].lower() != name.lower()]
         if len(filtered) == len(templates):
             raise RuntimeError("Шаблон не найден")
         settings["call_quick_templates"] = filtered
         self.store.save_settings(settings)
+        self._invalidate_settings_cache()
         return {"templates": filtered}
 
     def _handle_call_assist_template(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1544,7 +1567,7 @@ class BackendService:
         template_name = str(params.get("name", "")).strip()
         if not template_name:
             raise RuntimeError("name обязателен")
-        templates = self._normalize_templates(self.store.load_settings().get("call_quick_templates", []))
+        templates = self._normalize_templates(self._cached_settings().get("call_quick_templates", []))
         template = next((t for t in templates if t["name"].lower() == template_name.lower()), None)
         if template is None:
             raise RuntimeError("Шаблон не найден")
@@ -1578,7 +1601,7 @@ class BackendService:
 
     def _handle_call_assist_cost_estimate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Считает оценку telephony+AI стоимости через endpoint Voice Gateway."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
 
@@ -1635,7 +1658,7 @@ class BackendService:
 
     def _handle_call_assist_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает timeline текущей звонковой сессии из Voice Gateway."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1665,7 +1688,7 @@ class BackendService:
 
     def _handle_call_assist_cost_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """Считает usage-показатели и вызывает Gateway cost estimate."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1726,7 +1749,7 @@ class BackendService:
 
     def _handle_call_assist_timeline_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает агрегаты timeline текущей звонковой сессии."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1749,7 +1772,7 @@ class BackendService:
 
     def _handle_call_assist_timeline_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает краткую сводку timeline текущей звонковой сессии."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1774,7 +1797,7 @@ class BackendService:
 
     def _handle_call_assist_timeline_export(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует timeline текущей звонковой сессии (md/ndjson)."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1800,7 +1823,7 @@ class BackendService:
 
     def _handle_call_assist_timeline_clear(self, params: dict[str, Any]) -> dict[str, Any]:
         """Очищает timeline текущей звонковой сессии с опциональным keep_last."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1823,7 +1846,7 @@ class BackendService:
 
     def _handle_call_assist_timeline_to_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сохраняет экспорт timeline в историю Krab Ear как отдельную запись."""
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
         with self._call_assist_lock:
@@ -1959,7 +1982,7 @@ class BackendService:
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
 
-        settings = self.store.load_settings()
+        settings = self._cached_settings()
         quality_profile = str(params.get("quality_profile") or settings.get("quality_profile", "balanced"))
         cleanup_profile = str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft"))
         lang_hint: str | None = params.get("lang_hint") or None
@@ -2126,20 +2149,26 @@ class BackendService:
         snapshot_audio = getattr(self.recorder, "snapshot_audio", None)
         min_samples = int(getattr(self.recorder, "sample_rate", 16000) * 0.8)
         last_refresh_duration = 0.0
+        # Adaptive backoff: увеличивается при пустых результатах, сбрасывается при речи.
+        poll_interval = 0.35
+        _POLL_MIN = 0.35
+        _POLL_MAX = 1.5
+        _POLL_BACKOFF = 1.5
 
         while not self._preview_stop_event.is_set():
             if not bool(getattr(self.recorder, "is_recording", False)):
                 break
 
             if not callable(snapshot_audio):
-                self._preview_stop_event.wait(0.7)
+                self._preview_stop_event.wait(poll_interval)
                 continue
 
             try:
                 audio_data, duration_sec = snapshot_audio(max_duration_sec=12.0)
             except Exception:
                 logger.exception("Realtime preview: ошибка snapshot_audio")
-                self._preview_stop_event.wait(0.8)
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
+                self._preview_stop_event.wait(poll_interval)
                 continue
 
             with self._preview_lock:
@@ -2147,12 +2176,13 @@ class BackendService:
 
             current_size = int(getattr(audio_data, "size", 0))
             if current_size < min_samples:
-                self._preview_stop_event.wait(0.8)
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
+                self._preview_stop_event.wait(poll_interval)
                 continue
             # Важный нюанс: после достижения лимита snapshot-а размер буфера стабилизируется.
             # Поэтому ориентируемся на прогресс времени записи, а не на size.
             if duration_sec - last_refresh_duration < 0.9:
-                self._preview_stop_event.wait(0.35)
+                self._preview_stop_event.wait(_POLL_MIN)
                 continue
 
             try:
@@ -2164,21 +2194,22 @@ class BackendService:
                 preview_text = self._postprocess_preview_text(preview_text)
             except Exception:
                 logger.exception("Realtime preview: ошибка transcribe_preview")
-                self._preview_stop_event.wait(0.8)
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
+                self._preview_stop_event.wait(poll_interval)
                 continue
 
             if preview_text:
                 with self._preview_lock:
                     self._preview_text = preview_text[-900:]
                     self._preview_updated_at = float(duration_sec)
+                poll_interval = _POLL_MIN
             else:
-                # Не держим stale preview: если актуальный срез пустой/артефактный,
-                # очищаем текст, чтобы fallback не подхватил мусор.
                 with self._preview_lock:
                     self._preview_text = ""
                     self._preview_updated_at = float(duration_sec)
+                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
             last_refresh_duration = float(duration_sec)
-            self._preview_stop_event.wait(0.8)
+            self._preview_stop_event.wait(poll_interval)
 
     @staticmethod
     def _list_audio_inputs() -> list[dict[str, Any]]:

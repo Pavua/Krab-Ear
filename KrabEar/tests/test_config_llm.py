@@ -48,7 +48,7 @@ class ConfigLLMFieldsTestCase(unittest.TestCase):
             os.environ.pop("KRAB_EAR_LLM_MODEL", None)
             from core.config import Settings
             s = Settings(_env_file=())
-            self.assertEqual(s.LLM_MODEL, "qwen3.5-9b@6bit")
+            self.assertEqual(s.LLM_MODEL, "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx")
 
     def test_llm_api_key_default(self):
         """LLM_API_KEY должен быть пустой строкой по умолчанию (security-sensitive)."""
@@ -62,7 +62,7 @@ class ConfigLLMFieldsTestCase(unittest.TestCase):
             os.environ.pop("KRAB_EAR_LLM_TIMEOUT_SEC", None)
             from core.config import Settings
             s = Settings(_env_file=())
-            self.assertEqual(s.LLM_TIMEOUT_SEC, 4.0)
+            self.assertEqual(s.LLM_TIMEOUT_SEC, 5.0)
 
     def test_llm_circuit_fail_threshold_default(self):
         with patch.dict(os.environ, {}, clear=False):

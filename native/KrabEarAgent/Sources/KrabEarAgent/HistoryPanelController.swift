@@ -691,7 +691,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(NSView())
 
         // D.10a: AI Settings Row Setup
-        llmModelSelector.addItems(withTitles: ["qwen3.5-4b-mlx", "qwen3.5-9b@6bit", "qwen3.5-27b-mlx@6bit"])
+        llmModelSelector.addItems(withTitles: [
+            "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+            "qwen3.5-4b-mlx",
+            "qwen3.5-9b@6bit",
+            "qwen2.5-coder-7b-instruct-mlx",
+        ])
 
         diarizationButton.target = self
         diarizationButton.action = #selector(onDiarizationChanged)
