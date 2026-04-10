@@ -217,6 +217,24 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let realtimeScroll = NSScrollView()
     private let historyPreviewContainer = NSStackView()
     private let scrollView = NSScrollView()
+    // Promoted from local vars in setupUI() for applyVisualTheme() access
+    private let dictationStack = NSStackView()
+    private let dictationHistoryHeaderRow = NSStackView()
+    private let dictationHistoryPreviewScroll = NSScrollView()
+    // MARK: - Collapsible section references
+    private var dictationRecordingSection: CollapsibleSectionView?
+    private var dictationSystemSection: CollapsibleSectionView?
+    private var dictationAISection: CollapsibleSectionView?
+    private var liveCallAssistSection: CollapsibleSectionView?
+    private var historyFiltersSection: CollapsibleSectionView?
+    private var historyAdvancedSection: CollapsibleSectionView?
+    private var historyImportSection: CollapsibleSectionView?
+    // MARK: - Tab selector
+    private var tabSelector: NSSegmentedControl!
+    // MARK: - Reorganized History action rows
+    private let primaryActionsRow = NSStackView()
+    private let secondaryActionsRow = NSStackView()
+    private let statusRow = NSStackView()
 
     init(
         ipcClient: IPCClient,
@@ -282,16 +300,36 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     private func setupUI() {
         guard let windowContentView = window?.contentView else { return }
-        mainTabView.translatesAutoresizingMaskIntoConstraints = false
-        mainTabView.tabViewType = .topTabsBezelBorder
+        // Tab view setup
+        mainTabView.tabViewType = .noTabsNoBorder
         mainTabView.delegate = self
+        mainTabView.translatesAutoresizingMaskIntoConstraints = false
+
+        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
+        tabSelector.selectedSegment = 0
+        tabSelector.translatesAutoresizingMaskIntoConstraints = false
+        tabSelector.segmentStyle = .rounded
+        tabSelector.controlSize = .regular
+        self.tabSelector = tabSelector
+
+        windowContentView.addSubview(tabSelector)
         windowContentView.addSubview(mainTabView)
         NSLayoutConstraint.activate([
-            mainTabView.topAnchor.constraint(equalTo: windowContentView.topAnchor, constant: 8),
+            tabSelector.topAnchor.constraint(equalTo: windowContentView.topAnchor, constant: 8),
+            tabSelector.centerXAnchor.constraint(equalTo: windowContentView.centerXAnchor),
+            mainTabView.topAnchor.constraint(equalTo: tabSelector.bottomAnchor, constant: 8),
             mainTabView.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor, constant: 8),
             mainTabView.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor, constant: -8),
             mainTabView.bottomAnchor.constraint(equalTo: windowContentView.bottomAnchor, constant: -8),
         ])
+
+        // Configure new history stack views
+        for stack in [primaryActionsRow, secondaryActionsRow, statusRow] {
+            stack.orientation = .horizontal
+            stack.spacing = 8
+            stack.alignment = .centerY
+            stack.translatesAutoresizingMaskIntoConstraints = false
+        }
 
         let dictationContentView = NSView()
         dictationContentView.translatesAutoresizingMaskIntoConstraints = false
@@ -894,7 +932,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeTextView.string = "Во время записи здесь появляется промежуточный текст."
         realtimeScroll.documentView = realtimeTextView
 
-        let dictationHistoryPreviewScroll = NSScrollView()
         dictationHistoryPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
         dictationHistoryPreviewScroll.hasVerticalScroller = true
         dictationHistoryPreviewScroll.borderType = .bezelBorder
@@ -1042,7 +1079,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryHintLabel.lineBreakMode = .byTruncatingTail
         dictationHistoryHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let dictationHistoryHeaderRow = NSStackView()
         dictationHistoryHeaderRow.orientation = .horizontal
         dictationHistoryHeaderRow.spacing = 8
         dictationHistoryHeaderRow.alignment = .centerY
@@ -1066,7 +1102,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveHeaderRow.addArrangedSubview(NSView())
         liveHeaderRow.addArrangedSubview(realtimeStatusLabel)
 
-        let dictationStack = NSStackView()
         dictationStack.orientation = .vertical
         dictationStack.spacing = 10
         dictationStack.alignment = .leading
@@ -1192,32 +1227,52 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         guard let window = self.window else { return }
         KrabEarTheme.applyTheme(to: window)
 
+        // Clear existing layouts
+        for stack in [dictationStack, liveStack, historyStack, settingsBar, primaryActionsRow, secondaryActionsRow, statusRow] {
+            for view in stack.arrangedSubviews {
+                stack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+        }
+
         // --- DICTATION TAB ---
-        settingsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        settingsBar.spacing = KrabEarTheme.Metrics.sectionSpacing
+        let recordingSection = CollapsibleSectionView(sectionId: "dictation_recording", title: "Запись и вставка", isExpanded: true)
+        let recordingCard = ThemeCardView()
+        recordingCard.contentStackView.addArrangedSubview(settingsRow1)
+        recordingCard.contentStackView.addArrangedSubview(settingsRow3)
+        recordingCard.contentStackView.addArrangedSubview(settingsRow5)
+        recordingSection.contentStackView.addArrangedSubview(recordingCard)
+        self.dictationRecordingSection = recordingSection
 
-        let generalCard = ThemeCardView()
-        generalCard.title = "Основные настройки"
-        for row in [settingsRow1, settingsRow2, settingsRow3, settingsRow4, settingsRow5, settingsRow6] {
-            generalCard.contentStackView.addArrangedSubview(row)
-        }
+        let systemSection = CollapsibleSectionView(sectionId: "dictation_system", title: "Горячие клавиши и система", isExpanded: false)
+        let systemCard = ThemeCardView()
+        systemCard.contentStackView.addArrangedSubview(settingsRow4)
+        systemCard.contentStackView.addArrangedSubview(settingsRow6)
+        systemCard.contentStackView.addArrangedSubview(settingsRow7) // Moved from Live tab
+        systemSection.contentStackView.addArrangedSubview(systemCard)
+        self.dictationSystemSection = systemSection
 
+        let aiSection = CollapsibleSectionView(sectionId: "dictation_ai", title: "AI и обработка", isExpanded: false)
         let aiCard = ThemeCardView()
-        aiCard.title = aiSectionLabel.stringValue.isEmpty ? "Настройки AI" : aiSectionLabel.stringValue
-        for row in [aiSettingsRow1, aiSettingsRow2] {
-            aiCard.contentStackView.addArrangedSubview(row)
-        }
+        aiCard.contentStackView.addArrangedSubview(aiSettingsRow1)
+        aiCard.contentStackView.addArrangedSubview(aiSettingsRow2)
+        aiSection.contentStackView.addArrangedSubview(aiCard)
+        self.dictationAISection = aiSection
 
-        settingsBar.addArrangedSubview(generalCard)
-        settingsBar.addArrangedSubview(aiCard)
+        settingsBar.addArrangedSubview(recordingSection)
+        settingsBar.addArrangedSubview(systemSection)
+        settingsBar.addArrangedSubview(aiSection)
+
+        dictationStack.addArrangedSubview(controlRow)
+        dictationStack.addArrangedSubview(settingsBar)
+        dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
+        dictationStack.addArrangedSubview(dictationHistoryHintLabel)
+        dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
 
         // --- LIVE TRANSLATION TAB ---
-        liveStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        liveStack.spacing = KrabEarTheme.Metrics.sectionSpacing
-
         let translationSettingsCard = ThemeCardView()
         translationSettingsCard.title = "Настройки перевода"
-        for view in [settingsRow2, settingsRow7, toolsRow] as [NSView] {
+        for view in [settingsRow2, toolsRow] as [NSView] {
             view.removeFromSuperview()
             translationSettingsCard.contentStackView.addArrangedSubview(view)
         }
@@ -1236,57 +1291,83 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             callAssistCard.contentStackView.addArrangedSubview(view)
         }
 
+        let callAssistSection = CollapsibleSectionView(sectionId: "live_call_assist", title: "Call Assist", isExpanded: false)
+        callAssistSection.contentStackView.addArrangedSubview(callAssistCard)
+        self.liveCallAssistSection = callAssistSection
+
+        liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(translationSettingsCard)
         liveStack.addArrangedSubview(gatewayCard)
-        liveStack.addArrangedSubview(callAssistCard)
-        liveStack.addArrangedSubview(liveHeaderRow)
+        liveStack.addArrangedSubview(callAssistSection)
         liveStack.addArrangedSubview(realtimeScroll)
 
-        for card in [translationSettingsCard, gatewayCard, callAssistCard] {
+        for card in [translationSettingsCard, gatewayCard] as [ThemeCardView] {
             card.widthAnchor.constraint(equalTo: liveStack.widthAnchor).isActive = true
         }
 
         // --- HISTORY TAB ---
-        historyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        historyStack.spacing = KrabEarTheme.Metrics.sectionSpacing
+        historyPreviewContainer.isHidden = true
+        historyScrollMinHeightConstraint?.constant = 320
 
-        let filterCard = ThemeCardView()
-        filterCard.title = "Поиск и фильтры"
-        for view in [topSearchRow, filterRow1, filterRow2, historyQuickPresetRow] as [NSView] {
-            view.removeFromSuperview()
-            filterCard.contentStackView.addArrangedSubview(view)
-        }
+        let filtersSection = CollapsibleSectionView(sectionId: "history_filters", title: "Фильтры", isExpanded: false)
+        let filtersCard = ThemeCardView()
+        filtersCard.contentStackView.addArrangedSubview(filterRow1)
+        filtersCard.contentStackView.addArrangedSubview(filterRow2)
+        filtersCard.contentStackView.addArrangedSubview(historyQuickPresetRow)
+        filtersSection.contentStackView.addArrangedSubview(filtersCard)
+        self.historyFiltersSection = filtersSection
 
+        primaryActionsRow.addArrangedSubview(loadMoreButton)
+        primaryActionsRow.addArrangedSubview(jumpToLatestButton)
+        primaryActionsRow.addArrangedSubview(copyButton)
+        primaryActionsRow.addArrangedSubview(pasteSelectedButton)
+        primaryActionsRow.addArrangedSubview(deleteButton)
+        primaryActionsRow.addArrangedSubview(NSView()) // Spacer
+        primaryActionsRow.addArrangedSubview(historyOverviewLabel)
+        primaryActionsRow.addArrangedSubview(historyStatusLabel)
+
+        let advancedSection = CollapsibleSectionView(sectionId: "history_advanced", title: "Расширенные действия", isExpanded: false)
+        secondaryActionsRow.addArrangedSubview(loadAllButton)
+        secondaryActionsRow.addArrangedSubview(copyOriginalButton)
+        secondaryActionsRow.addArrangedSubview(copyTranslationButton)
+        secondaryActionsRow.addArrangedSubview(retranslateButton)
+        secondaryActionsRow.addArrangedSubview(summarizeSelectedButton)
+        secondaryActionsRow.addArrangedSubview(exportButton)
+        secondaryActionsRow.addArrangedSubview(exportNdjsonButton)
+        secondaryActionsRow.addArrangedSubview(importNdjsonButton)
+        secondaryActionsRow.addArrangedSubview(compactButton)
+        secondaryActionsRow.addArrangedSubview(NSView()) // Spacer
+        advancedSection.contentStackView.addArrangedSubview(secondaryActionsRow)
+        self.historyAdvancedSection = advancedSection
+
+        let importSection = CollapsibleSectionView(sectionId: "history_import", title: "Импорт аудио", isExpanded: false)
         let importCard = ThemeCardView()
-        importCard.title = "Импорт"
-        for view in [importRow, dropZoneView] as [NSView] {
-            view.removeFromSuperview()
-            importCard.contentStackView.addArrangedSubview(view)
-        }
+        importCard.contentStackView.addArrangedSubview(importRow)
+        importCard.contentStackView.addArrangedSubview(dropZoneView)
+        importSection.contentStackView.addArrangedSubview(importCard)
+        self.historyImportSection = importSection
 
+        statusRow.addArrangedSubview(glossaryStatusLabel)
+        statusRow.addArrangedSubview(NSView()) // Spacer
+        statusRow.addArrangedSubview(importStatusLabel)
+
+        historyStack.addArrangedSubview(topSearchRow)
         historyStack.addArrangedSubview(topActionsRow)
-        historyStack.addArrangedSubview(filterCard)
-        historyStack.addArrangedSubview(historyPreviewContainer)
-        historyStack.addArrangedSubview(importCard)
+        historyStack.addArrangedSubview(filtersSection)
         historyStack.addArrangedSubview(scrollView)
-        historyStack.addArrangedSubview(bottomBar1)
-        historyStack.addArrangedSubview(bottomBar2)
-
-        for card in [filterCard, importCard] {
-            card.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
-        }
+        historyStack.addArrangedSubview(primaryActionsRow)
+        historyStack.addArrangedSubview(advancedSection)
+        historyStack.addArrangedSubview(importSection)
+        historyStack.addArrangedSubview(statusRow)
 
         // --- BUTTON STYLING ---
-        startStopButton.bezelStyle = .push
-        startStopButton.isBordered = true
-        startStopButton.bezelColor = KrabEarTheme.Colors.accent
-        startStopButton.font = KrabEarTheme.Typography.controlLabel
-
-        for button in [restartButton, stopButton] {
-            button.bezelStyle = .push
-            button.isBordered = true
-            button.bezelColor = nil
-            button.font = KrabEarTheme.Typography.controlLabel
+        let primaryButtons: [NSButton] = [startStopButton, restartButton, stopButton, loadMoreButton, jumpToLatestButton, copyButton, pasteSelectedButton, deleteButton]
+        for button in primaryButtons {
+            if let themedButton = button as? ThemePrimaryButton {
+                themedButton.bezelColor = KrabEarTheme.Colors.accent
+            } else {
+                button.bezelColor = KrabEarTheme.Colors.accent
+            }
         }
 
         // Primary buttons in Live Translation
@@ -3312,11 +3393,17 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
 
     private func applyHistoryFocusMode(_ enabled: Bool) {
-        for row in historyFocusManagedRows {
-            row.isHidden = enabled
-        }
-        // В фокус-режиме таблица получает больше места и её проще читать.
-        historyScrollMinHeightConstraint?.constant = enabled ? 360 : 260
+        // Collapse or expand all history collapsible sections
+        historyFiltersSection?.setExpanded(!enabled, animated: true)
+        historyAdvancedSection?.setExpanded(!enabled, animated: true)
+        historyImportSection?.setExpanded(!enabled, animated: true)
+
+        // Disable disclosure buttons in focus mode so user can't expand them
+        historyFiltersSection?.disclosureButton.isEnabled = !enabled
+        historyAdvancedSection?.disclosureButton.isEnabled = !enabled
+        historyImportSection?.disclosureButton.isEnabled = !enabled
+
+        historyScrollMinHeightConstraint?.constant = enabled ? 360 : 320
         historyFocusModeButton.title = enabled ? "Фокус истории: ON" : "Фокус истории: OFF"
     }
 
@@ -3606,9 +3693,18 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         alert.runModal()
     }
 
+    @objc private func onTabSelectorChanged() {
+        let index = tabSelector.selectedSegment
+        guard index >= 0, index < mainTabView.numberOfTabViewItems else { return }
+        mainTabView.selectTabViewItem(at: index)
+    }
+
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         guard tabView == mainTabView else { return }
         guard !isSyncingTabs, !isSyncingSettings else { return }
+        if let item = tabViewItem {
+            tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
+        }
         let raw = String(describing: tabViewItem?.identifier ?? PanelTab.history.rawValue)
         let tab = PanelTab.from(settingsValue: raw)
         applySettingsPatch(["ui_last_tab": tab.rawValue])

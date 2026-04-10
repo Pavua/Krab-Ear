@@ -151,3 +151,100 @@ public class ThemeSecondaryButton: NSButton {
         font = KrabEarTheme.Typography.controlLabel
     }
 }
+
+@MainActor
+public class CollapsibleSectionView: NSView {
+
+    public let sectionId: String
+    public let disclosureButton = NSButton(frame: .zero)
+    public let titleLabel = NSTextField(labelWithString: "")
+    public let headerStack = NSStackView()
+    public let contentStackView = NSStackView()
+    private let containerStack = NSStackView()
+
+    public private(set) var isExpanded: Bool
+
+    public init(sectionId: String, title: String, isExpanded: Bool = true) {
+        self.sectionId = sectionId
+        self.isExpanded = isExpanded
+        super.init(frame: .zero)
+
+        let key = "CollapsibleSection_\(sectionId)"
+        if UserDefaults.standard.object(forKey: key) != nil {
+            self.isExpanded = UserDefaults.standard.bool(forKey: key)
+        }
+
+        setup(title: title)
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("init(coder:) not supported")
+    }
+
+    private func setup(title: String) {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        disclosureButton.setButtonType(.pushOnPushOff)
+        disclosureButton.bezelStyle = .disclosure
+        disclosureButton.title = ""
+        disclosureButton.state = isExpanded ? .on : .off
+        disclosureButton.target = self
+        disclosureButton.action = #selector(onToggle)
+
+        titleLabel.stringValue = title
+        titleLabel.font = KrabEarTheme.Typography.sectionTitle
+        titleLabel.textColor = KrabEarTheme.Colors.textPrimary
+        titleLabel.isEditable = false
+        titleLabel.isBordered = false
+        titleLabel.drawsBackground = false
+
+        headerStack.orientation = .horizontal
+        headerStack.spacing = 4
+        headerStack.alignment = .centerY
+        headerStack.addArrangedSubview(disclosureButton)
+        headerStack.addArrangedSubview(titleLabel)
+
+        contentStackView.orientation = .vertical
+        contentStackView.spacing = KrabEarTheme.Metrics.itemSpacing
+        contentStackView.alignment = .leading
+        contentStackView.isHidden = !isExpanded
+
+        containerStack.orientation = .vertical
+        containerStack.spacing = KrabEarTheme.Metrics.itemSpacing
+        containerStack.alignment = .leading
+        containerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        containerStack.addArrangedSubview(headerStack)
+        containerStack.addArrangedSubview(contentStackView)
+        addSubview(containerStack)
+
+        NSLayoutConstraint.activate([
+            containerStack.topAnchor.constraint(equalTo: topAnchor),
+            containerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            containerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            containerStack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    @objc private func onToggle() {
+        setExpanded(disclosureButton.state == .on, animated: true)
+    }
+
+    public func setExpanded(_ expanded: Bool, animated: Bool) {
+        self.isExpanded = expanded
+        disclosureButton.state = expanded ? .on : .off
+
+        if animated {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.2
+                ctx.allowsImplicitAnimation = true
+                self.contentStackView.isHidden = !expanded
+                self.contentStackView.superview?.layoutSubtreeIfNeeded()
+            })
+        } else {
+            contentStackView.isHidden = !expanded
+        }
+
+        UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
+    }
+}
