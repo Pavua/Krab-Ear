@@ -202,6 +202,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let historyPreviewScroll = NSScrollView()
     private let historyPreviewTextView = NSTextView()
     private let historyPreviewHeader = NSTextField(labelWithString: "Последние транскрипты")
+    // Promoted from local vars in setupUI() for applyVisualTheme() access
+    private let liveSettingsBar = NSStackView()
+    private let liveStack = NSStackView()
+    private let historyStack = NSStackView()
+    private let liveHeaderRow = NSStackView()
+    private let voiceGatewayRow = NSStackView()
+    private let callAssistConfigRow = NSStackView()
+    private let callAssistControlRow = NSStackView()
+    private let callPhrasePresetRow = NSStackView()
+    private let callPhraseActionRow = NSStackView()
+    private let callTimelineRow = NSStackView()
+    private let callAssistOutputScroll = NSScrollView()
+    private let realtimeScroll = NSScrollView()
+    private let historyPreviewContainer = NSStackView()
+    private let scrollView = NSScrollView()
 
     init(
         ipcClient: IPCClient,
@@ -282,6 +297,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationContentView.translatesAutoresizingMaskIntoConstraints = false
         let liveContentView = NSView()
         liveContentView.translatesAutoresizingMaskIntoConstraints = false
+        // Note: liveSettingsBar is now a class property (promoted for applyVisualTheme)
         let historyContentView = NSView()
         historyContentView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -511,7 +527,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.spacing = 6
         settingsBar.alignment = .leading
         settingsBar.translatesAutoresizingMaskIntoConstraints = false
-        let liveSettingsBar = NSStackView()
         liveSettingsBar.orientation = .vertical
         liveSettingsBar.spacing = 6
         liveSettingsBar.alignment = .leading
@@ -552,37 +567,31 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow7.alignment = .centerY
         settingsRow7.translatesAutoresizingMaskIntoConstraints = false
 
-        let callAssistConfigRow = NSStackView()
         callAssistConfigRow.orientation = .horizontal
         callAssistConfigRow.spacing = 10
         callAssistConfigRow.alignment = .centerY
         callAssistConfigRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let callAssistControlRow = NSStackView()
         callAssistControlRow.orientation = .horizontal
         callAssistControlRow.spacing = 8
         callAssistControlRow.alignment = .centerY
         callAssistControlRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let voiceGatewayRow = NSStackView()
         voiceGatewayRow.orientation = .horizontal
         voiceGatewayRow.spacing = 8
         voiceGatewayRow.alignment = .centerY
         voiceGatewayRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let callPhrasePresetRow = NSStackView()
         callPhrasePresetRow.orientation = .horizontal
         callPhrasePresetRow.spacing = 8
         callPhrasePresetRow.alignment = .centerY
         callPhrasePresetRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let callPhraseActionRow = NSStackView()
         callPhraseActionRow.orientation = .horizontal
         callPhraseActionRow.spacing = 8
         callPhraseActionRow.alignment = .centerY
         callPhraseActionRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let callTimelineRow = NSStackView()
         callTimelineRow.orientation = .horizontal
         callTimelineRow.spacing = 8
         callTimelineRow.alignment = .centerY
@@ -855,7 +864,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveSettingsBar.addArrangedSubview(voiceGatewayRow)
         liveSettingsBar.addArrangedSubview(callAssistConfigRow)
 
-        let scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
 
@@ -878,7 +886,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             self?.enqueueImport(paths: paths, sourceTag: "drag_drop")
         }
 
-        let realtimeScroll = NSScrollView()
         realtimeScroll.translatesAutoresizingMaskIntoConstraints = false
         realtimeScroll.hasVerticalScroller = true
         realtimeScroll.borderType = .bezelBorder
@@ -896,7 +903,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
         dictationHistoryPreviewScroll.documentView = dictationHistoryPreviewView
 
-        let callAssistOutputScroll = NSScrollView()
         callAssistOutputScroll.translatesAutoresizingMaskIntoConstraints = false
         callAssistOutputScroll.hasVerticalScroller = true
         callAssistOutputScroll.borderType = .bezelBorder
@@ -1052,7 +1058,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let liveTitle = NSTextField(labelWithString: "Настройки live-перевода")
         liveTitle.font = .systemFont(ofSize: 14, weight: .semibold)
 
-        let liveHeaderRow = NSStackView()
         liveHeaderRow.orientation = .horizontal
         liveHeaderRow.spacing = 8
         liveHeaderRow.alignment = .centerY
@@ -1087,7 +1092,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationHistoryPreviewScroll.heightAnchor.constraint(equalToConstant: 150),
         ])
 
-        let liveStack = NSStackView()
         liveStack.orientation = .vertical
         liveStack.spacing = 10
         liveStack.alignment = .leading
@@ -1122,7 +1126,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             realtimeScroll.heightAnchor.constraint(equalToConstant: 132),
         ])
 
-        let historyStack = NSStackView()
         historyStack.orientation = .vertical
         historyStack.spacing = 8
         historyStack.alignment = .leading
@@ -1131,7 +1134,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(filterRow1)
         historyStack.addArrangedSubview(filterRow2)
         historyStack.addArrangedSubview(historyQuickPresetRow)
-        let historyPreviewContainer = NSStackView()
         historyPreviewContainer.orientation = .vertical
         historyPreviewContainer.spacing = 6
         historyPreviewContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -1190,38 +1192,112 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         guard let window = self.window else { return }
         KrabEarTheme.applyTheme(to: window)
 
+        // --- DICTATION TAB ---
         settingsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
         settingsBar.spacing = KrabEarTheme.Metrics.sectionSpacing
 
         let generalCard = ThemeCardView()
         generalCard.title = "Основные настройки"
-        let generalRows = [settingsRow1, settingsRow2, settingsRow3, settingsRow4, settingsRow5, settingsRow6]
-        for row in generalRows {
+        for row in [settingsRow1, settingsRow2, settingsRow3, settingsRow4, settingsRow5, settingsRow6] {
             generalCard.contentStackView.addArrangedSubview(row)
         }
 
         let aiCard = ThemeCardView()
         aiCard.title = aiSectionLabel.stringValue.isEmpty ? "Настройки AI" : aiSectionLabel.stringValue
-        let aiRows = [aiSettingsRow1, aiSettingsRow2]
-        for row in aiRows {
+        for row in [aiSettingsRow1, aiSettingsRow2] {
             aiCard.contentStackView.addArrangedSubview(row)
         }
 
         settingsBar.addArrangedSubview(generalCard)
         settingsBar.addArrangedSubview(aiCard)
 
+        // --- LIVE TRANSLATION TAB ---
+        liveStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        liveStack.spacing = KrabEarTheme.Metrics.sectionSpacing
+
+        let translationSettingsCard = ThemeCardView()
+        translationSettingsCard.title = "Настройки перевода"
+        for view in [settingsRow2, settingsRow7, toolsRow] as [NSView] {
+            view.removeFromSuperview()
+            translationSettingsCard.contentStackView.addArrangedSubview(view)
+        }
+
+        let gatewayCard = ThemeCardView()
+        gatewayCard.title = "Voice Gateway"
+        for view in [voiceGatewayRow, callAssistConfigRow] as [NSView] {
+            view.removeFromSuperview()
+            gatewayCard.contentStackView.addArrangedSubview(view)
+        }
+
+        let callAssistCard = ThemeCardView()
+        callAssistCard.title = "Call Assist"
+        for view in [callAssistControlRow, callPhrasePresetRow, callPhraseActionRow, callTimelineRow, callAssistOutputScroll] as [NSView] {
+            view.removeFromSuperview()
+            callAssistCard.contentStackView.addArrangedSubview(view)
+        }
+
+        liveStack.addArrangedSubview(translationSettingsCard)
+        liveStack.addArrangedSubview(gatewayCard)
+        liveStack.addArrangedSubview(callAssistCard)
+        liveStack.addArrangedSubview(liveHeaderRow)
+        liveStack.addArrangedSubview(realtimeScroll)
+
+        for card in [translationSettingsCard, gatewayCard, callAssistCard] {
+            card.widthAnchor.constraint(equalTo: liveStack.widthAnchor).isActive = true
+        }
+
+        // --- HISTORY TAB ---
+        historyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        historyStack.spacing = KrabEarTheme.Metrics.sectionSpacing
+
+        let filterCard = ThemeCardView()
+        filterCard.title = "Поиск и фильтры"
+        for view in [topSearchRow, filterRow1, filterRow2, historyQuickPresetRow] as [NSView] {
+            view.removeFromSuperview()
+            filterCard.contentStackView.addArrangedSubview(view)
+        }
+
+        let importCard = ThemeCardView()
+        importCard.title = "Импорт"
+        for view in [importRow, dropZoneView] as [NSView] {
+            view.removeFromSuperview()
+            importCard.contentStackView.addArrangedSubview(view)
+        }
+
+        historyStack.addArrangedSubview(topActionsRow)
+        historyStack.addArrangedSubview(filterCard)
+        historyStack.addArrangedSubview(historyPreviewContainer)
+        historyStack.addArrangedSubview(importCard)
+        historyStack.addArrangedSubview(scrollView)
+        historyStack.addArrangedSubview(bottomBar1)
+        historyStack.addArrangedSubview(bottomBar2)
+
+        for card in [filterCard, importCard] {
+            card.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
+        }
+
+        // --- BUTTON STYLING ---
         startStopButton.bezelStyle = .push
         startStopButton.isBordered = true
         startStopButton.bezelColor = KrabEarTheme.Colors.accent
         startStopButton.font = KrabEarTheme.Typography.controlLabel
 
-        let secondaryButtons = [restartButton, stopButton]
-        for button in secondaryButtons {
+        for button in [restartButton, stopButton] {
             button.bezelStyle = .push
             button.isBordered = true
             button.bezelColor = nil
             button.font = KrabEarTheme.Typography.controlLabel
         }
+
+        // Primary buttons in Live Translation
+        callAssistStartButton.bezelColor = KrabEarTheme.Colors.accent
+        callPhraseSendButton.bezelColor = KrabEarTheme.Colors.accent
+
+        // Style header labels
+        if let headerLabel = liveHeaderRow.arrangedSubviews.first(where: { $0 is NSTextField }) as? NSTextField {
+            headerLabel.font = KrabEarTheme.Typography.sectionTitle
+        }
+        historyPreviewHeader.font = KrabEarTheme.Typography.sectionTitle
     }
 
     @objc private func onSearch() {
