@@ -17,10 +17,17 @@ struct PasteAttemptResult {
 
 /// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
 final class PasteService {
+    // macOS virtual key codes for modifier keys
     private let rightOptionKeyCode: CGKeyCode = 61
     private let leftOptionKeyCode: CGKeyCode = 58
     private let leftCommandKeyCode: CGKeyCode = 55
     private let rightCommandKeyCode: CGKeyCode = 54
+    /// Max time to wait for modifier keys release before giving up on paste (ms)
+    private let modifierReleaseTimeoutMs = 2_500
+    /// Delay after modifier release before pasting, lets the OS finish key-up processing (µs)
+    private let prePasteDelayUs: useconds_t = 120_000
+    /// Delay between Cmd+V key-down and key-up events (µs)
+    private let cmdVKeypressDelayUs: useconds_t = 30_000
     private let logger = AgentLogger.shared
 
     private enum FocusState {
@@ -44,11 +51,11 @@ final class PasteService {
         putToClipboard(text)
         let axTrusted = isAccessibilityTrusted()
 
-        guard waitForModifierRelease(timeoutMs: 2_500) else {
+        guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
             logger.warn("Автовставка отменена: модификаторы не отпущены в таймаут")
             return PasteAttemptResult(ok: false, reason: "modifiers_stuck")
         }
-        usleep(120_000)
+        usleep(prePasteDelayUs)
 
         let resolvedPID: pid_t
         if let targetPID {
@@ -109,7 +116,7 @@ final class PasteService {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
         guard let (keyDown, keyUp) = makeCommandVEvents(source: source) else { return false }
         keyDown.postToPid(targetPID)
-        usleep(30_000)
+        usleep(cmdVKeypressDelayUs)
         keyUp.postToPid(targetPID)
         return true
     }
@@ -118,7 +125,7 @@ final class PasteService {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
         guard let (keyDown, keyUp) = makeCommandVEvents(source: source) else { return false }
         keyDown.post(tap: .cghidEventTap)
-        usleep(30_000)
+        usleep(cmdVKeypressDelayUs)
         keyUp.post(tap: .cghidEventTap)
         return true
     }

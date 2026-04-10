@@ -2432,22 +2432,18 @@ class BackendService:
         return default
 
     @staticmethod
-    def _coerce_bounded_int(value: Any, default: int, min_value: int, max_value: int) -> int:
-        """Нормализует целое значение в допустимый диапазон."""
+    def _coerce_bounded(value: Any, default: int | float, min_value: int | float, max_value: int | float) -> int | float:
+        """Нормализует числовое значение в допустимый диапазон. Тип определяется default."""
+        coerce = int if isinstance(default, int) else float
         try:
-            parsed = int(value)
+            parsed = coerce(value)
         except (TypeError, ValueError):
-            parsed = int(default)
+            parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
 
-    @staticmethod
-    def _coerce_bounded_float(value: Any, default: float, min_value: float, max_value: float) -> float:
-        """Нормализует float-значение в допустимый диапазон."""
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            parsed = float(default)
-        return max(min_value, min(parsed, max_value))
+    # Aliases for backward compatibility with existing call sites
+    _coerce_bounded_int = _coerce_bounded
+    _coerce_bounded_float = _coerce_bounded
 
     def _stop_recorder_guarded(self, stop_tail_trim_ms: int) -> tuple[Any, float] | None:
         """

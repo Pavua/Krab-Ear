@@ -71,7 +71,9 @@ final class IPCClient {
         }
 
         var responseData = Data()
-        var chunk = [UInt8](repeating: 0, count: 4096)
+        // IPC reads in a loop until EOF, so this is just the per-read buffer size
+        let ipcReadBufferSize = 4096
+        var chunk = [UInt8](repeating: 0, count: ipcReadBufferSize)
 
         while true {
             let count = Darwin.read(fd, &chunk, chunk.count)
