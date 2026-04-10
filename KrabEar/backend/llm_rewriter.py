@@ -150,6 +150,24 @@ _EXPLANATORY_PREFIXES = (
     "Вот:",
 )
 
+# Chatbot response markers — if LLM output starts with any of these,
+# the model switched to assistant mode instead of editing the text.
+_CHATBOT_MARKERS = (
+    "извините",
+    "пожалуйста, укажите",
+    "пожалуйста, предоставьте",
+    "как я могу",
+    "чем могу помочь",
+    "к сожалению",
+    "я не могу",
+    "i'm sorry",
+    "i apologize",
+    "here is",
+    "sure,",
+    "конечно,",
+    "вот исправленный",
+)
+
 
 @dataclass
 class LLMRewriteResult:
@@ -323,7 +341,44 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="empty_response", latency_ms=latency_ms
             )
 
-        # 8. Success
+        # 8. Chatbot detection — model answered as assistant instead of editing
+        cleaned_lower = cleaned.lower()
+        for marker in _CHATBOT_MARKERS:
+            if cleaned_lower.startswith(marker):
+                logger.warning(
+                    "LLM chatbot detected (starts with '%s'), falling back to original",
+                    marker,
+                )
+                self._last_error = "chatbot_response"
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="chatbot_response", latency_ms=latency_ms
+                )
+
+        # 9. Length ratio guard — dramatic shrink/expansion = hallucination
+        input_len = len(cleaned_input)
+        output_len = len(cleaned)
+        if input_len > 20:
+            ratio = output_len / input_len
+            if ratio < 0.35:
+                logger.warning(
+                    "LLM output too short (%.0f%% of input), falling back to original",
+                    ratio * 100,
+                )
+                self._last_error = "output_too_short"
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="output_too_short", latency_ms=latency_ms
+                )
+            if ratio > 3.0:
+                logger.warning(
+                    "LLM output too long (%.0f%% of input), falling back to original",
+                    ratio * 100,
+                )
+                self._last_error = "output_too_long"
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="output_too_long", latency_ms=latency_ms
+                )
+
+        # 10. Success
         self._circuit.record_success()
         self._last_error = None
         return LLMRewriteResult(
