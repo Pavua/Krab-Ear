@@ -33,12 +33,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let paths: [String]
         let sourceTag: String
         let audioCount: Int
+        let folderCount: Int
         let totalBytes: Int
         let byExtension: [String: Int]
     }
 
     private struct ImportPreview {
         let audioCount: Int
+        let folderCount: Int
         let sample: [String]
         let byExtension: [String: Int]
         let totalBytes: Int
@@ -1586,6 +1588,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.title = "Выберите аудиофайлы или папки"
+        panel.message = "Выберите аудиофайлы или папки с записями звонков для транскрибации"
         panel.prompt = "Транскрибировать"
 
         guard panel.runModal() == .OK else { return }
@@ -2794,6 +2797,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 paths: clean,
                 sourceTag: sourceTag,
                 audioCount: preview.audioCount,
+                folderCount: preview.folderCount,
                 totalBytes: preview.totalBytes,
                 byExtension: preview.byExtension
             )
@@ -2813,9 +2817,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: ", ")
+        let folderLine = preview.folderCount > 1
+            ? "Папок: \(preview.folderCount)\n"
+            : ""
         importStatusLabel.toolTip = preview.sample.isEmpty
-            ? "Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)"
-            : "Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)\nПримеры:\n\(preview.sample.joined(separator: "\n"))"
+            ? "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)"
+            : "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)\nПримеры:\n\(preview.sample.joined(separator: "\n"))"
         updateImportStatusLabel()
         processNextImportIfNeeded()
     }
@@ -2946,8 +2953,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             let remainingJobs = max(0, importJobsPlanned - importJobsCompleted)
             let eta = Int((Double(remainingJobs) * avgSec).rounded())
             let currentFiles = currentImportJob?.audioCount ?? 0
+            let currentFolders = currentImportJob?.folderCount ?? 0
             let elapsed = currentImportJobStartedAt.map { Int(Date().timeIntervalSince($0).rounded()) } ?? 0
-            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов \(currentFiles), \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
+            let folderSuffix = currentFolders > 1 ? " (\(currentFolders) папок)" : ""
+            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов \(currentFiles)\(folderSuffix), \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
             return
         }
         if isImportPaused {
@@ -2955,7 +2964,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             return
         }
         if !importQueue.isEmpty {
-            importStatusLabel.stringValue = "Импорт: в очереди \(importQueue.count), обработано \(importProcessedTotal)/\(importFilesPlanned), объём \(formatBytes(importBytesPlanned))"
+            let totalFolders = importQueue.reduce(0) { $0 + $1.folderCount }
+            let folderSuffix = totalFolders > 1 ? " в \(totalFolders) папках" : ""
+            importStatusLabel.stringValue = "Импорт: в очереди \(importQueue.count), файлов \(importFilesPlanned)\(folderSuffix), объём \(formatBytes(importBytesPlanned))"
             return
         }
         if importJobsPlanned > 0 && importJobsCompleted >= importJobsPlanned {
@@ -2996,14 +3007,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             ),
             let result = response["result"] as? [String: Any]
         else {
-            return ImportPreview(audioCount: 0, sample: [], byExtension: [:], totalBytes: 0)
+            return ImportPreview(audioCount: 0, folderCount: 0, sample: [], byExtension: [:], totalBytes: 0)
         }
         let audioCount = (result["audio_count"] as? Int) ?? 0
+        let folderCount = (result["folder_count"] as? Int) ?? 0
         let sample = (result["sample"] as? [String]) ?? []
         let totalBytes = (result["total_bytes"] as? Int) ?? 0
         let byExtension = (result["by_ext"] as? [String: Int]) ?? [:]
         return ImportPreview(
             audioCount: audioCount,
+            folderCount: folderCount,
             sample: sample,
             byExtension: byExtension,
             totalBytes: totalBytes

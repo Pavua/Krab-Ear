@@ -2150,9 +2150,13 @@ class BackendService:
         safe_sample_limit = max(1, min(sample_limit, 50))
         by_ext: dict[str, int] = {}
         total_bytes = 0
+        # Группировка по родительской папке для отображения структуры.
+        by_folder: dict[str, int] = {}
         for audio_path in audio_paths:
             suffix = Path(audio_path).suffix.lower() or "<none>"
             by_ext[suffix] = by_ext.get(suffix, 0) + 1
+            folder = str(Path(audio_path).parent)
+            by_folder[folder] = by_folder.get(folder, 0) + 1
             try:
                 total_bytes += Path(audio_path).stat().st_size
             except FileNotFoundError:
@@ -2160,6 +2164,8 @@ class BackendService:
         return {
             "input_count": len(selected),
             "audio_count": len(audio_paths),
+            "folder_count": len(by_folder),
+            "by_folder": by_folder,
             "sample": audio_paths[:safe_sample_limit],
             "by_ext": by_ext,
             "total_bytes": total_bytes,
@@ -2181,9 +2187,13 @@ class BackendService:
                 continue
 
             if path.is_dir():
-                for candidate in path.rglob("*"):
-                    if candidate.is_file() and candidate.suffix.lower() in audio_ext:
-                        result.append(str(candidate.resolve()))
+                # Сортируем по пути, чтобы части записей звонков
+                # (part1.m4a, part2.m4a, ...) шли в правильном порядке.
+                candidates = sorted(
+                    (c for c in path.rglob("*") if c.is_file() and c.suffix.lower() in audio_ext),
+                    key=lambda c: str(c),
+                )
+                result.extend(str(c.resolve()) for c in candidates)
 
         # Убираем дубликаты, сохраняем порядок.
         unique: list[str] = []
