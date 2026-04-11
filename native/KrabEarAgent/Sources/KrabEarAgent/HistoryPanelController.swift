@@ -258,7 +258,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         self.onSwapRuEsDirection = onSwapRuEsDirection
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -1221,7 +1221,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dropZoneView,
         ]
         historyContentView.addSubview(historyStack)
-        let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260)
+        let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
@@ -1321,7 +1321,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // --- HISTORY TAB ---
         historyPreviewContainer.isHidden = true
-        historyScrollMinHeightConstraint?.constant = 320
+        historyScrollMinHeightConstraint?.constant = 180
 
         let filtersSection = CollapsibleSectionView(sectionId: "history_filters", title: "Фильтры", isExpanded: false)
         let filtersCard = ThemeCardView()
@@ -3440,7 +3440,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyAdvancedSection?.disclosureButton.isEnabled = !enabled
         historyImportSection?.disclosureButton.isEnabled = !enabled
 
-        historyScrollMinHeightConstraint?.constant = enabled ? 360 : 320
+        historyScrollMinHeightConstraint?.constant = enabled ? 240 : 180
         historyFocusModeButton.title = enabled ? "Фокус истории: ON" : "Фокус истории: OFF"
     }
 
