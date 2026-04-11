@@ -1113,12 +1113,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.addArrangedSubview(dictationHistoryHintLabel)
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
         dictationStack.addArrangedSubview(NSView())
-        dictationContentView.addSubview(dictationStack)
+        let dictationTabScroll = NSScrollView()
+        dictationTabScroll.translatesAutoresizingMaskIntoConstraints = false
+        dictationTabScroll.hasVerticalScroller = true
+        dictationTabScroll.borderType = .noBorder
+        dictationTabScroll.drawsBackground = false
+        dictationTabScroll.automaticallyAdjustsContentInsets = false
+        dictationTabScroll.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        dictationTabScroll.documentView = dictationStack
+        dictationContentView.addSubview(dictationTabScroll)
         NSLayoutConstraint.activate([
-            dictationStack.topAnchor.constraint(equalTo: dictationContentView.topAnchor, constant: 12),
-            dictationStack.leadingAnchor.constraint(equalTo: dictationContentView.leadingAnchor, constant: 12),
-            dictationStack.trailingAnchor.constraint(equalTo: dictationContentView.trailingAnchor, constant: -12),
-            dictationStack.bottomAnchor.constraint(equalTo: dictationContentView.bottomAnchor, constant: -12),
+            dictationTabScroll.topAnchor.constraint(equalTo: dictationContentView.topAnchor),
+            dictationTabScroll.leadingAnchor.constraint(equalTo: dictationContentView.leadingAnchor),
+            dictationTabScroll.trailingAnchor.constraint(equalTo: dictationContentView.trailingAnchor),
+            dictationTabScroll.bottomAnchor.constraint(equalTo: dictationContentView.bottomAnchor),
+            dictationStack.widthAnchor.constraint(equalTo: dictationTabScroll.widthAnchor, constant: -24),
             controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1142,12 +1151,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(realtimeScroll)
         liveStack.addArrangedSubview(NSView())
-        liveContentView.addSubview(liveStack)
+        let liveTabScroll = NSScrollView()
+        liveTabScroll.translatesAutoresizingMaskIntoConstraints = false
+        liveTabScroll.hasVerticalScroller = true
+        liveTabScroll.borderType = .noBorder
+        liveTabScroll.drawsBackground = false
+        liveTabScroll.automaticallyAdjustsContentInsets = false
+        liveTabScroll.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        liveTabScroll.documentView = liveStack
+        liveContentView.addSubview(liveTabScroll)
         NSLayoutConstraint.activate([
-            liveStack.topAnchor.constraint(equalTo: liveContentView.topAnchor, constant: 12),
-            liveStack.leadingAnchor.constraint(equalTo: liveContentView.leadingAnchor, constant: 12),
-            liveStack.trailingAnchor.constraint(equalTo: liveContentView.trailingAnchor, constant: -12),
-            liveStack.bottomAnchor.constraint(equalTo: liveContentView.bottomAnchor, constant: -12),
+            liveTabScroll.topAnchor.constraint(equalTo: liveContentView.topAnchor),
+            liveTabScroll.leadingAnchor.constraint(equalTo: liveContentView.leadingAnchor),
+            liveTabScroll.trailingAnchor.constraint(equalTo: liveContentView.trailingAnchor),
+            liveTabScroll.bottomAnchor.constraint(equalTo: liveContentView.bottomAnchor),
+            liveStack.widthAnchor.constraint(equalTo: liveTabScroll.widthAnchor, constant: -24),
             liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             toolsRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callAssistControlRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
@@ -1196,15 +1214,24 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             importRow,
             dropZoneView,
         ]
-        historyContentView.addSubview(historyStack)
+        let historyTabScroll = NSScrollView()
+        historyTabScroll.translatesAutoresizingMaskIntoConstraints = false
+        historyTabScroll.hasVerticalScroller = true
+        historyTabScroll.borderType = .noBorder
+        historyTabScroll.drawsBackground = false
+        historyTabScroll.automaticallyAdjustsContentInsets = false
+        historyTabScroll.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        historyTabScroll.documentView = historyStack
+        historyContentView.addSubview(historyTabScroll)
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
-            historyStack.topAnchor.constraint(equalTo: historyContentView.topAnchor, constant: 12),
-            historyStack.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor, constant: 12),
-            historyStack.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor, constant: -12),
-            historyStack.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor, constant: -12),
+            historyTabScroll.topAnchor.constraint(equalTo: historyContentView.topAnchor),
+            historyTabScroll.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
+            historyTabScroll.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
+            historyTabScroll.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
+            historyStack.widthAnchor.constraint(equalTo: historyTabScroll.widthAnchor, constant: -24),
             topBar.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
             filterRow1.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
             filterRow2.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
