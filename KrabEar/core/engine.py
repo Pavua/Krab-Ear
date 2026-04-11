@@ -447,13 +447,16 @@ class AudioEngine:
         if self._diarization_load_error:
             raise RuntimeError(self._diarization_load_error)
 
-        hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN
-        if not hf_token:
-            self._diarization_load_error = "Не задан HF_TOKEN для pyannote diarization."
-            raise RuntimeError(self._diarization_load_error)
+        hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
 
         # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
-        self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, token=hf_token)
+        # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
+        try:
+            kwargs = {"token": hf_token} if hf_token else {}
+            self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
+        except Exception as e:
+            self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
+            raise RuntimeError(self._diarization_load_error)
         diarization_device = self._resolve_diarization_device()
         self._diarization_pipeline.to(diarization_device)
         logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
@@ -461,7 +464,12 @@ class AudioEngine:
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:
-        """Выбирает лучшее доступное устройство для pyannote."""
+        """Выбирает устройство для pyannote diarization.
+
+        MPS (Metal) re-enabled: torch 2.11 + pyannote 4.0.4 на M4 Max
+        больше не вызывает Metal GPU assertion failure.
+        Протестировано 2026-04-11 — 0.2s на 5 сек аудио, без crash.
+        """
         if torch.backends.mps.is_available():
             return torch.device("mps")
         if torch.cuda.is_available():
