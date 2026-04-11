@@ -1010,6 +1010,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         if !pasteResult.ok {
             handlePasteFailure(reason: pasteResult.reason, text: cleanText)
         }
+
+        // Звук завершения транскрибации.
+        NSSound(named: "Purr")?.play()
     }
 
     private func isDuplicateAutopasteCandidate(historyId: String?, text: String) -> Bool {

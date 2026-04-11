@@ -54,6 +54,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let onStopAgent: () -> Void
     private let onPasteHistoryItem: (HistoryItem) -> Void
     private let onSwapRuEsDirection: () -> Void
+    private let notificationService = NotificationService()
 
     private var items: [HistoryItem] = []
     private var nextCursor: String?
@@ -2984,6 +2985,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             showInfoAlert(title: "Импорт аудио", body: summary)
         }
 
+        // macOS-уведомление для случая, когда пользователь переключился в другое приложение.
+        sendImportNotification(
+            filesProcessed: importProcessedTotal,
+            errors: importErrorsTotal,
+            duration: totalSec
+        )
+        // Звук завершения импорта.
+        NSSound(named: "Purr")?.play()
+
         // Сбрасываем агрегаторы для следующей очереди.
         importJobsPlanned = 0
         importJobsCompleted = 0
@@ -2996,6 +3006,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         importFormatStats.removeAll()
         importFilesPlanned = 0
         importBytesPlanned = 0
+    }
+
+    private func sendImportNotification(filesProcessed: Int, errors: Int, duration: Int) {
+        notificationService.notify(
+            title: "Krab Ear — Импорт завершён",
+            body: "Файлов: \(filesProcessed), ошибок: \(errors), время: \(duration)с"
+        )
     }
 
     private func updateImportStatusLabel() {
