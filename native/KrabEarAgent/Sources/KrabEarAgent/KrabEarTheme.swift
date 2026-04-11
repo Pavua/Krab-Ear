@@ -49,36 +49,39 @@ public enum KrabEarTheme {
 }
 
 @MainActor
-public class ThemeCardView: NSView {
-    
+public class ThemeCardView: NSVisualEffectView {
+
     public let contentStackView = NSStackView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let containerStack = NSStackView()
-    
+
     public var title: String = "" {
         didSet {
             titleLabel.stringValue = title
             titleLabel.isHidden = title.isEmpty
         }
     }
-    
-    public override var wantsUpdateLayer: Bool { true }
-    
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setup()
     }
-    
+
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
     }
-    
+
     private func setup() {
+        // Liquid Glass: frosted glass material
+        material = .hudWindow
+        blendingMode = .behindWindow
+        state = .active
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
         layer?.borderWidth = 0.5
-        layer?.masksToBounds = true  // Prevent rendering artifacts on scroll/hover
+        layer?.borderColor = KrabEarTheme.Colors.separator.cgColor
+        layer?.masksToBounds = true
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
@@ -100,33 +103,12 @@ public class ThemeCardView: NSView {
         containerStack.addArrangedSubview(contentStackView)
         addSubview(containerStack)
 
-        // Liquid Glass: add vibrancy effect behind content
-        let effectView = NSVisualEffectView()
-        effectView.material = .hudWindow
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
-        effectView.layer?.masksToBounds = true  // Prevent ghost traces from alpha blending
-        effectView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(effectView, positioned: .below, relativeTo: containerStack)
-
         NSLayoutConstraint.activate([
-            effectView.topAnchor.constraint(equalTo: topAnchor),
-            effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
             containerStack.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.cardPadding),
             containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.cardPadding)
         ])
-    }
-    
-    public override func updateLayer() {
-        super.updateLayer()
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.3).cgColor
-        layer?.borderColor = KrabEarTheme.Colors.separator.cgColor
     }
 }
 

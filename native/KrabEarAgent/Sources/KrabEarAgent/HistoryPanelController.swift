@@ -1197,26 +1197,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             importRow,
             dropZoneView,
         ]
-        // Wrap historyStack in NSScrollView for vertical overflow
-        let historyTabScrollView = NSScrollView()
-        historyTabScrollView.translatesAutoresizingMaskIntoConstraints = false
-        historyTabScrollView.hasVerticalScroller = true
-        historyTabScrollView.borderType = .noBorder
-        historyTabScrollView.drawsBackground = false
-        historyTabScrollView.automaticallyAdjustsContentInsets = false
-        historyTabScrollView.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        historyTabScrollView.documentView = historyStack
-        historyContentView.addSubview(historyTabScrollView)
-
+        historyContentView.addSubview(historyStack)
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
-            historyTabScrollView.topAnchor.constraint(equalTo: historyContentView.topAnchor),
-            historyTabScrollView.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
-            historyTabScrollView.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
-            historyTabScrollView.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
-            historyStack.widthAnchor.constraint(equalTo: historyTabScrollView.contentView.widthAnchor, constant: -24),
+            historyStack.topAnchor.constraint(equalTo: historyContentView.topAnchor, constant: 12),
+            historyStack.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor, constant: 12),
+            historyStack.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor, constant: -12),
+            historyStack.bottomAnchor.constraint(lessThanOrEqualTo: historyContentView.bottomAnchor, constant: -12),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
