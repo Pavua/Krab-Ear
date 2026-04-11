@@ -1361,18 +1361,22 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(statusRow)
 
         // --- BUTTON STYLING ---
-        let primaryButtons: [NSButton] = [startStopButton, restartButton, stopButton, loadMoreButton, jumpToLatestButton, copyButton, pasteSelectedButton, deleteButton]
-        for button in primaryButtons {
-            if let themedButton = button as? ThemePrimaryButton {
-                themedButton.bezelColor = KrabEarTheme.Colors.accent
-            } else {
-                button.bezelColor = KrabEarTheme.Colors.accent
-            }
+        // Only true primary action buttons get accent color
+        for button in [startStopButton, callAssistStartButton, callPhraseSendButton] {
+            button.bezelStyle = .push
+            button.isBordered = true
+            button.bezelColor = KrabEarTheme.Colors.accent
+            button.font = KrabEarTheme.Typography.controlLabel
         }
 
-        // Primary buttons in Live Translation
-        callAssistStartButton.bezelColor = KrabEarTheme.Colors.accent
-        callPhraseSendButton.bezelColor = KrabEarTheme.Colors.accent
+        // Secondary buttons — standard appearance
+        for button in [restartButton, stopButton, loadMoreButton, jumpToLatestButton,
+                       copyButton, pasteSelectedButton, deleteButton] as [NSButton] {
+            button.bezelStyle = .push
+            button.isBordered = true
+            button.bezelColor = nil
+            button.font = KrabEarTheme.Typography.controlLabel
+        }
 
         // Style header labels
         if let headerLabel = liveHeaderRow.arrangedSubviews.first(where: { $0 is NSTextField }) as? NSTextField {

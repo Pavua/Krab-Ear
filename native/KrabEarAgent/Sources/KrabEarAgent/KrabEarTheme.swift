@@ -5,7 +5,10 @@ public enum KrabEarTheme {
     
     public enum Colors {
         public static var windowBackground: NSColor { .windowBackgroundColor }
-        public static var cardBackground: NSColor { .controlBackgroundColor }
+        /// Liquid Glass: semi-transparent card background with vibrancy
+        public static var cardBackground: NSColor {
+            NSColor.controlBackgroundColor.withAlphaComponent(0.65)
+        }
         public static var accent: NSColor { .controlAccentColor }
         
         public static var textPrimary: NSColor { .labelColor }
@@ -74,7 +77,7 @@ public class ThemeCardView: NSView {
     private func setup() {
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
-        layer?.borderWidth = 1.0
+        layer?.borderWidth = 0.5
         
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
@@ -198,11 +201,31 @@ public class CollapsibleSectionView: NSView {
         titleLabel.isBordered = false
         titleLabel.drawsBackground = false
 
+        // Make the entire header row clickable (bigger hit target)
+        let headerClickButton = NSButton(frame: .zero)
+        headerClickButton.title = ""
+        headerClickButton.isBordered = false
+        headerClickButton.isTransparent = true
+        headerClickButton.target = self
+        headerClickButton.action = #selector(onToggle)
+        headerClickButton.translatesAutoresizingMaskIntoConstraints = false
+
         headerStack.orientation = .horizontal
         headerStack.spacing = 4
         headerStack.alignment = .centerY
         headerStack.addArrangedSubview(disclosureButton)
         headerStack.addArrangedSubview(titleLabel)
+        headerStack.addArrangedSubview(NSView()) // spacer — makes full width clickable
+
+        // Overlay invisible button on entire header for bigger click target
+        headerStack.addSubview(headerClickButton)
+        NSLayoutConstraint.activate([
+            headerClickButton.topAnchor.constraint(equalTo: headerStack.topAnchor),
+            headerClickButton.leadingAnchor.constraint(equalTo: headerStack.leadingAnchor),
+            headerClickButton.trailingAnchor.constraint(equalTo: headerStack.trailingAnchor),
+            headerClickButton.bottomAnchor.constraint(equalTo: headerStack.bottomAnchor),
+            headerStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
+        ])
 
         contentStackView.orientation = .vertical
         contentStackView.spacing = KrabEarTheme.Metrics.itemSpacing
@@ -227,7 +250,8 @@ public class CollapsibleSectionView: NSView {
     }
 
     @objc private func onToggle() {
-        setExpanded(disclosureButton.state == .on, animated: true)
+        let newState = !isExpanded
+        setExpanded(newState, animated: true)
     }
 
     public func setExpanded(_ expanded: Bool, animated: Bool) {
