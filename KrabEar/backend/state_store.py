@@ -582,6 +582,11 @@ class StateStore:
             "today_text_chars": today_text_chars,
         }
 
+    def _load_active_items_with_lock(self) -> list[HistoryItem]:
+        """Возвращает все активные записи с захватом lock (публичный API для агрегации)."""
+        with self._lock():
+            return self._load_active_items_unlocked()
+
     def count_active_items(self) -> int:
         """Возвращает количество активных (не удаленных) записей."""
         with self._lock():

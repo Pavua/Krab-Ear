@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -200,9 +200,12 @@ class BackendService:
             "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
             "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
+            "export_history": self._handle_export_history,
+            "export_history_srt": self._handle_export_history_srt,
         }
 
         handler = handlers.get(method)
@@ -1067,6 +1070,336 @@ class BackendService:
     def _handle_get_history_overview(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает обзорный срез истории для панели управления."""
         return self.store.get_history_overview()
+
+    # ------------------------------------------------------------------
+    # Экспорт истории (markdown / SRT)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_duration_human(seconds: float | None) -> str:
+        """Форматирует длительность аудио в читаемый вид: '5м 23с'."""
+        if seconds is None or seconds <= 0:
+            return ""
+        total = int(seconds)
+        h, remainder = divmod(total, 3600)
+        m, s = divmod(remainder, 60)
+        if h > 0:
+            return f"{h}ч {m}м {s}с"
+        if m > 0:
+            return f"{m}м {s}с"
+        return f"{s}с"
+
+    @staticmethod
+    def _format_ts_human(iso_ts: str) -> str:
+        """Преобразует ISO timestamp в читаемый формат: '2026-04-11 22:46'."""
+        try:
+            dt = datetime.fromisoformat(iso_ts)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            return iso_ts
+
+    def _handle_export_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует всю историю в формате Markdown с метаданными и диаризацией.
+
+        Параметры:
+            limit (int): максимальное количество записей (по умолчанию 500)
+            save_to_file (bool): если True, сохраняет файл в transcripts/
+
+        Возвращает:
+            content (str): markdown-текст
+            total_items (int): количество экспортированных записей
+            path (str|None): путь к файлу, если save_to_file=True
+        """
+        limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
+
+        # Загружаем историю через пагинацию (от новых к старым)
+        items_dicts, _ = self.store.get_history_page_filtered(
+            cursor=None, limit=limit,
+            paste_status=None, translation_mode=None,
+        )
+        if not items_dicts:
+            return {"content": "# Krab Ear \u2014 \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0438\u0441\u0442\u043e\u0440\u0438\u0438\n\n\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u043f\u0443\u0441\u0442\u0430.\n", "total_items": 0, "path": None}
+
+        from backend.models import HistoryItem as _HI
+        items = [_HI.from_dict(d) for d in items_dicts]
+
+        # Определяем временной диапазон (items отсортированы newest-first)
+        ts_list = [it.ts for it in items if it.ts]
+        earliest_ts = self._format_ts_human(ts_list[-1]) if ts_list else "?"
+        latest_ts = self._format_ts_human(ts_list[0]) if ts_list else "?"
+        export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Метаданные шапки
+        header_lines = [
+            "# Krab Ear \u2014 \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0438\u0441\u0442\u043e\u0440\u0438\u0438",
+            f"- \u0417\u0430\u043f\u0438\u0441\u0435\u0439: {len(items)}",
+            f"- \u041f\u0435\u0440\u0438\u043e\u0434: {earliest_ts} \u2014 {latest_ts}",
+            f"- \u042d\u043a\u0441\u043f\u043e\u0440\u0442: {export_ts}",
+            "",
+            "---",
+            "",
+        ]
+
+        sections: list[str] = []
+        for idx, item in enumerate(items, start=1):
+            # Заголовок записи
+            ts_human = self._format_ts_human(item.ts)
+            duration_str = self._format_duration_human(item.audio_duration_sec)
+            title_parts = [f"## {idx}. [{ts_human}]"]
+            if duration_str:
+                title_parts.append(f"({duration_str})")
+            sections.append(" ".join(title_parts))
+
+            # Метаданные записи
+            meta_parts: list[str] = []
+            if item.source_lang:
+                meta_parts.append(f"**\u042f\u0437\u044b\u043a:** {item.source_lang}")
+            diar = item.diarization
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                turns = diar.get("speaker_turns", [])
+                speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+                if len(speakers) >= 2:
+                    meta_parts.append(f"**\u0421\u043f\u0438\u043a\u0435\u0440\u044b:** {len(speakers)}")
+            if meta_parts:
+                sections.append(" | ".join(meta_parts))
+                sections.append("")
+
+            # Основной текст (с метками спикеров если есть диаризация)
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                turns = diar.get("speaker_turns", [])
+                speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+                if len(speakers) >= 2 and turns:
+                    for turn in turns:
+                        speaker = turn.get("speaker", "?")
+                        turn_text = str(turn.get("text", "")).strip()
+                        if turn_text:
+                            sections.append(f"[{speaker}]: {turn_text}")
+                else:
+                    sections.append(item.text)
+            else:
+                sections.append(item.text)
+
+            # Перевод (если есть)
+            if item.translated_text and item.translation_status == "ok":
+                mode_label = item.translation_mode or ""
+                sections.append("")
+                sections.append(f"**\u041f\u0435\u0440\u0435\u0432\u043e\u0434** ({mode_label}):")
+                sections.append(item.translated_text)
+
+            sections.append("")
+
+        content = "\n".join(header_lines) + "\n".join(sections)
+
+        # Сохранение в файл (опционально)
+        save_path: str | None = None
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                transcripts_dir.mkdir(exist_ok=True)
+                filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                file_path = transcripts_dir / filename
+                file_path.write_text(content, encoding="utf-8")
+                save_path = str(file_path)
+            except Exception as exc:
+                logger.warning("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u044d\u043a\u0441\u043f\u043e\u0440\u0442 \u0432 \u0444\u0430\u0439\u043b: %s", exc)
+
+        return {"content": content, "total_items": len(items), "path": save_path}
+
+    def _handle_export_history_srt(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует запись истории в формате SRT-субтитров (по speaker_turns).
+
+        Параметры:
+            id (str): идентификатор записи в истории
+            save_to_file (bool): если True, сохраняет файл в transcripts/
+
+        Возвращает:
+            content (str): SRT-текст
+            item_id (str): ID записи
+            speakers (int): количество спикеров
+            segments (int): количество сегментов
+            path (str|None): путь к файлу, если save_to_file=True
+        """
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u0435\u043d")
+
+        # Ищем запись по ID через пагинацию
+        from backend.models import HistoryItem as _HI
+        target_item: _HI | None = None
+        cursor: str | None = None
+        for _ in range(200):  # безопасный лимит итераций
+            page_dicts, next_cursor = self.store.get_history_page_filtered(
+                cursor=cursor, limit=100,
+                paste_status=None, translation_mode=None,
+            )
+            if not page_dicts:
+                break
+            for d in page_dicts:
+                if d.get("id") == item_id:
+                    target_item = _HI.from_dict(d)
+                    break
+            if target_item is not None:
+                break
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+
+        if target_item is None:
+            raise RuntimeError(f"\u0417\u0430\u043f\u0438\u0441\u044c \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430: {item_id}")
+
+        diar = target_item.diarization
+        if not diar or not isinstance(diar, dict) or not diar.get("enabled"):
+            # Без диаризации — один сегмент на весь текст
+            duration = target_item.audio_duration_sec or 0.0
+            srt_content = self._build_srt_single(target_item.text, duration)
+            return self._finalize_srt_export(
+                params, srt_content, item_id, speakers=1, segments=1,
+            )
+
+        turns = diar.get("speaker_turns", [])
+        if not turns:
+            duration = target_item.audio_duration_sec or 0.0
+            srt_content = self._build_srt_single(target_item.text, duration)
+            return self._finalize_srt_export(
+                params, srt_content, item_id, speakers=1, segments=1,
+            )
+
+        speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+        srt_lines: list[str] = []
+        for seq, turn in enumerate(turns, start=1):
+            speaker = turn.get("speaker", "SPEAKER_00")
+            turn_text = str(turn.get("text", "")).strip()
+            if not turn_text:
+                continue
+            start_sec = float(turn.get("start", 0.0) or 0.0)
+            end_sec = float(turn.get("end", start_sec + 1.0) or start_sec + 1.0)
+            srt_lines.append(str(seq))
+            srt_lines.append(f"{self._srt_timestamp(start_sec)} --> {self._srt_timestamp(end_sec)}")
+            srt_lines.append(f"[{speaker}]: {turn_text}")
+            srt_lines.append("")
+
+        srt_content = "\n".join(srt_lines)
+        return self._finalize_srt_export(
+            params, srt_content, item_id,
+            speakers=len(speakers), segments=len(turns),
+        )
+
+    def _finalize_srt_export(
+        self,
+        params: dict[str, Any],
+        srt_content: str,
+        item_id: str,
+        speakers: int,
+        segments: int,
+    ) -> dict[str, Any]:
+        """Общая финализация SRT-экспорта: опциональное сохранение в файл."""
+        save_path: str | None = None
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                transcripts_dir.mkdir(exist_ok=True)
+                filename = f"srt_{item_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
+                file_path = transcripts_dir / filename
+                file_path.write_text(srt_content, encoding="utf-8")
+                save_path = str(file_path)
+            except Exception as exc:
+                logger.warning("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c SRT \u0432 \u0444\u0430\u0439\u043b: %s", exc)
+        return {
+            "content": srt_content,
+            "item_id": item_id,
+            "speakers": speakers,
+            "segments": segments,
+            "path": save_path,
+        }
+
+    @staticmethod
+    def _build_srt_single(text: str, duration: float) -> str:
+        """Строит SRT с одним сегментом (без диаризации)."""
+        end_ts = BackendService._srt_timestamp(duration) if duration > 0 else "00:00:01,000"
+        return f"1\n00:00:00,000 --> {end_ts}\n{text}\n"
+
+    @staticmethod
+    def _srt_timestamp(seconds: float) -> str:
+        """Конвертирует секунды в SRT-формат: HH:MM:SS,mmm."""
+        if seconds < 0:
+            seconds = 0.0
+        total_ms = int(round(seconds * 1000))
+        h, remainder = divmod(total_ms, 3600000)
+        m, remainder = divmod(remainder, 60000)
+        s, ms = divmod(remainder, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
+
+        Сканирует всю активную историю через store и агрегирует метаданные.
+        """
+        active = self.store._load_active_items_with_lock()
+
+        now = datetime.now()
+        today_iso = now.date().isoformat()
+        week_start = (now - timedelta(days=now.weekday())).date().isoformat()
+
+        total_count = 0
+        total_duration_sec = 0.0
+        today_count = 0
+        today_duration_sec = 0.0
+        week_count = 0
+        week_duration_sec = 0.0
+        llm_applied_count = 0
+        diarization_used_count = 0
+        lang_counts: dict[str, int] = {}
+
+        for item in active:
+            total_count += 1
+            dur = item.audio_duration_sec or 0.0
+            total_duration_sec += dur
+
+            day_str = item.ts[:10]  # "YYYY-MM-DD"
+            if day_str == today_iso:
+                today_count += 1
+                today_duration_sec += dur
+            if day_str >= week_start:
+                week_count += 1
+                week_duration_sec += dur
+
+            if item.llm_applied:
+                llm_applied_count += 1
+
+            if item.diarization is not None and isinstance(item.diarization, dict):
+                if item.diarization.get("enabled"):
+                    diarization_used_count += 1
+
+            lang = item.source_lang.strip()
+            if lang:
+                lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+        avg_duration = round(total_duration_sec / total_count, 2) if total_count else 0.0
+        llm_rate = round(llm_applied_count / total_count, 4) if total_count else 0.0
+        diarization_rate = round(diarization_used_count / total_count, 4) if total_count else 0.0
+
+        most_used_lang = ""
+        if lang_counts:
+            most_used_lang = max(lang_counts, key=lambda k: lang_counts[k])
+
+        return {
+            "total_count": total_count,
+            "total_duration_sec": round(total_duration_sec, 2),
+            "today_count": today_count,
+            "today_duration_sec": round(today_duration_sec, 2),
+            "week_count": week_count,
+            "week_duration_sec": round(week_duration_sec, 2),
+            "avg_duration_sec": avg_duration,
+            "most_used_lang": most_used_lang,
+            "lang_distribution": [
+                {"lang": lang, "count": cnt}
+                for lang, cnt in sorted(lang_counts.items(), key=lambda p: p[1], reverse=True)[:10]
+            ],
+            "llm_applied_count": llm_applied_count,
+            "llm_correction_rate": llm_rate,
+            "diarization_used_count": diarization_used_count,
+            "diarization_usage_rate": diarization_rate,
+        }
 
     def _handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Локальный lightweight-summary для длинных заметок/транскриптов."""

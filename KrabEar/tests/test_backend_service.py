@@ -375,6 +375,66 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(result["no_translation"], 1)
         self.assertIn("top_modes", result)
 
+    def test_get_recording_stats_empty(self) -> None:
+        """get_recording_stats на пустой истории возвращает нулевые значения."""
+        resp = self.request("get_recording_stats")
+        self.assertTrue(resp["ok"])
+        r = resp["result"]
+        self.assertEqual(r["total_count"], 0)
+        self.assertEqual(r["total_duration_sec"], 0.0)
+        self.assertEqual(r["today_count"], 0)
+        self.assertEqual(r["avg_duration_sec"], 0.0)
+        self.assertEqual(r["most_used_lang"], "")
+        self.assertEqual(r["llm_correction_rate"], 0.0)
+        self.assertEqual(r["diarization_usage_rate"], 0.0)
+        self.assertEqual(r["lang_distribution"], [])
+
+    def test_get_recording_stats_with_data(self) -> None:
+        """get_recording_stats корректно агрегирует длительность, язык, LLM, диаризацию."""
+        store = self.service.store
+        # 3 записи: 2 с длительностью, 1 без; 2 ru, 1 es; 1 llm; 1 diarization
+        store.add_history_item(
+            text="первая запись",
+            paste_status="ok",
+            source_lang="ru",
+            audio_duration_sec=10.5,
+            llm_applied=True,
+            llm_latency_ms=120,
+        )
+        store.add_history_item(
+            text="segunda entrada",
+            paste_status="ok",
+            source_lang="es",
+            audio_duration_sec=5.25,
+            diarization={"enabled": True, "speakers_count": 2, "speaker_turns": []},
+        )
+        store.add_history_item(
+            text="третья запись",
+            paste_status="failed",
+            source_lang="ru",
+            audio_duration_sec=None,
+        )
+        resp = self.request("get_recording_stats")
+        self.assertTrue(resp["ok"])
+        r = resp["result"]
+        self.assertEqual(r["total_count"], 3)
+        self.assertEqual(r["total_duration_sec"], 15.75)
+        self.assertEqual(r["today_count"], 3)
+        self.assertAlmostEqual(r["avg_duration_sec"], 5.25, places=2)
+        self.assertEqual(r["most_used_lang"], "ru")
+        # lang_distribution: ru=2, es=1
+        langs = {d["lang"]: d["count"] for d in r["lang_distribution"]}
+        self.assertEqual(langs["ru"], 2)
+        self.assertEqual(langs["es"], 1)
+        # LLM: 1 out of 3
+        self.assertEqual(r["llm_applied_count"], 1)
+        self.assertAlmostEqual(r["llm_correction_rate"], 1 / 3, places=4)
+        # Diarization: 1 out of 3
+        self.assertEqual(r["diarization_used_count"], 1)
+        self.assertAlmostEqual(r["diarization_usage_rate"], 1 / 3, places=4)
+        # Week count should equal today count (all items are from today)
+        self.assertEqual(r["week_count"], 3)
+
     def test_glossary_management(self) -> None:
         add = self.request(
             "set_translation_glossary_item",
