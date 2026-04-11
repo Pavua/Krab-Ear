@@ -1306,7 +1306,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }
 
         let callAssistCard = ThemeCardView()
-        callAssistCard.title = "Call Assist"
+        callAssistCard.title = ""  // Title shown by CollapsibleSectionView
         for view in [callAssistControlRow, callPhrasePresetRow, callPhraseActionRow, callTimelineRow, callAssistOutputScroll] as [NSView] {
             view.removeFromSuperview()
             callAssistCard.contentStackView.addArrangedSubview(view)

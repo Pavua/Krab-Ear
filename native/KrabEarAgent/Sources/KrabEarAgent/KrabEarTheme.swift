@@ -133,6 +133,11 @@ public class ThemeCardView: NSVisualEffectView {
             containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.cardPadding)
         ])
     }
+
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.borderColor = NSColor.separatorColor.cgColor
+    }
 }
 
 @MainActor
