@@ -1661,5 +1661,110 @@ class VocabularyPassthroughTestCase(unittest.TestCase):
         self.assertIsNone(self.transcriber.last_extra_vocabulary)
 
 
+class GlossarySuggestionsTestCase(unittest.TestCase):
+    """Тесты IPC-метода get_glossary_suggestions."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def request(self, method: str, params=None, request_id="t1"):
+        return self.service.handle_request(
+            {"id": request_id, "method": method, "params": params or {}}
+        )
+
+    def _add_item(self, source_text: str, translated_text: str) -> None:
+        self.store.add_history_item(
+            text=translated_text,
+            paste_status="ok",
+            source_text=source_text,
+            translated_text=translated_text,
+        )
+
+    def test_empty_history_returns_brand_suggestions(self) -> None:
+        """Без истории переводов возвращаются только бренды из BRAND_REPLACEMENTS."""
+        resp = self.request("get_glossary_suggestions")
+        self.assertTrue(resp["ok"])
+        result = resp["result"]
+        origins = {s["origin"] for s in result["suggestions"]}
+        # Должны присутствовать brand_replacement кандидаты
+        self.assertIn("brand_replacement", origins)
+        self.assertEqual(result["scanned_items"], 0)
+
+    def test_history_pair_detected(self) -> None:
+        """Заглавное слово из истории появляется среди кандидатов."""
+        # Используем слово не из BRAND_REPLACEMENTS, чтобы оно шло через capitalized_term
+        for _ in range(3):
+            self._add_item(
+                source_text="Открой Zabbix и проверь мониторинг",
+                translated_text="Open Zabbix and check monitoring",
+            )
+        resp = self.request("get_glossary_suggestions", {"min_count": 2, "top_k": 50})
+        self.assertTrue(resp["ok"])
+        suggestions = resp["result"]["suggestions"]
+        sources = [s["source"] for s in suggestions]
+        self.assertIn("Zabbix", sources)
+
+    def test_existing_glossary_filtered(self) -> None:
+        """Слова уже в глоссарии не возвращаются."""
+        # Записываем Zabbix в глоссарий напрямую, избегая мутации DEFAULT_SETTINGS
+        existing = self.store.load_settings()
+        existing["translation_glossary"] = dict(existing.get("translation_glossary") or {})
+        existing["translation_glossary"]["Zabbix"] = "Zabbix"
+        self.store.save_settings(existing)
+        self.service._invalidate_settings_cache()
+
+        for _ in range(3):
+            self._add_item(
+                source_text="Открой Zabbix срочно",
+                translated_text="Open Zabbix urgently",
+            )
+        resp = self.request("get_glossary_suggestions", {"min_count": 2, "top_k": 50})
+        self.assertTrue(resp["ok"])
+        sources = [s["source"] for s in resp["result"]["suggestions"]]
+        self.assertNotIn("Zabbix", sources)
+
+    def test_low_frequency_terms_excluded(self) -> None:
+        """Слова с частотой ниже min_count не попадают в history_pair/capitalized_term."""
+        # Добавляем только 1 запись — частота = 1 (Zabbix не в BRAND_REPLACEMENTS)
+        self._add_item(
+            source_text="Открой Zabbix один раз",
+            translated_text="Open Zabbix once",
+        )
+        resp = self.request("get_glossary_suggestions", {"min_count": 3, "top_k": 50})
+        self.assertTrue(resp["ok"])
+        # Zabbix с count=1 не должен быть среди history_pair/capitalized_term
+        non_brand = [
+            s for s in resp["result"]["suggestions"]
+            if s["origin"] != "brand_replacement"
+        ]
+        sources = [s["source"] for s in non_brand]
+        self.assertNotIn("Zabbix", sources)
+
+    def test_top_k_limits_results(self) -> None:
+        """top_k ограничивает количество результатов."""
+        resp = self.request("get_glossary_suggestions", {"top_k": 5})
+        self.assertTrue(resp["ok"])
+        self.assertLessEqual(len(resp["result"]["suggestions"]), 5)
+
+    def test_result_schema(self) -> None:
+        """Ответ содержит все обязательные поля."""
+        resp = self.request("get_glossary_suggestions")
+        self.assertTrue(resp["ok"])
+        result = resp["result"]
+        for key in ("suggestions", "total_candidates", "scanned_items", "current_glossary_size"):
+            self.assertIn(key, result)
+        for s in result["suggestions"]:
+            for field in ("source", "target", "count", "origin"):
+                self.assertIn(field, s)
+
+
 if __name__ == "__main__":
     unittest.main()
