@@ -385,6 +385,98 @@ class LLMRewriter:
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
 
+    def summarize(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
+        """Генерирует краткое summary текста через LLM.
+
+        Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
+        """
+        cleaned_input = (text or "").strip()
+        if not cleaned_input:
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="empty_input", latency_ms=None
+            )
+
+        if not self._circuit.allow_request():
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
+            )
+
+        system_prompt = (
+            f"Сделай краткое summary ({max_sentences} предложения) этого разговора/диктовки. "
+            "Верни ТОЛЬКО summary. Без пояснений. Без кавычек. Без префиксов."
+        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": cleaned_input},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 512,
+            "stream": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        start = time.monotonic()
+        try:
+            response = requests.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self._timeout * 2,  # summary может быть длиннее
+            )
+        except requests.Timeout:
+            self._circuit.record_failure()
+            self._last_error = "timeout"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="timeout", latency_ms=None
+            )
+        except (requests.ConnectionError, requests.RequestException) as exc:
+            self._circuit.record_failure()
+            self._last_error = f"connection_error: {exc}"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="connection_error", latency_ms=None
+            )
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        self._last_latency_ms = latency_ms
+
+        if response.status_code != 200:
+            self._circuit.record_failure()
+            self._last_error = f"http_{response.status_code}"
+            return LLMRewriteResult(
+                ok=False, text=None,
+                fallback_reason=f"http_{response.status_code}",
+                latency_ms=latency_ms,
+            )
+
+        try:
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            self._circuit.record_failure()
+            self._last_error = f"parse_error: {exc}"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="parse_error", latency_ms=latency_ms
+            )
+
+        cleaned = (content or "").strip()
+        if not cleaned:
+            self._circuit.record_failure()
+            self._last_error = "empty_response"
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="empty_response", latency_ms=latency_ms
+            )
+
+        self._circuit.record_success()
+        self._last_error = None
+        return LLMRewriteResult(
+            ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
+        )
+
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.
 

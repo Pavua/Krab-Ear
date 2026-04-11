@@ -202,6 +202,7 @@ class BackendService:
             "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
+            "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
             "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
             "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
             "export_history": self._handle_export_history,
@@ -1444,6 +1445,60 @@ class BackendService:
             summary = head
         return {"mode": mode, "summary": summary, "bullets": bullets}
 
+    def _generate_summary(self, text: str) -> str | None:
+        """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
+        if self._llm_rewriter is None:
+            return None
+        try:
+            result = self._llm_rewriter.summarize(text, max_sentences=3)
+            if result.ok and result.text:
+                logger.info("LLM summary сгенерировано (%d мс)", result.latency_ms or 0)
+                return result.text
+            logger.debug("LLM summary не удалось: %s", result.fallback_reason)
+            return None
+        except Exception as exc:
+            logger.warning("Ошибка генерации LLM summary: %s", exc)
+            return None
+
+    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует LLM-summary для элемента истории по ID."""
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("Параметр id обязателен")
+
+        # Найти элемент в истории
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        target = None
+        for item in items:
+            if item.id == item_id:
+                target = item
+                break
+        if target is None:
+            raise RuntimeError(f"Элемент не найден: {item_id}")
+
+        text = target.text or ""
+        if len(text) < 50:
+            raise RuntimeError("Текст слишком короткий для summary")
+
+        summary = self._generate_summary(text)
+        if summary is None:
+            # Fallback на локальный summary
+            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
+            return {
+                "id": item_id,
+                "summary": local["summary"],
+                "llm": False,
+                "source_chars": len(text),
+            }
+
+        return {
+            "id": item_id,
+            "summary": summary,
+            "llm": True,
+            "source_chars": len(text),
+        }
+
     def _handle_llm_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает диагностическую информацию о LLM rewriter'е.
 
@@ -2533,6 +2588,11 @@ class BackendService:
                     audio_duration_sec=audio_duration_sec,
                 )
 
+                # Auto-summary для длинных транскрипций (>500 символов)
+                summary: str | None = None
+                if len(final_text) > 500:
+                    summary = self._generate_summary(final_text)
+
                 # Save transcript to file
                 try:
                     transcripts_dir = Path(self.store.data_dir) / "transcripts"
@@ -2556,6 +2616,8 @@ class BackendService:
                             speakers = diar_info.get("speaker_turns", [])
                             unique_speakers = len(set(t.get("speaker") for t in speakers))
                             f.write(f"- Спикеры: {unique_speakers}\n")
+                        if summary:
+                            f.write(f"\n## Краткое содержание\n\n{summary}\n")
                         # Use speaker-labeled text if diarization is active
                         if diar_info and diar_info.get("enabled") and diar_info.get("speaker_turns"):
                             f.write(f"\n## Диалог\n\n{display_text}\n")
@@ -2566,23 +2628,24 @@ class BackendService:
                 except Exception as exc:
                     logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
 
-                items.append(
-                    {
-                        "path": audio_path,
-                        "text": display_text,
-                        "original_text": text,
-                        "translated_text": translated_text,
-                        "translation_mode": translation.mode,
-                        "translation_style": translation_style,
-                        "translation_status": translation.status,
-                        "source_lang": translation.source_lang,
-                        "target_lang": translation.target_lang,
-                        "history_id": history_item.id,
-                        "duration_sec": elapsed,
-                        "audio_duration_sec": audio_duration_sec,
-                        "language": detected_lang,
-                    }
-                )
+                item_result: dict[str, Any] = {
+                    "path": audio_path,
+                    "text": display_text,
+                    "original_text": text,
+                    "translated_text": translated_text,
+                    "translation_mode": translation.mode,
+                    "translation_style": translation_style,
+                    "translation_status": translation.status,
+                    "source_lang": translation.source_lang,
+                    "target_lang": translation.target_lang,
+                    "history_id": history_item.id,
+                    "duration_sec": elapsed,
+                    "audio_duration_sec": audio_duration_sec,
+                    "language": detected_lang,
+                }
+                if summary:
+                    item_result["summary"] = summary
+                items.append(item_result)
             except Exception as exc:
                 err_msg = str(exc)
                 file_name = Path(audio_path).name
