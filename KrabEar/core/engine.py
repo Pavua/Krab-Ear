@@ -258,6 +258,20 @@ class AudioEngine:
                 audio_data = _temp_copy_path
                 logger.info("iCloud файл скопирован во временный: %s", _temp_copy_path)
 
+        # Auto-select model for file imports based on duration
+        if isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)) and not is_preview:
+            try:
+                import soundfile as sf
+                info = sf.info(str(audio_data))
+                if info.duration < 30:
+                    self.set_quality_profile("balanced")
+                    logger.info("Auto-select: balanced (short audio %.1fs)", info.duration)
+                elif info.duration > 300:
+                    self.set_quality_profile("max")
+                    logger.info("Auto-select: max (long audio %.1fs)", info.duration)
+            except Exception:
+                pass  # Fall through to configured profile
+
         try:
             # 3. Вызов распознавания с механизмом деградации (fallback)
             result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
