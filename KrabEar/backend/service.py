@@ -218,6 +218,10 @@ class BackendService:
             "repaste_item": self._handle_repaste_item,
             "cleanup_old_history": self._handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._handle_get_storage_info,  # размер файлов данных
+            "apply_profile_preset": self._handle_apply_profile_preset,  # применяет пресет настроек профиля
+            "list_profile_presets": self._handle_list_profile_presets,  # список доступных пресетов профилей
+            "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
+            "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
         }
 
         handler = handlers.get(method)
@@ -490,6 +494,9 @@ class BackendService:
         translation_status = translation.status
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
+        confidence = tp.get("confidence", 0.0)
+        if confidence < 0.4 and text:
+            logger.warning("Низкая уверенность STT: %.2f — возможна ошибка распознавания", confidence)
         diarization_data = tp.get("diarization")
 
         # Format text with speaker labels if diarization produced multiple speakers
@@ -790,6 +797,74 @@ class BackendService:
         result = self.store.save_settings(settings)
         self._invalidate_settings_cache()
         return result
+
+    # ---------------------------------------------------------------------------
+    # Пресеты профилей настроек
+    # ---------------------------------------------------------------------------
+
+    _PROFILE_PRESETS: dict[str, dict[str, Any]] = {
+        "default": {
+            "quality_profile": "balanced",
+            "cleanup_profile": "soft",
+            "translation_mode": "off",
+            "realtime_preview_enabled": True,
+            "auto_paste": True,
+        },
+        "meeting": {
+            "quality_profile": "max",
+            "cleanup_profile": "strict",
+            "translation_mode": "off",
+            "realtime_preview_enabled": True,
+            "auto_paste": False,  # не вставлять автоматически во время митинга
+        },
+        "translation": {
+            "quality_profile": "balanced",
+            "cleanup_profile": "soft",
+            "translation_mode": "auto",
+            "translate_and_paste": True,
+            "realtime_preview_enabled": True,
+            "auto_paste": True,
+        },
+        "call_recording": {
+            "quality_profile": "max",
+            "cleanup_profile": "strict",
+            "translation_mode": "off",
+            "realtime_preview_enabled": False,
+            "auto_paste": False,
+        },
+    }
+
+    _PROFILE_PRESET_DESCRIPTIONS: dict[str, str] = {
+        "default": "Стандартный режим: сбалансированное качество, мягкая очистка, автовставка включена",
+        "meeting": "Режим митинга: максимальное качество, строгая очистка, автовставка отключена",
+        "translation": "Режим перевода: авто-перевод с автовставкой результата",
+        "call_recording": "Режим записи звонка: максимальное качество, без превью и автовставки",
+    }
+
+    def _handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Применяет пресет настроек профиля, сохраняет и сбрасывает кэш."""
+        profile = str(params.get("profile", "")).strip()
+        preset = self._PROFILE_PRESETS.get(profile)
+        if preset is None:
+            available = ", ".join(self._PROFILE_PRESETS.keys())
+            raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
+
+        settings = self._cached_settings()
+        settings.update(preset)
+        result = self.store.save_settings(settings)
+        self._invalidate_settings_cache()
+        return result
+
+    def _handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список доступных пресетов профилей с описаниями и значениями."""
+        presets = []
+        for name, values in self._PROFILE_PRESETS.items():
+            presets.append({
+                "name": name,
+                "description": self._PROFILE_PRESET_DESCRIPTIONS.get(name, ""),
+                "settings": dict(values),
+            })
+        return {"presets": presets}
 
     def _handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
@@ -2825,6 +2900,40 @@ class BackendService:
             "count": len(items),
             "default_input_id": default_input_id,
         }
+
+    def _handle_get_audio_devices(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список доступных входных аудиоустройств (обёртка для GUI)."""
+        return {"devices": self._list_audio_inputs()}
+
+    def _handle_test_microphone(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Записывает короткий фрагмент аудио и возвращает RMS/peak уровни."""
+        import numpy as np
+
+        duration = min(float(params.get("duration_sec", 2.0)), 5.0)
+        try:
+            import sounddevice as sd  # type: ignore
+
+            sample_rate = 16000
+            frames = int(duration * sample_rate)
+            audio_data = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
+            sd.wait()
+            audio_flat = audio_data.flatten()
+            rms = float(np.sqrt(np.mean(audio_flat ** 2)))
+            peak = float(np.max(np.abs(audio_flat)))
+            return {
+                "ok": True,
+                "duration_sec": duration,
+                "rms": round(rms, 6),
+                "peak": round(peak, 6),
+                "devices": self._list_audio_inputs(),
+            }
+        except Exception as exc:
+            logger.warning("test_microphone: ошибка записи — %s", exc)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "devices": self._list_audio_inputs(),
+            }
 
     def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
         raw_paths = params.get("paths", [])
