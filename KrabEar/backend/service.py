@@ -2047,11 +2047,13 @@ class BackendService:
         for audio_path in audio_paths:
             started_at = time.monotonic()
             try:
+                # For file imports, default to auto-detect if no explicit hint
+                import_lang_hint = lang_hint if lang_hint else "auto"
                 transcribe_payload = self.transcriber.transcribe(
                     audio_path,
                     quality_profile=quality_profile,
                     cleanup_profile=cleanup_profile,
-                    lang_hint=lang_hint,
+                    lang_hint=import_lang_hint,
                 )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
@@ -2063,6 +2065,7 @@ class BackendService:
                         errors.append(f"{audio_path}: пустой результат")
                     continue
                 diarization_data = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
+                detected_lang = transcribe_payload.get("language", "?") if isinstance(transcribe_payload, dict) else "?"
 
                 translation = self.translator.translate(
                     text=text,
@@ -2103,12 +2106,17 @@ class BackendService:
                         f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                         f.write(f"- Длительность: {elapsed:.1f}с\n")
                         f.write(f"- Источник: {audio_path}\n")
+                        f.write(f"- Язык: {detected_lang}\n")
                         diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
                         if diar_info and diar_info.get("enabled"):
                             speakers = diar_info.get("speaker_turns", [])
                             unique_speakers = len(set(t.get("speaker") for t in speakers))
                             f.write(f"- Спикеры: {unique_speakers}\n")
-                        f.write(f"\n## Текст\n\n{final_text}\n")
+                        # Use speaker-labeled text if diarization is active
+                        if diar_info and diar_info.get("enabled") and diar_info.get("speaker_turns"):
+                            f.write(f"\n## Диалог\n\n{display_text}\n")
+                        else:
+                            f.write(f"\n## Текст\n\n{final_text}\n")
                         if translated_text:
                             f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
                 except Exception as exc:
@@ -2127,6 +2135,7 @@ class BackendService:
                         "target_lang": translation.target_lang,
                         "history_id": history_item.id,
                         "duration_sec": elapsed,
+                        "language": detected_lang,
                     }
                 )
             except Exception as exc:
