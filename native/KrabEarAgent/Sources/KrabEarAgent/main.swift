@@ -285,6 +285,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         openHistoryPanel(forceMenubar: false)
     }
 
+    @objc private func onOpenTranscriptsInFinder() {
+        let dataDir = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath
+        let url = URL(fileURLWithPath: dataDir, isDirectory: true)
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func onModeToggle() {
         let nextMode = settings.mode == "menubar" ? "headless" : "menubar"
         applyMode(nextMode, persist: true)
@@ -1321,6 +1327,23 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         historyItem.target = self
         historyItem.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(historyItem)
+
+        let showPanelItem = NSMenuItem(
+            title: "Показать панель",
+            action: #selector(onOpenHistory),
+            keyEquivalent: "k"
+        )
+        showPanelItem.target = self
+        showPanelItem.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(showPanelItem)
+
+        let openTranscriptsItem = NSMenuItem(
+            title: "Открыть транскрипты",
+            action: #selector(onOpenTranscriptsInFinder),
+            keyEquivalent: ""
+        )
+        openTranscriptsItem.target = self
+        menu.addItem(openTranscriptsItem)
 
         menu.addItem(.separator())
 

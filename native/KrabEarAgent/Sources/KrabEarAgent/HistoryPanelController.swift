@@ -238,6 +238,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private var historyImportSection: CollapsibleSectionView?
     // MARK: - Tab selector
     private var tabSelector: NSSegmentedControl!
+    // MARK: - Keyboard shortcut monitor
+    nonisolated(unsafe) private var keyboardMonitor: Any?
     // MARK: - Reorganized History action rows
     private let primaryActionsRow = NSStackView()
     private let secondaryActionsRow = NSStackView()
@@ -281,6 +283,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) не поддерживается")
+    }
+
+    deinit {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     func showPanel() {
@@ -1242,7 +1250,51 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
 
+        setupKeyboardShortcuts()
         applyVisualTheme()
+    }
+
+    // MARK: - Keyboard Shortcuts (Cmd+1/2/3, Cmd+F, Cmd+R, Esc)
+
+    private func setupKeyboardShortcuts() {
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, self.window?.isKeyWindow == true else { return event }
+
+            if event.modifierFlags.contains(.command) {
+                switch event.charactersIgnoringModifiers {
+                case "1":
+                    self.tabSelector.selectedSegment = 0
+                    self.mainTabView.selectTabViewItem(at: 0)
+                    return nil
+                case "2":
+                    self.tabSelector.selectedSegment = 1
+                    self.mainTabView.selectTabViewItem(at: 1)
+                    return nil
+                case "3":
+                    self.tabSelector.selectedSegment = 2
+                    self.mainTabView.selectTabViewItem(at: 2)
+                    return nil
+                case "f":
+                    self.tabSelector.selectedSegment = 2
+                    self.mainTabView.selectTabViewItem(at: 2)
+                    self.window?.makeFirstResponder(self.searchField)
+                    return nil
+                case "r":
+                    self.loadInitial()
+                    return nil
+                default:
+                    break
+                }
+            }
+
+            // Escape — закрыть панель
+            if event.keyCode == 53 {
+                self.window?.orderOut(nil)
+                return nil
+            }
+
+            return event
+        }
     }
 
     @MainActor
