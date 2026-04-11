@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -201,6 +201,7 @@ class BackendService:
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_glossary_suggestions": self._handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
             "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
@@ -215,6 +216,8 @@ class BackendService:
             "export_history_srt": self._handle_export_history_srt,
             "get_clipboard_history": self._handle_get_clipboard_history,
             "repaste_item": self._handle_repaste_item,
+            "cleanup_old_history": self._handle_cleanup_old_history,  # удаляет записи старше N дней
+            "get_storage_info": self._handle_get_storage_info,  # размер файлов данных
         }
 
         handler = handlers.get(method)
@@ -1101,6 +1104,110 @@ class BackendService:
         self._invalidate_settings_cache()
         return {"removed": True, "count": len(saved.get("translation_glossary", {}))}
 
+    def _handle_get_glossary_suggestions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует историю переводов и предлагает пары source→target для глоссария.
+
+        Сканирует записи истории с source_text и translated_text, извлекает:
+        - заглавные слова/фразы (имена собственные, бренды)
+        - термины из BRAND_REPLACEMENTS
+        - повторяющиеся слова в парах оригинал→перевод
+
+        Возвращает кандидатов, которых ещё нет в текущем глоссарии.
+        """
+        from core.utils import _BRAND_REPLACEMENTS_RAW
+
+        scan_limit = max(10, min(int(params.get("scan_limit", 200) or 200), 1000))
+        min_count = max(2, min(int(params.get("min_count", 2) or 2), 20))
+        top_k = max(5, min(int(params.get("top_k", 30) or 30), 100))
+
+        items, _ = self.store.get_history_page(cursor=None, limit=scan_limit)
+
+        # Загружаем текущий глоссарий — фильтруем уже добавленные пары
+        settings = self._cached_settings()
+        current_glossary: dict[str, str] = settings.get("translation_glossary", {}) or {}
+
+        # Бренды из utils.py — канонические замены, которые стоит добавить в глоссарий
+        brand_canonicals: list[str] = [canonical for _pat, canonical in _BRAND_REPLACEMENTS_RAW]
+
+        # Собираем частоту заглавных слов и пары source→translated из истории
+        pair_counts: dict[str, dict[str, int]] = {}  # source_word → {translated_word: count}
+        capitalized_freq: dict[str, int] = {}
+
+        for item in items:
+            source_text = str(item.get("source_text", "") or "").strip()
+            translated_text = str(item.get("translated_text", "") or "").strip()
+            if not source_text or not translated_text:
+                continue
+
+            cap_words = re.findall(r"\b[A-ZА-Я][A-Za-zА-Яа-я]{2,}\b", source_text)
+            for w in cap_words:
+                capitalized_freq[w] = capitalized_freq.get(w, 0) + 1
+
+            for src_word in set(cap_words):
+                pattern = re.compile(r"\b" + re.escape(src_word) + r"\b", re.IGNORECASE)
+                match = pattern.search(translated_text)
+                if match:
+                    found = match.group(0)
+                    if src_word not in pair_counts:
+                        pair_counts[src_word] = {}
+                    pair_counts[src_word][found] = pair_counts[src_word].get(found, 0) + 1
+
+        suggestions: list[dict] = []
+
+        # 1. Пары из истории (src != target — реальный перевод)
+        for src_word, trans_counts in pair_counts.items():
+            if capitalized_freq.get(src_word, 0) < min_count:
+                continue
+            if src_word in current_glossary:
+                continue
+            best_target = max(trans_counts, key=lambda k: trans_counts[k])
+            if src_word.lower() != best_target.lower():
+                suggestions.append({
+                    "source": src_word,
+                    "target": best_target,
+                    "count": capitalized_freq[src_word],
+                    "origin": "history_pair",
+                })
+
+        # 2. Заглавные слова без явного перевода — пользователь уточнит target
+        for word, count in capitalized_freq.items():
+            if count < min_count:
+                continue
+            if word in current_glossary:
+                continue
+            if any(s["source"] == word for s in suggestions):
+                continue
+            suggestions.append({
+                "source": word,
+                "target": word,
+                "count": count,
+                "origin": "capitalized_term",
+            })
+
+        # 3. Бренды из BRAND_REPLACEMENTS — предлагаем зафиксировать в глоссарии
+        for canonical in brand_canonicals:
+            if canonical in current_glossary:
+                continue
+            if any(s["source"] == canonical for s in suggestions):
+                continue
+            suggestions.append({
+                "source": canonical,
+                "target": canonical,
+                "count": 0,
+                "origin": "brand_replacement",
+            })
+
+        # Сначала history_pair/capitalized_term по count desc, бренды в конце
+        suggestions.sort(key=lambda s: (s["origin"] == "brand_replacement", -s["count"], s["source"]))
+        top = suggestions[:top_k]
+
+        return {
+            "suggestions": top,
+            "total_candidates": len(suggestions),
+            "scanned_items": len(items),
+            "current_glossary_size": len(current_glossary),
+        }
+
     def _handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
         stats = self.store.compact_with_stats()
         return {"compacted": True, **stats}
@@ -1449,6 +1556,73 @@ class BackendService:
                     "found": True,
                 }
         raise RuntimeError(f"Запись не найдена в clipboard_history: {history_id}")
+
+    def _handle_cleanup_old_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет записи истории старше N дней (по умолчанию 90).
+
+        Параметры:
+            older_than_days (int): порог возраста в днях (по умолчанию 90)
+
+        Возвращает:
+            deleted (int): количество удалённых записей
+            remaining (int): количество оставшихся активных записей
+        """
+        older_than_days = int(params.get("older_than_days", 90))
+        if older_than_days <= 0:
+            raise RuntimeError("older_than_days должен быть положительным числом")
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        cutoff_iso = cutoff.isoformat()
+
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+            to_delete = [item for item in active if item.ts < cutoff_iso]
+            for item in to_delete:
+                self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
+            remaining = len(active) - len(to_delete)
+
+        return {"deleted": len(to_delete), "remaining": remaining}
+
+    def _handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает информацию о размере файлов данных Krab Ear.
+
+        Возвращает:
+            history_file_size_mb (float): размер history.ndjson в МБ
+            transcripts_count (int): количество .md файлов в transcripts/
+            transcripts_size_mb (float): суммарный размер transcripts/ в МБ
+            reports_count (int): количество файлов-отчётов в data_dir
+            total_data_mb (float): суммарный размер директории данных в МБ
+        """
+        data_dir = Path(self.store.data_dir)
+
+        # Размер файла истории
+        history_path = self.store.history_path
+        history_size_mb = history_path.stat().st_size / (1024 * 1024) if history_path.exists() else 0.0
+
+        # Транскрипты (.md файлы)
+        transcripts_dir = data_dir / "transcripts"
+        md_files = list(transcripts_dir.glob("*.md")) if transcripts_dir.exists() else []
+        transcripts_count = len(md_files)
+        transcripts_size_mb = sum(f.stat().st_size for f in md_files) / (1024 * 1024)
+
+        # Файлы отчётов
+        reports_count = len(list(data_dir.glob("*.report")) + list(data_dir.glob("report_*")))
+
+        # Общий размер директории данных
+        total_bytes = sum(
+            f.stat().st_size
+            for f in data_dir.rglob("*")
+            if f.is_file()
+        )
+        total_data_mb = total_bytes / (1024 * 1024)
+
+        return {
+            "history_file_size_mb": round(history_size_mb, 3),
+            "transcripts_count": transcripts_count,
+            "transcripts_size_mb": round(transcripts_size_mb, 3),
+            "reports_count": reports_count,
+            "total_data_mb": round(total_data_mb, 3),
+        }
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
