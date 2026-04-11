@@ -33,6 +33,8 @@ class HistoryItem:
     cleaned_text: str = ""
     llm_applied: bool = False
     llm_latency_ms: int = 0
+    # Diarization data (speaker segments, annotated segments, turns)
+    diarization: dict | None = None
 
     @classmethod
     def create(
@@ -51,6 +53,7 @@ class HistoryItem:
         cleaned_text: str = "",
         llm_applied: bool = False,
         llm_latency_ms: int = 0,
+        diarization: dict | None = None,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -70,6 +73,7 @@ class HistoryItem:
             cleaned_text=(cleaned_text or "").strip(),
             llm_applied=bool(llm_applied),
             llm_latency_ms=int(llm_latency_ms or 0),
+            diarization=diarization if isinstance(diarization, dict) else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -96,6 +100,7 @@ class HistoryItem:
             cleaned_text=str(payload.get("cleaned_text", "")).strip(),
             llm_applied=bool(payload.get("llm_applied", False)),
             llm_latency_ms=int(payload.get("llm_latency_ms", 0) or 0),
+            diarization=payload.get("diarization") if isinstance(payload.get("diarization"), dict) else None,
         )
 
 

@@ -74,6 +74,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private var importFormatStats: [String: Int] = [:]
     private var importFilesPlanned = 0
     private var importBytesPlanned = 0
+    private var importElapsedTimer: Timer?
+    private var currentImportJobStartedAt: Date?
     private var isSyncingTabs = false
     private var previewPollTick = 0
     private var isRecoveringHistoryFromFilters = false
@@ -188,6 +190,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let importNdjsonButton = NSButton(title: "Импорт NDJSON", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Удалить", target: nil, action: nil)
     private let compactButton = NSButton(title: "Оптимизировать историю", target: nil, action: nil)
+    private let openTranscriptsButton = NSButton(title: "Транскрипты", target: nil, action: nil)
     private let historyOverviewLabel = NSTextField(labelWithString: "")
     private let historyStatusLabel = NSTextField(labelWithString: "")
     private let glossaryStatusLabel = NSTextField(labelWithString: "Глоссарий: 0")
@@ -1049,6 +1052,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         compactButton.action = #selector(onCompact)
         compactButton.toolTip = "Сжимает журналы истории: удаляет служебный мусор после удалений/обновлений"
 
+        openTranscriptsButton.target = self
+        openTranscriptsButton.action = #selector(onOpenTranscripts)
+        openTranscriptsButton.toolTip = "Открыть папку с сохранёнными транскриптами"
+
         bottomBar1.addArrangedSubview(loadMoreButton)
         bottomBar1.addArrangedSubview(jumpToLatestButton)
         bottomBar1.addArrangedSubview(loadAllButton)
@@ -1350,6 +1357,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveTranslatePresetButton.removeFromSuperview()
         advancedToolbarRow.addArrangedSubview(helpButton)
         advancedToolbarRow.addArrangedSubview(liveTranslatePresetButton)
+        advancedToolbarRow.addArrangedSubview(openTranscriptsButton)
         advancedToolbarRow.addArrangedSubview(NSView()) // Spacer
         advancedSection.contentStackView.addArrangedSubview(advancedToolbarRow)
 
@@ -2747,6 +2755,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         loadInitial()
     }
 
+    @objc private func onOpenTranscripts() {
+        let transcriptsPath = NSString(string: "~/Library/Application Support/KrabEar/transcripts").expandingTildeInPath
+        let url = URL(fileURLWithPath: transcriptsPath, isDirectory: true)
+        // Create directory if needed
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(url)
+    }
+
     private func enqueueImport(paths: [String], sourceTag: String) {
         let clean = paths
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2817,10 +2833,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         isImportRunning = true
         currentImportJob = importQueue.removeFirst()
+        currentImportJobStartedAt = Date()
+        startImportElapsedTimer()
         updateImportStatusLabel()
 
         guard let job = currentImportJob else {
             isImportRunning = false
+            stopImportElapsedTimer()
             return
         }
         let endpoint = ipcClient.endpoint
@@ -2856,6 +2875,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isImportRunning = false
+                self.stopImportElapsedTimer()
+                self.currentImportJobStartedAt = nil
                 self.importJobsCompleted += 1
                 self.importProcessedTotal += processed
                 self.importErrorsTotal += failed ? 1 : errors
@@ -2876,6 +2897,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }
 
     private func finishImportQueueIfNeeded() {
+        stopImportElapsedTimer()
         guard importJobsPlanned > 0 else {
             importStatusLabel.stringValue = "Импорт: idle"
             cancelImportButton.isEnabled = false
@@ -2924,7 +2946,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             let remainingJobs = max(0, importJobsPlanned - importJobsCompleted)
             let eta = Int((Double(remainingJobs) * avgSec).rounded())
             let currentFiles = currentImportJob?.audioCount ?? 0
-            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов в задаче \(currentFiles), ETA ~\(eta)с"
+            let elapsed = currentImportJobStartedAt.map { Int(Date().timeIntervalSince($0).rounded()) } ?? 0
+            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов \(currentFiles), \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
             return
         }
         if isImportPaused {
@@ -2940,6 +2963,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             return
         }
         importStatusLabel.stringValue = "Импорт: idle"
+    }
+
+    private func startImportElapsedTimer() {
+        stopImportElapsedTimer()
+        importElapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self, self.isImportRunning else { return }
+                self.updateImportStatusLabel()
+            }
+        }
+    }
+
+    private func stopImportElapsedTimer() {
+        importElapsedTimer?.invalidate()
+        importElapsedTimer = nil
     }
 
     private func normalizedImportSignature(_ paths: [String]) -> String {

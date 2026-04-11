@@ -470,8 +470,13 @@ class BackendService:
         translation_status = translation.status
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
+        diarization_data = tp.get("diarization")
+
+        # Format text with speaker labels if diarization produced multiple speakers
+        display_text = self._format_text_with_speakers(final_text, diarization_data)
+
         item = self.store.add_history_item(
-            text=final_text,
+            text=display_text,
             paste_status="failed",
             source_text=text,
             translated_text=translated_text,
@@ -483,6 +488,7 @@ class BackendService:
             cleaned_text=tp.get("cleaned_text", ""),
             llm_applied=bool(tp.get("llm_applied", False)),
             llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+            diarization=diarization_data,
         )
         result_payload = {
             "status": "ok",
@@ -496,7 +502,7 @@ class BackendService:
             "source_lang": translation.source_lang,
             "target_lang": translation.target_lang,
             "translation_engine": translation.engine,
-            "text": final_text,
+            "text": display_text,
             "original_text": text,
             "translated_text": translated_text,
             "history_id": item.id,
@@ -842,6 +848,40 @@ class BackendService:
             "modes_missing_offline": missing,
             "any_ready": bool(cached),
         }
+
+    @staticmethod
+    def _format_text_with_speakers(text: str, diarization: dict | None) -> str:
+        """Форматирует текст с метками спикеров из diarization speaker_turns.
+
+        Если diarization неактивен или менее 2 спикеров — возвращает исходный текст.
+        Использует speaker_turns (склеенные реплики) для читаемого вывода.
+        """
+        if not diarization or not isinstance(diarization, dict):
+            return text
+        if not diarization.get("enabled"):
+            return text
+        turns = diarization.get("speaker_turns", [])
+        if not turns or len(turns) < 2:
+            return text
+        # Check that there are actually multiple speakers
+        speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+        if len(speakers) < 2:
+            return text
+        parts: list[str] = []
+        current_speaker = None
+        for turn in turns:
+            speaker = turn.get("speaker", "?")
+            turn_text = str(turn.get("text", "")).strip()
+            if not turn_text:
+                continue
+            if speaker != current_speaker:
+                current_speaker = speaker
+                parts.append(f"\n[{speaker}]: {turn_text}")
+            else:
+                parts.append(f" {turn_text}")
+        if parts:
+            return "".join(parts).strip()
+        return text
 
     @staticmethod
     def _build_readiness_report_static() -> dict[str, Any]:
@@ -2022,6 +2062,8 @@ class BackendService:
                     else:
                         errors.append(f"{audio_path}: пустой результат")
                     continue
+                diarization_data = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
+
                 translation = self.translator.translate(
                     text=text,
                     mode=translation_mode,
@@ -2032,8 +2074,11 @@ class BackendService:
                 translated_text = translation.text.strip() if translation.ok else ""
                 final_text = translated_text if (translate_and_paste and translated_text) else text
 
+                # Format text with speaker labels if diarization produced multiple speakers
+                display_text = self._format_text_with_speakers(final_text, diarization_data)
+
                 history_item = self.store.add_history_item(
-                    text=final_text,
+                    text=display_text,
                     paste_status="failed",
                     source_text=text,
                     translated_text=translated_text,
@@ -2042,11 +2087,37 @@ class BackendService:
                     target_lang=translation.target_lang,
                     translation_status=translation.status,
                     translation_engine=translation.engine,
+                    diarization=diarization_data,
                 )
+
+                # Save transcript to file
+                try:
+                    transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                    transcripts_dir.mkdir(exist_ok=True)
+                    source_name = Path(audio_path).stem
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    transcript_filename = f"{timestamp}_{source_name}.md"
+                    transcript_path = transcripts_dir / transcript_filename
+                    with open(transcript_path, "w", encoding="utf-8") as f:
+                        f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")
+                        f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"- Длительность: {elapsed:.1f}с\n")
+                        f.write(f"- Источник: {audio_path}\n")
+                        diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
+                        if diar_info and diar_info.get("enabled"):
+                            speakers = diar_info.get("speaker_turns", [])
+                            unique_speakers = len(set(t.get("speaker") for t in speakers))
+                            f.write(f"- Спикеры: {unique_speakers}\n")
+                        f.write(f"\n## Текст\n\n{final_text}\n")
+                        if translated_text:
+                            f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
+                except Exception as exc:
+                    logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
+
                 items.append(
                     {
                         "path": audio_path,
-                        "text": final_text,
+                        "text": display_text,
                         "original_text": text,
                         "translated_text": translated_text,
                         "translation_mode": translation.mode,
