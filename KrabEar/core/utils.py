@@ -45,6 +45,33 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bФаст\s*АПИ\b", "FastAPI"),
     (r"\bГит[-\s]?Хаб\b", "GitHub"),
     (r"\bМак[-\s]?Бук\b", "MacBook"),
+    # AI/ML инструменты
+    (r"\bЧат\s*Джи\s*Пи\s*[Тт]\b", "ChatGPT"),
+    (r"\bДжи\s*Пи\s*[Тт]\b", "GPT"),
+    (r"\bОпен\s*[Ээ]й\s*[Аа]й\b", "OpenAI"),
+    (r"\bМидж[оё]рни\b", "Midjourney"),
+    (r"\bСтейбл\s*Диффь?южн\b", "Stable Diffusion"),
+    (r"\bЛлама\b", "Llama"),
+    (r"\bДжемини\b", "Gemini"),
+    # Dev-инструменты
+    (r"\bВи\s*Эс\s*Код\b", "VS Code"),
+    (r"\bГит\b", "Git"),
+    (r"\bНод\s*[Дд]жи\s*[Ээс]\b", "Node.js"),
+    (r"\bРеакт\b", "React"),
+    (r"\bДокер\b", "Docker"),
+    (r"\bКубернетис\b", "Kubernetes"),
+    (r"\bЛинукс\b", "Linux"),
+    # Сервисы
+    (r"\bАмазон\b", "Amazon"),
+    (r"\bНетфликс\b", "Netflix"),
+    (r"\bСпотифай\b", "Spotify"),
+    (r"\bЮ\s*[Тт]юб\b", "YouTube"),
+    (r"\bИнстаграм\b", "Instagram"),
+    (r"\bВотс\s*[Аа]п\b", "WhatsApp"),
+    # Испания (розничные сети)
+    (r"\bКарр[еэ]фур\b", "Carrefour"),
+    (r"\bЛидл\b", "Lidl"),
+    (r"\bАльди\b", "Aldi"),
 ]
 BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(pat, re.IGNORECASE), repl) for pat, repl in _BRAND_REPLACEMENTS_RAW
