@@ -37,9 +37,32 @@ public enum KrabEarTheme {
     }
     
     public static func applyTheme(to window: NSWindow) {
-        window.backgroundColor = Colors.windowBackground
+        window.backgroundColor = .clear
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
+        window.isOpaque = false
+
+        // Add NSVisualEffectView as window background for full Liquid Glass
+        if let contentView = window.contentView {
+            let existingEffect = contentView.subviews.first(where: {
+                $0 is NSVisualEffectView && $0.identifier == NSUserInterfaceItemIdentifier("krabEarWindowBg")
+            })
+            if existingEffect == nil {
+                let bgEffect = NSVisualEffectView()
+                bgEffect.material = .sidebar
+                bgEffect.blendingMode = .behindWindow
+                bgEffect.state = .active
+                bgEffect.identifier = NSUserInterfaceItemIdentifier("krabEarWindowBg")
+                bgEffect.translatesAutoresizingMaskIntoConstraints = false
+                contentView.addSubview(bgEffect, positioned: .below, relativeTo: contentView.subviews.first)
+                NSLayoutConstraint.activate([
+                    bgEffect.topAnchor.constraint(equalTo: contentView.topAnchor),
+                    bgEffect.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                    bgEffect.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                    bgEffect.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                ])
+            }
+        }
     }
     
     public static func styleCheckbox(_ checkbox: NSButton) {
@@ -209,9 +232,12 @@ public class CollapsibleSectionView: NSView {
         headerClickButton.action = #selector(onToggle)
         headerClickButton.translatesAutoresizingMaskIntoConstraints = false
 
+        disclosureButton.controlSize = .regular
+
         headerStack.orientation = .horizontal
         headerStack.spacing = 4
         headerStack.alignment = .centerY
+        headerStack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
         headerStack.addArrangedSubview(disclosureButton)
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(NSView()) // spacer — makes full width clickable

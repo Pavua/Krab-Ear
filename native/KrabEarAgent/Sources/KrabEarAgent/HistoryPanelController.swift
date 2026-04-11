@@ -362,6 +362,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         topSearchRow.orientation = .horizontal
         topSearchRow.spacing = 8
         topSearchRow.alignment = .centerY
+        topSearchRow.distribution = .fill
         topSearchRow.translatesAutoresizingMaskIntoConstraints = false
 
         topActionsRow.orientation = .horizontal
@@ -407,8 +408,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         topSearchRow.addArrangedSubview(searchField)
 
         let clearSearch = NSButton(title: "Сбросить", target: self, action: #selector(onClearSearch))
+        clearSearch.controlSize = .small
+        clearSearch.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        clearSearch.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         topSearchRow.addArrangedSubview(clearSearch)
         let clearFiltersButton = NSButton(title: "Сбросить фильтры", target: self, action: #selector(onClearFilters))
+        clearFiltersButton.controlSize = .small
+        clearFiltersButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        clearFiltersButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         topSearchRow.addArrangedSubview(clearFiltersButton)
         
         historyFiltersBadge.textColor = .secondaryLabelColor
@@ -927,7 +934,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         realtimeScroll.translatesAutoresizingMaskIntoConstraints = false
         realtimeScroll.hasVerticalScroller = true
-        realtimeScroll.borderType = .bezelBorder
+        realtimeScroll.borderType = .noBorder
+        realtimeScroll.wantsLayer = true
+        realtimeScroll.layer?.cornerRadius = 8
+        realtimeScroll.layer?.borderWidth = 0.5
+        realtimeScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         realtimeTextView.isEditable = false
         realtimeTextView.font = .systemFont(ofSize: 13)
         realtimeTextView.string = "Во время записи здесь появляется промежуточный текст."
@@ -935,7 +946,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         dictationHistoryPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
         dictationHistoryPreviewScroll.hasVerticalScroller = true
-        dictationHistoryPreviewScroll.borderType = .bezelBorder
+        dictationHistoryPreviewScroll.borderType = .noBorder
+        dictationHistoryPreviewScroll.wantsLayer = true
+        dictationHistoryPreviewScroll.layer?.cornerRadius = 8
+        dictationHistoryPreviewScroll.layer?.borderWidth = 0.5
+        dictationHistoryPreviewScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         dictationHistoryPreviewView.isEditable = false
         dictationHistoryPreviewView.font = .systemFont(ofSize: 12)
         dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
@@ -943,7 +958,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         callAssistOutputScroll.translatesAutoresizingMaskIntoConstraints = false
         callAssistOutputScroll.hasVerticalScroller = true
-        callAssistOutputScroll.borderType = .bezelBorder
+        callAssistOutputScroll.borderType = .noBorder
+        callAssistOutputScroll.wantsLayer = true
+        callAssistOutputScroll.layer?.cornerRadius = 8
+        callAssistOutputScroll.layer?.borderWidth = 0.5
+        callAssistOutputScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         callAssistOutputView.isEditable = false
         callAssistOutputView.font = .systemFont(ofSize: 12)
         callAssistOutputView.string = "Здесь появятся результаты быстрых фраз, summary и диагностики звонка."
@@ -1180,7 +1199,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewTextView.string = "История загружается..."
         historyPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
         historyPreviewScroll.hasVerticalScroller = true
-        historyPreviewScroll.borderType = .bezelBorder
+        historyPreviewScroll.borderType = .noBorder
+        historyPreviewScroll.wantsLayer = true
+        historyPreviewScroll.layer?.cornerRadius = 8
+        historyPreviewScroll.layer?.borderWidth = 0.5
+        historyPreviewScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         historyPreviewScroll.documentView = historyPreviewTextView
         historyPreviewContainer.addArrangedSubview(historyPreviewHeader)
         historyPreviewContainer.addArrangedSubview(historyPreviewScroll)
@@ -3891,11 +3914,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     func windowDidResize(_ notification: Notification) {
         let width = window?.frame.width ?? 0
-        let isNarrow = width < 1100
         let isVeryNarrow = width < 900
         
-        topSearchRow.orientation = isNarrow ? .vertical : .horizontal
-        topSearchRow.alignment = isNarrow ? .leading : .centerY
+        topSearchRow.orientation = isVeryNarrow ? .vertical : .horizontal
+        topSearchRow.alignment = isVeryNarrow ? .leading : .centerY
         
         filterRow1.orientation = isVeryNarrow ? .vertical : .horizontal
         filterRow2.orientation = isVeryNarrow ? .vertical : .horizontal
