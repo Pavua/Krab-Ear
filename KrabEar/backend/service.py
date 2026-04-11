@@ -99,6 +99,7 @@ class BackendService:
             "gateway_session_id": None,
         }
         self._preview_error_count: int = 0
+        self._clipboard_history: list[dict] = []
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -203,13 +204,17 @@ class BackendService:
             "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_item": self._handle_get_history_item,  # полные детали одной записи истории по ID
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
+            "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
             "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
             "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
             "export_history": self._handle_export_history,
             "export_history_srt": self._handle_export_history_srt,
+            "get_clipboard_history": self._handle_get_clipboard_history,
+            "repaste_item": self._handle_repaste_item,
         }
 
         handler = handlers.get(method)
@@ -502,6 +507,14 @@ class BackendService:
             llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
             diarization=diarization_data,
         )
+        self._clipboard_history.append({
+            "text": final_text,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "history_id": item.id,
+        })
+        if len(self._clipboard_history) > 20:
+            self._clipboard_history = self._clipboard_history[-20:]
+
         result_payload = {
             "status": "ok",
             "duration_sec": duration_sec,
@@ -1113,6 +1126,28 @@ class BackendService:
         """Возвращает обзорный срез истории для панели управления."""
         return self.store.get_history_overview()
 
+    def _handle_get_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает полные детали одной записи истории по ID."""
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        for item in items:
+            if item.id == item_id:
+                result = item.to_dict()
+                # Вычисляемые поля
+                result["text_length"] = len(item.text)
+                result["word_count"] = len(item.text.split()) if item.text else 0
+                # Проверяем наличие файла транскрипта
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                matching = list(transcripts_dir.glob(f"*{item_id[:8]}*")) if transcripts_dir.exists() else []
+                result["transcript_file"] = str(matching[0]) if matching else None
+                return result
+
+        raise RuntimeError(f"Запись {item_id} не найдена")
+
     # ------------------------------------------------------------------
     # Экспорт истории (markdown / SRT)
     # ------------------------------------------------------------------
@@ -1441,6 +1476,39 @@ class BackendService:
             "llm_correction_rate": llm_rate,
             "diarization_used_count": diarization_used_count,
             "diarization_usage_rate": diarization_rate,
+        }
+
+    def _handle_get_metrics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Снимок метрик реального времени: сессия, LLM, call_assist, конфиг."""
+        settings = self._cached_settings()
+
+        # Active session info
+        preview_active = self._preview_thread is not None and self._preview_thread.is_alive()
+
+        return {
+            "session": {
+                "recording_active": bool(getattr(self.recorder, 'is_recording', False)),
+                "preview_active": preview_active,
+                "preview_text_length": len(self._preview_text),
+                "preview_duration_sec": self._preview_duration_sec,
+            },
+            "llm": {
+                "enabled": settings.get("llm_rewrite_enabled", False),
+                "model": settings.get("llm_model", "?"),
+                "status": self._llm_rewriter.status() if self._llm_rewriter else None,
+            },
+            "call_assist": self._call_assist_state.copy(),
+            "import": {
+                # Check if import is active by looking at import queue state
+                "active": False,  # Would need import state tracking
+            },
+            "config_snapshot": {
+                "quality": settings.get("quality_profile", "balanced"),
+                "cleanup": settings.get("cleanup_profile", "soft"),
+                "translation_mode": settings.get("translation_mode", "off"),
+                "diarization": settings.get("diarization_enabled", False),
+                "network_mode": settings.get("network_mode", "offline_default"),
+            },
         }
 
     def _handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
