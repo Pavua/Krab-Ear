@@ -19,8 +19,9 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 │  - PasteService      │                                  │  - BackendService    │
 │  - HistoryPanel      │                                  │  - AudioRecorder     │
 │  - BackendSupervisor │                                  │  - Transcriber       │
-└─────────────────────┘                                   │  - Translator        │
-                                                          │  - StateStore (NDJSON)│
+│  - KrabEarTheme      │                                  │  - Translator        │
+│  - CollapsibleSection│                                  │  - LLMRewriter       │
+└─────────────────────┘                                   │  - StateStore (NDJSON)│
                                                           └──────────────────────┘
 ```
 
@@ -33,6 +34,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/state_store.py`** — `StateStore`: append-only NDJSON history with tombstone deletes, file-lock, and compaction. Settings stored as `settings.json`.
 - **`backend/transcriber.py`** — Thin wrapper over `AudioEngine` for profile/vocabulary management.
 - **`backend/translator.py`** — Offline-first translator (RU↔ES, EN→RU, Auto, Bilingual modes) with in-memory cache.
+- **`backend/llm_rewriter.py`** — LLM post-processing via LM Studio (qwen3-4b-abliterated). CircuitBreaker + chatbot detection + length ratio guard.
 - **`backend/rest_server.py`** — Flask REST API (port 5005) for HTTP-based transcription and metrics. Separate from the IPC service.
 - **`backend/event_bus.py`** — In-process pub/sub EventBus with SSE streaming. Supports both untyped `emit(str, dict)` and typed `emit_typed(EventType, BaseModel)`.
 - **`backend/metrics_collector.py`** — Thread-safe sliding-window metrics (latency percentiles, confidence).
@@ -42,6 +44,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - Swift Package (swift-tools-version 6.0, macOS 13+). Single executable target.
 - Communicates with backend exclusively through Unix socket JSON-RPC.
 - Resolves project root by checking for `KrabEar/backend/service.py`.
+- **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
 
 ## Common Commands
 
@@ -86,6 +89,9 @@ Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`
 cd native/KrabEarAgent && swift build -c release
 
 # The compiled binary goes to native/runtime/KrabEarAgent
+
+# Rebuild + sign Swift agent (full cycle)
+cd native/KrabEarAgent && swift build -c release && cp -f .build/release/KrabEarAgent ../runtime/KrabEarAgent && codesign -s - -f ../runtime/KrabEarAgent
 ```
 
 ### One-click shortcuts
@@ -102,6 +108,10 @@ cd native/KrabEarAgent && swift build -c release
   Request format: `{"id": "...", "method": "...", "params": {...}}`. Response: `{"id": "...", "ok": true, "result": {...}}`.
 - **History storage**: Append-only NDJSON (`history.ndjson`) with tombstone-based deletes and periodic compaction. All writes are file-lock protected.
 - **STT fallback chain**: balanced model → max model candidates → remote STT (if network mode allows). Unavailable models are tracked in `_unavailable_models` set.
+- **LLM post-processing**: engine.py hooks into LLMRewriter after STT, before paste. Chatbot guard rejects responses starting with known assistant phrases. Length ratio guard rejects output <35% or >300% of input.
+- **Collapsible GUI sections**: CollapsibleSectionView with UserDefaults persistence (key: `CollapsibleSection_{sectionId}`). Disclosure triangle toggle with animation.
+- **iCloud audio import**: files from `Mobile Documents/com~apple~CloudDocs` are auto-copied to /tmp before ffmpeg (errno 11 workaround).
+- **Transcript files**: imported audio generates .md files in `~/Library/Application Support/KrabEar/transcripts/`.
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
