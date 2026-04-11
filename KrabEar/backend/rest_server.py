@@ -142,6 +142,7 @@ def transcribe_audio():
             "model": result.get("model", ""),
             "language": result.get("language"),
             "segments": result.get("segments", []),
+            "diarization": result.get("diarization", {}),
             "history_id": history_item.id,
         })
 
