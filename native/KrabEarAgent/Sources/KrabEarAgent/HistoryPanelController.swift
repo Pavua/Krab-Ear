@@ -151,6 +151,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let topBar = NSStackView()
     private let topSearchRow = NSStackView()
     private let topActionsRow = NSStackView()
+    private let helpButton = NSButton(title: "Справка", target: nil, action: nil)
+    private let liveTranslatePresetButton = NSButton(title: "Live Translation", target: nil, action: nil)
     private let filterRow1 = NSStackView()
     private let filterRow2 = NSStackView()
     private let historyQuickPresetRow = NSStackView()
@@ -416,10 +418,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         
         topSearchRow.addArrangedSubview(NSView())
 
-        let helpButton = NSButton(title: "Справка", target: self, action: #selector(onHelp))
+        helpButton.target = self
+        helpButton.action = #selector(onHelp)
         topActionsRow.addArrangedSubview(helpButton)
 
-        let liveTranslatePresetButton = NSButton(title: "Live Translation", target: self, action: #selector(onEnableLiveTranslationPreset))
+        liveTranslatePresetButton.target = self
+        liveTranslatePresetButton.action = #selector(onEnableLiveTranslationPreset)
         topActionsRow.addArrangedSubview(liveTranslatePresetButton)
         topActionsRow.addArrangedSubview(NSTextField(labelWithString: "Страница:"))
         historyPageSizeSelector.addItems(withTitles: ["25", "50", "100", "200"])
@@ -640,9 +644,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         qualitySelector.target = self
         qualitySelector.action = #selector(onQualityChanged)
         settingsRow1.addArrangedSubview(qualitySelector)
-        let modelHintLabel = NSTextField(labelWithString: "Bal=turbo, Max=custom")
-        modelHintLabel.lineBreakMode = .byTruncatingTail
-        settingsRow1.addArrangedSubview(modelHintLabel)
 
         settingsRow1.addArrangedSubview(NSTextField(labelWithString: "Очистка хвоста:"))
         cleanupSelector.addItems(withTitles: ["Soft", "Strict"])
@@ -1327,6 +1328,18 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         primaryActionsRow.addArrangedSubview(historyStatusLabel)
 
         let advancedSection = CollapsibleSectionView(sectionId: "history_advanced", title: "Расширенные действия", isExpanded: false)
+        // Move rarely-used buttons from toolbar into advanced section
+        let advancedToolbarRow = NSStackView()
+        advancedToolbarRow.orientation = .horizontal
+        advancedToolbarRow.spacing = 8
+        advancedToolbarRow.alignment = .centerY
+        helpButton.removeFromSuperview()
+        liveTranslatePresetButton.removeFromSuperview()
+        advancedToolbarRow.addArrangedSubview(helpButton)
+        advancedToolbarRow.addArrangedSubview(liveTranslatePresetButton)
+        advancedToolbarRow.addArrangedSubview(NSView()) // Spacer
+        advancedSection.contentStackView.addArrangedSubview(advancedToolbarRow)
+
         secondaryActionsRow.addArrangedSubview(loadAllButton)
         secondaryActionsRow.addArrangedSubview(copyOriginalButton)
         secondaryActionsRow.addArrangedSubview(copyTranslationButton)
@@ -1351,8 +1364,20 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         statusRow.addArrangedSubview(NSView()) // Spacer
         statusRow.addArrangedSubview(importStatusLabel)
 
+        // Merge topActionsRow items (Страница, Плотность, Фокус) into topSearchRow for compact single-row toolbar
+        // Remove trailing spacer from topSearchRow first
+        if let lastView = topSearchRow.arrangedSubviews.last, !(lastView is NSTextField) && !(lastView is NSButton) && !(lastView is NSSearchField) && !(lastView is NSPopUpButton) {
+            topSearchRow.removeArrangedSubview(lastView)
+            lastView.removeFromSuperview()
+        }
+        // Move remaining items from topActionsRow into topSearchRow (skip helpButton/liveTranslatePresetButton — already moved)
+        for view in topActionsRow.arrangedSubviews {
+            topActionsRow.removeArrangedSubview(view)
+            view.removeFromSuperview()
+            topSearchRow.addArrangedSubview(view)
+        }
+
         historyStack.addArrangedSubview(topSearchRow)
-        historyStack.addArrangedSubview(topActionsRow)
         historyStack.addArrangedSubview(filtersSection)
         historyStack.addArrangedSubview(scrollView)
         historyStack.addArrangedSubview(primaryActionsRow)
@@ -3884,8 +3909,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let isNarrow = width < 1100
         let isVeryNarrow = width < 900
         
-        topActionsRow.orientation = isNarrow ? .vertical : .horizontal
-        topActionsRow.alignment = isNarrow ? .leading : .centerY
+        topSearchRow.orientation = isNarrow ? .vertical : .horizontal
+        topSearchRow.alignment = isNarrow ? .leading : .centerY
         
         filterRow1.orientation = isVeryNarrow ? .vertical : .horizontal
         filterRow2.orientation = isVeryNarrow ? .vertical : .horizontal

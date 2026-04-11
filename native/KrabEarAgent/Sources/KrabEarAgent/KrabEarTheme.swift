@@ -78,28 +78,42 @@ public class ThemeCardView: NSView {
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
         layer?.borderWidth = 0.5
-        
+
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
         titleLabel.isEditable = false
         titleLabel.isBordered = false
         titleLabel.drawsBackground = false
         titleLabel.isHidden = true
-        
+
         contentStackView.orientation = .vertical
         contentStackView.spacing = KrabEarTheme.Metrics.itemSpacing
         contentStackView.alignment = .leading
-        
+
         containerStack.orientation = .vertical
         containerStack.spacing = KrabEarTheme.Metrics.itemSpacing
         containerStack.alignment = .leading
         containerStack.translatesAutoresizingMaskIntoConstraints = false
-        
+
         containerStack.addArrangedSubview(titleLabel)
         containerStack.addArrangedSubview(contentStackView)
         addSubview(containerStack)
-        
+
+        // Liquid Glass: add vibrancy effect behind content
+        let effectView = NSVisualEffectView()
+        effectView.material = .hudWindow
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        effectView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(effectView, positioned: .below, relativeTo: containerStack)
+
         NSLayoutConstraint.activate([
+            effectView.topAnchor.constraint(equalTo: topAnchor),
+            effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
             containerStack.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.cardPadding),
@@ -109,7 +123,7 @@ public class ThemeCardView: NSView {
     
     public override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.cgColor
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.3).cgColor
         layer?.borderColor = KrabEarTheme.Colors.separator.cgColor
     }
 }
@@ -164,6 +178,7 @@ public class CollapsibleSectionView: NSView {
     public let headerStack = NSStackView()
     public let contentStackView = NSStackView()
     private let containerStack = NSStackView()
+    private let headerSeparator = NSBox()
 
     public private(set) var isExpanded: Bool
 
@@ -227,6 +242,11 @@ public class CollapsibleSectionView: NSView {
             headerStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
         ])
 
+        // Subtle separator between header and content (visible only when expanded)
+        headerSeparator.boxType = .separator
+        headerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        headerSeparator.isHidden = !isExpanded
+
         contentStackView.orientation = .vertical
         contentStackView.spacing = KrabEarTheme.Metrics.itemSpacing
         contentStackView.alignment = .leading
@@ -238,6 +258,7 @@ public class CollapsibleSectionView: NSView {
         containerStack.translatesAutoresizingMaskIntoConstraints = false
 
         containerStack.addArrangedSubview(headerStack)
+        containerStack.addArrangedSubview(headerSeparator)
         containerStack.addArrangedSubview(contentStackView)
         addSubview(containerStack)
 
@@ -245,7 +266,8 @@ public class CollapsibleSectionView: NSView {
             containerStack.topAnchor.constraint(equalTo: topAnchor),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            containerStack.bottomAnchor.constraint(equalTo: bottomAnchor)
+            containerStack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            headerSeparator.widthAnchor.constraint(equalTo: containerStack.widthAnchor),
         ])
     }
 
@@ -262,10 +284,12 @@ public class CollapsibleSectionView: NSView {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.2
                 ctx.allowsImplicitAnimation = true
+                self.headerSeparator.isHidden = !expanded
                 self.contentStackView.isHidden = !expanded
                 self.contentStackView.superview?.layoutSubtreeIfNeeded()
             })
         } else {
+            headerSeparator.isHidden = !expanded
             contentStackView.isHidden = !expanded
         }
 
