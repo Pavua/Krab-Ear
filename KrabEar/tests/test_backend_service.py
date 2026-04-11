@@ -1431,5 +1431,175 @@ class LLMStatusIPCTestCase(unittest.TestCase):
             self.assertTrue(result["runtime_enabled"])
 
 
+class VocabularyCapturingTranscriber(FakeTranscriber):
+    """FakeTranscriber, который запоминает переданный extra_vocabulary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_extra_vocabulary: list[str] | None = None
+
+    def transcribe(self, audio_data, quality_profile: str = "balanced", cleanup_profile: str = "soft",
+                   domain: str = "casual", extra_vocabulary=None, lang_hint=None) -> str:
+        self.last_extra_vocabulary = extra_vocabulary
+        return super().transcribe(audio_data, quality_profile, cleanup_profile, domain, extra_vocabulary, lang_hint)
+
+
+class VocabularySuggestionsTestCase(unittest.TestCase):
+    """Тесты IPC-метода get_vocabulary_suggestions."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def request(self, method: str, params=None, request_id="t1"):
+        return self.service.handle_request(
+            {"id": request_id, "method": method, "params": params or {}}
+        )
+
+    def test_empty_history_returns_empty_suggestions(self) -> None:
+        """Без истории — пустые suggestions."""
+        resp = self.request("get_vocabulary_suggestions")
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["result"]["suggestions"], [])
+        self.assertEqual(resp["result"]["scanned_items"], 0)
+
+    def test_suggestions_from_history(self) -> None:
+        """Слова с частотой >= 3 попадают в suggestions."""
+        # Добавляем 5 записей, где "Telegram" и "Python" встречаются 4 раза
+        for i in range(4):
+            self.store.add_history_item(
+                text=f"Запустил Telegram и Python на сервере #{i}",
+                paste_status="ok",
+            )
+        # Добавляем запись без этих слов
+        self.store.add_history_item(text="Просто тест", paste_status="ok")
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3})
+        self.assertTrue(resp["ok"])
+        result = resp["result"]
+        self.assertEqual(result["scanned_items"], 5)
+        words = [s["word"] for s in result["suggestions"]]
+        self.assertIn("Telegram", words)
+        self.assertIn("Python", words)
+
+    def test_suggestions_filter_short_words(self) -> None:
+        """Слова короче min_word_len не попадают в suggestions."""
+        for _ in range(5):
+            self.store.add_history_item(text="да нет тут вот ок", paste_status="ok")
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3, "min_word_len": 4})
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["result"]["suggestions"], [])
+
+    def test_suggestions_filter_stop_words(self) -> None:
+        """Стоп-слова не попадают в suggestions."""
+        for _ in range(5):
+            self.store.add_history_item(
+                text="может быть просто нужно тогда потом",
+                paste_status="ok",
+            )
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3, "min_word_len": 4})
+        self.assertTrue(resp["ok"])
+        words = [s["word"] for s in resp["result"]["suggestions"]]
+        self.assertNotIn("может", words)
+        self.assertNotIn("просто", words)
+        self.assertNotIn("нужно", words)
+        self.assertNotIn("потом", words)
+
+    def test_suggestions_exclude_existing_vocabulary(self) -> None:
+        """Слова уже в vocabulary.txt не попадают в suggestions."""
+        self.store.save_vocabulary(["Telegram"])
+        for _ in range(5):
+            self.store.add_history_item(
+                text="Telegram Python Claude",
+                paste_status="ok",
+            )
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3})
+        self.assertTrue(resp["ok"])
+        words = [s["word"] for s in resp["result"]["suggestions"]]
+        self.assertNotIn("Telegram", words)
+        self.assertIn("Python", words)
+        self.assertIn("Claude", words)
+        self.assertEqual(resp["result"]["current_vocabulary_size"], 1)
+
+    def test_suggestions_top_k_limit(self) -> None:
+        """top_k ограничивает количество результатов."""
+        for i in range(10):
+            self.store.add_history_item(
+                text=f"Word{i:02d}xx Alpha Beta Gamma Delta Epsilon Zeta",
+                paste_status="ok",
+            )
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3, "top_k": 5})
+        self.assertTrue(resp["ok"])
+        self.assertLessEqual(len(resp["result"]["suggestions"]), 5)
+
+    def test_suggestions_uses_source_text_when_available(self) -> None:
+        """Если source_text заполнен, анализируется он, а не text (до перевода)."""
+        for _ in range(4):
+            self.store.add_history_item(
+                text="ES:Telegram",
+                paste_status="ok",
+                source_text="Telegram работает хорошо",
+            )
+
+        resp = self.request("get_vocabulary_suggestions", {"min_count": 3})
+        self.assertTrue(resp["ok"])
+        words = [s["word"] for s in resp["result"]["suggestions"]]
+        self.assertIn("Telegram", words)
+        self.assertIn("работает", words)
+
+
+class VocabularyPassthroughTestCase(unittest.TestCase):
+    """Проверяет, что user vocabulary передаётся в Whisper prompt."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = StateStore(Path(self.tmp.name) / "data")
+        self.transcriber = VocabularyCapturingTranscriber()
+        self.service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=self.transcriber,
+            translator=FakeTranslator(),
+        )
+
+    def request(self, method: str, params=None, request_id="t1"):
+        return self.service.handle_request(
+            {"id": request_id, "method": method, "params": params or {}}
+        )
+
+    def test_stop_recording_passes_vocabulary(self) -> None:
+        """stop_recording передаёт vocabulary из store в transcriber."""
+        self.store.save_vocabulary(["Telegram", "Claude", "Hammerspoon"])
+
+        self.request("start_recording")
+        resp = self.request("stop_recording")
+        self.assertTrue(resp["ok"])
+        self.assertIsNotNone(self.transcriber.last_extra_vocabulary)
+        self.assertEqual(
+            sorted(self.transcriber.last_extra_vocabulary),
+            ["Claude", "Hammerspoon", "Telegram"],
+        )
+
+    def test_stop_recording_no_vocabulary_passes_none(self) -> None:
+        """Если vocabulary пуст, передаётся None (без лишнего prompt-раздувания)."""
+        # Vocabulary файла нет — load_vocabulary вернёт []
+        self.request("start_recording")
+        resp = self.request("stop_recording")
+        self.assertTrue(resp["ok"])
+        self.assertIsNone(self.transcriber.last_extra_vocabulary)
+
+
 if __name__ == "__main__":
     unittest.main()
