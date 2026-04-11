@@ -234,12 +234,16 @@ class HistoryStoreTestCase(unittest.TestCase):
             paste_status="ok",
             translation_mode="ru_to_es",
             translation_status="ok",
+            source_lang="ru",
+            target_lang="es",
         )
         self.store.add_history_item(
             text="translate error",
             paste_status="failed",
             translation_mode="ru_to_es",
             translation_status="translate_error",
+            source_lang="ru",
+            target_lang="es",
         )
         self.store.add_history_item(
             text="no translation",
@@ -258,6 +262,101 @@ class HistoryStoreTestCase(unittest.TestCase):
         self.assertGreaterEqual(overview["last_24h_count"], 1)
         self.assertIsInstance(overview["top_modes"], list)
 
+        # Новые поля: языковая статистика
+        self.assertIsInstance(overview["source_langs"], list)
+        self.assertIsInstance(overview["target_langs"], list)
+        self.assertEqual(overview["source_langs"][0]["lang"], "ru")
+        self.assertEqual(overview["source_langs"][0]["count"], 2)
+        self.assertEqual(overview["target_langs"][0]["lang"], "es")
+        self.assertEqual(overview["target_langs"][0]["count"], 2)
+
+        # Диаризация и LLM
+        self.assertEqual(overview["diarization_count"], 0)
+        self.assertEqual(overview["llm_applied_count"], 0)
+
+        # Средняя длина текста
+        self.assertGreater(overview["avg_text_chars"], 0)
+        self.assertGreater(overview["today_text_chars"], 0)
+
+    def test_overview_diarization_and_llm_stats(self) -> None:
+        """Проверяет подсчёт записей с диаризацией и LLM-обработкой."""
+        self.store.add_history_item(
+            text="with diarization",
+            paste_status="ok",
+            diarization={"speakers": 2, "segments": []},
+        )
+        self.store.add_history_item(
+            text="with llm",
+            paste_status="ok",
+            llm_applied=True,
+            llm_latency_ms=150,
+        )
+        self.store.add_history_item(
+            text="with both",
+            paste_status="ok",
+            diarization={"speakers": 3, "segments": []},
+            llm_applied=True,
+            llm_latency_ms=200,
+        )
+        self.store.add_history_item(text="plain", paste_status="ok")
+
+        overview = self.store.get_history_overview()
+        self.assertEqual(overview["diarization_count"], 2)
+        self.assertEqual(overview["llm_applied_count"], 2)
+
+    def test_overview_empty_history(self) -> None:
+        """Проверяет обзор при пустой истории — не должен падать."""
+        overview = self.store.get_history_overview()
+        self.assertEqual(overview["active_count"], 0)
+        self.assertEqual(overview["avg_text_chars"], 0)
+        self.assertEqual(overview["today_count"], 0)
+        self.assertEqual(overview["diarization_count"], 0)
+        self.assertEqual(overview["source_langs"], [])
+        self.assertEqual(overview["target_langs"], [])
+
+
+    def test_date_filter_early_termination(self) -> None:
+        """Проверяет, что фильтрация по дате с from_ts корректно возвращает результаты.
+
+        Записи с разными датами — фильтр по дате должен вернуть только нужные.
+        Это также неявно тестирует early termination (break при item.ts < from_ts).
+        """
+        # Записываем напрямую в NDJSON для контроля ts.
+        import json as _json
+        items_data = [
+            {"id": "old-1", "ts": "2025-01-15T10:00:00", "text": "january", "paste_status": "ok"},
+            {"id": "old-2", "ts": "2025-02-10T10:00:00", "text": "february", "paste_status": "ok"},
+            {"id": "mid-1", "ts": "2025-03-05T10:00:00", "text": "march", "paste_status": "ok"},
+            {"id": "new-1", "ts": "2025-04-01T10:00:00", "text": "april", "paste_status": "ok"},
+            {"id": "new-2", "ts": "2025-04-10T10:00:00", "text": "april-late", "paste_status": "ok"},
+        ]
+        with self.store.history_path.open("w", encoding="utf-8") as fh:
+            for item in items_data:
+                fh.write(_json.dumps(item, ensure_ascii=False) + "\n")
+
+        # Фильтр: только март
+        page, _ = self.store.get_history_page_filtered(
+            cursor=None, limit=50,
+            paste_status=None, translation_mode=None,
+            from_ts="2025-03-01", to_ts="2025-03-31",
+        )
+        self.assertEqual(len(page), 1)
+        self.assertEqual(page[0]["text"], "march")
+
+        # Фильтр: с марта по конец (no to_ts)
+        page2, _ = self.store.get_history_page_filtered(
+            cursor=None, limit=50,
+            paste_status=None, translation_mode=None,
+            from_ts="2025-03-01",
+        )
+        self.assertEqual(len(page2), 3)  # march, april, april-late
+
+        # Search с from_ts
+        results, _ = self.store.search_history(
+            query="april", cursor=None, limit=50,
+            from_ts="2025-04-01",
+        )
+        self.assertEqual(len(results), 2)
 
     def test_load_settings_handles_corrupted_json(self) -> None:
         """Проверяет, что load_settings возвращает дефолты при битом JSON."""

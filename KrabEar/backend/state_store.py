@@ -185,7 +185,11 @@ class StateStore:
         from_ts: str | None = None,
         to_ts: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """Возвращает страницу истории от новых к старым с опциональными фильтрами."""
+        """Возвращает страницу истории от новых к старым с опциональными фильтрами.
+
+        Оптимизация: при наличии from_ts итерация прекращается, как только
+        записи становятся старше нижней границы диапазона (NDJSON хронологический).
+        """
         safe_limit = max(1, min(limit, 500))
         safe_cursor = self._parse_cursor(cursor)
         filter_paste = self._normalize_optional_filter(paste_status)
@@ -199,6 +203,10 @@ class StateStore:
 
         newest_first = []
         for item in reversed(active):
+            # Early termination: items are chronological, iterating newest-first.
+            # Once item.ts < from_ts, all remaining are even older — stop.
+            if filter_from_ts is not None and item.ts < filter_from_ts:
+                break
             if not self._matches_filters(
                 item,
                 filter_paste,
@@ -245,9 +253,12 @@ class StateStore:
         # Быстрый путь: проверяем сначала последние N записей.
         # Если найденных результатов достаточно для текущей страницы,
         # возвращаем их без полного прохода по всей истории.
+        # Early termination при наличии from_ts (индекс отсортирован newest-first).
         filtered = []
         if needle:
             for item, haystack in recent_index:
+                if filter_from_ts is not None and item.ts < filter_from_ts:
+                    break
                 if not self._matches_filters(
                     item,
                     filter_paste,
@@ -268,8 +279,11 @@ class StateStore:
                 return [item.to_dict() for item in page], next_cursor
 
         # Точный fallback: полный проход по всей истории.
+        # Early termination при наличии from_ts (хронологический порядок NDJSON).
         filtered = []
         for item in reversed(active):
+            if filter_from_ts is not None and item.ts < filter_from_ts:
+                break
             if not self._matches_filters(
                 item,
                 filter_paste,
@@ -477,7 +491,7 @@ class StateStore:
         }
 
     def get_history_overview(self) -> dict[str, Any]:
-        """Возвращает обзор истории для UI: статусы, перевод и свежесть данных."""
+        """Возвращает обзор истории для UI: статусы, перевод, языки, диаризация."""
         with self._lock():
             active = self._load_active_items_unlocked()
 
@@ -491,9 +505,18 @@ class StateStore:
         no_translation = 0
         today_count = 0
         last_24h_count = 0
+        diarization_count = 0
+        llm_applied_count = 0
+        total_text_chars = 0
         mode_counts: dict[str, int] = {}
+        source_lang_counts: dict[str, int] = {}
+        target_lang_counts: dict[str, int] = {}
+        today_text_chars = 0
 
         for item in active:
+            text_len = len(item.text)
+            total_text_chars += text_len
+
             if item.paste_status == "ok":
                 paste_ok += 1
             else:
@@ -508,8 +531,21 @@ class StateStore:
             elif item.translation_status == "translate_error":
                 translated_error += 1
 
-            if item.ts.startswith(today_iso):
+            if item.source_lang:
+                source_lang_counts[item.source_lang] = source_lang_counts.get(item.source_lang, 0) + 1
+            if item.target_lang:
+                target_lang_counts[item.target_lang] = target_lang_counts.get(item.target_lang, 0) + 1
+
+            if item.diarization is not None:
+                diarization_count += 1
+
+            if item.llm_applied:
+                llm_applied_count += 1
+
+            is_today = item.ts.startswith(today_iso)
+            if is_today:
                 today_count += 1
+                today_text_chars += text_len
             try:
                 item_dt = datetime.fromisoformat(item.ts)
             except ValueError:
@@ -517,11 +553,14 @@ class StateStore:
             if item_dt is not None and item_dt >= last_24h_threshold:
                 last_24h_count += 1
 
+        total = len(active)
         top_modes = sorted(mode_counts.items(), key=lambda pair: pair[1], reverse=True)[:3]
         top_modes_payload = [{"mode": mode, "count": count} for mode, count in top_modes]
+        top_source_langs = sorted(source_lang_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]
+        top_target_langs = sorted(target_lang_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]
 
         return {
-            "active_count": len(active),
+            "active_count": total,
             "paste_ok": paste_ok,
             "paste_failed": paste_failed,
             "translated_ok": translated_ok,
@@ -530,6 +569,15 @@ class StateStore:
             "today_count": today_count,
             "last_24h_count": last_24h_count,
             "top_modes": top_modes_payload,
+            # Языковая статистика
+            "source_langs": [{"lang": lang, "count": cnt} for lang, cnt in top_source_langs],
+            "target_langs": [{"lang": lang, "count": cnt} for lang, cnt in top_target_langs],
+            # Диаризация и LLM
+            "diarization_count": diarization_count,
+            "llm_applied_count": llm_applied_count,
+            # Объём текста
+            "avg_text_chars": round(total_text_chars / total) if total else 0,
+            "today_text_chars": today_text_chars,
         }
 
     def count_active_items(self) -> int:
