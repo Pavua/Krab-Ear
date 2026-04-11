@@ -1364,26 +1364,49 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         statusRow.addArrangedSubview(NSView()) // Spacer
         statusRow.addArrangedSubview(importStatusLabel)
 
-        // Merge topActionsRow items (Страница, Плотность, Фокус) into topSearchRow for compact single-row toolbar
-        // Remove trailing spacer from topSearchRow first
-        if let lastView = topSearchRow.arrangedSubviews.last, !(lastView is NSTextField) && !(lastView is NSButton) && !(lastView is NSSearchField) && !(lastView is NSPopUpButton) {
-            topSearchRow.removeArrangedSubview(lastView)
-            lastView.removeFromSuperview()
-        }
-        // Move remaining items from topActionsRow into topSearchRow (skip helpButton/liveTranslatePresetButton — already moved)
-        for view in topActionsRow.arrangedSubviews {
-            topActionsRow.removeArrangedSubview(view)
-            view.removeFromSuperview()
-            topSearchRow.addArrangedSubview(view)
-        }
-
+        // Keep topSearchRow and topActionsRow as separate horizontal rows
+        // (reverted merge that caused vertical stacking of toolbar items)
         historyStack.addArrangedSubview(topSearchRow)
+        historyStack.addArrangedSubview(topActionsRow)
         historyStack.addArrangedSubview(filtersSection)
         historyStack.addArrangedSubview(scrollView)
         historyStack.addArrangedSubview(primaryActionsRow)
         historyStack.addArrangedSubview(advancedSection)
         historyStack.addArrangedSubview(importSection)
         historyStack.addArrangedSubview(statusRow)
+
+        // Make history tab scrollable — wrap historyStack in NSScrollView
+        // Done here (after rebuild) because the clear loop above does removeFromSuperview
+        if let historyContentView = mainTabView.tabViewItem(at: 2).view {
+            historyStack.removeFromSuperview()
+
+            let existingScroll = historyContentView.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView
+            let historyScroll = existingScroll ?? NSScrollView()
+            if existingScroll == nil {
+                historyScroll.translatesAutoresizingMaskIntoConstraints = false
+                historyScroll.hasVerticalScroller = true
+                historyScroll.borderType = .noBorder
+                historyScroll.drawsBackground = false
+                historyScroll.automaticallyAdjustsContentInsets = false
+                historyScroll.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+                historyContentView.addSubview(historyScroll)
+                NSLayoutConstraint.activate([
+                    historyScroll.topAnchor.constraint(equalTo: historyContentView.topAnchor),
+                    historyScroll.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
+                    historyScroll.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
+                    historyScroll.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
+                ])
+                // Pin stack width once — stays stable across applyVisualTheme() re-runs
+                historyStack.translatesAutoresizingMaskIntoConstraints = false
+                historyStack.widthAnchor.constraint(equalTo: historyScroll.contentView.widthAnchor, constant: -24).isActive = true
+            }
+            historyScroll.documentView = historyStack
+
+            // Ensure all arranged subviews fill stack width
+            for child in historyStack.arrangedSubviews {
+                child.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
+            }
+        }
 
         // --- BUTTON STYLING ---
         // Only true primary action buttons get accent color

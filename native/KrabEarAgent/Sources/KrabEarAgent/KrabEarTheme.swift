@@ -78,6 +78,7 @@ public class ThemeCardView: NSView {
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
         layer?.borderWidth = 0.5
+        layer?.masksToBounds = true  // Prevent rendering artifacts on scroll/hover
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
@@ -106,6 +107,7 @@ public class ThemeCardView: NSView {
         effectView.state = .active
         effectView.wantsLayer = true
         effectView.layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
+        effectView.layer?.masksToBounds = true  // Prevent ghost traces from alpha blending
         effectView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(effectView, positioned: .below, relativeTo: containerStack)
 
