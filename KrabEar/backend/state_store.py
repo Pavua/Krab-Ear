@@ -123,6 +123,7 @@ class StateStore:
         llm_applied: bool = False,
         llm_latency_ms: int = 0,
         diarization: dict | None = None,
+        audio_duration_sec: float | None = None,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -141,6 +142,7 @@ class StateStore:
             llm_applied=llm_applied,
             llm_latency_ms=llm_latency_ms,
             diarization=diarization,
+            audio_duration_sec=audio_duration_sec,
         )
         with self._lock():
             self._append_ndjson(self.history_path, item.to_dict())

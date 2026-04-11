@@ -202,6 +202,7 @@ class BackendService:
             "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
+            "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
         }
 
         handler = handlers.get(method)
@@ -428,11 +429,15 @@ class BackendService:
                     "background_guard_rejected": True,
                 }
 
+        # Загружаем пользовательский vocabulary для подсказок Whisper
+        user_vocabulary = self.store.load_vocabulary() or []
+
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
             cleanup_profile=cleanup_profile,
             lang_hint=lang_hint,
+            extra_vocabulary=user_vocabulary if user_vocabulary else None,
         )
         text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
         transcription_error = self._extract_transcribed_error(transcribe_payload)
@@ -1133,6 +1138,94 @@ class BackendService:
             "admin_enabled": admin_enabled,
             "runtime_enabled": runtime_enabled,
             "enabled": bool(admin_enabled and runtime_enabled and reachable),
+        }
+
+    # ── Стоп-слова для фильтрации vocabulary suggestions ──────────────
+    _STOP_WORDS_RU = frozenset([
+        "быть", "было", "была", "были", "буду", "будет", "будут",
+        "этот", "этой", "этом", "этих", "этого", "этому",
+        "который", "которая", "которое", "которые", "которого", "которой",
+        "может", "можно", "могут", "можем",
+        "если", "когда", "потом", "потому", "после", "перед",
+        "очень", "более", "менее", "также", "тоже",
+        "через", "между", "около", "вокруг",
+        "нужно", "нужна", "надо", "просто",
+        "здесь", "сейчас", "тогда", "всегда", "никогда",
+        "ничего", "некоторые", "каждый", "другой", "другие",
+        "такой", "такая", "такие", "такое",
+        "свой", "свою", "свои", "своей", "своего",
+        "весь", "вся", "всё", "все", "всех", "всем",
+        "один", "одна", "одно", "одни",
+        "наш", "наша", "наши", "ваш", "ваша", "ваши",
+        "есть", "нет", "там", "тут", "еще", "ещё", "уже",
+        "только", "самый", "самая", "самое",
+        "хорошо", "ладно", "давай", "давайте",
+    ])
+    _STOP_WORDS_ES = frozenset([
+        "pero", "para", "como", "desde", "este", "esta", "esto",
+        "estos", "estas", "donde", "cuando", "porque", "aunque",
+        "puede", "pueden", "podemos", "tiene", "tienen",
+        "hace", "hacen", "está", "están", "sido", "haber",
+        "también", "mucho", "mucha", "muchos", "muchas",
+        "otro", "otra", "otros", "otras",
+        "todo", "toda", "todos", "todas",
+        "cada", "mismo", "misma", "mismos",
+        "algo", "nada", "siempre", "nunca",
+        "aquí", "ahora", "entonces", "después", "antes",
+        "entre", "sobre", "contra", "hacia",
+        "solo", "bueno", "bien", "vale",
+    ])
+
+    def _handle_get_vocabulary_suggestions(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует историю транскрибаций и предлагает слова для vocabulary.
+
+        Сканирует последние N записей истории, находит слова с частотой >= min_count,
+        фильтрует стоп-слова и короткие слова, возвращает top-K кандидатов.
+        """
+        scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))
+        min_count = max(2, min(int(params.get("min_count", 3) or 3), 20))
+        top_k = max(5, min(int(params.get("top_k", 20) or 20), 50))
+        min_word_len = max(2, min(int(params.get("min_word_len", 4) or 4), 10))
+
+        # Собираем тексты из последних записей истории
+        items, _ = self.store.get_history_page(cursor=None, limit=scan_limit)
+
+        # Подсчёт частоты слов
+        word_freq: dict[str, int] = {}
+        for item in items:
+            text = str(item.get("text", "") or "")
+            source_text = str(item.get("source_text", "") or "")
+            # Используем source_text (до перевода) если есть, иначе text
+            raw = source_text if source_text else text
+            words = re.findall(r"[A-Za-zА-Яа-яÁÉÍÓÚáéíóúÑñÜü0-9_-]{2,}", raw)
+            for w in words:
+                key = w.strip()
+                if len(key) >= min_word_len:
+                    word_freq[key] = word_freq.get(key, 0) + 1
+
+        # Фильтрация стоп-слов и уже известных vocabulary
+        current_vocab = set(self.store.load_vocabulary())
+        stop_words = self._STOP_WORDS_RU | self._STOP_WORDS_ES
+        candidates: list[tuple[str, int]] = []
+        for word, count in word_freq.items():
+            if count < min_count:
+                continue
+            lower = word.lower()
+            if lower in stop_words:
+                continue
+            if word in current_vocab:
+                continue
+            candidates.append((word, count))
+
+        # Сортируем по частоте (desc), потом по длине (desc) для стабильности
+        candidates.sort(key=lambda x: (-x[1], -len(x[0]), x[0]))
+        top = candidates[:top_k]
+
+        return {
+            "suggestions": [{"word": w, "count": c} for w, c in top],
+            "total_candidates": len(candidates),
+            "scanned_items": len(items),
+            "current_vocabulary_size": len(current_vocab),
         }
 
     def _call_assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
@@ -2042,11 +2135,23 @@ class BackendService:
         if not audio_paths:
             return {"items": [], "processed": 0, "errors": ["Не найдено аудиофайлов для транскрибации"]}
 
+        # Загружаем пользовательский vocabulary для подсказок Whisper
+        user_vocabulary = self.store.load_vocabulary() or []
+
         items: list[dict[str, Any]] = []
         errors: list[str] = []
         for audio_path in audio_paths:
             started_at = time.monotonic()
             try:
+                # Determine audio file duration before transcription
+                audio_duration_sec: float | None = None
+                try:
+                    import soundfile as sf
+                    sf_info = sf.info(audio_path)
+                    audio_duration_sec = round(sf_info.duration, 3)
+                except Exception:
+                    pass  # Non-critical: duration is informational
+
                 # For file imports, default to auto-detect if no explicit hint
                 import_lang_hint = lang_hint if lang_hint else "auto"
                 transcribe_payload = self.transcriber.transcribe(
@@ -2054,6 +2159,7 @@ class BackendService:
                     quality_profile=quality_profile,
                     cleanup_profile=cleanup_profile,
                     lang_hint=import_lang_hint,
+                    extra_vocabulary=user_vocabulary if user_vocabulary else None,
                 )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
@@ -2091,6 +2197,7 @@ class BackendService:
                     translation_status=translation.status,
                     translation_engine=translation.engine,
                     diarization=diarization_data,
+                    audio_duration_sec=audio_duration_sec,
                 )
 
                 # Save transcript to file
@@ -2104,7 +2211,11 @@ class BackendService:
                     with open(transcript_path, "w", encoding="utf-8") as f:
                         f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")
                         f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write(f"- Длительность: {elapsed:.1f}с\n")
+                        if audio_duration_sec is not None:
+                            _mins = int(audio_duration_sec) // 60
+                            _secs = audio_duration_sec - _mins * 60
+                            f.write(f"- Аудио: {_mins}м {_secs:.1f}с\n")
+                        f.write(f"- Обработка: {elapsed:.1f}с\n")
                         f.write(f"- Источник: {audio_path}\n")
                         f.write(f"- Язык: {detected_lang}\n")
                         diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
@@ -2135,11 +2246,28 @@ class BackendService:
                         "target_lang": translation.target_lang,
                         "history_id": history_item.id,
                         "duration_sec": elapsed,
+                        "audio_duration_sec": audio_duration_sec,
                         "language": detected_lang,
                     }
                 )
             except Exception as exc:
-                errors.append(f"{audio_path}: {exc}")
+                err_msg = str(exc)
+                file_name = Path(audio_path).name
+                if "Resource deadlock" in err_msg:
+                    err_msg = f"Файл заблокирован (возможно iCloud): {file_name}"
+                elif "timeout" in err_msg.lower():
+                    err_msg = f"Превышено время транскрибации: {file_name}"
+                elif "No such file" in err_msg:
+                    err_msg = f"Файл не найден: {file_name}"
+                elif "Permission denied" in err_msg:
+                    err_msg = f"Нет доступа к файлу: {file_name}"
+                elif "too large" in err_msg.lower() or "MAX_AUDIO_MB" in err_msg:
+                    err_msg = f"Файл слишком большой: {file_name}"
+                elif "Unsupported" in err_msg or "codec" in err_msg.lower():
+                    err_msg = f"Неподдерживаемый формат аудио: {file_name}"
+                else:
+                    err_msg = f"{file_name}: {err_msg}"
+                errors.append(err_msg)
 
         return {
             "items": items,
