@@ -239,11 +239,24 @@ class AudioEngine:
             if extra_vocabulary:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
 
-        # 2. Проверка лимитов для файлов
+        # 2. Проверка лимитов и iCloud workaround для файлов
+        _temp_copy_path: str | None = None
         if isinstance(audio_data, (str, Path)) and os.path.exists(audio_data):
             size_mb = os.path.getsize(audio_data) / (1024 * 1024)
             if size_mb > settings.MAX_AUDIO_MB:
                 raise ValueError(f"Файл слишком большой: {size_mb:.1f}MB > {settings.MAX_AUDIO_MB}MB")
+            # iCloud Drive files may trigger "Resource deadlock avoided" (errno 11)
+            # when ffmpeg tries to read them without NSFileCoordinator.
+            # Workaround: copy to /tmp before processing.
+            audio_str = str(audio_data)
+            if "Mobile Documents" in audio_str or "com~apple~CloudDocs" in audio_str:
+                import shutil
+                suffix = Path(audio_str).suffix
+                with tempfile.NamedTemporaryFile(prefix="krab_ear_import_", suffix=suffix, delete=False) as tmp:
+                    _temp_copy_path = tmp.name
+                shutil.copy2(audio_str, _temp_copy_path)
+                audio_data = _temp_copy_path
+                logger.info("iCloud файл скопирован во временный: %s", _temp_copy_path)
 
         try:
             # 3. Вызов распознавания с механизмом деградации (fallback)
@@ -303,6 +316,13 @@ class AudioEngine:
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
             return {"text": "", "error": str(exc), "status": "error"}
+        finally:
+            # Cleanup iCloud temp copy
+            if _temp_copy_path:
+                try:
+                    os.unlink(_temp_copy_path)
+                except OSError:
+                    pass
 
     def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
