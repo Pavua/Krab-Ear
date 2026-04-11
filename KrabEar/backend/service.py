@@ -1406,6 +1406,50 @@ class BackendService:
         s, ms = divmod(remainder, 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    def _handle_get_clipboard_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние N вставленных транскрипций из clipboard_history.
+
+        Параметры:
+            limit (int): максимальное количество элементов (по умолчанию 10, макс 20)
+
+        Возвращает:
+            items (list): список записей {text, ts, history_id}
+            count (int): общее количество элементов в истории
+        """
+        limit = self._coerce_bounded_int(
+            value=params.get("limit", 10),
+            default=10,
+            min_value=1,
+            max_value=20,
+        )
+        return {
+            "items": self._clipboard_history[-limit:],
+            "count": len(self._clipboard_history),
+        }
+
+    def _handle_repaste_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Находит текст по history_id в clipboard_history и возвращает его для повторной вставки.
+
+        Параметры:
+            history_id (str): идентификатор записи из clipboard_history
+
+        Возвращает:
+            text (str): текст для вставки
+            history_id (str): подтверждённый идентификатор
+            found (bool): True если запись найдена
+        """
+        history_id = str(params.get("history_id", "")).strip()
+        if not history_id:
+            raise RuntimeError("history_id обязателен")
+        for entry in reversed(self._clipboard_history):
+            if entry.get("history_id") == history_id:
+                return {
+                    "text": entry["text"],
+                    "history_id": history_id,
+                    "found": True,
+                }
+        raise RuntimeError(f"Запись не найдена в clipboard_history: {history_id}")
+
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
 
