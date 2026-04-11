@@ -1197,25 +1197,26 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             importRow,
             dropZoneView,
         ]
-        historyContentView.addSubview(historyStack)
+        // Wrap historyStack in NSScrollView for vertical overflow
+        let historyTabScrollView = NSScrollView()
+        historyTabScrollView.translatesAutoresizingMaskIntoConstraints = false
+        historyTabScrollView.hasVerticalScroller = true
+        historyTabScrollView.borderType = .noBorder
+        historyTabScrollView.drawsBackground = false
+        historyTabScrollView.automaticallyAdjustsContentInsets = false
+        historyTabScrollView.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        historyTabScrollView.documentView = historyStack
+        historyContentView.addSubview(historyTabScrollView)
+
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
-            historyStack.topAnchor.constraint(equalTo: historyContentView.topAnchor, constant: 12),
-            historyStack.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor, constant: 12),
-            historyStack.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor, constant: -12),
-            historyStack.bottomAnchor.constraint(lessThanOrEqualTo: historyContentView.bottomAnchor, constant: -12),
-            topBar.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            filterRow1.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            filterRow2.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            historyQuickPresetRow.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            historyPreviewScroll.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            importRow.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            dropZoneView.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            scrollView.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            bottomBar1.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
-            bottomBar2.widthAnchor.constraint(equalTo: historyStack.widthAnchor),
+            historyTabScrollView.topAnchor.constraint(equalTo: historyContentView.topAnchor),
+            historyTabScrollView.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
+            historyTabScrollView.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
+            historyTabScrollView.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
+            historyStack.widthAnchor.constraint(equalTo: historyTabScrollView.contentView.widthAnchor, constant: -24),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
@@ -1375,37 +1376,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(importSection)
         historyStack.addArrangedSubview(statusRow)
 
-        // Make history tab scrollable — wrap historyStack in NSScrollView
-        // Done here (after rebuild) because the clear loop above does removeFromSuperview
-        if let historyContentView = mainTabView.tabViewItem(at: 2).view {
-            historyStack.removeFromSuperview()
-
-            let existingScroll = historyContentView.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView
-            let historyScroll = existingScroll ?? NSScrollView()
-            if existingScroll == nil {
-                historyScroll.translatesAutoresizingMaskIntoConstraints = false
-                historyScroll.hasVerticalScroller = true
-                historyScroll.borderType = .noBorder
-                historyScroll.drawsBackground = false
-                historyScroll.automaticallyAdjustsContentInsets = false
-                historyScroll.contentInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-                historyContentView.addSubview(historyScroll)
-                NSLayoutConstraint.activate([
-                    historyScroll.topAnchor.constraint(equalTo: historyContentView.topAnchor),
-                    historyScroll.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
-                    historyScroll.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
-                    historyScroll.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
-                ])
-                // Pin stack width once — stays stable across applyVisualTheme() re-runs
-                historyStack.translatesAutoresizingMaskIntoConstraints = false
-                historyStack.widthAnchor.constraint(equalTo: historyScroll.contentView.widthAnchor, constant: -24).isActive = true
-            }
-            historyScroll.documentView = historyStack
-
-            // Ensure all arranged subviews fill stack width
-            for child in historyStack.arrangedSubviews {
-                child.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
-            }
+        // Width constraints for history children
+        for child in historyStack.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
         }
 
         // --- BUTTON STYLING ---
