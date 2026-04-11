@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import platform
 import sys
 import threading
 import time
@@ -80,6 +81,7 @@ class BackendService:
                     transcriber.engine._settings_get = self._get_runtime_setting
 
         self.translator = translator or Translator()
+        self._start_time: float = time.monotonic()
         self._settings_cache: dict[str, Any] | None = None
         self._settings_cache_ts: float = 0.0
         self._settings_cache_ttl: float = 5.0
@@ -195,6 +197,7 @@ class BackendService:
             "translate_text": self._handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "get_capabilities": self._handle_get_capabilities,  # UNUSED: consider deprecation (no Swift callers)
             "get_readiness": self._handle_get_readiness,  # UNUSED: consider deprecation (no Swift callers)
+            "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
@@ -912,6 +915,44 @@ class BackendService:
     def _handle_get_readiness(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает детальный отчёт о реальной готовности компонентов."""
         return self._build_readiness_report_static()
+
+    def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
+        try:
+            diarization_device = str(self.transcriber.engine._resolve_diarization_device())
+        except Exception:
+            diarization_device = "unknown"
+
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+
+        return {
+            "system": {
+                "python_version": sys.version,
+                "platform": platform.platform(),
+                "uptime_sec": time.monotonic() - self._start_time,
+            },
+            "stt": {
+                "model_balanced": settings.MODEL_BALANCED,
+                "model_max": settings.MODEL_MAX_CANDIDATES,
+                "quality_profile": self.transcriber.engine.quality_profile,
+                "current_model": self.transcriber.engine.current_model,
+                "diarization_enabled": settings.DIARIZATION_ENABLED,
+                "diarization_device": diarization_device,
+            },
+            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
+            "history": {
+                "total_items": history_count,
+                "data_dir": str(self.store.data_dir),
+                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
+            },
+            "settings_cache": {
+                "ttl_sec": self._settings_cache_ttl,
+                "cached": self._settings_cache is not None,
+            },
+        }
 
     def _handle_get_capabilities(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает матрицу доступных возможностей текущей сборки."""
