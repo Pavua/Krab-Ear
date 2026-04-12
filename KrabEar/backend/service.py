@@ -47,6 +47,7 @@ from backend.history_service import HistoryService
 from backend.speaker_manager import SpeakerManager
 from backend.session_tracker import SessionTracker
 from backend.usage_tracker import UsageTracker
+from backend.cost_estimator import CostEstimator
 from backend.transcript_writer import TranscriptWriter
 from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
@@ -86,10 +87,13 @@ from core.context_memory import ContextMemory
 from core.auto_title import AutoTitleGenerator
 from backend.language_learning import LanguageLearningManager
 from core.paste_formatter import PasteFormatter
+from backend.config_presets_library import ConfigPresetsLibrary
 from backend.data_migrator import DataMigrator
 from core.text_anonymizer import TextAnonymizer
+from core.topic_tracker import TopicTracker
 from core.transcription_scorer import TranscriptionScorer
 from core.emotion_detector import EmotionDetector
+from backend.transcription_queue import TranscriptionQueue
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -169,6 +173,7 @@ class BackendService:
         self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
         self._error_reporter = ErrorReporter()
         self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
+        self._cost_estimator = CostEstimator()
         self._audio_converter = AudioConverter()
         self._auto_backup = AutoBackupManager(
             store=self.store,
@@ -200,11 +205,14 @@ class BackendService:
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
+        self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
         self._text_anonymizer = TextAnonymizer()
+        self._transcription_queue = TranscriptionQueue()
+        self._emotion_detector = EmotionDetector()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -423,7 +431,15 @@ class BackendService:
             "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
+            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
+            "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
             "anonymize_text": self._handle_anonymize_text,  # редактирование персональных данных из транскрипции
+            "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
+            "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
+            "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
+            "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
+            "detect_emotion": self._handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
         }
 
         handler = handlers.get(method)
@@ -2501,6 +2517,40 @@ class BackendService:
             "shortest_sentence": report.shortest_sentence,
         }
 
+
+    def _handle_score_transcription(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Оценивает качество транскрибации и возвращает балл 0–100 с оценкой A–F.
+
+        Params:
+            text (str): транскрибированный текст.
+            confidence (float): уверенность STT-модели, 0.0–1.0.
+            duration_sec (float): длительность аудио в секундах.
+            has_diarization (bool, optional): была ли применена диаризация. Default False.
+            has_llm_enhancement (bool, optional): был ли применён LLM-рерайтер. Default False.
+
+        Returns:
+            Словарь с полями QualityScore: overall_score, grade, factors, recommendations.
+        """
+        text = params.get("text", "")
+        confidence = float(params.get("confidence", 0.0))
+        duration_sec = float(params.get("duration_sec", 0.0))
+        has_diarization = bool(params.get("has_diarization", False))
+        has_llm_enhancement = bool(params.get("has_llm_enhancement", False))
+
+        result = self._transcription_scorer.score(
+            text=text,
+            confidence=confidence,
+            duration_sec=duration_sec,
+            has_diarization=has_diarization,
+            has_llm_enhancement=has_llm_enhancement,
+        )
+        return {
+            "overall_score": result.overall_score,
+            "grade": result.grade,
+            "factors": result.factors,
+            "recommendations": result.recommendations,
+        }
+
     def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует темп речи транскрибации.
 
@@ -2704,6 +2754,38 @@ class BackendService:
         days = max(1, min(int(params.get("days", 30) or 30), 365))
         return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
 
+
+
+    def _handle_anonymize_text(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: anonymize_text — редактирование персональных данных из транскрипции.
+
+        Параметры:
+            text  (str)       — исходный текст.
+            rules (list[str]) — опциональный список имён правил (phone, email, credit_card и др.).
+                                Если не указан, применяются все правила.
+
+        Возвращает:
+            anonymized_text, redactions, redaction_count
+        """
+        text = params.get("text", "")
+        rules = params.get("rules")  # None → все правила
+        if rules is not None and not isinstance(rules, list):
+            raise ValueError("Параметр 'rules' должен быть списком строк или null")
+
+        result = self._text_anonymizer.anonymize(text, rules=rules)
+        return {
+            "anonymized_text": result.anonymized_text,
+            "redaction_count": result.redaction_count,
+            "redactions": [
+                {
+                    "original": r.original,
+                    "replacement": r.replacement,
+                    "category": r.category,
+                    "position": r.position,
+                }
+                for r in result.redactions
+            ],
+        }
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
