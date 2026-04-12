@@ -1192,12 +1192,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.addArrangedSubview(dictationHistoryHintLabel)
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
         dictationStack.addArrangedSubview(NSView())
-        dictationContentView.addSubview(dictationStack)
+        let dictationOuterScroll = NSScrollView()
+        dictationOuterScroll.documentView = dictationStack
+        dictationOuterScroll.hasVerticalScroller = true
+        dictationOuterScroll.hasHorizontalScroller = false
+        dictationOuterScroll.drawsBackground = false
+        dictationOuterScroll.translatesAutoresizingMaskIntoConstraints = false
+        dictationContentView.addSubview(dictationOuterScroll)
         NSLayoutConstraint.activate([
-            dictationStack.topAnchor.constraint(equalTo: dictationContentView.topAnchor, constant: 12),
-            dictationStack.leadingAnchor.constraint(equalTo: dictationContentView.leadingAnchor, constant: 12),
-            dictationStack.trailingAnchor.constraint(equalTo: dictationContentView.trailingAnchor, constant: -12),
-            dictationStack.bottomAnchor.constraint(lessThanOrEqualTo: dictationContentView.bottomAnchor, constant: -12),
+            dictationOuterScroll.topAnchor.constraint(equalTo: dictationContentView.topAnchor),
+            dictationOuterScroll.leadingAnchor.constraint(equalTo: dictationContentView.leadingAnchor),
+            dictationOuterScroll.trailingAnchor.constraint(equalTo: dictationContentView.trailingAnchor),
+            dictationOuterScroll.bottomAnchor.constraint(equalTo: dictationContentView.bottomAnchor),
+            dictationStack.topAnchor.constraint(equalTo: dictationOuterScroll.contentView.topAnchor, constant: 12),
+            dictationStack.leadingAnchor.constraint(equalTo: dictationOuterScroll.contentView.leadingAnchor, constant: 12),
+            dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
             controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1221,12 +1230,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(realtimeScroll)
         liveStack.addArrangedSubview(NSView())
-        liveContentView.addSubview(liveStack)
+        let liveOuterScroll = NSScrollView()
+        liveOuterScroll.documentView = liveStack
+        liveOuterScroll.hasVerticalScroller = true
+        liveOuterScroll.hasHorizontalScroller = false
+        liveOuterScroll.drawsBackground = false
+        liveOuterScroll.translatesAutoresizingMaskIntoConstraints = false
+        liveContentView.addSubview(liveOuterScroll)
         NSLayoutConstraint.activate([
-            liveStack.topAnchor.constraint(equalTo: liveContentView.topAnchor, constant: 12),
-            liveStack.leadingAnchor.constraint(equalTo: liveContentView.leadingAnchor, constant: 12),
-            liveStack.trailingAnchor.constraint(equalTo: liveContentView.trailingAnchor, constant: -12),
-            liveStack.bottomAnchor.constraint(lessThanOrEqualTo: liveContentView.bottomAnchor, constant: -12),
+            liveOuterScroll.topAnchor.constraint(equalTo: liveContentView.topAnchor),
+            liveOuterScroll.leadingAnchor.constraint(equalTo: liveContentView.leadingAnchor),
+            liveOuterScroll.trailingAnchor.constraint(equalTo: liveContentView.trailingAnchor),
+            liveOuterScroll.bottomAnchor.constraint(equalTo: liveContentView.bottomAnchor),
+            liveStack.topAnchor.constraint(equalTo: liveOuterScroll.contentView.topAnchor, constant: 12),
+            liveStack.leadingAnchor.constraint(equalTo: liveOuterScroll.contentView.leadingAnchor, constant: 12),
+            liveStack.trailingAnchor.constraint(equalTo: liveOuterScroll.contentView.trailingAnchor, constant: -12),
             liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             toolsRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callAssistControlRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
