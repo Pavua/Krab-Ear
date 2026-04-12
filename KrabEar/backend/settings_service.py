@@ -249,6 +249,45 @@ class SettingsService:
         self.invalidate_cache()
         return result
 
+    def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущие настройки уведомлений из хранилища настроек."""
+        settings = self.cached_settings()
+        return {
+            "notifications_enabled": bool(settings.get("notifications_enabled", True)),
+            "notify_on_low_confidence": bool(settings.get("notify_on_low_confidence", True)),
+            "notify_confidence_threshold": float(settings.get("notify_confidence_threshold", 0.5)),
+            "notify_on_llm_failure": bool(settings.get("notify_on_llm_failure", True)),
+            "notify_on_import_complete": bool(settings.get("notify_on_import_complete", True)),
+            "notify_sound_enabled": bool(settings.get("notify_sound_enabled", True)),
+        }
+
+    def handle_set_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обновляет настройки уведомлений. Принимает любое подмножество полей."""
+        settings = self.cached_settings()
+
+        _BOOL_FIELDS = (
+            "notifications_enabled",
+            "notify_on_low_confidence",
+            "notify_on_llm_failure",
+            "notify_on_import_complete",
+            "notify_sound_enabled",
+        )
+        for field in _BOOL_FIELDS:
+            if field in params:
+                settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
+
+        if "notify_confidence_threshold" in params:
+            settings["notify_confidence_threshold"] = self._coerce_bounded(
+                value=params["notify_confidence_threshold"],
+                default=0.5,
+                min_value=0.0,
+                max_value=1.0,
+            )
+
+        result = self.store.save_settings(settings)
+        self.invalidate_cache()
+        return result
+
     def handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных пресетов профилей с описаниями и значениями."""
         presets = []

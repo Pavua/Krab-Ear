@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.translator import Translator
     from backend.transcriber import Transcriber
+    from backend.vocabulary_store import VocabularyStore
 
 
 class TranslationService:
@@ -62,11 +63,13 @@ class TranslationService:
         store: "StateStore",
         cached_settings: Callable[[], dict[str, Any]],
         invalidate_settings_cache: Callable[[], None],
+        vocabulary_store: "VocabularyStore | None" = None,
     ) -> None:
         self.translator = translator
         self.store = store
         self._cached_settings = cached_settings
         self._invalidate_settings_cache = invalidate_settings_cache
+        self._vocabulary_store = vocabulary_store
 
     def handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
@@ -256,7 +259,10 @@ class TranslationService:
                     word_freq[key] = word_freq.get(key, 0) + 1
 
         # Фильтрация стоп-слов и уже известных vocabulary
-        current_vocab = set(self.store.load_vocabulary())
+        if self._vocabulary_store is not None:
+            current_vocab = set(self._vocabulary_store.load())
+        else:
+            current_vocab = set(self.store.load_vocabulary())
         stop_words = self._STOP_WORDS_RU | self._STOP_WORDS_ES
         candidates: list[tuple[str, int]] = []
         for word, count in word_freq.items():

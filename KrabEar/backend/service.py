@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.call_assist_service import CallAssistService
 from backend.history_service import HistoryService
+from backend.session_tracker import SessionTracker
 from backend.transcript_writer import TranscriptWriter
 from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
@@ -48,6 +49,7 @@ from contracts.translation_events import TranslationCompleted, TranslationFailed
 from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
+from backend.vocabulary_store import VocabularyStore
 from backend.translator import Translator
 from core.config import settings
 from core.utils import TextUtils
@@ -66,6 +68,7 @@ class BackendService:
         translator: Translator | None = None,
     ) -> None:
         self.store = store
+        self.vocabulary = VocabularyStore(data_dir=store.data_dir)
         self.recorder = recorder or AudioRecorder()
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
@@ -112,6 +115,7 @@ class BackendService:
             store=self.store,
             cached_settings=self._cached_settings,
             invalidate_settings_cache=self._invalidate_settings_cache,
+            vocabulary_store=self.vocabulary,
         )
         from backend.health_checker import HealthChecker
         self._health_checker = HealthChecker(
@@ -120,6 +124,7 @@ class BackendService:
             llm_rewriter=self._llm_rewriter,
             start_time=self._start_time,
         )
+        self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -228,18 +233,25 @@ class BackendService:
             "export_history": self._history.handle_export_history,
             "export_history_srt": self._history.handle_export_history_srt,
             "export_history_markdown": self._history.handle_export_history_markdown,
+            "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "get_clipboard_history": self._history.handle_get_clipboard_history,
             "repaste_item": self._history.handle_repaste_item,
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
+            "get_history_statistics": self._history.handle_get_history_statistics,  # агрегированная статистика по истории
             "apply_profile_preset": self._settings_svc.handle_apply_profile_preset,  # применяет пресет настроек профиля
             "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
+            "get_notification_preferences": self._settings_svc.handle_get_notification_preferences,  # настройки уведомлений
+            "set_notification_preferences": self._settings_svc.handle_set_notification_preferences,  # обновление настроек уведомлений
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
             "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
+            "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
+            "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
+            "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
         }
 
         handler = handlers.get(method)
@@ -478,7 +490,7 @@ class BackendService:
                 }
 
         # Загружаем пользовательский vocabulary для подсказок Whisper
-        user_vocabulary = self.store.load_vocabulary() or []
+        user_vocabulary = self.vocabulary.load() or []
 
         transcribe_payload = self.transcriber.transcribe(
             audio,
@@ -631,6 +643,16 @@ class BackendService:
             "duration_sec": preview_duration,
             "preview_text": preview_text,
         }
+
+    def _handle_get_session_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние N сессий записи с метаданными."""
+        limit = int(params.get("limit", 50))
+        sessions = self._session_tracker.get_sessions(limit=limit)
+        return {"sessions": sessions, "count": len(sessions)}
+
+    def _handle_get_session_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает агрегированную статистику по всем сессиям в памяти."""
+        return self._session_tracker.get_session_stats()
 
     def _handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
         item_id = str(params.get("id", "")).strip()
@@ -793,6 +815,26 @@ class BackendService:
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
         return self._health_checker.check_all()
+
+    def _handle_analyze_audio_quality(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pre-flight анализ качества аудиофайла перед транскрипцией.
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+
+        Returns:
+            Словарь с метриками качества: rms_level, peak_level, snr_estimate_db,
+            clipping_ratio, silence_ratio, duration_sec, quality_score, warnings.
+        """
+        from core.audio_quality import analyze_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        report = analyze_file(file_path)
+        return report.to_dict()
+
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
@@ -1077,7 +1119,7 @@ class BackendService:
             return {"items": [], "processed": 0, "errors": ["Не найдено аудиофайлов для транскрибации"]}
 
         # Загружаем пользовательский vocabulary для подсказок Whisper
-        user_vocabulary = self.store.load_vocabulary() or []
+        user_vocabulary = self.vocabulary.load() or []
 
         items: list[dict[str, Any]] = []
         errors: list[str] = []

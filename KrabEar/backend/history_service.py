@@ -1012,6 +1012,136 @@ class HistoryService:
         }
 
     # ------------------------------------------------------------------
+    # Агрегированная статистика по истории
+    # ------------------------------------------------------------------
+
+    def handle_get_history_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Агрегирует статистику по всем активным записям истории за один проход.
+
+        Возвращает:
+            total_items (int): общее количество записей
+            total_duration_sec (float): суммарная длительность аудио в секундах
+            total_words (int): суммарное количество слов
+            avg_confidence (float): средняя уверенность STT (0.0–1.0), 0.0 если нет данных
+            languages (dict): {lang_code: count} — частота языков по source_lang
+            date_range (dict): {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"} или None если нет записей
+            items_with_translation (int): количество записей с переводом (translation_status == "ok")
+            items_with_diarization (int): количество записей с диаризацией (enabled=True, ≥2 спикеров)
+            avg_speakers (float): среднее количество спикеров в записях с диаризацией
+            top_speakers (dict): {speaker_id: count} — топ спикеров по частоте встреч
+            daily_counts (dict): {"YYYY-MM-DD": count} — количество записей за последние 30 дней
+        """
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        if not active:
+            return {
+                "total_items": 0,
+                "total_duration_sec": 0.0,
+                "total_words": 0,
+                "avg_confidence": 0.0,
+                "languages": {},
+                "date_range": None,
+                "items_with_translation": 0,
+                "items_with_diarization": 0,
+                "avg_speakers": 0.0,
+                "top_speakers": {},
+                "daily_counts": {},
+            }
+
+        total_items = len(active)
+        total_duration_sec = 0.0
+        total_words = 0
+        confidence_sum = 0.0
+        confidence_count = 0
+        languages: dict[str, int] = {}
+        items_with_translation = 0
+        items_with_diarization = 0
+        speakers_per_item: list[int] = []
+        all_speakers: dict[str, int] = {}
+        min_date: str | None = None
+        max_date: str | None = None
+
+        # Вычисляем порог для daily_counts (последние 30 дней)
+        now = datetime.now(timezone.utc)
+        thirty_days_ago = (now - timedelta(days=30)).date()
+        daily_counts: dict[str, int] = {}
+
+        for item in active:
+            # Длительность
+            if item.audio_duration_sec is not None:
+                total_duration_sec += item.audio_duration_sec
+
+            # Слова
+            if item.text:
+                total_words += len(item.text.split())
+
+            # Уверенность
+            if item.confidence is not None:
+                confidence_sum += item.confidence
+                confidence_count += 1
+
+            # Язык
+            if item.source_lang:
+                languages[item.source_lang] = languages.get(item.source_lang, 0) + 1
+
+            # Перевод
+            if item.translated_text and item.translation_status == "ok":
+                items_with_translation += 1
+
+            # Диаризация
+            diar = item.diarization
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                turns = diar.get("speaker_turns", [])
+                speakers = {str(t.get("speaker")) for t in turns if t.get("speaker")}
+                if len(speakers) >= 2:
+                    items_with_diarization += 1
+                    speakers_per_item.append(len(speakers))
+                    for spk in speakers:
+                        all_speakers[spk] = all_speakers.get(spk, 0) + 1
+
+            # Диапазон дат
+            if item.ts:
+                try:
+                    item_date = item.ts[:10]  # "YYYY-MM-DD"
+                    if min_date is None or item_date < min_date:
+                        min_date = item_date
+                    if max_date is None or item_date > max_date:
+                        max_date = item_date
+
+                    # daily_counts за последние 30 дней
+                    from datetime import date as _date
+                    parsed_date = _date.fromisoformat(item_date)
+                    if parsed_date >= thirty_days_ago:
+                        daily_counts[item_date] = daily_counts.get(item_date, 0) + 1
+                except (ValueError, TypeError):
+                    pass
+
+        avg_confidence = round(confidence_sum / confidence_count, 4) if confidence_count > 0 else 0.0
+        avg_speakers = round(sum(speakers_per_item) / len(speakers_per_item), 2) if speakers_per_item else 0.0
+
+        # Топ-10 спикеров по частоте
+        top_speakers = dict(
+            sorted(all_speakers.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        )
+
+        date_range = {"from": min_date, "to": max_date} if min_date and max_date else None
+
+        return {
+            "total_items": total_items,
+            "total_duration_sec": round(total_duration_sec, 3),
+            "total_words": total_words,
+            "avg_confidence": avg_confidence,
+            "languages": languages,
+            "date_range": date_range,
+            "items_with_translation": items_with_translation,
+            "items_with_diarization": items_with_diarization,
+            "avg_speakers": avg_speakers,
+            "top_speakers": top_speakers,
+            "daily_counts": daily_counts,
+        }
+
+    # ------------------------------------------------------------------
     # Статические хелперы (копированы из BackendService для автономности)
     # ------------------------------------------------------------------
 
@@ -1049,3 +1179,355 @@ class HistoryService:
 
     _coerce_bounded_int = _coerce_bounded
     _coerce_bounded_float = _coerce_bounded
+
+    # ------------------------------------------------------------------
+    # Экспорт в формат Obsidian
+    # ------------------------------------------------------------------
+
+    def handle_export_obsidian(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует транскрипции в формат Obsidian-совместимого Markdown.
+
+        Параметры (взаимно-исключающие — приоритет: ids > date range):
+            ids (list[str]|None): список ID записей для экспорта
+            from_ts (str|None): ISO-timestamp начала диапазона (включительно)
+            to_ts (str|None): ISO-timestamp конца диапазона (включительно)
+            limit (int): макс. количество записей при выборке по диапазону (по умолчанию 100)
+            title (str|None): заголовок документа (по умолчанию генерируется из дат)
+            output_dir (str|None): директория для сохранения (по умолчанию transcripts/)
+            tags (list[str]|None): дополнительные Obsidian-теги (кроме #transcription #krab-ear)
+
+        Возвращает:
+            file (str): путь к созданному .md файлу
+            entries (int): количество экспортированных записей
+            content (str): содержимое файла
+        """
+        ids: list[str] | None = params.get("ids")
+        from_ts: str | None = params.get("from_ts")
+        to_ts: str | None = params.get("to_ts")
+        limit = max(1, min(int(params.get("limit", 100) or 100), 2000))
+        custom_title: str | None = params.get("title")
+        output_dir_param: str | None = params.get("output_dir")
+        extra_tags: list[str] = list(params.get("tags") or [])
+
+        # --- Загружаем записи ---
+        from backend.models import HistoryItem as _HI
+        if ids is not None:
+            if not isinstance(ids, list) or len(ids) == 0:
+                raise RuntimeError("ids должен быть непустым списком строк")
+            id_set = {str(i).strip() for i in ids if str(i).strip()}
+            with self.store._lock():
+                all_items = self.store._load_active_items_unlocked()
+            items = [it for it in all_items if it.id in id_set]
+            if not items:
+                raise RuntimeError("Ни одна из указанных записей не найдена")
+        else:
+            page_dicts, _ = self.store.get_history_page_filtered(
+                cursor=None,
+                limit=limit,
+                paste_status=None,
+                translation_mode=None,
+                from_ts=str(from_ts) if from_ts else None,
+                to_ts=str(to_ts) if to_ts else None,
+            )
+            if not page_dicts:
+                raise RuntimeError("Записи в указанном диапазоне не найдены")
+            items = [_HI.from_dict(d) for d in page_dicts]
+
+        # --- Метаданные ---
+        ts_list = [it.ts for it in items if it.ts]
+        first_ts = ts_list[-1] if ts_list else None   # старейшая (список в порядке убывания)
+        last_ts = ts_list[0] if ts_list else None      # новейшая
+
+        # Определяем дату для заголовка и имени файла
+        try:
+            title_date_dt = datetime.fromisoformat(last_ts) if last_ts else datetime.now()
+        except (ValueError, TypeError):
+            title_date_dt = datetime.now()
+        title_date_str = title_date_dt.strftime("%Y-%m-%d")
+
+        # Человекочитаемая дата для frontmatter
+        MONTHS_RU = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ]
+        date_human = f"{title_date_dt.day} {MONTHS_RU[title_date_dt.month - 1]} {title_date_dt.year} г."
+
+        # --- Длительность всех записей ---
+        total_dur_sec = sum(
+            (it.audio_duration_sec or 0.0) for it in items
+        )
+
+        # --- Теги ---
+        base_tags = ["transcription", "krab-ear"]
+        all_tags = base_tags + [t.lstrip("#") for t in extra_tags if t.strip()]
+        tags_yaml = ", ".join(f'"{t}"' for t in all_tags)
+        tags_inline = " ".join(f"#{t}" for t in all_tags)
+
+        # --- Заголовок ---
+        if custom_title:
+            doc_title = custom_title
+        elif len(items) == 1:
+            doc_title = f"Транскрибация ({title_date_str})"
+        else:
+            doc_title = f"Транскрибации ({title_date_str})"
+
+        # --- Строим YAML frontmatter ---
+        fm_lines = [
+            "---",
+            f"title: \"{doc_title}\"",
+            f"date: {title_date_str}",
+            f"tags: [{tags_yaml}]",
+            f"entries: {len(items)}",
+        ]
+        if total_dur_sec > 0:
+            fm_lines.append(
+                f"duration: \"{self._format_duration_human(total_dur_sec)}\""
+            )
+        if first_ts and last_ts and first_ts != last_ts:
+            fm_lines.append(f"from: \"{self._format_ts_human(first_ts)}\"")
+            fm_lines.append(f"to: \"{self._format_ts_human(last_ts)}\"")
+        fm_lines.append("---")
+
+        # --- Тело документа ---
+        body_lines: list[str] = [
+            "",
+            f"# {doc_title}",
+            "",
+            f"**Дата:** {date_human}  ",
+            f"**Теги:** {tags_inline}  ",
+            "",
+        ]
+
+        # Summary: если LLM доступен — пытаемся авто-резюме
+        summary_text: str | None = None
+        key_points: list[str] = []
+
+        if self._llm_rewriter is not None:
+            circuit_state = (
+                self._llm_rewriter._circuit.state
+                if hasattr(self._llm_rewriter, "_circuit")
+                else None
+            )
+            if circuit_state != "open":
+                texts = [(it.text or "").strip() for it in items if (it.text or "").strip()]
+                if texts:
+                    try:
+                        prompt = self._build_batch_summary_prompt(texts)
+                        result = self._llm_rewriter.summarize(prompt, max_sentences=5)
+                        if result.ok and result.text:
+                            parsed = self._parse_llm_batch_response(result.text)
+                            summary_text = parsed.get("summary")
+                            key_points = parsed.get("key_points", [])
+                    except Exception as exc:
+                        logger.warning("export_obsidian: LLM summarize failed: %s", exc)
+
+        if summary_text is None:
+            # Базовое резюме: статистика
+            duration_str = self._format_duration_human(total_dur_sec)
+            summary_text = (
+                f"{len(items)} транскрипций"
+                + (f", суммарная длительность {duration_str}" if duration_str else "")
+                + f", экспортировано {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+
+        body_lines += [
+            "## Краткое содержание (Summary)",
+            "",
+            summary_text,
+            "",
+        ]
+
+        if key_points:
+            body_lines += ["**Основные темы:**", ""]
+            for i, point in enumerate(key_points, start=1):
+                body_lines.append(f"{i}. **Тема:** {point}")
+            body_lines.append("")
+
+        body_lines += ["---", "", "## Улучшенная транскрибация", ""]
+
+        # --- Каждая запись ---
+        for item in items:
+            ts_human = self._format_ts_human(item.ts) if item.ts else "—"
+
+            diar = item.diarization
+            diar_turns: list[dict] = []
+            has_diarization = False
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                diar_turns = diar.get("speaker_turns", [])
+                speakers_set = {t.get("speaker") for t in diar_turns if t.get("speaker")}
+                if len(speakers_set) >= 2:
+                    has_diarization = True
+
+            if has_diarization and diar_turns:
+                for turn in diar_turns:
+                    speaker = turn.get("speaker", "SPEAKER_00")
+                    turn_text = str(turn.get("text", "")).strip()
+                    if not turn_text:
+                        continue
+                    start_sec = turn.get("start")
+                    if start_sec is not None:
+                        ts_mark = self._srt_timestamp(float(start_sec))[:8]  # HH:MM:SS
+                        body_lines.append(f"[{speaker} ({ts_mark})]")
+                    else:
+                        body_lines.append(f"[{speaker} ({ts_human})]")
+                    body_lines.append(turn_text)
+                    body_lines.append("")
+            else:
+                body_lines.append(f"[Спикер ({ts_human})]")
+                body_lines.append(item.text or "")
+                body_lines.append("")
+
+            # Перевод
+            if item.translated_text and item.translation_status == "ok":
+                mode_label = item.translation_mode or "перевод"
+                body_lines += [
+                    f"> **Перевод** ({mode_label}): {item.translated_text}",
+                    "",
+                ]
+
+        # --- Собираем файл ---
+        content = "\n".join(fm_lines) + "\n" + "\n".join(body_lines)
+
+        # --- Сохраняем ---
+        if output_dir_param:
+            out_dir = Path(output_dir_param).expanduser().resolve()
+        else:
+            out_dir = Path(self.store.data_dir) / "transcripts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_title = (
+            doc_title
+            .replace("/", "-")
+            .replace("\\", "-")
+            .replace(":", "-")
+            .replace("*", "")
+            .replace("?", "")
+            .replace("\"", "")
+            .replace("<", "")
+            .replace(">", "")
+            .replace("|", "-")
+        )
+        filename = f"{title_date_str}-{safe_title}.md"
+        file_path = out_dir / filename
+
+        # Уникальность имени файла
+        if file_path.exists():
+            suffix = datetime.now().strftime("%H%M%S")
+            filename = f"{title_date_str}-{safe_title}-{suffix}.md"
+            file_path = out_dir / filename
+
+        file_path.write_text(content, encoding="utf-8")
+        logger.info("Obsidian экспорт сохранён: %s (%d записей)", file_path, len(items))
+
+        return {
+            "file": str(file_path),
+            "entries": len(items),
+            "content": content,
+        }
+
+    def _build_obsidian_content_for_items(
+        self,
+        items: list[Any],
+        doc_title: str,
+        extra_tags: list[str],
+    ) -> str:
+        """Строит содержимое Obsidian .md для списка объектов HistoryItem.
+
+        Вспомогательный метод — используется в handle_export_obsidian и тестах.
+        """
+        from backend.models import HistoryItem as _HI
+
+        ts_list = [it.ts for it in items if it.ts]
+        last_ts = ts_list[0] if ts_list else None
+        try:
+            title_date_dt = datetime.fromisoformat(last_ts) if last_ts else datetime.now()
+        except (ValueError, TypeError):
+            title_date_dt = datetime.now()
+        title_date_str = title_date_dt.strftime("%Y-%m-%d")
+
+        MONTHS_RU = [
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ]
+        date_human = f"{title_date_dt.day} {MONTHS_RU[title_date_dt.month - 1]} {title_date_dt.year} г."
+
+        total_dur_sec = sum((getattr(it, "audio_duration_sec", None) or 0.0) for it in items)
+
+        base_tags = ["transcription", "krab-ear"]
+        all_tags = base_tags + [t.lstrip("#") for t in extra_tags if t.strip()]
+        tags_yaml = ", ".join(f'"{t}"' for t in all_tags)
+        tags_inline = " ".join(f"#{t}" for t in all_tags)
+
+        fm_lines = [
+            "---",
+            f"title: \"{doc_title}\"",
+            f"date: {title_date_str}",
+            f"tags: [{tags_yaml}]",
+            f"entries: {len(items)}",
+        ]
+        if total_dur_sec > 0:
+            fm_lines.append(
+                f"duration: \"{self._format_duration_human(total_dur_sec)}\""
+            )
+        fm_lines.append("---")
+
+        body_lines: list[str] = [
+            "",
+            f"# {doc_title}",
+            "",
+            f"**Дата:** {date_human}  ",
+            f"**Теги:** {tags_inline}  ",
+            "",
+            "## Краткое содержание (Summary)",
+            "",
+            (
+                f"{len(items)} транскрипций"
+                + (f", суммарная длительность {self._format_duration_human(total_dur_sec)}" if total_dur_sec > 0 else "")
+            ),
+            "",
+            "---",
+            "",
+            "## Улучшенная транскрибация",
+            "",
+        ]
+
+        for item in items:
+            ts_human = self._format_ts_human(item.ts) if item.ts else "—"
+            diar = getattr(item, "diarization", None)
+            diar_turns: list[dict] = []
+            has_diarization = False
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                diar_turns = diar.get("speaker_turns", [])
+                speakers_set = {t.get("speaker") for t in diar_turns if t.get("speaker")}
+                if len(speakers_set) >= 2:
+                    has_diarization = True
+
+            if has_diarization and diar_turns:
+                for turn in diar_turns:
+                    speaker = turn.get("speaker", "SPEAKER_00")
+                    turn_text = str(turn.get("text", "")).strip()
+                    if not turn_text:
+                        continue
+                    start_sec = turn.get("start")
+                    if start_sec is not None:
+                        ts_mark = self._srt_timestamp(float(start_sec))[:8]
+                        body_lines.append(f"[{speaker} ({ts_mark})]")
+                    else:
+                        body_lines.append(f"[{speaker} ({ts_human})]")
+                    body_lines.append(turn_text)
+                    body_lines.append("")
+            else:
+                body_lines.append(f"[Спикер ({ts_human})]")
+                body_lines.append(getattr(item, "text", "") or "")
+                body_lines.append("")
+
+            translated_text = getattr(item, "translated_text", "") or ""
+            translation_status = getattr(item, "translation_status", "") or ""
+            translation_mode = getattr(item, "translation_mode", "") or "перевод"
+            if translated_text and translation_status == "ok":
+                body_lines += [
+                    f"> **Перевод** ({translation_mode}): {translated_text}",
+                    "",
+                ]
+
+        return "\n".join(fm_lines) + "\n" + "\n".join(body_lines)

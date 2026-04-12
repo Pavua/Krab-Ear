@@ -44,6 +44,8 @@ class PipelineContext:
 
     # DiarizationStage output
     diarization: dict = field(default_factory=dict)
+    speaker_segments: list = field(default_factory=list)
+    num_speakers: int = 0
 
     # TextCleanupStage output
     cleaned_text: str = ""
@@ -56,6 +58,7 @@ class PipelineContext:
 
     # TranslationStage output
     translation: Optional[str] = None
+    translation_engine: Optional[str] = None
 
     # --- Финальный текст (выставляется последней стадией или executor'ом) ---
     final_text: str = ""

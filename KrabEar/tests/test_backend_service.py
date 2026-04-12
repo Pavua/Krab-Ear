@@ -1443,8 +1443,8 @@ class VocabularySuggestionsTestCase(unittest.TestCase):
         self.assertNotIn("потом", words)
 
     def test_suggestions_exclude_existing_vocabulary(self) -> None:
-        """Слова уже в vocabulary.txt не попадают в suggestions."""
-        self.store.save_vocabulary(["Telegram"])
+        """Слова уже в vocabulary.json не попадают в suggestions."""
+        self.service.vocabulary.save(["Telegram"])
         for _ in range(5):
             self.store.add_history_item(
                 text="Telegram Python Claude",
@@ -1508,8 +1508,8 @@ class VocabularyPassthroughTestCase(unittest.TestCase):
         )
 
     def test_stop_recording_passes_vocabulary(self) -> None:
-        """stop_recording передаёт vocabulary из store в transcriber."""
-        self.store.save_vocabulary(["Telegram", "Claude", "Hammerspoon"])
+        """stop_recording передаёт vocabulary из VocabularyStore в transcriber."""
+        self.service.vocabulary.save(["Telegram", "Claude", "Hammerspoon"])
 
         self.request("start_recording")
         resp = self.request("stop_recording")

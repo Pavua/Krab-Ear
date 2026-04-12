@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
     RATE_LIMIT_ENABLED: bool = True
 
+    # Pipeline v2 feature flag.
+    # True = BackendService использует transcribe_v2() (pipeline-based path).
+    # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).
+    PIPELINE_V2: bool = False
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -158,4 +163,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "llm_rewrite_enabled": False,
     # Автосохранение каждой транскрибации в .md файл в transcripts/.
     "auto_save_transcripts": False,
+    # --- Настройки уведомлений ---
+    # Мастер-переключатель уведомлений.
+    "notifications_enabled": True,
+    # Предупреждать, когда уверенность STT ниже порога.
+    "notify_on_low_confidence": True,
+    # Порог уверенности для уведомления (0.0–1.0).
+    "notify_confidence_threshold": 0.5,
+    # Уведомлять, когда LLM circuit breaker открывается.
+    "notify_on_llm_failure": True,
+    # Уведомлять по завершении импорта аудиофайла.
+    "notify_on_import_complete": True,
+    # Воспроизводить звук вместе с уведомлением.
+    "notify_sound_enabled": True,
 }
