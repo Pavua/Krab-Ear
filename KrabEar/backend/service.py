@@ -229,6 +229,11 @@ class BackendService:
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_item": self._history.handle_get_history_item,  # полные детали одной записи истории по ID
+            "add_tag": self._history.handle_add_tag,
+            "remove_tag": self._history.handle_remove_tag,
+            "get_tags": self._history.handle_get_tags,
+            "search_by_tag": self._history.handle_search_by_tag,
+            "list_all_tags": self._history.handle_list_all_tags,
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
@@ -238,6 +243,7 @@ class BackendService:
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
             "export_history": self._history.handle_export_history,
             "export_history_srt": self._history.handle_export_history_srt,
+            "export_history_csv": self._history.handle_export_history_csv,
             "export_history_markdown": self._history.handle_export_history_markdown,
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "get_clipboard_history": self._history.handle_get_clipboard_history,

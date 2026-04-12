@@ -286,6 +286,110 @@ def get_metrics():
     return metrics.get_summary()
 
 
+# ---------------------------------------------------------------------------
+# Prometheus text-format metrics endpoint
+# ---------------------------------------------------------------------------
+
+_SERVER_START_TIME = time.time()
+
+# Prometheus histogram bucket boundaries (seconds)
+_PROM_LATENCY_BUCKETS_SEC = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+
+def _build_prometheus_text(summary: dict) -> str:
+    """Формирует строку в формате Prometheus text exposition format 0.0.4."""
+    lines = []
+
+    # ── transcriptions_total ─────────────────────────────────────────────────
+    total = summary.get("total_requests", 0)
+    lines += [
+        "# HELP krab_ear_transcriptions_total Total number of transcription requests",
+        "# TYPE krab_ear_transcriptions_total counter",
+        f"krab_ear_transcriptions_total {total}",
+    ]
+
+    # ── errors_total ─────────────────────────────────────────────────────────
+    error_rate = summary.get("error_rate", 0.0)
+    errors = round(error_rate * total) if total else 0
+    lines += [
+        "# HELP krab_ear_errors_total Total number of failed transcription requests",
+        "# TYPE krab_ear_errors_total counter",
+        f"krab_ear_errors_total {errors}",
+    ]
+
+    # ── confidence_avg ───────────────────────────────────────────────────────
+    stt = summary.get("stt_metrics", {})
+    conf_avg = stt.get("confidence", {}).get("avg", 0.0) if stt else 0.0
+    lines += [
+        "# HELP krab_ear_confidence_avg Average STT confidence score (0-1)",
+        "# TYPE krab_ear_confidence_avg gauge",
+        f"krab_ear_confidence_avg {conf_avg:.4f}",
+    ]
+
+    # ── uptime_seconds ────────────────────────────────────────────────────────
+    uptime = time.time() - _SERVER_START_TIME
+    lines += [
+        "# HELP krab_ear_uptime_seconds Time since the REST server process started",
+        "# TYPE krab_ear_uptime_seconds gauge",
+        f"krab_ear_uptime_seconds {uptime:.3f}",
+    ]
+
+    # ── stt_latency histogram ────────────────────────────────────────────────
+    lines += [
+        "# HELP krab_ear_stt_latency_seconds STT transcription latency",
+        "# TYPE krab_ear_stt_latency_seconds histogram",
+    ]
+
+    latency_ms_data = stt.get("latency_ms", {}) if stt else {}
+    p50 = latency_ms_data.get("p50")
+    p95 = latency_ms_data.get("p95")
+    p99 = latency_ms_data.get("p99")
+    avg_ms = latency_ms_data.get("avg")
+
+    # Build approximate bucket counts from percentile data.
+    # Uses p50 / p95 / p99 as thresholds to infer cumulative counts.
+    window = summary.get("window_size", 0)
+    for le in _PROM_LATENCY_BUCKETS_SEC:
+        le_ms = le * 1000.0
+        if window == 0 or p50 is None:
+            count = 0
+        elif le_ms < (p50 or 0):
+            count = int(window * 0.49)
+        elif le_ms < (p95 or 0):
+            count = int(window * 0.94)
+        elif le_ms < (p99 or 0):
+            count = int(window * 0.98)
+        else:
+            count = window
+        lines.append(f'krab_ear_stt_latency_seconds_bucket{{le="{le}"}} {count}')
+
+    lines.append(f"krab_ear_stt_latency_seconds_bucket{{le=\"+Inf\"}} {window}")
+    sum_sec = (avg_ms / 1000.0 * window) if (avg_ms is not None and window) else 0.0
+    lines += [
+        f"krab_ear_stt_latency_seconds_sum {sum_sec:.6f}",
+        f"krab_ear_stt_latency_seconds_count {window}",
+    ]
+
+    return "\n".join(lines) + "\n"
+
+
+@monitoring_blp.route("/metrics/prometheus", methods=["GET"])
+@require_api_key
+def get_metrics_prometheus():
+    """Return metrics in Prometheus text exposition format 0.0.4.
+
+    No external dependencies — format generated manually.
+    Content-Type: text/plain; version=0.0.4; charset=utf-8
+    """
+    summary = metrics.get_summary()
+    body = _build_prometheus_text(summary)
+    return Response(
+        body,
+        status=200,
+        mimetype="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 # ── v1 APIs ──────────────────────────────────────────────────────────────────
 v1_blp = Blueprint(
     "v1",

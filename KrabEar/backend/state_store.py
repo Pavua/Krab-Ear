@@ -38,16 +38,17 @@ class StateStore:
         self.history_path = self.data_dir / "history.ndjson"
         self.tombstones_path = self.data_dir / "history_tombstones.ndjson"
         self.status_path = self.data_dir / "history_status.ndjson"
+        self.tags_path = self.data_dir / "history_tags.ndjson"
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.history_path, self.tombstones_path, self.status_path, self.vocabulary_path):
+        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.vocabulary_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
         # Важно: это только read-through оптимизация, источник истины остаётся NDJSON.
-        self._recent_search_index_signature: tuple[int, int, int, int, int, int, int] | None = None
+        self._recent_search_index_signature: tuple[int, ...] | None = None
         self._recent_search_index: list[tuple[HistoryItem, str]] = []
         self._recent_search_index_limit = 4000
 
@@ -316,15 +317,17 @@ class StateStore:
         next_cursor = str(end) if end < len(filtered) else None
         return [item.to_dict() for item in page], next_cursor
 
-    def _history_signature_unlocked(self) -> tuple[int, int, int, int, int, int]:
+    def _history_signature_unlocked(self) -> tuple[int, ...]:
         """Возвращает сигнатуру журналов для валидации кэша поиска."""
         return (
             self._safe_file_size(self.history_path),
             self._safe_file_size(self.tombstones_path),
             self._safe_file_size(self.status_path),
+            self._safe_file_size(self.tags_path),
             self._safe_mtime_ns(self.history_path),
             self._safe_mtime_ns(self.tombstones_path),
             self._safe_mtime_ns(self.status_path),
+            self._safe_mtime_ns(self.tags_path),
         )
 
     def _get_recent_search_index_unlocked(
@@ -605,6 +608,7 @@ class StateStore:
         tmp_history.replace(self.history_path)
         self.tombstones_path.write_text("", encoding="utf-8")
         self.status_path.write_text("", encoding="utf-8")
+        self.tags_path.write_text("", encoding="utf-8")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -627,9 +631,10 @@ class StateStore:
         }
 
     def _load_active_items_unlocked(self) -> list[HistoryItem]:
-        """Читает активные записи с применением tombstone и status-override."""
+        """Читает активные записи с применением tombstone, status-override и tags-override."""
         deleted = self._load_deleted_ids_unlocked()
         statuses = self._load_status_overrides_unlocked()
+        tags_overrides = self._load_tags_overrides_unlocked()
 
         items: list[HistoryItem] = []
         for item in self._iter_history_items_unlocked():
@@ -637,8 +642,20 @@ class StateStore:
                 continue
             if item.id in statuses:
                 item.paste_status = statuses[item.id]
+            if item.id in tags_overrides:
+                item.tags = tags_overrides[item.id]
             items.append(item)
         return items
+
+    def _load_tags_overrides_unlocked(self) -> dict[str, list[str]]:
+        """Собирает последние значения tags по id из журнала тегов."""
+        result: dict[str, list[str]] = {}
+        for payload in self._read_ndjson_unlocked(self.tags_path):
+            item_id = str(payload.get("id", "")).strip()
+            tags = payload.get("tags")
+            if item_id and isinstance(tags, list):
+                result[item_id] = [str(t) for t in tags]
+        return result
 
     def _load_deleted_ids_unlocked(self) -> set[str]:
         """Собирает множество удаленных идентификаторов."""
@@ -728,6 +745,28 @@ class StateStore:
                     continue
                 if isinstance(payload, dict):
                     yield payload
+    def update_history_item_tags(self, item_id: str, tags: list[str]) -> bool:
+        """Записывает теги для записи в отдельный журнал (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.tags_path, {"id": clean_id, "tags": list(tags)})
+        return True
+
+    def get_history_item_by_id(self, item_id: str) -> "HistoryItem | None":
+        """Возвращает активную запись по ID или None."""
+        clean_id = item_id.strip()
+        with self._lock():
+            active = self._load_active_items_unlocked()
+        for item in active:
+            if item.id == clean_id:
+                return item
+        return None
+
     def is_idempotent(self, chat_id: str | int | None, message_id: str | int | None) -> bool:
         """Проверяет, было ли уже успешно обработано сообщение с такими ID.
         

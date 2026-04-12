@@ -193,6 +193,112 @@ class HistoryService:
 
         raise RuntimeError(f"Запись {item_id} не найдена")
 
+
+    # ------------------------------------------------------------------
+    # Теги (tagging / labelling)
+    # ------------------------------------------------------------------
+
+    def handle_add_tag(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет тег к записи истории.
+
+        Params: id (str), tag (str)
+        Returns: {"id": ..., "tags": [...]}
+        """
+        item_id = str(params.get("id", "")).strip()
+        tag = str(params.get("tag", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+        if not tag:
+            raise RuntimeError("tag обязателен")
+
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        current_tags: list[str] = list(item.tags or [])
+        if tag not in current_tags:
+            current_tags.append(tag)
+            self.store.update_history_item_tags(item_id, current_tags)
+
+        return {"id": item_id, "tags": current_tags}
+
+    def handle_remove_tag(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет тег из записи истории.
+
+        Params: id (str), tag (str)
+        Returns: {"id": ..., "tags": [...]}
+        """
+        item_id = str(params.get("id", "")).strip()
+        tag = str(params.get("tag", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+        if not tag:
+            raise RuntimeError("tag обязателен")
+
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        current_tags: list[str] = [t for t in (item.tags or []) if t != tag]
+        self.store.update_history_item_tags(item_id, current_tags)
+
+        return {"id": item_id, "tags": current_tags}
+
+    def handle_get_tags(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает все теги для конкретной записи.
+
+        Params: id (str)
+        Returns: {"id": ..., "tags": [...]}
+        """
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        return {"id": item_id, "tags": list(item.tags or [])}
+
+    def handle_search_by_tag(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает записи истории с указанным тегом.
+
+        Params: tag (str), limit (int, optional, default 100)
+        Returns: {"items": [...], "count": N}
+        """
+        tag = str(params.get("tag", "")).strip()
+        if not tag:
+            raise RuntimeError("tag обязателен")
+        safe_limit = max(1, min(int(params.get("limit", 100)), 500))
+
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        matched = []
+        for item in reversed(active):
+            if tag in (item.tags or []):
+                matched.append(item.to_dict())
+                if len(matched) >= safe_limit:
+                    break
+
+        return {"items": matched, "count": len(matched)}
+
+    def handle_list_all_tags(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает все уникальные теги с количеством использований.
+
+        Returns: {"tags": [{"tag": "...", "count": N}, ...]}
+        """
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        counts: dict[str, int] = {}
+        for item in active:
+            for t in (item.tags or []):
+                counts[t] = counts.get(t, 0) + 1
+
+        sorted_tags = sorted(counts.items(), key=lambda pair: pair[1], reverse=True)
+        return {"tags": [{"tag": t, "count": c} for t, c in sorted_tags]}
+
     # ------------------------------------------------------------------
     # Экспорт истории (markdown / SRT)
     # ------------------------------------------------------------------
@@ -589,6 +695,84 @@ class HistoryService:
         m, remainder = divmod(remainder, 60000)
         s, ms = divmod(remainder, 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    # ------------------------------------------------------------------
+    # CSV export
+    # ------------------------------------------------------------------
+
+    def handle_export_history_csv(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспорт истории в CSV формат."""
+        import csv
+        import io
+        import subprocess
+
+        delimiter = params.get("delimiter", ",")
+        if len(delimiter) != 1:
+            delimiter = ","
+        include_header = params.get("include_header", True)
+        limit = params.get("limit")
+        from_ts = params.get("from_ts")
+        to_ts = params.get("to_ts")
+        copy_to_clipboard = params.get("copy_to_clipboard", True)
+        save_path = params.get("save_to_file")
+
+        items = [i.to_dict() if hasattr(i, 'to_dict') else i
+                 for i in self.store._load_active_items_with_lock()]
+        if from_ts:
+            items = [i for i in items if i.get("ts", "") >= from_ts]
+        if to_ts:
+            items = [i for i in items if i.get("ts", "") <= to_ts]
+        items.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        if limit:
+            items = items[:int(limit)]
+
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=delimiter)
+        columns = ["timestamp", "text", "translation", "language", "confidence",
+                    "duration_sec", "paste_status", "speakers"]
+        if include_header:
+            writer.writerow(columns)
+
+        for item in items:
+            translation = ""
+            if item.get("translation_status") == "ok":
+                translation = item.get("translated_text") or item.get("translation", "")
+            speakers = ""
+            diar = item.get("diarization")
+            if diar and isinstance(diar, dict):
+                segs = diar.get("speaker_segments", [])
+                speaker_set = {s.get("speaker", "") for s in segs if isinstance(s, dict)}
+                speakers = ", ".join(sorted(speaker_set))
+            writer.writerow([
+                item.get("ts", ""),
+                item.get("text", ""),
+                translation,
+                item.get("lang", ""),
+                item.get("confidence", ""),
+                item.get("duration", ""),
+                item.get("paste_status", ""),
+                speakers,
+            ])
+
+        csv_text = output.getvalue()
+        file_path = None
+
+        if save_path or save_path is True:
+            from datetime import datetime
+            transcripts_dir = self.store.data_dir / "transcripts"
+            transcripts_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            file_path = transcripts_dir / fname
+            file_path.write_text(csv_text, encoding="utf-8")
+            file_path = str(file_path)
+
+        if copy_to_clipboard:
+            try:
+                subprocess.run(["pbcopy"], input=csv_text.encode(), check=True, timeout=5)
+            except Exception:
+                pass
+
+        return {"ok": True, "entries": len(items), "file": file_path}
 
     # ------------------------------------------------------------------
     # Clipboard history
