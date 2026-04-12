@@ -213,6 +213,15 @@ class TextUtils:
         return result
 
     @staticmethod
+    def fix_punctuation(text: str, language: str = "ru") -> str:
+        """Опциональный этап коррекции пунктуации через PunctuationFixer.
+
+        Импортируется лениво, чтобы избежать циклических зависимостей.
+        """
+        from core.punctuation_fixer import PunctuationFixer  # lazy import
+        return PunctuationFixer().fix(text, language=language)
+
+    @staticmethod
     def _strip_hallucinations(clean: str) -> str:
         """Удаляет типичные шаблоны галлюцинаций Whispera."""
         lowered = clean.lower()

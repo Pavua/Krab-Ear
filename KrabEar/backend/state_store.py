@@ -40,11 +40,12 @@ class StateStore:
         self.status_path = self.data_dir / "history_status.ndjson"
         self.tags_path = self.data_dir / "history_tags.ndjson"
         self.favorites_path = self.data_dir / "history_favorites.ndjson"
+        self.annotations_path = self.data_dir / "history_annotations.ndjson"
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.favorites_path, self.vocabulary_path):
+        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.favorites_path, self.annotations_path, self.vocabulary_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
@@ -670,6 +671,66 @@ class StateStore:
             if item_id and "favorite" in payload:
                 result[item_id] = bool(payload["favorite"])
         return result
+
+    def set_annotation(self, item_id: str, note: str) -> bool:
+        """Сохраняет пользовательскую заметку для записи (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.annotations_path, {"id": clean_id, "note": str(note)})
+        return True
+
+    def get_annotation(self, item_id: str) -> str | None:
+        """Возвращает заметку для записи или None, если заметки нет."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return None
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return None
+            overrides = self._load_annotation_overrides_unlocked()
+        return overrides.get(clean_id)
+
+    def delete_annotation(self, item_id: str) -> bool:
+        """Удаляет заметку записи (записывает пустую строку — tombstone)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.annotations_path, {"id": clean_id, "note": ""})
+        return True
+
+    def search_annotations(self, query: str) -> list[dict[str, Any]]:
+        """Полнотекстовый поиск по заметкам. Возвращает список {id, note}."""
+        needle = query.strip().lower()
+        with self._lock():
+            overrides = self._load_annotation_overrides_unlocked()
+        if not needle:
+            return [{"id": k, "note": v} for k, v in overrides.items() if v]
+        return [
+            {"id": k, "note": v}
+            for k, v in overrides.items()
+            if v and needle in v.lower()
+        ]
+
+    def _load_annotation_overrides_unlocked(self) -> dict[str, str]:
+        """Собирает последние заметки по id из журнала аннотаций (last-write-wins)."""
+        result: dict[str, str] = {}
+        for payload in self._read_ndjson_unlocked(self.annotations_path):
+            item_id = str(payload.get("id", "")).strip()
+            note = payload.get("note")
+            if item_id and note is not None:
+                result[item_id] = str(note)
+        # Отфильтровываем пустые (удалённые) заметки из результата
+        return {k: v for k, v in result.items() if v}
 
     def _load_deleted_ids_unlocked(self) -> set[str]:
         """Собирает множество удаленных идентификаторов."""

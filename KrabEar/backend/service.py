@@ -37,8 +37,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.call_assist_service import CallAssistService
+from backend.collection_manager import CollectionManager
 from backend.error_reporter import ErrorReporter
 from backend.history_service import HistoryService
+from backend.speaker_manager import SpeakerManager
 from backend.session_tracker import SessionTracker
 from backend.usage_tracker import UsageTracker
 from backend.transcript_writer import TranscriptWriter
@@ -58,6 +60,7 @@ from backend.translator import Translator
 from core.audio_converter import AudioConverter
 from core.config import settings
 from core.language_detector import LanguageDetector
+from core.text_comparator import TextComparator
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.Service")
@@ -105,6 +108,7 @@ class BackendService:
         self._preview_updated_at = 0.0
         self._preview_error_count: int = 0
         self._clipboard_history: list[dict] = []
+        self._collections = CollectionManager(store=self.store)
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
@@ -304,6 +308,15 @@ class BackendService:
             "get_audio_info": self._handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
             "get_system_info": self._handle_get_system_info,  # мониторинг системных ресурсов: CPU, RAM, диск, GPU
             "find_duplicates": self._history.handle_find_duplicates,  # обнаружение дублирующихся транскрипций по текстовому сходству
+            "set_annotation": self._history.handle_set_annotation,  # сохранить пользовательскую заметку к записи истории
+            "get_annotation": self._history.handle_get_annotation,  # получить заметку для записи истории
+            "search_annotations": self._history.handle_search_annotations,  # полнотекстовый поиск по заметкам
+            "create_collection": self._collections.handle_create_collection,  # создать коллекцию/папку для организации истории
+            "delete_collection": self._collections.handle_delete_collection,  # удалить коллекцию
+            "list_collections": self._collections.handle_list_collections,  # список всех коллекций
+            "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
+            "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
+            "get_collection_items": self._collections.handle_get_collection_items,  # получить записи истории из коллекции
         }
 
         handler = handlers.get(method)

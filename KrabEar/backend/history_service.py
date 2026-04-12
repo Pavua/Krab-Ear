@@ -416,6 +416,55 @@ class HistoryService:
         return {"id": item_id, "favorite": bool(item.favorite)}
 
     # ------------------------------------------------------------------
+    # Аннотации / пользовательские заметки
+    # ------------------------------------------------------------------
+
+    def handle_set_annotation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сохраняет текстовую заметку к записи истории.
+
+        Params: id (str), note (str)
+        Returns: {"id": ..., "note": "..."}
+        """
+        item_id = str(params.get("id", "")).strip()
+        note = str(params.get("note", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        # Пустая заметка — допустима (удаляет предыдущую аннотацию).
+        ok = self.store.set_annotation(item_id, note)
+        if not ok:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+        return {"id": item_id, "note": note}
+
+    def handle_get_annotation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает заметку для записи истории.
+
+        Params: id (str)
+        Returns: {"id": ..., "note": str | None}
+        """
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        # Убедимся, что запись существует.
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        note = self.store.get_annotation(item_id)
+        return {"id": item_id, "note": note}
+
+    def handle_search_annotations(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Полнотекстовый поиск по пользовательским заметкам.
+
+        Params: query (str)
+        Returns: {"results": [{"id": ..., "note": ...}, ...], "count": N}
+        """
+        query = str(params.get("query", "")).strip()
+        results = self.store.search_annotations(query)
+        return {"results": results, "count": len(results)}
+
+    # ------------------------------------------------------------------
     # Экспорт истории (markdown / SRT)
     # ------------------------------------------------------------------
 
