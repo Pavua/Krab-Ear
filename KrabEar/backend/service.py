@@ -79,6 +79,7 @@ from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
 from core.audio_fingerprint import AudioFingerprinter
+from core.abbreviation_expander import AbbreviationExpander
 from core.readability_scorer import ReadabilityScorer
 from core.speech_pace import SpeechPaceAnalyzer
 from backend.sharing_manager import SharingManager
@@ -213,6 +214,9 @@ class BackendService:
         self._text_anonymizer = TextAnonymizer()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
+        self._topic_tracker = TopicTracker()
+        self._data_migrator = DataMigrator()
+        self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -431,6 +435,7 @@ class BackendService:
             "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
@@ -440,6 +445,14 @@ class BackendService:
             "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
             "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
             "detect_emotion": self._handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
+            "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
+            "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
+            "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
+            "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
+            "expand_abbreviations": self._handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
+            "add_abbreviation": self._handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
+            "remove_abbreviation": self._handle_remove_abbreviation,  # удалить аббревиатуру
+            "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
         }
 
         handler = handlers.get(method)
@@ -2756,6 +2769,41 @@ class BackendService:
 
 
 
+    def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
+
+        Параметры:
+            window_size (int): размер скользящего окна (по умолчанию 5).
+            limit       (int): максимальное количество последних записей
+                               для анализа (по умолчанию 100, 0 — все).
+
+        Возвращает:
+            segments     (list) — список сегментов с полями start_index,
+                                  end_index, topic_words, summary, items_count, is_shift.
+            total_shifts (int)  — количество смен темы.
+            current_topic (dict) — текущая тема (last_n=window_size).
+        """
+        window_size = max(1, int(params.get("window_size", 5) or 5))
+        limit = int(params.get("limit", 100) or 100)
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+
+        if limit > 0:
+            items = items[-limit:]
+
+        timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
+        current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
+        shifts = sum(1 for entry in timeline if entry.get("is_shift"))
+
+        return {
+            "segments": timeline,
+            "total_shifts": shifts,
+            "current_topic": current_topic,
+        }
+
     def _handle_anonymize_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: anonymize_text — редактирование персональных данных из транскрипции.
 
@@ -2786,6 +2834,128 @@ class BackendService:
                 for r in result.redactions
             ],
         }
+
+
+    def _handle_detect_emotion(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: detect_emotion — эвристическое определение эмоции в тексте транскрипции.
+
+        Параметры:
+            text     (str) — исходный текст для анализа.
+            language (str) — язык текста ("ru", "es", "en"). По умолчанию "ru".
+
+        Возвращает:
+            primary_emotion, confidence, indicators, exclamation_count,
+            question_count, caps_ratio
+        """
+        text = str(params.get("text", ""))
+        language = str(params.get("language", "ru"))
+        result = self._emotion_detector.detect(text, language=language)
+        return {
+            "primary_emotion": result.primary_emotion,
+            "confidence": result.confidence,
+            "indicators": result.indicators,
+            "exclamation_count": result.exclamation_count,
+            "question_count": result.question_count,
+            "caps_ratio": result.caps_ratio,
+        }
+
+
+    def _handle_estimate_recording_cost(self, params: dict) -> dict:
+        """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
+
+        Параметры:
+            duration_sec  — длительность аудио в секундах (обязательно).
+            quality       — профиль STT: "balanced" (по умолчанию), "max", "remote".
+            features      — объект с булевыми флагами: diarization, llm, translation.
+
+        Ответ: CostEstimate в виде словаря.
+        """
+        duration_sec = float(params.get("duration_sec", 0.0))
+        quality = str(params.get("quality", "balanced"))
+        features = params.get("features") or {}
+        est = self._cost_estimator.estimate_cost(
+            duration_sec=duration_sec,
+            quality=quality,
+            features=features,
+        )
+        return {
+            "compute_time_sec": est.compute_time_sec,
+            "memory_mb": est.memory_mb,
+            "disk_mb": est.disk_mb,
+            "features_cost": est.features_cost,
+            "total_relative_cost": est.total_relative_cost,
+        }
+
+    def _handle_get_daily_cost_summary(self, params: dict) -> dict:
+        """IPC: get_daily_cost_summary — сводка вычислительных расходов за сегодня."""
+        return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
+
+    # ── Abbreviation expander IPC handlers ────────────────────────────────────
+
+    def _handle_expand_abbreviations(self, params: dict) -> dict:
+        """IPC: expand_abbreviations — раскрыть аббревиатуры в тексте транскрипции.
+
+        Params:
+            text (str): Исходный текст.
+            language (str, optional): Код языка (по умолчанию "ru").
+
+        Returns:
+            {"expanded": str, "changed": bool}
+        """
+        text = str(params.get("text", ""))
+        language = str(params.get("language", "ru"))
+        expanded = self._abbreviation_expander.expand(text, language=language)
+        return {"expanded": expanded, "changed": expanded != text}
+
+    def _handle_add_abbreviation(self, params: dict) -> dict:
+        """IPC: add_abbreviation — добавить пользовательскую аббревиатуру.
+
+        Params:
+            abbr (str): Аббревиатура.
+            expansion (str): Полная форма.
+            language (str, optional): Код языка (по умолчанию "ru").
+            flags (str, optional): Дополнительные флаги.
+
+        Returns:
+            {"ok": true}
+        """
+        abbr = str(params.get("abbr", "")).strip()
+        expansion = str(params.get("expansion", "")).strip()
+        language = str(params.get("language", "ru"))
+        flags = str(params.get("flags", ""))
+        if not abbr or not expansion:
+            raise ValueError("abbr и expansion не должны быть пустыми")
+        self._abbreviation_expander.add_abbreviation(abbr, expansion, language=language, flags=flags)
+        return {"ok": True}
+
+    def _handle_remove_abbreviation(self, params: dict) -> dict:
+        """IPC: remove_abbreviation — удалить аббревиатуру.
+
+        Params:
+            abbr (str): Аббревиатура.
+            language (str, optional): Код языка (по умолчанию "ru").
+
+        Returns:
+            {"removed": bool}
+        """
+        abbr = str(params.get("abbr", "")).strip()
+        language = str(params.get("language", "ru"))
+        removed = self._abbreviation_expander.remove_abbreviation(abbr, language=language)
+        return {"removed": removed}
+
+    def _handle_list_abbreviations(self, params: dict) -> dict:
+        """IPC: list_abbreviations — список аббревиатур для языка.
+
+        Params:
+            language (str, optional): Код языка (по умолчанию "ru").
+
+        Returns:
+            {"abbreviations": list[dict], "language": str, "count": int}
+        """
+        language = str(params.get("language", "ru"))
+        abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
+        return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
+
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
