@@ -76,7 +76,10 @@ from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
 from core.audio_fingerprint import AudioFingerprinter
+from core.readability_scorer import ReadabilityScorer
+from core.speech_pace import SpeechPaceAnalyzer
 from backend.sharing_manager import SharingManager
+from backend.transcript_versioning import TranscriptVersionManager
 from core.context_memory import ContextMemory
 
 logger = logging.getLogger("KrabEar.Backend.Service")
@@ -172,13 +175,16 @@ class BackendService:
         self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
+        self._readability_scorer = ReadabilityScorer()
         self._audio_fingerprinter = AudioFingerprinter()
         self._context_memory = ContextMemory(window_size=50)
+        self._readability_scorer = ReadabilityScorer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
+        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
