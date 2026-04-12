@@ -12,6 +12,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from core.fuzzy_search import FuzzySearcher
+
+from core.duplicate_detector import DuplicateDetector
+from backend.summary_profiles import SummaryProfileManager
+
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
 
@@ -30,6 +35,9 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
+        # Менеджер профилей резюмирования (персистентность в data_dir).
+        _data_dir = getattr(store, "data_dir", None)
+        self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
 
     # ------------------------------------------------------------------
     # История
@@ -104,6 +112,62 @@ class HistoryService:
             to_ts=to_ts_str,
         )
         return {"items": items, "next_cursor": next_cursor}
+
+    def handle_fuzzy_search(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Нечёткий поиск по истории транскрипций.
+
+        Params:
+            query (str): поисковый запрос.
+            threshold (float): минимальный порог сходства [0.0, 1.0], по умолчанию 0.6.
+            limit (int): максимальное кол-во результатов, по умолчанию 50.
+
+        Returns:
+            {"matches": [{"id": ..., "text": ..., "score": ...}, ...]}
+        """
+        query = str(params.get("query", "")).strip()
+        threshold = float(params.get("threshold", 0.6))
+        limit = int(params.get("limit", 50))
+
+        threshold = max(0.0, min(1.0, threshold))
+
+        if not query:
+            return {"matches": []}
+
+        # Получаем все записи истории без пагинации (большой лимит)
+        all_items, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=10_000,
+            paste_status=None,
+            translation_mode=None,
+            translation_status=None,
+            from_ts=None,
+            to_ts=None,
+        )
+
+        # Собираем тексты для поиска (основной текст + source_text)
+        texts: list[str] = []
+        for item in all_items:
+            text = item.get("text", "") or ""
+            source = item.get("source_text", "") or ""
+            # Объединяем оба поля для поиска
+            combined = f"{text} {source}".strip() if source else text
+            texts.append(combined)
+
+        searcher = FuzzySearcher()
+        matches = searcher.search(query, texts, threshold=threshold)
+
+        results = []
+        for match in matches[:limit]:
+            item = all_items[match.index]
+            results.append({
+                "id": item.get("id", ""),
+                "text": item.get("text", ""),
+                "source_text": item.get("source_text", ""),
+                "score": round(match.score, 4),
+                "ts": item.get("ts", ""),
+            })
+
+        return {"matches": results}
 
     def handle_delete_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
         item_id = str(params.get("id", "")).strip()
@@ -298,6 +362,58 @@ class HistoryService:
 
         sorted_tags = sorted(counts.items(), key=lambda pair: pair[1], reverse=True)
         return {"tags": [{"tag": t, "count": c} for t, c in sorted_tags]}
+
+    # ------------------------------------------------------------------
+    # Избранное (favorites / bookmarks)
+    # ------------------------------------------------------------------
+
+    def handle_toggle_favorite(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Переключает флаг избранного для записи истории.
+
+        Params: id (str)
+        Returns: {"id": ..., "favorite": bool}
+        """
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        new_value = not bool(item.favorite)
+        ok = self.store.update_history_item_favorite(item_id, new_value)
+        if not ok:
+            raise RuntimeError(f"Не удалось обновить избранное для {item_id}")
+
+        return {"id": item_id, "favorite": new_value}
+
+    def handle_get_favorites(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает все избранные записи, отсортированные по времени (новые первыми).
+
+        Returns: {"items": [...], "count": N}
+        """
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        favorites = [item.to_dict() for item in reversed(active) if item.favorite]
+        return {"items": favorites, "count": len(favorites)}
+
+    def handle_is_favorite(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Проверяет, находится ли запись в избранном.
+
+        Params: id (str)
+        Returns: {"id": ..., "favorite": bool}
+        """
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("id обязателен")
+
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            raise RuntimeError(f"Запись {item_id} не найдена")
+
+        return {"id": item_id, "favorite": bool(item.favorite)}
 
     # ------------------------------------------------------------------
     # Экспорт истории (markdown / SRT)
@@ -932,6 +1048,16 @@ class HistoryService:
         from_ts: str | None = params.get("from_ts")
         to_ts: str | None = params.get("to_ts")
         limit = max(1, min(int(params.get("limit", 50) or 50), 200))
+        profile_name: str | None = params.get("profile")
+        # Загружаем профиль — если не указан или не найден, используем "brief"
+        _active_profile = None
+        if profile_name:
+            try:
+                _active_profile = self._summary_profiles.get_profile(profile_name)
+            except KeyError:
+                logger.warning("auto_summarize_batch: профиль %r не найден, используем 'brief'", profile_name)
+        if _active_profile is None:
+            _active_profile = self._summary_profiles.get_profile("brief")
 
         # --- Загружаем записи ---
         if ids is not None:
@@ -1002,15 +1128,16 @@ class HistoryService:
                 "error": "LLM unavailable",
             }
 
-        # Формируем промпт для пакетного резюме
-        prompt = self._build_batch_summary_prompt(texts)
+        # Формируем промпт для пакетного резюме с учётом профиля
+        prompt = self._build_batch_summary_prompt(texts, profile=_active_profile)
         logger.info(
-            "auto_summarize_batch: отправляем %d записей в LLM (итого %d слов)",
-            len(texts), total_words,
+            "auto_summarize_batch: профиль=%r, отправляем %d записей в LLM (итого %d слов)",
+            _active_profile.name, len(texts), total_words,
         )
 
         # Используем метод summarize — он обёрнут в circuit breaker и never-raises контракт
-        result = self._llm_rewriter.summarize(prompt, max_sentences=5)
+        _max_sentences = max(1, _active_profile.max_tokens // 50)
+        result = self._llm_rewriter.summarize(prompt, max_sentences=_max_sentences)
 
         if not result.ok or not result.text:
             logger.warning(
@@ -1038,15 +1165,27 @@ class HistoryService:
             "llm": True,
             "fallback": False,
             "error": None,
+            "profile": _active_profile.name,
         }
 
     @staticmethod
-    def _build_batch_summary_prompt(texts: list[str]) -> str:
+    def _build_batch_summary_prompt(texts: list[str], profile: Any = None) -> str:
         """Формирует промпт для пакетного LLM-резюмирования транскрипций.
 
-        Промпт запрашивает структурированный ответ: краткое резюме + маркированный список.
+        Если передан профиль — использует его system_prompt и format_instructions.
+        Без профиля — стандартный промпт (режим совместимости с тестами).
         """
         joined = "\n\n---\n\n".join(texts)
+        if profile is not None:
+            header = profile.system_prompt
+            fmt = profile.format_instructions
+            instructions = f"\n\nФормат ответа: {fmt}" if fmt else ""
+            return (
+                f"{header}{instructions}\n\n"
+                "Текст для резюмирования:\n"
+                f"{joined}"
+            )
+        # Стандартный (обратно-совместимый) промпт
         return (
             "Ниже представлены несколько транскрипций переговоров/диктовок.\n"
             "Сделай краткое сводное резюме на русском языке.\n"
@@ -1992,3 +2131,346 @@ class HistoryService:
             result.append(entry)
 
         return {"backups": result}
+
+    def handle_find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Находит дублирующиеся транскрипции в истории.
+
+        Параметры:
+            similarity_threshold (float): порог сходства [0..1], по умолчанию 0.9.
+            limit (int): максимальное количество записей истории для анализа (по умолчанию 500).
+
+        Возвращает:
+            groups (list): список групп, каждая содержит items[] и similarity.
+            total_duplicates (int): общее количество дублирующихся записей.
+        """
+        threshold = float(params.get("similarity_threshold", 0.9))
+        limit = int(params.get("limit", 500))
+
+        items, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=limit,
+            paste_status=None,
+            translation_mode=None,
+        )
+        detector = DuplicateDetector()
+        groups = detector.find_duplicates(items, similarity_threshold=threshold)
+
+        total_duplicates = sum(len(g.items) - 1 for g in groups)
+        return {
+            "groups": [
+                {"items": g.items, "similarity": g.similarity}
+                for g in groups
+            ],
+            "total_duplicates": total_duplicates,
+        }
+
+    # ------------------------------------------------------------------
+    # IPC-обработчики для профилей резюмирования
+    # ------------------------------------------------------------------
+
+    def handle_list_summary_profiles(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список всех профилей резюмирования.
+
+        Возвращает:
+            profiles (list): список профилей (name, system_prompt, max_tokens,
+                             format_instructions, builtin).
+        """
+        return {"profiles": self._summary_profiles.list_profiles()}
+
+    def handle_add_summary_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет или заменяет кастомный профиль резюмирования.
+
+        Параметры:
+            name (str): уникальное имя профиля (snake_case, обязательно)
+            prompt (str): системный промпт для LLM (обязательно)
+            max_tokens (int): максимальное количество токенов (по умолчанию 300)
+            format_instructions (str): описание формата ответа (опционально)
+
+        Возвращает:
+            profile (dict): созданный профиль
+        """
+        name = str(params.get("name", "")).strip()
+        prompt = str(params.get("prompt", "")).strip()
+        max_tokens = int(params.get("max_tokens", 300) or 300)
+        format_instructions = str(params.get("format_instructions", "")).strip()
+
+        if not name:
+            raise RuntimeError("Параметр 'name' обязателен")
+        if not prompt:
+            raise RuntimeError("Параметр 'prompt' обязателен")
+
+        profile = self._summary_profiles.add_custom_profile(
+            name=name,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            format_instructions=format_instructions,
+        )
+        return {"profile": profile.to_dict()}
+
+    # ------------------------------------------------------------------
+    # Batch export
+    # ------------------------------------------------------------------
+
+    def handle_batch_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует историю в нескольких форматах одновременно.
+
+        Параметры:
+            formats (list[str]): список форматов — любое подмножество
+                ["srt", "csv", "markdown", "obsidian"].
+                По умолчанию все четыре.
+            from_ts (str|None): начало диапазона (ISO timestamp или YYYY-MM-DD)
+            to_ts (str|None): конец диапазона (ISO timestamp или YYYY-MM-DD)
+            output_dir (str|None): директория для бандла (по умолчанию {data_dir}/exports/)
+            limit (int): максимальное количество записей (по умолчанию 500)
+
+        Возвращает:
+            dir (str): путь к директории бандла
+            files (dict[str, str]): {format: path} для каждого успешно экспортированного формата
+            errors (dict[str, str]): {format: error_message} для неудачных форматов
+            total_entries (int): количество записей в экспорте
+        """
+        all_formats = {"srt", "csv", "markdown", "obsidian"}
+        formats_raw = params.get("formats")
+        if formats_raw is None:
+            requested = list(all_formats)
+        else:
+            if not isinstance(formats_raw, list) or len(formats_raw) == 0:
+                raise RuntimeError("formats должен быть непустым списком строк")
+            requested = [str(f).lower().strip() for f in formats_raw]
+            unknown = set(requested) - all_formats
+            if unknown:
+                raise RuntimeError(
+                    f"Неизвестные форматы: {sorted(unknown)}. Допустимые: {sorted(all_formats)}"
+                )
+
+        from_ts: str | None = params.get("from_ts")
+        to_ts: str | None = params.get("to_ts")
+        limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
+        output_dir_param: str | None = params.get("output_dir")
+
+        # Создаём директорию бандла
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if output_dir_param:
+            base_dir = Path(output_dir_param).expanduser().resolve()
+        else:
+            base_dir = Path(self.store.data_dir) / "exports"
+        bundle_dir = base_dir / f"export_{timestamp_str}"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        # Получаем записи один раз для подсчёта общего числа
+        items_dicts, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=limit,
+            paste_status=None,
+            translation_mode=None,
+            from_ts=str(from_ts) if from_ts else None,
+            to_ts=str(to_ts) if to_ts else None,
+        )
+        total_entries = len(items_dicts)
+
+        files: dict[str, str] = {}
+        errors: dict[str, str] = {}
+
+        for fmt in requested:
+            try:
+                if fmt == "csv":
+                    csv_params: dict[str, Any] = {"limit": limit}
+                    if from_ts is not None:
+                        csv_params["from_ts"] = from_ts
+                    if to_ts is not None:
+                        csv_params["to_ts"] = to_ts
+                    files["csv"] = self._export_csv_to_dir(csv_params, bundle_dir, timestamp_str)
+
+                elif fmt == "markdown":
+                    md_content = self._build_markdown_content(items_dicts)
+                    md_path = bundle_dir / f"export_{timestamp_str}.md"
+                    md_path.write_text(md_content, encoding="utf-8")
+                    files["markdown"] = str(md_path)
+
+                elif fmt == "srt":
+                    srt_content = self._build_bulk_srt(items_dicts)
+                    srt_path = bundle_dir / f"export_{timestamp_str}.srt"
+                    srt_path.write_text(srt_content, encoding="utf-8")
+                    files["srt"] = str(srt_path)
+
+                elif fmt == "obsidian":
+                    obs_params: dict[str, Any] = {
+                        "limit": limit,
+                        "output_dir": str(bundle_dir),
+                    }
+                    if from_ts is not None:
+                        obs_params["from_ts"] = from_ts
+                    if to_ts is not None:
+                        obs_params["to_ts"] = to_ts
+                    obs_result = self.handle_export_obsidian(obs_params)
+                    files["obsidian"] = obs_result["file"]
+
+            except Exception as exc:
+                logger.warning("batch_export: ошибка формата %s: %s", fmt, exc)
+                errors[fmt] = str(exc)
+
+        logger.info(
+            "batch_export завершён: %d форматов, %d ошибок, dir=%s",
+            len(files), len(errors), bundle_dir,
+        )
+        return {
+            "dir": str(bundle_dir),
+            "files": files,
+            "errors": errors,
+            "total_entries": total_entries,
+        }
+
+    # ------------------------------------------------------------------
+    # Batch export helpers
+    # ------------------------------------------------------------------
+
+    def _export_csv_to_dir(
+        self,
+        params: dict[str, Any],
+        target_dir: Path,
+        timestamp_str: str,
+    ) -> str:
+        """Экспортирует CSV в указанную директорию и возвращает путь к файлу."""
+        import csv
+        import io
+
+        delimiter = params.get("delimiter", ",")
+        if not isinstance(delimiter, str) or len(delimiter) != 1:
+            delimiter = ","
+        include_header = params.get("include_header", True)
+        limit = params.get("limit")
+        from_ts = params.get("from_ts")
+        to_ts = params.get("to_ts")
+
+        items = [i.to_dict() if hasattr(i, "to_dict") else i
+                 for i in self.store._load_active_items_with_lock()]
+        if from_ts:
+            items = [i for i in items if i.get("ts", "") >= str(from_ts)]
+        if to_ts:
+            items = [i for i in items if i.get("ts", "") <= str(to_ts)]
+        items.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        if limit:
+            items = items[: int(limit)]
+
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=delimiter)
+        columns = ["timestamp", "text", "translation", "language", "confidence",
+                   "duration_sec", "paste_status", "speakers"]
+        if include_header:
+            writer.writerow(columns)
+
+        for item in items:
+            translation = ""
+            if item.get("translation_status") == "ok":
+                translation = item.get("translated_text") or item.get("translation", "")
+            speakers = ""
+            diar = item.get("diarization")
+            if diar and isinstance(diar, dict):
+                segs = diar.get("speaker_segments", [])
+                speaker_set = {s.get("speaker", "") for s in segs if isinstance(s, dict)}
+                speakers = ", ".join(sorted(speaker_set))
+            writer.writerow([
+                item.get("ts", ""),
+                item.get("text", ""),
+                translation,
+                item.get("lang", ""),
+                item.get("confidence", ""),
+                item.get("duration", ""),
+                item.get("paste_status", ""),
+                speakers,
+            ])
+
+        csv_text = output.getvalue()
+        file_path = target_dir / f"export_{timestamp_str}.csv"
+        file_path.write_text(csv_text, encoding="utf-8")
+        return str(file_path)
+
+    def _build_markdown_content(self, items_dicts: list[dict]) -> str:
+        """Строит Markdown-содержимое для пакетного экспорта."""
+        from backend.models import HistoryItem as _HI
+        items = [_HI.from_dict(d) for d in items_dicts]
+
+        if not items:
+            return "# Krab Ear — Экспорт транскрипций\n\nИстория пуста.\n"
+
+        ts_list = [it.ts for it in items if it.ts]
+        earliest_ts = self._format_ts_human(ts_list[-1]) if ts_list else "?"
+        latest_ts = self._format_ts_human(ts_list[0]) if ts_list else "?"
+        export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        lines: list[str] = [
+            "# Krab Ear — Экспорт транскрипций",
+            "",
+            f"**Период:** {earliest_ts} — {latest_ts}  ",
+            f"**Записей:** {len(items)}  ",
+            f"**Экспорт:** {export_ts}",
+            "",
+            "---",
+            "",
+        ]
+
+        for idx, item in enumerate(items, start=1):
+            ts_human = self._format_ts_human(item.ts)
+            duration_str = self._format_duration_human(item.audio_duration_sec)
+            section_title = f"## {idx}. {ts_human}"
+            if duration_str:
+                section_title += f" ({duration_str})"
+            lines.append(section_title)
+            lines.append("")
+            lines.append(item.text or "")
+            if item.translated_text and item.translation_status == "ok":
+                lines.append("")
+                lines.append(f"> **Перевод:** {item.translated_text}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _build_bulk_srt(self, items_dicts: list[dict]) -> str:
+        """Строит единый SRT-файл для набора записей истории."""
+        from backend.models import HistoryItem as _HI
+        lines: list[str] = []
+        seq = 1
+        offset_sec = 0.0
+
+        for d in reversed(items_dicts):  # хронологический порядок
+            item = _HI.from_dict(d)
+            duration = item.audio_duration_sec or 3.0
+            diar = item.diarization
+
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                turns = diar.get("speaker_turns", [])
+                speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+                if len(speakers) >= 2 and turns:
+                    for turn in turns:
+                        speaker = turn.get("speaker", "SPEAKER_00")
+                        turn_text = str(turn.get("text", "")).strip()
+                        if not turn_text:
+                            continue
+                        start_sec = offset_sec + float(turn.get("start", 0.0) or 0.0)
+                        end_sec = offset_sec + float(
+                            turn.get("end", start_sec + 1.0) or start_sec + 1.0
+                        )
+                        lines.append(str(seq))
+                        lines.append(
+                            f"{self._srt_timestamp(start_sec)} --> {self._srt_timestamp(end_sec)}"
+                        )
+                        lines.append(f"[{speaker}]: {turn_text}")
+                        lines.append("")
+                        seq += 1
+                    offset_sec += duration
+                    continue
+
+            # Нет диаризации — весь текст как один сегмент
+            text = (item.text or "").strip()
+            if text:
+                lines.append(str(seq))
+                lines.append(
+                    f"{self._srt_timestamp(offset_sec)} --> "
+                    f"{self._srt_timestamp(offset_sec + duration)}"
+                )
+                lines.append(text)
+                lines.append("")
+                seq += 1
+            offset_sec += duration
+
+        return "\n".join(lines)

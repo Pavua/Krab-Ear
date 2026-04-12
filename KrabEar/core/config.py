@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
 
+    # Авто-резервное копирование
+    AUTO_BACKUP_ENABLED: bool = True
+
     # Формат логов: "text" (стандартный) или "json" (структурированный JSON)
     LOG_FORMAT: str = "text"
 

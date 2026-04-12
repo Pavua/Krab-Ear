@@ -39,11 +39,12 @@ class StateStore:
         self.tombstones_path = self.data_dir / "history_tombstones.ndjson"
         self.status_path = self.data_dir / "history_status.ndjson"
         self.tags_path = self.data_dir / "history_tags.ndjson"
+        self.favorites_path = self.data_dir / "history_favorites.ndjson"
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.vocabulary_path):
+        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.favorites_path, self.vocabulary_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
@@ -609,6 +610,7 @@ class StateStore:
         self.tombstones_path.write_text("", encoding="utf-8")
         self.status_path.write_text("", encoding="utf-8")
         self.tags_path.write_text("", encoding="utf-8")
+        self.favorites_path.write_text("", encoding="utf-8")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -631,10 +633,11 @@ class StateStore:
         }
 
     def _load_active_items_unlocked(self) -> list[HistoryItem]:
-        """Читает активные записи с применением tombstone, status-override и tags-override."""
+        """Читает активные записи с применением tombstone, status-override, tags-override и favorites-override."""
         deleted = self._load_deleted_ids_unlocked()
         statuses = self._load_status_overrides_unlocked()
         tags_overrides = self._load_tags_overrides_unlocked()
+        favorites_overrides = self._load_favorites_overrides_unlocked()
 
         items: list[HistoryItem] = []
         for item in self._iter_history_items_unlocked():
@@ -644,6 +647,8 @@ class StateStore:
                 item.paste_status = statuses[item.id]
             if item.id in tags_overrides:
                 item.tags = tags_overrides[item.id]
+            if item.id in favorites_overrides:
+                item.favorite = favorites_overrides[item.id]
             items.append(item)
         return items
 
@@ -655,6 +660,15 @@ class StateStore:
             tags = payload.get("tags")
             if item_id and isinstance(tags, list):
                 result[item_id] = [str(t) for t in tags]
+        return result
+
+    def _load_favorites_overrides_unlocked(self) -> dict[str, bool]:
+        """Собирает последние значения favorite по id из журнала избранного."""
+        result: dict[str, bool] = {}
+        for payload in self._read_ndjson_unlocked(self.favorites_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id and "favorite" in payload:
+                result[item_id] = bool(payload["favorite"])
         return result
 
     def _load_deleted_ids_unlocked(self) -> set[str]:
@@ -755,6 +769,18 @@ class StateStore:
             if not any(item.id == clean_id for item in active):
                 return False
             self._append_ndjson(self.tags_path, {"id": clean_id, "tags": list(tags)})
+        return True
+
+    def update_history_item_favorite(self, item_id: str, favorite: bool) -> bool:
+        """Записывает флаг избранного для записи в отдельный журнал (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.favorites_path, {"id": clean_id, "favorite": bool(favorite)})
         return True
 
     def get_history_item_by_id(self, item_id: str) -> "HistoryItem | None":

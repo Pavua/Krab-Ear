@@ -35,6 +35,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.call_assist_service import CallAssistService
 from backend.error_reporter import ErrorReporter
 from backend.history_service import HistoryService
@@ -43,6 +44,7 @@ from backend.usage_tracker import UsageTracker
 from backend.transcript_writer import TranscriptWriter
 from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
+from backend.system_monitor import SystemMonitor
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -53,6 +55,7 @@ from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.vocabulary_store import VocabularyStore
 from backend.translator import Translator
+from core.audio_converter import AudioConverter
 from core.config import settings
 from core.language_detector import LanguageDetector
 from core.utils import TextUtils
@@ -93,6 +96,7 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+        self._system_monitor = SystemMonitor()
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
         self._preview_stop_event = threading.Event()
@@ -130,6 +134,19 @@ class BackendService:
         self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
         self._error_reporter = ErrorReporter()
         self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
+        self._audio_converter = AudioConverter()
+        self._auto_backup = AutoBackupManager(
+            store=self.store,
+            interval_hours=AUTO_BACKUP_INTERVAL_HOURS,
+            max_copies=AUTO_BACKUP_MAX_COPIES,
+            enabled=settings.AUTO_BACKUP_ENABLED,
+        )
+        self._transcription_counter: int = 0
+        # Проверяем авто-бэкап при старте
+        try:
+            self._auto_backup.check_and_backup()
+        except Exception:
+            pass
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -211,6 +228,7 @@ class BackendService:
             "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_page": self._history.handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
             "search_history": self._history.handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "fuzzy_search": self._history.handle_fuzzy_search,  # нечёткий поиск по истории транскрипций
             "search_by_speaker": self._history.handle_search_by_speaker,
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
@@ -241,9 +259,13 @@ class BackendService:
             "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
+            "toggle_favorite": self._history.handle_toggle_favorite,
+            "get_favorites": self._history.handle_get_favorites,
+            "is_favorite": self._history.handle_is_favorite,
             "export_history": self._history.handle_export_history,
             "export_history_srt": self._history.handle_export_history_srt,
             "export_history_csv": self._history.handle_export_history_csv,
+            "batch_export": self._history.handle_batch_export,  # пакетный экспорт в нескольких форматах
             "export_history_markdown": self._history.handle_export_history_markdown,
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "get_clipboard_history": self._history.handle_get_clipboard_history,
@@ -252,6 +274,7 @@ class BackendService:
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
+            "get_auto_backup_status": lambda p: self._auto_backup.get_auto_backup_status(),  # статус авто-резервного копирования
             "restore_history": self._history.handle_restore_history,  # восстанавливает историю из резервной копии
             "list_backups": self._history.handle_list_backups,  # список доступных резервных копий
             "get_history_statistics": self._history.handle_get_history_statistics,  # агрегированная статистика по истории
@@ -260,9 +283,13 @@ class BackendService:
             "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
             "get_notification_preferences": self._settings_svc.handle_get_notification_preferences,  # настройки уведомлений
             "set_notification_preferences": self._settings_svc.handle_set_notification_preferences,  # обновление настроек уведомлений
+            "export_settings": self._settings_svc.handle_export_settings,  # экспорт настроек в JSON-файл
+            "import_settings": self._settings_svc.handle_import_settings,  # импорт настроек из JSON-файла
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
+            "list_summary_profiles": self._history.handle_list_summary_profiles,  # список профилей резюмирования
+            "add_summary_profile": self._history.handle_add_summary_profile,  # добавить кастомный профиль резюмирования
             "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
             "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
@@ -272,7 +299,11 @@ class BackendService:
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
             "get_error_stats": self._error_reporter.handle_get_error_stats,  # счётчики ошибок по компоненту/типу/окну
             "detect_language": self._handle_detect_language,  # эвристическое определение языка текста
-            "get_usage_stats": self._handle_get_usage_stats,  # ежедневная статистика использования: записи, длительность, слова
+            "get_usage_stats": self._handle_get_usage_stats,
+            "convert_audio": self._handle_convert_audio,  # конвертация аудио в WAV
+            "get_audio_info": self._handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
+            "get_system_info": self._handle_get_system_info,  # мониторинг системных ресурсов: CPU, RAM, диск, GPU
+            "find_duplicates": self._history.handle_find_duplicates,  # обнаружение дублирующихся транскрипций по текстовому сходству
         }
 
         handler = handlers.get(method)
@@ -605,6 +636,14 @@ class BackendService:
         if len(self._clipboard_history) > 20:
             self._clipboard_history = self._clipboard_history[-20:]
 
+        # Авто-бэкап каждые 100 транскрибаций
+        self._transcription_counter += 1
+        if self._transcription_counter % 100 == 0:
+            try:
+                self._auto_backup.check_and_backup()
+            except Exception:
+                pass
+
         result_payload = {
             "status": "ok",
             "duration_sec": duration_sec,
@@ -679,6 +718,10 @@ class BackendService:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
         return self._usage_tracker.get_usage_stats()
 
+    def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU."""
+        return self._system_monitor.get_system_info()
+
     def _handle_detect_language(self, params: dict[str, Any]) -> dict[str, Any]:
         """Определяет язык текста (или пакета текстов) эвристически."""
         detector = LanguageDetector()
@@ -706,6 +749,41 @@ class BackendService:
         if not ok:
             raise RuntimeError("Не удалось обновить paste_status")
         return {"updated": True, "id": item_id, "paste_status": paste_status}
+
+
+    # ------------------------------------------------------------------
+    # Audio converter IPC handlers
+    # ------------------------------------------------------------------
+
+    def _handle_convert_audio(self, params: dict) -> dict:
+        """Конвертирует аудиофайл в указанный формат (по умолчанию WAV 16kHz mono)."""
+        input_path = str(params.get("input_path", "")).strip()
+        if not input_path:
+            raise ValueError("Параметр 'input_path' обязателен")
+        output_format = str(params.get("output_format", "wav")).strip() or "wav"
+        sample_rate = int(params.get("sample_rate", 16000))
+        output_path = params.get("output_path")
+        output = self._audio_converter.convert(
+            input_path=input_path,
+            output_format=output_format,
+            sample_rate=sample_rate,
+            output_path=str(output_path) if output_path else None,
+        )
+        return {"output_path": output, "format": output_format, "sample_rate": sample_rate}
+
+    def _handle_get_audio_info(self, params: dict) -> dict:
+        """Возвращает метаданные аудиофайла."""
+        path = str(params.get("path", "")).strip()
+        if not path:
+            raise ValueError("Параметр 'path' обязателен")
+        info = self._audio_converter.get_audio_info(path)
+        return {
+            "duration": info.duration,
+            "sample_rate": info.sample_rate,
+            "channels": info.channels,
+            "format": info.format,
+            "size_mb": info.size_mb,
+        }
 
     # ------------------------------------------------------------------
     # Readiness probing — честная проверка доступности компонентов

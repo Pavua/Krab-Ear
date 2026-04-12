@@ -41,6 +41,8 @@ class HistoryItem:
     confidence: float | None = None
     # User-defined tags for filtering and categorisation
     tags: list = field(default_factory=list)
+    # Favorite/bookmark flag
+    favorite: bool = False
 
     @classmethod
     def create(
@@ -63,6 +65,7 @@ class HistoryItem:
         audio_duration_sec: float | None = None,
         confidence: float | None = None,
         tags: list | None = None,
+        favorite: bool = False,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -86,6 +89,7 @@ class HistoryItem:
             audio_duration_sec=round(float(audio_duration_sec), 3) if audio_duration_sec is not None else None,
             confidence=round(float(confidence), 4) if confidence is not None else None,
             tags=list(tags) if tags else [],
+            favorite=bool(favorite),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,6 +120,7 @@ class HistoryItem:
             audio_duration_sec=float(payload["audio_duration_sec"]) if payload.get("audio_duration_sec") is not None else None,
             confidence=float(payload["confidence"]) if payload.get("confidence") is not None else None,
             tags=[str(t) for t in payload["tags"]] if isinstance(payload.get("tags"), list) else [],
+            favorite=bool(payload.get("favorite", False)),
         )
 
 

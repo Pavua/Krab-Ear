@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
@@ -307,6 +310,95 @@ class SettingsService:
         result = self.store.save_settings(settings)
         self.invalidate_cache()
         return result
+
+    # Sensitive fields — никогда не экспортируются
+    _SENSITIVE_FIELDS: frozenset[str] = frozenset({
+        "voice_gateway_api_key",
+        "hf_token",
+        "rest_api_key",
+        "lm_studio_api_key",
+    })
+
+    def handle_export_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля.
+
+        Params:
+            file (str, optional): путь к файлу. По умолчанию ~/krabear_settings_<ts>.json.
+
+        Returns:
+            {"file": path, "settings_count": N}
+        """
+        settings = self.cached_settings()
+        safe = {k: v for k, v in settings.items() if k not in self._SENSITIVE_FIELDS}
+
+        if params.get("file"):
+            out_path = Path(str(params["file"])).expanduser().resolve()
+        else:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_path = Path.home() / f"krabear_settings_{ts}.json"
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8") as fh:
+            json.dump(safe, fh, ensure_ascii=False, indent=2)
+
+        _log.info("export_settings: %d settings → %s", len(safe), out_path)
+        return {"file": str(out_path), "settings_count": len(safe)}
+
+    def handle_import_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Импортирует настройки из JSON-файла.
+
+        Params:
+            file (str): путь к JSON-файлу с настройками.
+
+        Validates each key via SettingsValidator (run against merged dict).
+        Never overwrites sensitive fields — they are silently skipped.
+        Returns {"imported": N, "skipped": N, "errors": [...]}
+        """
+        file_path = params.get("file")
+        if not file_path:
+            raise ValueError("Параметр 'file' обязателен для import_settings")
+
+        src = Path(str(file_path)).expanduser().resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"Файл настроек не найден: {src}")
+
+        try:
+            with src.open("r", encoding="utf-8") as fh:
+                incoming: dict[str, Any] = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Невалидный JSON в файле настроек: {exc}") from exc
+
+        if not isinstance(incoming, dict):
+            raise ValueError("Файл настроек должен содержать JSON-объект")
+
+        errors: list[str] = []
+        skipped = 0
+        merged = self.cached_settings()
+
+        for key, value in incoming.items():
+            if key in self._SENSITIVE_FIELDS:
+                skipped += 1
+                _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
+                continue
+            merged[key] = value
+
+        # Validate the merged result
+        vr = self._validator.validate(merged)
+        if not vr.valid:
+            errors.extend(vr.errors)
+        if vr.warnings:
+            for w in vr.warnings:
+                _log.warning("import_settings: %s", w)
+            errors.extend(vr.warnings)
+        merged = vr.fixed
+
+        imported = len(incoming) - skipped
+        self.store.save_settings(merged)
+        self.invalidate_cache()
+
+        _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
+                  imported, skipped, len(errors), src)
+        return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных пресетов профилей с описаниями и значениями."""
