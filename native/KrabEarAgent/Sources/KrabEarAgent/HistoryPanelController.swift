@@ -1549,18 +1549,22 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // --- LIVE TRANSLATION TAB ---
         let translationSettingsCard = ThemeCardView()
-        translationSettingsCard.title = "Настройки перевода"
+        translationSettingsCard.title = ""  // Section provides the title
         for view in [settingsRow2, toolsRow] as [NSView] {
             view.removeFromSuperview()
             translationSettingsCard.contentStackView.addArrangedSubview(view)
         }
+        let translationSection = CollapsibleSectionView(sectionId: "live_translation_settings", title: "Настройки перевода", isExpanded: true)
+        translationSection.contentStackView.addArrangedSubview(translationSettingsCard)
 
         let gatewayCard = ThemeCardView()
-        gatewayCard.title = "Voice Gateway"
+        gatewayCard.title = ""  // Section provides the title
         for view in [voiceGatewayRow, callAssistConfigRow] as [NSView] {
             view.removeFromSuperview()
             gatewayCard.contentStackView.addArrangedSubview(view)
         }
+        let gatewaySection = CollapsibleSectionView(sectionId: "live_gateway", title: "Voice Gateway", isExpanded: true)
+        gatewaySection.contentStackView.addArrangedSubview(gatewayCard)
 
         let callAssistCard = ThemeCardView()
         callAssistCard.title = ""  // Title shown by CollapsibleSectionView
@@ -1574,10 +1578,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         self.liveCallAssistSection = callAssistSection
 
         liveStack.addArrangedSubview(liveHeaderRow)
-        liveStack.addArrangedSubview(translationSettingsCard)
-        liveStack.addArrangedSubview(gatewayCard)
+        liveStack.addArrangedSubview(translationSection)
+        liveStack.addArrangedSubview(gatewaySection)
         liveStack.addArrangedSubview(callAssistSection)
-        liveStack.addArrangedSubview(realtimeScroll)
+
+        let realtimeCard = ThemeCardView()
+        realtimeCard.contentStackView.addArrangedSubview(realtimeScroll)
+        liveStack.addArrangedSubview(realtimeCard)
 
         // Width constraints for all live translation children (consistent with historyStack pattern)
         for child in liveStack.arrangedSubviews {
@@ -1620,7 +1627,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         advancedToolbarRow.addArrangedSubview(liveTranslatePresetButton)
         advancedToolbarRow.addArrangedSubview(openTranscriptsButton)
         advancedToolbarRow.addArrangedSubview(NSView()) // Spacer
-        advancedSection.contentStackView.addArrangedSubview(advancedToolbarRow)
+        let advancedCard = ThemeCardView()
+        advancedCard.contentStackView.addArrangedSubview(advancedToolbarRow)
 
         secondaryActionsRow.addArrangedSubview(loadAllButton)
         secondaryActionsRow.addArrangedSubview(copyOriginalButton)
@@ -1632,7 +1640,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         secondaryActionsRow.addArrangedSubview(importNdjsonButton)
         secondaryActionsRow.addArrangedSubview(compactButton)
         secondaryActionsRow.addArrangedSubview(NSView()) // Spacer
-        advancedSection.contentStackView.addArrangedSubview(secondaryActionsRow)
+        advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow)
 
         // History enhancements row
         historyEnhancementsRow.orientation = .horizontal
@@ -1658,7 +1666,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyEnhancementsRow.addArrangedSubview(vocabSuggestionsButton)
         historyEnhancementsRow.addArrangedSubview(glossarySuggestionsButton)
         historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
-        advancedSection.contentStackView.addArrangedSubview(historyEnhancementsRow)
+        advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
+        advancedSection.contentStackView.addArrangedSubview(advancedCard)
 
         self.historyAdvancedSection = advancedSection
 
@@ -1692,6 +1701,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Width constraints for settingsBar children (Dictation tab sections)
         for child in settingsBar.arrangedSubviews {
             child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor).isActive = true
+        }
+
+        for child in dictationStack.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: dictationStack.widthAnchor).isActive = true
         }
 
         // --- BUTTON STYLING ---

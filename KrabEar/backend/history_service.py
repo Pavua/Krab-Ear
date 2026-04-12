@@ -22,11 +22,14 @@ class HistoryService:
         self,
         store: Any,
         clipboard_history: list[dict] | None = None,
+        llm_rewriter: Any = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
         # Если не передан — создаём изолированный список (для тестов).
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
+        # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
+        self._llm_rewriter = llm_rewriter
 
     # ------------------------------------------------------------------
     # История
@@ -363,6 +366,155 @@ class HistoryService:
             speakers=len(speakers), segments=len(turns),
         )
 
+    def handle_export_history_markdown(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует историю транскрипций в формате Markdown.
+
+        Параметры:
+            limit (int): максимальное количество записей (по умолчанию 500)
+            from_ts (str|None): начало диапазона (ISO timestamp или YYYY-MM-DD)
+            to_ts (str|None): конец диапазона (ISO timestamp или YYYY-MM-DD)
+            paste_status (str|None): фильтр по статусу вставки
+            copy_to_clipboard (bool): если True, копирует результат в буфер обмена
+
+        Возвращает:
+            ok (bool): True при успехе
+            entries (int): количество экспортированных записей
+            chars (int): размер результата в символах
+        """
+        limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
+        from_ts = params.get("from_ts")
+        from_ts_str = None if from_ts is None else str(from_ts)
+        to_ts = params.get("to_ts")
+        to_ts_str = None if to_ts is None else str(to_ts)
+        paste_status = params.get("paste_status")
+        paste_status_str = None if paste_status is None else str(paste_status)
+
+        items_dicts, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=limit,
+            paste_status=paste_status_str,
+            translation_mode=None,
+            from_ts=from_ts_str,
+            to_ts=to_ts_str,
+        )
+
+        if not items_dicts:
+            md = "# Krab Ear — Экспорт транскрипций\n\nИстория пуста.\n"
+            return {"ok": True, "entries": 0, "chars": len(md)}
+
+        from backend.models import HistoryItem as _HI
+        items = [_HI.from_dict(d) for d in items_dicts]
+
+        # Определяем диапазон дат для заголовка
+        ts_list = [it.ts for it in items if it.ts]
+        earliest_ts = self._format_ts_human(ts_list[-1]) if ts_list else "?"
+        latest_ts = self._format_ts_human(ts_list[0]) if ts_list else "?"
+        export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Собираем статистику для сводки
+        total_confidence = 0.0
+        confidence_count = 0
+        languages_used: set[str] = set()
+
+        # Заголовок документа
+        lines: list[str] = [
+            "# Krab Ear — Экспорт транскрипций",
+            "",
+            f"**Период:** {earliest_ts} — {latest_ts}  ",
+            f"**Записей:** {len(items)}  ",
+            f"**Экспорт:** {export_ts}",
+            "",
+            "---",
+            "",
+        ]
+
+        for idx, item in enumerate(items, start=1):
+            ts_human = self._format_ts_human(item.ts)
+            duration_str = self._format_duration_human(item.audio_duration_sec)
+
+            # Заголовок раздела
+            section_title = f"## {idx}. {ts_human}"
+            if duration_str:
+                section_title += f" ({duration_str})"
+            lines.append(section_title)
+            lines.append("")
+
+            # Метаданные записи
+            meta: list[str] = []
+            if item.source_lang:
+                meta.append(f"**Язык:** {item.source_lang}")
+                languages_used.add(item.source_lang)
+            if item.target_lang and item.translation_status == "ok":
+                languages_used.add(item.target_lang)
+
+            # Диаризация: подсчёт спикеров
+            diar = item.diarization
+            diar_turns: list[dict] = []
+            has_diarization = False
+            if diar and isinstance(diar, dict) and diar.get("enabled"):
+                diar_turns = diar.get("speaker_turns", [])
+                speakers = {t.get("speaker") for t in diar_turns if t.get("speaker")}
+                if len(speakers) >= 2:
+                    has_diarization = True
+                    meta.append(f"**Спикеры:** {len(speakers)}")
+
+            if meta:
+                lines.append(" | ".join(meta))
+                lines.append("")
+
+            # Основной текст или реплики по спикерам
+            if has_diarization and diar_turns:
+                for turn in diar_turns:
+                    speaker = turn.get("speaker", "?")
+                    turn_text = str(turn.get("text", "")).strip()
+                    if not turn_text:
+                        continue
+                    start_sec = turn.get("start")
+                    if start_sec is not None:
+                        ts_mark = f"`{self._srt_timestamp(float(start_sec))[:8]}`"
+                        lines.append(f"**[{speaker}]** {ts_mark}: {turn_text}")
+                    else:
+                        lines.append(f"**[{speaker}]**: {turn_text}")
+            else:
+                lines.append(item.text)
+
+            # Перевод (если есть)
+            if item.translated_text and item.translation_status == "ok":
+                mode_label = item.translation_mode or "перевод"
+                lines.append("")
+                lines.append(f"> **Перевод** ({mode_label}): {item.translated_text}")
+
+            lines.append("")
+
+        # Итоговая статистика
+        lines.append("---")
+        lines.append("")
+        lines.append("## Сводная статистика")
+        lines.append("")
+        lines.append(f"- **Всего записей:** {len(items)}")
+        if languages_used:
+            lines.append(f"- **Языки:** {', '.join(sorted(languages_used))}")
+        lines.append(f"- **Экспортировано:** {export_ts}")
+        lines.append("")
+
+        md_content = "\n".join(lines)
+
+        # Копирование в буфер обмена (по запросу)
+        if self._coerce_bool(params.get("copy_to_clipboard", False), default=False):
+            try:
+                import subprocess
+                proc = subprocess.run(
+                    ["pbcopy"],
+                    input=md_content.encode("utf-8"),
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    logger.warning("pbcopy завершился с кодом %d", proc.returncode)
+            except Exception as exc:
+                logger.warning("Не удалось скопировать Markdown в буфер обмена: %s", exc)
+
+        return {"ok": True, "entries": len(items), "chars": len(md_content)}
+
     def _finalize_srt_export(
         self,
         params: dict[str, Any],
@@ -527,6 +679,244 @@ class HistoryService:
             "total_bytes": total_bytes,
             "total_data_mb": round(total_data_mb, 3),
         }
+
+    def handle_get_transcripts_path(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает путь к папке транскриптов и создаёт её при необходимости.
+
+        Возвращает:
+            path (str): абсолютный путь к директории transcripts/
+            exists (bool): True если директория уже существовала
+        """
+        transcripts_dir = Path(self.store.data_dir) / "transcripts"
+        existed = transcripts_dir.exists()
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        return {"path": str(transcripts_dir), "exists": existed}
+
+    # ------------------------------------------------------------------
+    # Авто-резюмирование пакета транскрипций через LLM
+    # ------------------------------------------------------------------
+
+    def handle_auto_summarize_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует сводное LLM-резюме для нескольких транскрипций.
+
+        Параметры (взаимно-исключающие — приоритет: ids > date range):
+            ids (list[str]): список ID записей истории для резюмирования
+            from_ts (str|None): ISO-timestamp начала диапазона (включительно)
+            to_ts (str|None): ISO-timestamp конца диапазона (включительно)
+            limit (int): макс. кол-во записей при выборке по диапазону (по умолчанию 50)
+
+        Возвращает:
+            summary (str): связный текст резюме
+            key_points (list[str]): список ключевых тезисов
+            items_processed (int): кол-во обработанных записей
+            total_words (int): суммарное кол-во слов в исходных текстах
+            llm (bool): True если резюме сгенерировано через LLM
+            fallback (bool): True если LLM был недоступен (circuit open / отключён)
+            error (str|None): описание ошибки при fallback=True
+        """
+        ids: list[str] | None = params.get("ids")
+        from_ts: str | None = params.get("from_ts")
+        to_ts: str | None = params.get("to_ts")
+        limit = max(1, min(int(params.get("limit", 50) or 50), 200))
+
+        # --- Загружаем записи ---
+        if ids is not None:
+            # По списку ID
+            if not isinstance(ids, list) or len(ids) == 0:
+                raise RuntimeError("ids должен быть непустым списком строк")
+            id_set = {str(i).strip() for i in ids if str(i).strip()}
+            with self.store._lock():
+                all_items = self.store._load_active_items_unlocked()
+            items = [it for it in all_items if it.id in id_set]
+            if not items:
+                raise RuntimeError("Ни одна из указанных записей не найдена")
+        else:
+            # По временному диапазону
+            page_dicts, _ = self.store.get_history_page_filtered(
+                cursor=None,
+                limit=limit,
+                paste_status=None,
+                translation_mode=None,
+                from_ts=str(from_ts) if from_ts else None,
+                to_ts=str(to_ts) if to_ts else None,
+            )
+            if not page_dicts:
+                raise RuntimeError("Записи в указанном диапазоне не найдены")
+            from backend.models import HistoryItem as _HI
+            items = [_HI.from_dict(d) for d in page_dicts]
+
+        # --- Собираем единый текст ---
+        texts: list[str] = []
+        for it in items:
+            t = (it.text or "").strip()
+            if t:
+                texts.append(t)
+
+        if not texts:
+            raise RuntimeError("Все выбранные записи имеют пустой текст")
+
+        combined = "\n\n".join(texts)
+        total_words = sum(len(t.split()) for t in texts)
+
+        # --- LLM-резюме ---
+        if self._llm_rewriter is None:
+            # LLM не сконфигурирован — базовая статистика
+            fallback_summary = self._build_fallback_summary(texts)
+            return {
+                "summary": fallback_summary["summary"],
+                "key_points": fallback_summary["key_points"],
+                "items_processed": len(texts),
+                "total_words": total_words,
+                "llm": False,
+                "fallback": True,
+                "error": "LLM unavailable",
+            }
+
+        # Проверяем circuit breaker через публичный метод rewriter'а
+        # (allow_request — внутренний, проверяем косвенно через status)
+        circuit_state = self._llm_rewriter._circuit.state if hasattr(self._llm_rewriter, "_circuit") else None
+        if circuit_state == "open":
+            logger.warning("auto_summarize_batch: circuit breaker открыт, LLM недоступен")
+            fallback_summary = self._build_fallback_summary(texts)
+            return {
+                "summary": fallback_summary["summary"],
+                "key_points": fallback_summary["key_points"],
+                "items_processed": len(texts),
+                "total_words": total_words,
+                "llm": False,
+                "fallback": True,
+                "error": "LLM unavailable",
+            }
+
+        # Формируем промпт для пакетного резюме
+        prompt = self._build_batch_summary_prompt(texts)
+        logger.info(
+            "auto_summarize_batch: отправляем %d записей в LLM (итого %d слов)",
+            len(texts), total_words,
+        )
+
+        # Используем метод summarize — он обёрнут в circuit breaker и never-raises контракт
+        result = self._llm_rewriter.summarize(prompt, max_sentences=5)
+
+        if not result.ok or not result.text:
+            logger.warning(
+                "auto_summarize_batch: LLM вернул ошибку — %s, fallback на эвристику",
+                result.fallback_reason,
+            )
+            fallback_summary = self._build_fallback_summary(texts)
+            return {
+                "summary": fallback_summary["summary"],
+                "key_points": fallback_summary["key_points"],
+                "items_processed": len(texts),
+                "total_words": total_words,
+                "llm": False,
+                "fallback": True,
+                "error": result.fallback_reason or "LLM unavailable",
+            }
+
+        # Парсим структурированный ответ LLM
+        parsed = self._parse_llm_batch_response(result.text)
+        return {
+            "summary": parsed["summary"],
+            "key_points": parsed["key_points"],
+            "items_processed": len(texts),
+            "total_words": total_words,
+            "llm": True,
+            "fallback": False,
+            "error": None,
+        }
+
+    @staticmethod
+    def _build_batch_summary_prompt(texts: list[str]) -> str:
+        """Формирует промпт для пакетного LLM-резюмирования транскрипций.
+
+        Промпт запрашивает структурированный ответ: краткое резюме + маркированный список.
+        """
+        joined = "\n\n---\n\n".join(texts)
+        return (
+            "Ниже представлены несколько транскрипций переговоров/диктовок.\n"
+            "Сделай краткое сводное резюме на русском языке.\n"
+            "Структура ответа:\n"
+            "РЕЗЮМЕ: <одно-два предложения — главная суть>\n"
+            "ТЕЗИСЫ:\n"
+            "- <тезис 1>\n"
+            "- <тезис 2>\n"
+            "- <тезис 3>\n\n"
+            f"{joined}"
+        )
+
+    @staticmethod
+    def _parse_llm_batch_response(text: str) -> dict[str, Any]:
+        """Парсит структурированный ответ LLM в summary + key_points.
+
+        Ожидаемый формат:
+            РЕЗЮМЕ: <текст>
+            ТЕЗИСЫ:
+            - <тезис>
+            - <тезис>
+
+        Если формат не распознан — весь текст идёт в summary, key_points=[].
+        """
+        summary = ""
+        key_points: list[str] = []
+
+        lines = text.strip().splitlines()
+        mode = "scan"
+        summary_parts: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            lower = stripped.lower()
+            if lower.startswith("резюме:"):
+                mode = "summary"
+                tail = stripped[len("резюме:"):].strip()
+                if tail:
+                    summary_parts.append(tail)
+                continue
+            if lower.startswith("тезисы:") or lower.startswith("ключевые тезисы:"):
+                mode = "bullets"
+                continue
+
+            if mode == "summary":
+                if stripped.startswith("-"):
+                    mode = "bullets"
+                    point = stripped.lstrip("- ").strip()
+                    if point:
+                        key_points.append(point)
+                else:
+                    summary_parts.append(stripped)
+            elif mode == "bullets":
+                if stripped.startswith("-"):
+                    point = stripped.lstrip("- ").strip()
+                    if point:
+                        key_points.append(point)
+            else:
+                # Нераспознанный формат — весь текст в резюме
+                summary_parts.append(stripped)
+
+        summary = " ".join(summary_parts).strip()
+        if not summary:
+            # Fallback: первое предложение из исходного текста
+            summary = text.strip().split("\n")[0][:300]
+
+        return {"summary": summary, "key_points": key_points}
+
+    @staticmethod
+    def _build_fallback_summary(texts: list[str]) -> dict[str, Any]:
+        """Минимальное эвристическое резюме без LLM (первые предложения каждой записи)."""
+        import re as _re
+        key_points: list[str] = []
+        for t in texts[:10]:  # ограничиваем кол-во тезисов
+            sentences = _re.split(r"(?<=[.!?])\s+", t.strip())
+            first = sentences[0].strip() if sentences else t[:150].strip()
+            if first:
+                key_points.append(first[:200])
+
+        summary = key_points[0] if key_points else ""
+        return {"summary": summary, "key_points": key_points}
 
     # ------------------------------------------------------------------
     # Статические хелперы (копированы из BackendService для автономности)

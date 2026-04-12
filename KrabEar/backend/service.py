@@ -97,6 +97,7 @@ class BackendService:
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
+            llm_rewriter=self._llm_rewriter,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -217,14 +218,17 @@ class BackendService:
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
             "export_history": self._history.handle_export_history,
             "export_history_srt": self._history.handle_export_history_srt,
+            "export_history_markdown": self._history.handle_export_history_markdown,
             "get_clipboard_history": self._history.handle_get_clipboard_history,
             "repaste_item": self._history.handle_repaste_item,
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
+            "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "apply_profile_preset": self._settings_svc.handle_apply_profile_preset,  # применяет пресет настроек профиля
             "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
+            "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
         }
 
         handler = handlers.get(method)
