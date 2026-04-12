@@ -41,8 +41,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.call_assist_service import CallAssistService
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
-from contracts.stt_events import SttFailed, SttFinal
+from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.registry import EventType
+from contracts.translation_events import TranslationCompleted, TranslationFailed
 from backend.recorder import AudioRecorder
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
@@ -494,6 +495,24 @@ class BackendService:
         translated_text = translation.text.strip() if translation.ok else ""
         final_text = translated_text if (translate_and_paste and translated_text) else text
         translation_status = translation.status
+        if translation.ok and translated_text:
+            event_bus.emit_typed(EventType.TRANSLATION_COMPLETED, TranslationCompleted(
+                history_id="",  # будет обновлено ниже после сохранения в store
+                source_text=text,
+                translated_text=translated_text,
+                source_lang=translation.source_lang or "",
+                target_lang=translation.target_lang or "",
+                engine=translation.engine or "",
+                mode=translation.mode or "",
+            ))
+        elif not translation.ok and translation_status not in ("not_requested", "off"):
+            event_bus.emit_typed(EventType.TRANSLATION_FAILED, TranslationFailed(
+                history_id=None,
+                source_text=text,
+                reason=translation.status or "unknown",
+                source_lang=translation.source_lang,
+                target_lang=translation.target_lang,
+            ))
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
         confidence = tp.get("confidence", 0.0)
@@ -726,7 +745,10 @@ class BackendService:
         settings["call_notify_default"] = self._coerce_bool(settings.get("call_notify_default", True), default=True)
         settings["call_auto_summary"] = self._coerce_bool(settings.get("call_auto_summary", True), default=True)
         settings["history_focus_mode"] = self._coerce_bool(settings.get("history_focus_mode", True), default=True)
-        settings["voice_gateway_url"] = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
+        _gw_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
+        if not (_gw_url.startswith("http://localhost") or _gw_url.startswith("http://127.0.0.1") or _gw_url.startswith("https://")):
+            raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
+        settings["voice_gateway_url"] = _gw_url
         settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
 
         try:
@@ -2419,6 +2441,10 @@ class BackendService:
                 with self._preview_lock:
                     self._preview_text = preview_text[-900:]
                     self._preview_updated_at = float(duration_sec)
+                event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
+                    text=preview_text[-900:],
+                    duration_sec=float(duration_sec),
+                ))
                 poll_interval = _POLL_MIN
             else:
                 with self._preview_lock:
@@ -2489,6 +2515,8 @@ class BackendService:
                 }
             )
         return results
+
+    @staticmethod
     def _error(request_id: Any, code: str, message: str) -> dict[str, Any]:
         return {
             "id": request_id,

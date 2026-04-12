@@ -12,6 +12,7 @@ import logging
 import websockets
 
 from backend.event_bus import bus
+from contracts.registry import EVENT_SCHEMA_MAP
 
 logger = logging.getLogger("KrabEar.VGClient")
 
@@ -47,6 +48,12 @@ class VGWebSocketClient:
                             event = json.loads(raw)
                             event_type = event.get("type", "unknown")
                             event_data = event.get("data", {})
+                            schema_cls = EVENT_SCHEMA_MAP.get(event_type)
+                            if schema_cls:
+                                try:
+                                    schema_cls.model_validate(event_data)
+                                except Exception as e:
+                                    logger.warning("VG event %s failed contract validation: %s", event_type, e)
                             bus.emit(event_type, event_data)
                         except (json.JSONDecodeError, TypeError) as parse_err:
                             logger.warning("VG WS bad message: %s", parse_err)

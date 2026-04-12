@@ -5,6 +5,7 @@
 
 import os
 import time
+import uuid
 import logging
 from pathlib import Path
 from flask import Flask, Response, request, jsonify, stream_with_context
@@ -23,6 +24,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("KrabEar.REST")
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max
+
+ALLOWED_EXTENSIONS = {'.wav', '.mp3', '.ogg', '.m4a', '.flac', '.opus', '.webm', '.mp4', '.aac'}
+
+VALID_QUALITY = {"fast", "balanced", "accurate"}
+VALID_CLEANUP = {"off", "soft", "strict"}
+VALID_DOMAIN = {"casual", "finance", "code", "conversational", "medical"}
 
 # Итерация 2: Централизованная инициализация
 # Используем один AudioEngine для всех подсистем во избежание перегрузки VRAM
@@ -89,7 +97,10 @@ def transcribe_audio():
 
     # 2. Безопасное сохранение временного файла
     filename = secure_filename(file.filename)
-    temp_path = TEMP_DIR / f"{int(time.time())}_{filename}"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": f"Unsupported file type: {ext}"}), 400
+    temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{filename}"
     file.save(str(temp_path))
     
     is_error = False
@@ -98,8 +109,14 @@ def transcribe_audio():
         engine.normalize_audio(str(temp_path))
         
         quality = request.form.get("quality_profile", "balanced")
+        if quality not in VALID_QUALITY:
+            return jsonify({"error": f"Invalid quality_profile: {quality}"}), 400
         cleanup = request.form.get("cleanup_profile", "soft")
+        if cleanup not in VALID_CLEANUP:
+            return jsonify({"error": f"Invalid cleanup_profile: {cleanup}"}), 400
         domain = request.form.get("domain", "casual")
+        if domain not in VALID_DOMAIN:
+            return jsonify({"error": f"Invalid domain: {domain}"}), 400
         lang_hint = request.form.get("lang_hint") or None  # None = авто-определение whisper'ом
 
         # Интеграция словарей
@@ -149,7 +166,8 @@ def transcribe_audio():
     except Exception as e:
         logger.exception("Ошибка при обработке аудио-запроса")
         metrics.record(0, 0, is_error=True)
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Transcription error")
+        return jsonify({"error": "Internal processing error"}), 500
         
     finally:
         # 6. Гарантированная очистка временных ресурсов

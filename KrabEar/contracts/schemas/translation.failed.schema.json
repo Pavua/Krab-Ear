@@ -1,0 +1,55 @@
+{
+  "description": "Ошибка перевода.",
+  "properties": {
+    "history_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "History Id"
+    },
+    "source_text": {
+      "title": "Source Text",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "source_lang": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Lang"
+    },
+    "target_lang": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Lang"
+    }
+  },
+  "required": [
+    "source_text",
+    "reason"
+  ],
+  "title": "TranslationFailed",
+  "type": "object"
+}

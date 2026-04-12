@@ -1153,6 +1153,17 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
         scrollView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
+        setupDictationTab(dictationContentView)
+        setupLiveTranslationTab(liveContentView)
+        setupHistoryTab(historyContentView)
+
+        setupKeyboardShortcuts()
+        applyVisualTheme()
+    }
+
+    // MARK: - Tab Setup Helpers
+
+    private func setupDictationTab(_ contentView: NSView) {
         let dictationTitle = NSTextField(labelWithString: "Быстрые действия диктовки")
         dictationTitle.font = .systemFont(ofSize: 14, weight: .semibold)
         dictationHistoryHintLabel.lineBreakMode = .byTruncatingTail
@@ -1169,17 +1180,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryOpenButton.target = self
         dictationHistoryOpenButton.action = #selector(onOpenHistoryTabFromDictation)
         dictationHistoryHeaderRow.addArrangedSubview(dictationHistoryOpenButton)
-
-        let liveTitle = NSTextField(labelWithString: "Настройки live-перевода")
-        liveTitle.font = .systemFont(ofSize: 14, weight: .semibold)
-
-        liveHeaderRow.orientation = .horizontal
-        liveHeaderRow.spacing = 8
-        liveHeaderRow.alignment = .centerY
-        liveHeaderRow.translatesAutoresizingMaskIntoConstraints = false
-        liveHeaderRow.addArrangedSubview(NSTextField(labelWithString: "Realtime preview"))
-        liveHeaderRow.addArrangedSubview(NSView())
-        liveHeaderRow.addArrangedSubview(realtimeStatusLabel)
 
         dictationStack.orientation = .vertical
         dictationStack.spacing = 10
@@ -1198,12 +1198,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationOuterScroll.hasHorizontalScroller = false
         dictationOuterScroll.drawsBackground = false
         dictationOuterScroll.translatesAutoresizingMaskIntoConstraints = false
-        dictationContentView.addSubview(dictationOuterScroll)
+        contentView.addSubview(dictationOuterScroll)
         NSLayoutConstraint.activate([
-            dictationOuterScroll.topAnchor.constraint(equalTo: dictationContentView.topAnchor),
-            dictationOuterScroll.leadingAnchor.constraint(equalTo: dictationContentView.leadingAnchor),
-            dictationOuterScroll.trailingAnchor.constraint(equalTo: dictationContentView.trailingAnchor),
-            dictationOuterScroll.bottomAnchor.constraint(equalTo: dictationContentView.bottomAnchor),
+            dictationOuterScroll.topAnchor.constraint(equalTo: contentView.topAnchor),
+            dictationOuterScroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            dictationOuterScroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            dictationOuterScroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             dictationStack.topAnchor.constraint(equalTo: dictationOuterScroll.contentView.topAnchor, constant: 12),
             dictationStack.leadingAnchor.constraint(equalTo: dictationOuterScroll.contentView.leadingAnchor, constant: 12),
             dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
@@ -1214,6 +1214,19 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryPreviewScroll.heightAnchor.constraint(equalToConstant: 150),
         ])
+    }
+
+    private func setupLiveTranslationTab(_ contentView: NSView) {
+        let liveTitle = NSTextField(labelWithString: "Настройки live-перевода")
+        liveTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+
+        liveHeaderRow.orientation = .horizontal
+        liveHeaderRow.spacing = 8
+        liveHeaderRow.alignment = .centerY
+        liveHeaderRow.translatesAutoresizingMaskIntoConstraints = false
+        liveHeaderRow.addArrangedSubview(NSTextField(labelWithString: "Realtime preview"))
+        liveHeaderRow.addArrangedSubview(NSView())
+        liveHeaderRow.addArrangedSubview(realtimeStatusLabel)
 
         liveStack.orientation = .vertical
         liveStack.spacing = 10
@@ -1236,12 +1249,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveOuterScroll.hasHorizontalScroller = false
         liveOuterScroll.drawsBackground = false
         liveOuterScroll.translatesAutoresizingMaskIntoConstraints = false
-        liveContentView.addSubview(liveOuterScroll)
+        contentView.addSubview(liveOuterScroll)
         NSLayoutConstraint.activate([
-            liveOuterScroll.topAnchor.constraint(equalTo: liveContentView.topAnchor),
-            liveOuterScroll.leadingAnchor.constraint(equalTo: liveContentView.leadingAnchor),
-            liveOuterScroll.trailingAnchor.constraint(equalTo: liveContentView.trailingAnchor),
-            liveOuterScroll.bottomAnchor.constraint(equalTo: liveContentView.bottomAnchor),
+            liveOuterScroll.topAnchor.constraint(equalTo: contentView.topAnchor),
+            liveOuterScroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            liveOuterScroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            liveOuterScroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             liveStack.topAnchor.constraint(equalTo: liveOuterScroll.contentView.topAnchor, constant: 12),
             liveStack.leadingAnchor.constraint(equalTo: liveOuterScroll.contentView.leadingAnchor, constant: 12),
             liveStack.trailingAnchor.constraint(equalTo: liveOuterScroll.contentView.trailingAnchor, constant: -12),
@@ -1257,7 +1270,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             callAssistOutputScroll.heightAnchor.constraint(equalToConstant: 110),
             realtimeScroll.heightAnchor.constraint(equalToConstant: 132),
         ])
+    }
 
+    private func setupHistoryTab(_ contentView: NSView) {
         historyStack.orientation = .vertical
         historyStack.spacing = 8
         historyStack.alignment = .leading
@@ -1304,24 +1319,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyOuterScroll.hasHorizontalScroller = false
         historyOuterScroll.drawsBackground = false
         historyOuterScroll.translatesAutoresizingMaskIntoConstraints = false
-        historyContentView.addSubview(historyOuterScroll)
+        contentView.addSubview(historyOuterScroll)
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
-            historyOuterScroll.topAnchor.constraint(equalTo: historyContentView.topAnchor),
-            historyOuterScroll.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
-            historyOuterScroll.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
-            historyOuterScroll.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
+            historyOuterScroll.topAnchor.constraint(equalTo: contentView.topAnchor),
+            historyOuterScroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            historyOuterScroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            historyOuterScroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             historyStack.topAnchor.constraint(equalTo: historyOuterScroll.contentView.topAnchor, constant: 12),
             historyStack.leadingAnchor.constraint(equalTo: historyOuterScroll.contentView.leadingAnchor, constant: 12),
             historyStack.trailingAnchor.constraint(equalTo: historyOuterScroll.contentView.trailingAnchor, constant: -12),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
-
-        setupKeyboardShortcuts()
-        applyVisualTheme()
     }
 
     // MARK: - Keyboard Shortcuts (Cmd+1/2/3, Cmd+F, Cmd+R, Cmd+D, Cmd+E, Cmd+I, Esc)

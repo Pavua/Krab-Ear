@@ -471,7 +471,7 @@ class BackendServiceTestCase(unittest.TestCase):
             {
                 "capture_source_mode": "wrong",
                 "ui_last_tab": "wrong",
-                "voice_gateway_url": "  http://x  ",
+                "voice_gateway_url": "  https://gateway.example.com  ",
                 "voice_gateway_api_key": "  key  ",
                 "call_auto_summary": "off",
                 "hotkey_profile": "unknown_profile",
@@ -484,7 +484,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["capture_source_mode"], "mic")
         self.assertEqual(response["result"]["ui_last_tab"], "history")
-        self.assertEqual(response["result"]["voice_gateway_url"], "http://x")
+        self.assertEqual(response["result"]["voice_gateway_url"], "https://gateway.example.com")
         self.assertEqual(response["result"]["voice_gateway_api_key"], "key")
         self.assertFalse(response["result"]["call_auto_summary"])
         self.assertEqual(response["result"]["hotkey_profile"], "default")
@@ -492,6 +492,16 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertIsInstance(response["result"]["text_templates"], dict)
         self.assertTrue(response["result"]["history_focus_mode"])
         self.assertEqual(response["result"]["history_text_density"], "normal")
+
+    def test_settings_voice_gateway_url_whitelist(self) -> None:
+        # Допустимые URL
+        for valid_url in ["http://localhost:8090", "http://127.0.0.1:8090", "https://gw.example.com"]:
+            resp = self.request("set_settings", {"voice_gateway_url": valid_url})
+            self.assertTrue(resp["ok"], f"Expected ok for {valid_url}")
+            self.assertEqual(resp["result"]["voice_gateway_url"], valid_url)
+        # Недопустимый URL — должен вернуть ошибку
+        bad_resp = self.request("set_settings", {"voice_gateway_url": "http://evil.internal/steal"})
+        self.assertFalse(bad_resp["ok"], "Expected rejection of non-localhost HTTP URL")
 
     def test_summarize_text_method(self) -> None:
         summary_short = self.request(

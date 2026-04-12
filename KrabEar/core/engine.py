@@ -688,6 +688,10 @@ class AudioEngine:
         if not text.strip(): return
         cmd = ["say", "-r", str(rate)]
         if settings.SAY_VOICE:
-            cmd.extend(["-v", settings.SAY_VOICE])
+            import re as _re
+            voice = settings.SAY_VOICE
+            if not _re.match(r'^[a-zA-Z0-9 _-]+$', voice):
+                voice = "Milena"  # безопасный fallback
+            cmd.extend(["-v", voice])
         cmd.append(text)
         subprocess.run(cmd, check=False)

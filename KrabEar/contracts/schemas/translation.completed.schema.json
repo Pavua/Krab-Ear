@@ -1,0 +1,44 @@
+{
+  "description": "Перевод готов.",
+  "properties": {
+    "history_id": {
+      "title": "History Id",
+      "type": "string"
+    },
+    "source_text": {
+      "title": "Source Text",
+      "type": "string"
+    },
+    "translated_text": {
+      "title": "Translated Text",
+      "type": "string"
+    },
+    "source_lang": {
+      "title": "Source Lang",
+      "type": "string"
+    },
+    "target_lang": {
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "engine": {
+      "title": "Engine",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    }
+  },
+  "required": [
+    "history_id",
+    "source_text",
+    "translated_text",
+    "source_lang",
+    "target_lang",
+    "engine",
+    "mode"
+  ],
+  "title": "TranslationCompleted",
+  "type": "object"
+}

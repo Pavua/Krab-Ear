@@ -1,0 +1,19 @@
+{
+  "description": "Ошибка транскрипции.",
+  "properties": {
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "duration_sec": {
+      "default": 0.0,
+      "title": "Duration Sec",
+      "type": "number"
+    }
+  },
+  "required": [
+    "reason"
+  ],
+  "title": "SttFailed",
+  "type": "object"
+}

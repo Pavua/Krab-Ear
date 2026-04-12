@@ -1,0 +1,57 @@
+{
+  "description": "Финальная транскрипция.",
+  "properties": {
+    "history_id": {
+      "title": "History Id",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "duration_sec": {
+      "title": "Duration Sec",
+      "type": "number"
+    },
+    "language": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Language"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence"
+    },
+    "segments": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Segments",
+      "type": "array"
+    }
+  },
+  "required": [
+    "history_id",
+    "text",
+    "duration_sec"
+  ],
+  "title": "SttFinal",
+  "type": "object"
+}

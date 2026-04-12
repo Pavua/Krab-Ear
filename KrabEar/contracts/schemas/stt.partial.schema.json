@@ -1,0 +1,26 @@
+{
+  "description": "Промежуточный текст во время записи.",
+  "properties": {
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "duration_sec": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration Sec"
+    }
+  },
+  "required": [
+    "text"
+  ],
+  "title": "SttPartial",
+  "type": "object"
+}
