@@ -8,6 +8,7 @@ soundfile
 pyperclip
 flask
 flask-smorest
+flask-sock>=0.7.0
 marshmallow
 pyobjc-framework-Cocoa; sys_platform == "darwin"
 pyobjc-framework-Vision; sys_platform == "darwin"

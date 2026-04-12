@@ -4,7 +4,9 @@
 OpenAPI 3.0 документация доступна по адресу /api/docs.
 """
 
+import json
 import os
+import queue
 import time
 import uuid
 import logging
@@ -12,6 +14,7 @@ import functools
 from pathlib import Path
 from flask import Flask, Response, request, jsonify, stream_with_context, g
 from flask_smorest import Api, Blueprint
+from flask_sock import Sock
 from marshmallow import Schema, fields as ma_fields, validate
 from werkzeug.utils import secure_filename
 
@@ -39,6 +42,12 @@ app.config["OPENAPI_SWAGGER_UI_PATH"] = "/docs"
 app.config["OPENAPI_SWAGGER_UI_URL"] = "https://cdn.jsdelivr.net/npm/swagger-ui-dist/"
 
 api = Api(app)
+sock = Sock(app)
+
+# WebSocket heartbeat interval (seconds)
+_WS_HEARTBEAT_SEC = 30
+# How long to block waiting for next event before looping (keep < heartbeat)
+_WS_POLL_SEC = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +395,76 @@ def events_stream():
 # Register blueprints
 api.register_blueprint(monitoring_blp)
 api.register_blueprint(v1_blp)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket live-streaming endpoint
+# ---------------------------------------------------------------------------
+
+def _handle_ws_connection(ws, bus, type_filter=None):
+    """Внутренняя логика WebSocket-соединения — выделена для unit-тестирования.
+
+    Args:
+        ws: объект WebSocket с методом .send(str).
+        bus: EventBus для подписки.
+        type_filter: set строк с допустимыми типами событий, или None — всё.
+    """
+    q = bus.subscribe()
+    logger.info("WS /ws/events: клиент подключился, фильтр=%s", type_filter or "все")
+
+    last_ping = time.monotonic()
+    try:
+        while True:
+            now = time.monotonic()
+            if now - last_ping >= _WS_HEARTBEAT_SEC:
+                try:
+                    ws.send('{"type":"ping"}')
+                except Exception:
+                    break
+                last_ping = time.monotonic()
+
+            try:
+                event = q.get(timeout=_WS_POLL_SEC)
+            except queue.Empty:
+                continue
+
+            if event is None:
+                # Сигнал завершения от сервера
+                break
+
+            if type_filter and event.get("type") not in type_filter:
+                continue
+
+            try:
+                ws.send(json.dumps(event))
+            except Exception:
+                break
+    except Exception:
+        logger.debug("WS /ws/events: соединение прервано")
+    finally:
+        bus.unsubscribe(q)
+        logger.info("WS /ws/events: клиент отключился")
+
+
+@sock.route("/ws/events")
+def ws_events(ws):
+    """WebSocket endpoint для стриминга событий транскрибации в реальном времени.
+
+    Подписывается на EventBus и пересылает все события клиенту в формате JSON.
+
+    Query params:
+        types — опциональный фильтр по типам событий через запятую.
+                Пример: /ws/events?types=stt.final,translation
+                Если не задан — отправляются все события.
+
+    Протокол:
+        Server → Client: JSON-строка {type, ts, data}
+        Server → Client: {"type": "ping"} каждые 30 секунд (heartbeat)
+        Client → Server: любые входящие данные игнорируются
+    """
+    raw_types = request.args.get("types", "")
+    type_filter = {t.strip() for t in raw_types.split(",") if t.strip()} if raw_types else None
+    _handle_ws_connection(ws, event_bus, type_filter)
 
 
 def create_app():

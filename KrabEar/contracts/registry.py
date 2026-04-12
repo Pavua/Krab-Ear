@@ -6,6 +6,7 @@ from enum import Enum
 
 from pydantic import BaseModel
 
+from contracts.history_events import AutoSummaryEvent, MarkdownExportEvent
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 
@@ -16,6 +17,8 @@ class EventType(str, Enum):
     STT_FAILED = "stt.failed"
     TRANSLATION_COMPLETED = "translation.completed"
     TRANSLATION_FAILED = "translation.failed"
+    MARKDOWN_EXPORT = "markdown_export"
+    AUTO_SUMMARY = "auto_summary"
 
 
 EVENT_SCHEMA_MAP: dict[EventType, type[BaseModel]] = {
@@ -24,4 +27,6 @@ EVENT_SCHEMA_MAP: dict[EventType, type[BaseModel]] = {
     EventType.STT_FAILED: SttFailed,
     EventType.TRANSLATION_COMPLETED: TranslationCompleted,
     EventType.TRANSLATION_FAILED: TranslationFailed,
+    EventType.MARKDOWN_EXPORT: MarkdownExportEvent,
+    EventType.AUTO_SUMMARY: AutoSummaryEvent,
 }

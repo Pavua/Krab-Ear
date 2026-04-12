@@ -72,6 +72,61 @@ extension HistoryPanelController {
         showDiagnosticsOutput(lines.joined(separator: "\n"))
     }
 
+    // MARK: - auto_summarize_batch
+
+    @objc func onAutoSummaryBatch() {
+        // Collect selected rows; fall back to first 50 loaded items
+        var targetIDs: [String]
+        let selectedRows = tableView.selectedRowIndexes
+        if selectedRows.count > 0 {
+            targetIDs = selectedRows.compactMap { idx -> String? in
+                guard idx < items.count else { return nil }
+                return items[idx].id
+            }
+        } else {
+            targetIDs = Array(items.prefix(50).map { $0.id })
+        }
+
+        guard !targetIDs.isEmpty else {
+            showDiagnosticsOutput("Нет записей для авто-саммари.")
+            return
+        }
+
+        showDiagnosticsOutput("Авто-саммари: обрабатываю \(targetIDs.count) записей…")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            guard let response = try? self.ipcClient.call(
+                method: "auto_summarize_batch",
+                params: ["ids": targetIDs]
+            ),
+            let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self.showDiagnosticsOutput("Ошибка: авто-саммари не выполнено.")
+                }
+                return
+            }
+
+            let processed = result["processed"] as? Int ?? 0
+            let failed = result["failed"] as? Int ?? 0
+            let summaries = result["summaries"] as? [[String: Any]] ?? []
+
+            var lines: [String] = ["=== Авто-саммари (\(processed) обработано, \(failed) ошибок) ==="]
+            for item in summaries {
+                let itemID = (item["id"] as? String ?? "").prefix(8)
+                let summary = item["summary"] as? String ?? "(нет)"
+                let isLLM = item["llm"] as? Bool ?? false
+                lines.append("\n[\(itemID)…] (LLM: \(isLLM ? "да" : "нет"))")
+                lines.append(summary)
+            }
+
+            let output = lines.joined(separator: "\n")
+            DispatchQueue.main.async {
+                self.showDiagnosticsOutput(output)
+            }
+        }
+    }
+
     // MARK: - get_history_item (double-click detail)
 
     @objc func onTableViewDoubleClick() {

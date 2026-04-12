@@ -198,6 +198,17 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let historyStatusLabel = NSTextField(labelWithString: "")
     let glossaryStatusLabel = NSTextField(labelWithString: "Глоссарий: 0")
     let importStatusLabel = NSTextField(labelWithString: "Импорт: idle")
+    private(set) var importProgressBar: NSProgressIndicator = {
+        let bar = NSProgressIndicator()
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 100
+        bar.doubleValue = 0
+        bar.isHidden = true
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        return bar
+    }()
     let cancelImportButton = NSButton(title: "Отменить импорт", target: nil, action: nil)
     let pauseImportButton = NSButton(title: "Пауза импорта", target: nil, action: nil)
     let swapRuEsButton = NSButton(title: "Swap RU<->ES", target: nil, action: nil)
@@ -1390,6 +1401,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 case "i":
                     self.onStorageInfo()
                     return nil
+                case "/", "?":
+                    self.showKeyboardShortcutsHelp()
+                    return nil
                 default:
                     break
                 }
@@ -1402,6 +1416,33 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
 
             return event
+        }
+    }
+
+    @MainActor
+    private func showKeyboardShortcutsHelp() {
+        let shortcuts = """
+        ⌘1  Диктовка
+        ⌘2  Live перевод
+        ⌘3  История
+        ⌘F  Поиск
+        ⌘R  Обновить
+        ⌘D  Диагностика
+        ⌘E  Экспорт SRT
+        ⌘M  Экспорт Markdown
+        ⌘I  Хранилище
+        Esc  Закрыть
+        ⌘/  Эта справка
+        """
+        let alert = NSAlert()
+        alert.messageText = "Горячие клавиши"
+        alert.informativeText = shortcuts
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        if let window = self.window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
         }
     }
 
@@ -1541,7 +1582,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         self.clipboardSection = clipSection
         settingsBar.addArrangedSubview(clipSection)
 
-        dictationStack.addArrangedSubview(controlRow)
+        let controlCard = ThemeCardView()
+        controlCard.contentStackView.addArrangedSubview(controlRow)
+        dictationStack.addArrangedSubview(controlCard)
         dictationStack.addArrangedSubview(settingsBar)
         dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
         dictationStack.addArrangedSubview(dictationHistoryHintLabel)
@@ -1682,16 +1725,30 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         statusRow.addArrangedSubview(NSView()) // Spacer
         statusRow.addArrangedSubview(importStatusLabel)
 
-        // Keep topSearchRow and topActionsRow as separate horizontal rows
-        // (reverted merge that caused vertical stacking of toolbar items)
-        historyStack.addArrangedSubview(topSearchRow)
-        historyStack.addArrangedSubview(topActionsRow)
+        // Wrap topSearchRow + topActionsRow together in a frosted glass card
+        let searchActionsCard = ThemeCardView()
+        searchActionsCard.contentStackView.addArrangedSubview(topSearchRow)
+        searchActionsCard.contentStackView.addArrangedSubview(topActionsRow)
+
+        // Wrap scrollView (history table) in a frosted glass card
+        let tableCard = ThemeCardView()
+        tableCard.contentStackView.addArrangedSubview(scrollView)
+
+        // Wrap primaryActionsRow in a frosted glass card
+        let primaryActionsCard = ThemeCardView()
+        primaryActionsCard.contentStackView.addArrangedSubview(primaryActionsRow)
+
+        // Wrap statusRow in a frosted glass card
+        let statusCard = ThemeCardView()
+        statusCard.contentStackView.addArrangedSubview(statusRow)
+
+        historyStack.addArrangedSubview(searchActionsCard)
         historyStack.addArrangedSubview(filtersSection)
-        historyStack.addArrangedSubview(scrollView)
-        historyStack.addArrangedSubview(primaryActionsRow)
+        historyStack.addArrangedSubview(tableCard)
+        historyStack.addArrangedSubview(primaryActionsCard)
         historyStack.addArrangedSubview(advancedSection)
         historyStack.addArrangedSubview(importSection)
-        historyStack.addArrangedSubview(statusRow)
+        historyStack.addArrangedSubview(statusCard)
 
         // Width constraints for history children
         for child in historyStack.arrangedSubviews {
