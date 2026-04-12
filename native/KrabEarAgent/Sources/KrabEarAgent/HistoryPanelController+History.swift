@@ -1,0 +1,760 @@
+/*
+ HistoryPanelController+History.swift
+ Расширение: обработчики действий истории, пагинация, экспорт/импорт,
+ фильтрация, вспомогательные методы отображения.
+*/
+
+import AppKit
+import Foundation
+import UniformTypeIdentifiers
+
+extension HistoryPanelController {
+
+    // MARK: - Pagination
+
+    @objc func onLoadMore() {
+        guard let nextCursor else {
+            updateHistoryStatusLabel()
+            return
+        }
+        let pageSize = settingsProvider().historyPageSize
+        if currentQuery.isEmpty {
+            appendPage(
+                method: "get_history_page",
+                params: buildHistoryQueryParams(cursor: nextCursor, limit: pageSize)
+            )
+        } else {
+            var params = buildHistoryQueryParams(cursor: nextCursor, limit: pageSize)
+            params["query"] = currentQuery
+            appendPage(method: "search_history", params: params)
+        }
+    }
+
+    @objc func onLoadAll() {
+        var guardLoops = 0
+        while nextCursor != nil && guardLoops < 120 {
+            guardLoops += 1
+            onLoadMore()
+        }
+        if guardLoops >= 120 {
+            showInfoAlert(
+                title: "История",
+                body: "Загружен лимит страниц за один проход. Сузьте фильтр или повторите действие."
+            )
+        }
+    }
+
+    @objc func onJumpToLatest() {
+        guard !items.isEmpty else { return }
+        tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        tableView.scrollRowToVisible(0)
+    }
+
+    // MARK: - Copy / Paste actions
+
+    @objc func onCopy() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        let text = items[selected].text
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc func onPasteSelected() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        onPasteHistoryItem(items[selected])
+    }
+
+    @objc func onCopyOriginal() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        let item = items[selected]
+        let text = item.sourceText.isEmpty ? item.text : item.sourceText
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc func onCopyTranslation() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        let item = items[selected]
+        let text = item.translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            showInfoAlert(title: "Копирование перевода", body: "Для этой записи перевод отсутствует.")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    // MARK: - Export / Import
+
+    @objc func onExportHistory() {
+        guard !items.isEmpty else {
+            showInfoAlert(title: "Экспорт истории", body: "История пуста, экспортировать нечего.")
+            return
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let suggestedName = "krab_ear_history_\(formatter.string(from: Date())).md"
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedName
+        panel.allowedContentTypes = [.plainText]
+        panel.title = "Сохранить экспорт истории"
+        panel.prompt = "Сохранить"
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        let content = buildHistoryMarkdownExport()
+        do {
+            try content.write(to: outputURL, atomically: true, encoding: .utf8)
+            showInfoAlert(
+                title: "Экспорт истории",
+                body: "Сохранено записей: \(items.count)\n\(outputURL.path)"
+            )
+        } catch {
+            showInfoAlert(
+                title: "Экспорт истории",
+                body: "Не удалось сохранить файл: \(error.localizedDescription)"
+            )
+        }
+        // Также сохраняем копию через IPC (export_history) в transcripts/
+        if let ipcResponse = try? ipcClient.call(
+            method: "export_history",
+            params: ["format": "md", "save_to_file": true]
+        ), let ipcResult = ipcResponse["result"] as? [String: Any],
+           let serverPath = ipcResult["path"] as? String {
+            notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+        }
+    }
+
+    @objc func onExportHistoryNdjson() {
+        guard !items.isEmpty else {
+            showInfoAlert(title: "Экспорт NDJSON", body: "История пуста, экспортировать нечего.")
+            return
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let suggestedName = "krab_ear_history_\(formatter.string(from: Date())).ndjson"
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedName
+        panel.allowedContentTypes = [.json]
+        panel.title = "Сохранить экспорт NDJSON"
+        panel.prompt = "Сохранить"
+
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        let content = buildHistoryNdjsonExport()
+        do {
+            try content.write(to: outputURL, atomically: true, encoding: .utf8)
+            showInfoAlert(
+                title: "Экспорт NDJSON",
+                body: "Сохранено записей: \(items.count)\n\(outputURL.path)"
+            )
+        } catch {
+            showInfoAlert(
+                title: "Экспорт NDJSON",
+                body: "Не удалось сохранить файл: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    @objc func onImportHistoryNdjson() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.title = "Выберите NDJSON-файл истории"
+        panel.prompt = "Импортировать"
+
+        guard panel.runModal() == .OK, let inputURL = panel.url else { return }
+        guard
+            let response = try? ipcClient.call(
+                method: "import_history_ndjson",
+                params: ["path": inputURL.path]
+            ),
+            let result = response["result"] as? [String: Any]
+        else {
+            showInfoAlert(title: "Импорт NDJSON", body: "Ошибка при импорте файла.")
+            return
+        }
+
+        let imported = (result["imported"] as? Int) ?? 0
+        let skipped = (result["skipped"] as? Int) ?? 0
+        let errors = (result["errors"] as? Int) ?? 0
+        loadInitial()
+        showInfoAlert(
+            title: "Импорт NDJSON",
+            body: "Импортировано: \(imported)\nПропущено дублей: \(skipped)\nОшибок: \(errors)"
+        )
+    }
+
+    // MARK: - Retranslate / Summarize
+
+    @objc func onRetranslateSelected() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+
+        let item = items[selected]
+        let sourceText = item.sourceText.isEmpty ? item.text : item.sourceText
+        let cleanSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSource.isEmpty else {
+            showInfoAlert(title: "Повторить перевод", body: "У выбранной записи нет исходного текста.")
+            return
+        }
+
+        let targetMode: String
+        switch translationSelector.indexOfSelectedItem {
+        case 1:
+            targetMode = "ru_to_es"
+        case 2:
+            targetMode = "es_to_ru"
+        case 3:
+            targetMode = "en_to_ru"
+        case 4:
+            targetMode = "auto"
+        case 5:
+            targetMode = "bilingual_ru_es"
+        case 6:
+            targetMode = "auto_to_ru"
+        default:
+            targetMode = "off"
+        }
+
+        guard targetMode != "off" else {
+            showInfoAlert(title: "Повторить перевод", body: "Выберите режим перевода отличный от Off.")
+            return
+        }
+
+        guard
+            let translateResponse = try? ipcClient.call(
+                method: "translate_text",
+                params: [
+                    "text": cleanSource,
+                    "translation_mode": targetMode,
+                    "translation_style": settingsProvider().translationStyle,
+                    "network_mode": settingsProvider().networkMode,
+                ]
+            ),
+            let translateResult = translateResponse["result"] as? [String: Any]
+        else {
+            showInfoAlert(title: "Повторить перевод", body: "Не удалось выполнить перевод.")
+            return
+        }
+
+        let status = (translateResult["status"] as? String) ?? "unknown"
+        let translatedText = ((translateResult["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if status != "ok" || translatedText.isEmpty {
+            showInfoAlert(title: "Повторить перевод", body: "Перевод недоступен: \(status).")
+            return
+        }
+
+        let shouldPasteTranslated = translateAndPasteButton.state == .on
+        let newText = shouldPasteTranslated ? translatedText : cleanSource
+
+        let _ = try? ipcClient.call(
+            method: "add_history_item",
+            params: [
+                "text": newText,
+                "paste_status": "failed",
+                "source_text": cleanSource,
+                "translated_text": translatedText,
+                "translation_mode": targetMode,
+                "translation_status": status,
+                "translation_engine": (translateResult["engine"] as? String) ?? "",
+                "source_lang": (translateResult["source_lang"] as? String) ?? "",
+                "target_lang": (translateResult["target_lang"] as? String) ?? "",
+            ]
+        )
+
+        loadInitial()
+        showInfoAlert(
+            title: "Повторить перевод",
+            body: "Готово. Создана новая запись истории с обновлённым переводом."
+        )
+    }
+
+    @objc func onSummarizeSelected() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        let item = items[selected]
+        let source = item.sourceText.isEmpty ? item.text : item.sourceText
+        let cleanSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSource.isEmpty else {
+            showInfoAlert(title: "Summary", body: "У выбранной записи пустой текст.")
+            return
+        }
+        guard
+            let response = try? ipcClient.call(
+                method: "summarize_text",
+                params: [
+                    "text": cleanSource,
+                    "mode": "summary_short",
+                    "max_points": 4,
+                ]
+            ),
+            let result = response["result"] as? [String: Any]
+        else {
+            showInfoAlert(title: "Summary", body: "Не удалось построить summary.")
+            return
+        }
+        let summary = (result["summary"] as? String) ?? ""
+        let bullets = (result["bullets"] as? [String]) ?? []
+        let bulletText = bullets.isEmpty ? "- (нет пунктов)" : bullets.prefix(6).map { "- \($0)" }.joined(separator: "\n")
+        let text = """
+        \(summary.isEmpty ? "—" : summary)
+
+        Пункты:
+        \(bulletText)
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        showInfoAlert(title: "Summary", body: "\(text)\n\n(Скопировано в буфер)")
+    }
+
+    // MARK: - Delete / Compact / Transcripts
+
+    @objc func onDelete() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else { return }
+        let item = items[selected]
+        _ = try? ipcClient.call(method: "delete_history_item", params: ["id": item.id])
+        items.remove(at: selected)
+        tableView.reloadData()
+    }
+
+    @objc func onCompact() {
+        let response = try? ipcClient.call(method: "compact_history", params: [:])
+        if let result = response?["result"] as? [String: Any] {
+            let reclaimed = (result["reclaimed_bytes"] as? Int) ?? 0
+            let beforeBytes = (result["before_total_bytes"] as? Int) ?? 0
+            let afterBytes = (result["after_total_bytes"] as? Int) ?? 0
+            let beforeActive = (result["before_active_count"] as? Int) ?? 0
+            let afterActive = (result["after_active_count"] as? Int) ?? 0
+            showInfoAlert(
+                title: "Оптимизация истории",
+                body: """
+                Активных записей: \(beforeActive) -> \(afterActive)
+                Размер: \(formatBytes(beforeBytes)) -> \(formatBytes(afterBytes))
+                Освобождено: \(formatBytes(max(0, reclaimed)))
+                """
+            )
+        }
+        loadInitial()
+    }
+
+    @objc func onOpenTranscripts() {
+        let transcriptsPath = NSString(string: "~/Library/Application Support/KrabEar/transcripts").expandingTildeInPath
+        let url = URL(fileURLWithPath: transcriptsPath, isDirectory: true)
+        // Create directory if needed
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(url)
+    }
+
+    // MARK: - Load / Append
+
+    func loadInitial() {
+        items = []
+        nextCursor = nil
+        tableView.reloadData()
+        jumpToLatestButton.isEnabled = false
+        updateHistoryStatusLabel()
+        updateDictationHistoryPreview()
+        updateHistoryFiltersBadge()
+        updateHistoryPreviewCard()
+
+        let pageSize = settingsProvider().historyPageSize
+        let hadActiveFilters = hasActiveHistoryFiltersOrQuery()
+        if currentQuery.isEmpty {
+            appendPage(method: "get_history_page", params: buildHistoryQueryParams(cursor: NSNull(), limit: pageSize))
+        } else {
+            var params = buildHistoryQueryParams(cursor: NSNull(), limit: pageSize)
+            params["query"] = currentQuery
+            appendPage(method: "search_history", params: params)
+        }
+
+        recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
+    }
+
+    func appendPage(method: String, params: [String: Any]) {
+        guard let response = try? ipcClient.call(method: method, params: params),
+              let result = response["result"] as? [String: Any],
+              let rawItems = result["items"] as? [[String: Any]] else {
+            return
+        }
+
+        let mapped = rawItems.compactMap(HistoryItem.init(payload:))
+        items.append(contentsOf: mapped)
+        nextCursor = result["next_cursor"] as? String
+        loadMoreButton.isEnabled = (nextCursor != nil)
+        loadAllButton.isEnabled = (nextCursor != nil)
+        updateLoadMoreButtonCaption()
+        updateHistoryStatusLabel()
+        updateDictationHistoryPreview()
+        tableView.reloadData()
+        updateHistoryPreviewCard()
+        jumpToLatestButton.isEnabled = !items.isEmpty
+    }
+
+    // MARK: - Filter helpers
+
+    func hasActiveHistoryFiltersOrQuery() -> Bool {
+        if !currentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        if historyPasteStatusFilter.indexOfSelectedItem > 0 {
+            return true
+        }
+        if historyTranslationModeFilter.indexOfSelectedItem > 0 {
+            return true
+        }
+        if historyTranslationStatusFilter.indexOfSelectedItem > 0 {
+            return true
+        }
+        if !historyFromDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        if !historyToDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
+    }
+
+    func recoverHistoryIfFiltersHideAllRows(limit: Int, hadActiveFilters: Bool) {
+        guard hadActiveFilters else { return }
+        guard items.isEmpty else { return }
+        guard !isRecoveringHistoryFromFilters else { return }
+        guard let stats = fetchHistoryStats(), stats.activeCount > 0 else { return }
+
+        // UX-страховка: если записи есть, но пользователь их "скрыл" фильтрами,
+        // автоматически показываем последние элементы вместо пустой таблицы.
+        isRecoveringHistoryFromFilters = true
+        defer { isRecoveringHistoryFromFilters = false }
+
+        currentQuery = ""
+        searchField.stringValue = ""
+        historyPasteStatusFilter.selectItem(at: 0)
+        historyTranslationModeFilter.selectItem(at: 0)
+        historyTranslationStatusFilter.selectItem(at: 0)
+        historyFromDateField.stringValue = ""
+        historyToDateField.stringValue = ""
+
+        items = []
+        nextCursor = nil
+        tableView.reloadData()
+        appendPage(method: "get_history_page", params: buildHistoryQueryParams(cursor: NSNull(), limit: limit))
+        if !items.isEmpty {
+            historyStatusLabel.stringValue = "Фильтры скрывали записи. Показаны последние \(items.count)."
+        }
+        updateDictationHistoryPreview()
+    }
+
+    // MARK: - Focus mode / Text density
+
+    func applyHistoryFocusMode(_ enabled: Bool) {
+        // Collapse or expand all history collapsible sections
+        historyFiltersSection?.setExpanded(!enabled, animated: true)
+        historyAdvancedSection?.setExpanded(!enabled, animated: true)
+        historyImportSection?.setExpanded(!enabled, animated: true)
+
+        // Disable disclosure buttons in focus mode so user can't expand them
+        historyFiltersSection?.disclosureButton.isEnabled = !enabled
+        historyAdvancedSection?.disclosureButton.isEnabled = !enabled
+        historyImportSection?.disclosureButton.isEnabled = !enabled
+
+        historyScrollMinHeightConstraint?.constant = enabled ? 240 : 180
+        historyFocusModeButton.title = enabled ? "Фокус истории: ON" : "Фокус истории: OFF"
+    }
+
+    func applyHistoryTextDensity(_ density: String) {
+        let compact = (density == "compact")
+        tableView.rowHeight = compact ? 24 : 28
+        historyDensitySelector.selectItem(at: compact ? 1 : 0)
+    }
+
+    func historyBodyFont() -> NSFont {
+        return settingsProvider().historyTextDensity == "compact"
+            ? .systemFont(ofSize: 12)
+            : .systemFont(ofSize: NSFont.systemFontSize)
+    }
+
+    func historyMinRowHeight() -> CGFloat {
+        return settingsProvider().historyTextDensity == "compact" ? 24 : 28
+    }
+
+    func updateLoadMoreButtonCaption() {
+        let pageSize = settingsProvider().historyPageSize
+        loadMoreButton.title = "Показать ещё (\(pageSize))"
+        loadAllButton.title = "Загрузить всё"
+    }
+
+    func normalizePageSize(_ value: Int) -> Int {
+        if value <= 25 { return 25 }
+        if value <= 50 { return 50 }
+        if value <= 100 { return 100 }
+        return 200
+    }
+
+    // MARK: - Status labels
+
+    func updateHistoryStatusLabel() {
+        let stats = fetchHistoryStats()
+        let statsSuffix = stats.map { " • Активных: \($0.activeCount), \(formatBytes($0.totalBytes))" } ?? ""
+        if items.isEmpty {
+            historyStatusLabel.stringValue = "История пуста\(statsSuffix)"
+        } else if nextCursor == nil {
+            historyStatusLabel.stringValue = "Показаны все: \(items.count)\(statsSuffix)"
+        } else {
+            historyStatusLabel.stringValue = "Показано: \(items.count) (есть ещё)\(statsSuffix)"
+        }
+        historyOverviewLabel.stringValue = buildHistoryOverviewLabel()
+    }
+
+    func updateDictationHistoryPreview() {
+        let stats = fetchHistoryStats()
+        let activeCount = stats?.activeCount ?? 0
+
+        if items.isEmpty {
+            dictationHistoryOpenButton.isEnabled = activeCount > 0
+            if activeCount > 0 {
+                let suffix = hasActiveHistoryFiltersOrQuery() ? " (фильтры/поиск активны)" : ""
+                dictationHistoryHintLabel.stringValue = "В истории есть \(activeCount) записей\(suffix)."
+                dictationHistoryPreviewView.string = "Записи есть, но текущая выборка пустая. Нажмите «Открыть историю»."
+            } else {
+                dictationHistoryHintLabel.stringValue = "История пока пустая. После первой транскрибации записи появятся здесь."
+                dictationHistoryPreviewView.string = "Пока нет записей для предпросмотра."
+            }
+            return
+        }
+
+        dictationHistoryOpenButton.isEnabled = true
+        dictationHistoryHintLabel.stringValue = "Показаны последние \(min(items.count, 5)) из \(max(activeCount, items.count)) записей."
+        let lines = items.prefix(5).enumerated().map { index, item -> String in
+            let raw = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortText = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
+            return "\(index + 1). [\(item.ts)] \(shortText)"
+        }
+        dictationHistoryPreviewView.string = lines.joined(separator: "\n")
+    }
+
+    func updateHistoryPreviewCard() {
+        if items.isEmpty {
+            let message = hasActiveHistoryFiltersOrQuery()
+                ? "Фильтры/поиск скрывают записи. Снимите фильтры или обновите поиск."
+                : "История пуста. Запишите что-нибудь — запись появится здесь."
+            historyPreviewTextView.string = message
+            return
+        }
+
+        let previewLines = items.prefix(3).enumerated().map { index, item -> String in
+            let snippet = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let truncated = snippet.count > 150 ? String(snippet.prefix(150)) + "…" : snippet
+            return "\(index + 1). [\(item.ts)] \(truncated)"
+        }
+        historyPreviewTextView.string = previewLines.joined(separator: "\n\n")
+    }
+
+    // MARK: - Stats / Overview
+
+    func fetchHistoryStats() -> (activeCount: Int, totalBytes: Int)? {
+        guard
+            let response = try? ipcClient.call(method: "get_history_stats", params: [:]),
+            let result = response["result"] as? [String: Any]
+        else {
+            return nil
+        }
+        return (
+            activeCount: (result["active_count"] as? Int) ?? 0,
+            totalBytes: (result["total_bytes"] as? Int) ?? 0
+        )
+    }
+
+    func buildHistoryOverviewLabel() -> String {
+        guard
+            let response = try? ipcClient.call(method: "get_history_overview", params: [:]),
+            let result = response["result"] as? [String: Any]
+        else {
+            return "Обзор: недоступен"
+        }
+        let todayCount = (result["today_count"] as? Int) ?? 0
+        let last24hCount = (result["last_24h_count"] as? Int) ?? 0
+        let pasteOk = (result["paste_ok"] as? Int) ?? 0
+        let pasteFailed = (result["paste_failed"] as? Int) ?? 0
+        let translatedOk = (result["translated_ok"] as? Int) ?? 0
+        let translatedError = (result["translated_error"] as? Int) ?? 0
+        return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
+    }
+
+    func formatBytes(_ value: Int) -> String {
+        let safe = max(0, value)
+        if safe < 1024 {
+            return "\(safe) B"
+        }
+        let kb = Double(safe) / 1024.0
+        if kb < 1024 {
+            return String(format: "%.1f KB", kb)
+        }
+        let mb = kb / 1024.0
+        if mb < 1024 {
+            return String(format: "%.1f MB", mb)
+        }
+        let gb = mb / 1024.0
+        return String(format: "%.2f GB", gb)
+    }
+
+    // MARK: - Query params
+
+    func buildHistoryQueryParams(cursor: Any, limit: Int) -> [String: Any] {
+        var params: [String: Any] = [
+            "cursor": cursor,
+            "limit": limit,
+        ]
+
+        let pasteStatus = selectedHistoryPasteStatusFilter()
+        if let pasteStatus {
+            params["paste_status"] = pasteStatus
+        }
+        let translationMode = selectedHistoryTranslationModeFilter()
+        if let translationMode {
+            params["translation_mode"] = translationMode
+        }
+        let translationStatus = selectedHistoryTranslationStatusFilter()
+        if let translationStatus {
+            params["translation_status"] = translationStatus
+        }
+        let fromTs = historyFromDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fromTs.isEmpty {
+            params["from_ts"] = fromTs
+        }
+        let toTs = historyToDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !toTs.isEmpty {
+            params["to_ts"] = toTs
+        }
+        return params
+    }
+
+    func selectedHistoryPasteStatusFilter() -> String? {
+        let idx = historyPasteStatusFilter.indexOfSelectedItem
+        switch idx {
+        case 1:
+            return "ok"
+        case 2:
+            return "failed"
+        default:
+            return nil
+        }
+    }
+
+    func selectedHistoryTranslationModeFilter() -> String? {
+        let idx = historyTranslationModeFilter.indexOfSelectedItem
+        switch idx {
+        case 1:
+            return "off"
+        case 2:
+            return "ru_to_es"
+        case 3:
+            return "es_to_ru"
+        case 4:
+            return "en_to_ru"
+        case 5:
+            return "auto"
+        case 6:
+            return "auto_to_ru"
+        case 7:
+            return "bilingual_ru_es"
+        default:
+            return nil
+        }
+    }
+
+    func selectedHistoryTranslationStatusFilter() -> String? {
+        let idx = historyTranslationStatusFilter.indexOfSelectedItem
+        switch idx {
+        case 1:
+            return "ok"
+        case 2:
+            return "not_requested"
+        case 3:
+            return "model_unavailable_offline"
+        case 4:
+            return "model_unavailable_online"
+        case 5:
+            return "model_unavailable_cached"
+        case 6:
+            return "cannot_detect_language"
+        case 7:
+            return "already_target_language"
+        case 8:
+            return "translate_error"
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - Export builders
+
+    func buildHistoryNdjsonExport() -> String {
+        var lines: [String] = []
+        for item in items {
+            let payload: [String: Any] = [
+                "id": item.id,
+                "ts": item.ts,
+                "text": item.text,
+                "paste_status": item.pasteStatus,
+                "source_text": item.sourceText,
+                "translated_text": item.translatedText,
+                "translation_mode": item.translationMode,
+                "translation_status": item.translationStatus,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+               let raw = String(data: data, encoding: .utf8) {
+                lines.append(raw)
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    func buildHistoryMarkdownExport() -> String {
+        var lines: [String] = []
+        lines.append("# Krab Ear History Export")
+        lines.append("")
+        lines.append("- exported_at: \(ISO8601DateFormatter().string(from: Date()))")
+        lines.append("- items: \(items.count)")
+        lines.append("- search_query: \(currentQuery.isEmpty ? "(none)" : currentQuery)")
+        lines.append("")
+
+        for (index, item) in items.enumerated() {
+            lines.append("## \(index + 1). \(item.ts)")
+            lines.append("")
+            lines.append("- id: \(item.id)")
+            lines.append("- paste_status: \(item.pasteStatus)")
+            lines.append("- translation_mode: \(item.translationMode)")
+            lines.append("- translation_status: \(item.translationStatus)")
+            lines.append("")
+            lines.append("### text")
+            lines.append("")
+            lines.append(item.text)
+            lines.append("")
+            if !item.sourceText.isEmpty {
+                lines.append("### source_text")
+                lines.append("")
+                lines.append(item.sourceText)
+                lines.append("")
+            }
+            if !item.translatedText.isEmpty {
+                lines.append("### translated_text")
+                lines.append("")
+                lines.append(item.translatedText)
+                lines.append("")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+}
