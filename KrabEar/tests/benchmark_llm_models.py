@@ -9,11 +9,12 @@
 """
 
 import json
+import os
 import time
 import requests
 
 API_BASE = "http://localhost:1234/v1"
-API_KEY = "sk-lm-n5OZwUYH:o2lxbyp2VUE4hFSNtVXR"
+API_KEY = os.environ.get("LM_STUDIO_API_KEY", "lm-studio")
 
 SYSTEM_PROMPT = """Ты — редактор русской диктовки. Твоя задача — исправить пунктуацию, орфографию и грамматику в тексте, сохранив смысл и стиль автора.
 
