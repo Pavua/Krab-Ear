@@ -69,12 +69,15 @@ from core.term_extractor import TermExtractor
 from core.utils import TextUtils
 from backend.daily_digest import DailyDigestGenerator
 from backend.quality_trends import QualityTrendAnalyzer
+from backend.keyword_cloud import KeywordCloudGenerator
 from backend.period_comparison import compare_periods as _compare_periods_fn
 from backend.integrity_checker import IntegrityChecker
 from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
 from core.audio_fingerprint import AudioFingerprinter
+from backend.sharing_manager import SharingManager
+from core.context_memory import ContextMemory
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -164,15 +167,18 @@ class BackendService:
         self._transcription_counter: int = 0
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
+        self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
         self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
         self._audio_fingerprinter = AudioFingerprinter()
+        self._context_memory = ContextMemory(window_size=50)
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
+        self._sharing = SharingManager(store=self.store)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
@@ -304,6 +310,7 @@ class BackendService:
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "export_history_json": self._history.handle_export_history_json,
             "repaste_item": self._history.handle_repaste_item,
+            "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
@@ -365,6 +372,8 @@ class BackendService:
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
             "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
             "compare_texts": self._handle_compare_texts,  # сравнение двух текстов/транскрипций
+            "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
+            "score_readability": self._handle_score_readability,  # оценка читабельности текста транскрибации
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
@@ -372,6 +381,10 @@ class BackendService:
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
+            "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
+            "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
+            "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
+            "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
         }
 
         handler = handlers.get(method)
@@ -772,6 +785,12 @@ class BackendService:
         })
         if len(self._clipboard_history) > 20:
             self._clipboard_history = self._clipboard_history[-20:]
+
+        # Обновляем контекстную память для улучшения следующего STT
+        try:
+            self._context_memory.update(text)
+        except Exception:
+            pass
 
         # Авто-бэкап каждые 100 транскрибаций
         self._transcription_counter += 1
@@ -2396,6 +2415,77 @@ class BackendService:
             "summary": result.summary,
         }
 
+    def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущее состояние контекстной памяти STT.
+
+        Params (опционально):
+            max_words (int): максимальное кол-во контекстных слов (по умолчанию 20).
+            last_n (int): кол-во последних транскрибаций для тем (по умолчанию 10).
+            clear (bool): если true — очищает память перед возвратом результата.
+        """
+        if params.get("clear"):
+            self._context_memory.clear()
+            return {"cleared": True, "context_words": [], "recent_topics": [], "size": 0}
+
+        max_words = int(params.get("max_words", 20))
+        last_n = int(params.get("last_n", 10))
+        return {
+            "context_words": self._context_memory.get_context_words(max_words=max_words),
+            "recent_topics": self._context_memory.get_recent_topics(last_n=last_n),
+            "size": self._context_memory.size(),
+            "window_size": 50,
+        }
+
+    def _handle_score_readability(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Оценивает читабельность текста транскрибации."""
+        text = params.get("text", "")
+        if not text:
+            return {
+                "flesch_score": 0.0,
+                "avg_sentence_length": 0.0,
+                "avg_word_length": 0.0,
+                "vocabulary_level": "simple",
+                "sentence_count": 0,
+                "word_count": 0,
+                "longest_sentence": "",
+                "shortest_sentence": "",
+            }
+        report = self._readability_scorer.score(text)
+        return {
+            "flesch_score": report.flesch_score,
+            "avg_sentence_length": report.avg_sentence_length,
+            "avg_word_length": report.avg_word_length,
+            "vocabulary_level": report.vocabulary_level,
+            "sentence_count": report.sentence_count,
+            "word_count": report.word_count,
+            "longest_sentence": report.longest_sentence,
+            "shortest_sentence": report.shortest_sentence,
+        }
+
+    def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует данные облака ключевых слов из истории транскрипций."""
+        max_words = int(params.get("max_words", 100))
+        language = params.get("language")
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        cloud_words = self._keyword_cloud_gen.generate_cloud(
+            items, max_words=max_words, language=language
+        )
+        return {
+            "words": [
+                {
+                    "word": cw.word,
+                    "count": cw.count,
+                    "weight": cw.weight,
+                    "font_size": cw.font_size,
+                }
+                for cw in cloud_words
+            ]
+        }
+
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
     def _handle_check_audio_duplicate(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2455,6 +2545,37 @@ class BackendService:
         """Возвращает все паттерны галлюцинаций (встроенные + пользовательские)."""
         patterns = self._hallucination_manager.list_patterns()
         return {"patterns": patterns, "total": len(patterns)}
+
+
+    # ── Timeline view ────────────────────────────────────────────────────────
+
+    def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Группирует историю транскрипций по временным блокам (timeline).
+
+        Параметры:
+          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
+          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
+          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
+          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
+        """
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+        include_heatmap = bool(params.get("include_heatmap", False))
+        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
+
+        raw_items = self.store._load_active_items_with_lock()[:limit]
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        result: dict[str, Any] = {
+            "blocks": [b.to_dict() for b in blocks],
+            "total_blocks": len(blocks),
+            "group_by": group_by,
+        }
+
+        if include_heatmap:
+            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
+            result["activity_heatmap"] = heatmap
+
+        return result
 
 
 class IPCServer:

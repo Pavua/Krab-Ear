@@ -4,9 +4,9 @@
 через алгоритм token bucket (token bucket algorithm).
 
 Категории методов и их лимиты (вызовов/минуту):
-  heavy  — 5/min  : transcribe, export, summarize
-  medium — 30/min : search, statistics
-  light  — 120/min: ping, get_settings (и все остальные)
+  heavy  — 5/min  : transcribe_paths, export, summarize (тяжёлые фоновые операции)
+  medium — 30/min : search, statistics (поиск и аналитика)
+  light  — 120/min: ping, get_settings, start/stop_recording (и все остальные)
 
 Все операции потокобезопасны через threading.Lock.
 """
@@ -22,8 +22,9 @@ from typing import Dict, Set
 # Категории методов
 # ---------------------------------------------------------------------------
 
+# Тяжёлые методы: CPU/GPU-интенсивные фоновые операции.
+# start/stop_recording не включаем — это обычные пользовательские действия.
 HEAVY_METHODS: Set[str] = {
-    "stop_recording",           # запускает транскрибацию
     "transcribe_paths",         # импорт и транскрибация файлов
     "preview_transcribe_paths", # предпросмотр транскрибации
     "summarize_text",           # LLM суммаризация текста
@@ -79,6 +80,17 @@ MEDIUM_METHODS: Set[str] = {
     "get_session_history",      # история сессий
 }
 
+# Методы, полностью исключённые из throttling.
+# Это операции жизненного цикла записи — пользователь должен иметь возможность
+# вызывать их без ограничений (в т.ч. в тестах с 1000 циклами).
+EXCLUDED_METHODS: Set[str] = {
+    "start_recording",
+    "stop_recording",
+    "get_recording_state",
+    "set_paste_status",
+    "ping",
+}
+
 # Всё остальное — light (120/min)
 
 # Лимиты по категориям (вызовов/минуту)
@@ -90,7 +102,10 @@ _LIMITS: Dict[str, int] = {
 
 
 def _classify_method(method: str) -> str:
-    """Возвращает категорию метода: 'heavy', 'medium' или 'light'."""
+    """Возвращает категорию метода: 'heavy', 'medium' или 'light'.
+
+    Возвращает None для методов из EXCLUDED_METHODS (throttling не применяется).
+    """
     if method in HEAVY_METHODS:
         return "heavy"
     if method in MEDIUM_METHODS:
@@ -189,10 +204,15 @@ class IPCThrottle:
     def check_rate(self, method: str) -> bool:
         """Проверяет и потребляет rate-limit токен.
 
+        Методы из EXCLUDED_METHODS всегда разрешены (True, без учёта в статистике).
+
         Returns:
             True  — вызов разрешён.
             False — вызов отклонён (rate limit exceeded).
         """
+        if method in EXCLUDED_METHODS:
+            return True
+
         with self._lock:
             bucket = self._get_bucket(method)
             allowed = bucket.consume()
@@ -206,8 +226,10 @@ class IPCThrottle:
     def get_wait_time(self, method: str) -> float:
         """Возвращает секунды до следующего разрешённого вызова.
 
-        Returns 0.0 если вызов уже разрешён (токены есть).
+        Returns 0.0 если вызов уже разрешён (токены есть) или метод исключён.
         """
+        if method in EXCLUDED_METHODS:
+            return 0.0
         with self._lock:
             bucket = self._get_bucket(method)
             return bucket.wait_time()

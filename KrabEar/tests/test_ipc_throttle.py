@@ -7,7 +7,7 @@
   - get_wait_time: положительное значение при исчерпании токенов
   - get_throttle_stats: корректный подсчёт вызовов и throttled
   - Кастомные лимиты
-  - Отключение через лимит 0 и сброс stats
+  - Исключённые методы (start/stop_recording, ping) — всегда разрешены
   - Интеграция с BackendService (throttle wire-in)
 """
 
@@ -29,6 +29,7 @@ from backend.ipc_throttle import (
     _classify_method,
     HEAVY_METHODS,
     MEDIUM_METHODS,
+    EXCLUDED_METHODS,
 )
 
 
@@ -44,12 +45,20 @@ class TestClassifyMethod(unittest.TestCase):
             self.assertEqual(_classify_method(m), "medium", f"Expected medium: {m}")
 
     def test_light_methods_classified_as_light(self):
-        for m in ["ping", "get_settings", "some_unknown_method"]:
+        for m in ["get_settings", "some_unknown_method"]:
             self.assertEqual(_classify_method(m), "light", f"Expected light: {m}")
 
     def test_heavy_medium_sets_are_disjoint(self):
         overlap = HEAVY_METHODS & MEDIUM_METHODS
         self.assertEqual(overlap, set(), f"Methods in both sets: {overlap}")
+
+    def test_excluded_methods_always_allowed(self):
+        """Excluded методы (start/stop_recording, ping) не ограничиваются throttle."""
+        throttle = IPCThrottle(limits={"heavy": 1, "medium": 1, "light": 1})
+        # Вызываем 200 раз — все должны быть разрешены
+        for m in list(EXCLUDED_METHODS):
+            for _ in range(200):
+                self.assertTrue(throttle.check_rate(m), f"Excluded method {m!r} was throttled")
 
 
 class TestTokenBucket(unittest.TestCase):
@@ -69,15 +78,17 @@ class TestTokenBucket(unittest.TestCase):
         self.assertFalse(throttle.check_rate("transcribe_paths"))
 
     def test_allows_calls_after_token_refill(self):
-        # Очень маленький лимит, но fast refill
-        throttle = IPCThrottle(limits={"heavy": 1, "medium": 30, "light": 120})
-        result1 = throttle.check_rate("export_history")
-        self.assertTrue(result1)
-        # Немного ждём — bucket пополняется со скоростью 1/60 t/s
-        # При capacity=1 ждём ~1 секунду для полного пополнения
+        # capacity=60 => rate = 60/60 = 1 token/sec.
+        # Исчерпываем все 60 токенов, ждём 1.1s (должен появиться ~1 новый токен).
+        throttle = IPCThrottle(limits={"heavy": 60, "medium": 30, "light": 120})
+        for _ in range(60):
+            throttle.check_rate("export_history")
+        # Бакет пуст
+        self.assertFalse(throttle.check_rate("export_history"))
+        # Ждём 1.1s: при rate=1t/s появится >= 1 токен
         time.sleep(1.1)
-        result2 = throttle.check_rate("export_history")
-        self.assertTrue(result2, "Должен разрешить после пополнения токена")
+        result = throttle.check_rate("export_history")
+        self.assertTrue(result, "Должен разрешить после пополнения токена")
 
     def test_light_methods_have_higher_limit(self):
         # Дефолтный лимит light = 120, heavy = 5
@@ -87,7 +98,7 @@ class TestTokenBucket(unittest.TestCase):
         self.assertEqual(heavy_ok, 5)
 
         throttle2 = IPCThrottle()
-        light_ok = sum(1 for _ in range(121) if throttle2.check_rate("ping"))
+        light_ok = sum(1 for _ in range(121) if throttle2.check_rate("get_settings"))
         self.assertEqual(light_ok, 120)
 
 
@@ -112,7 +123,13 @@ class TestGetWaitTime(unittest.TestCase):
         # Исчерпать heavy
         throttle.check_rate("transcribe_paths")
         # light не должен иметь wait
-        self.assertAlmostEqual(throttle.get_wait_time("ping"), 0.0, places=2)
+        self.assertAlmostEqual(throttle.get_wait_time("get_settings"), 0.0, places=2)
+
+    def test_excluded_methods_wait_time_is_zero(self):
+        throttle = IPCThrottle(limits={"heavy": 1, "medium": 1, "light": 1})
+        # Для excluded методов wait всегда 0
+        for m in list(EXCLUDED_METHODS):
+            self.assertEqual(throttle.get_wait_time(m), 0.0)
 
 
 class TestThrottleStats(unittest.TestCase):
@@ -127,13 +144,13 @@ class TestThrottleStats(unittest.TestCase):
 
     def test_stats_tracks_allowed_calls(self):
         throttle = IPCThrottle()
-        throttle.check_rate("ping")
-        throttle.check_rate("ping")
+        throttle.check_rate("get_settings")
+        throttle.check_rate("get_settings")
         stats = throttle.get_throttle_stats()
         self.assertEqual(stats["total_calls"], 2)
         self.assertEqual(stats["total_throttled"], 0)
-        self.assertEqual(stats["methods"]["ping"]["calls"], 2)
-        self.assertEqual(stats["methods"]["ping"]["throttled"], 0)
+        self.assertEqual(stats["methods"]["get_settings"]["calls"], 2)
+        self.assertEqual(stats["methods"]["get_settings"]["throttled"], 0)
 
     def test_stats_tracks_throttled_calls(self):
         throttle = IPCThrottle(limits={"heavy": 2, "medium": 30, "light": 120})
@@ -147,6 +164,16 @@ class TestThrottleStats(unittest.TestCase):
         self.assertEqual(stats["methods"]["export_history"]["calls"], 4)
         self.assertEqual(stats["methods"]["export_history"]["throttled"], 2)
 
+    def test_excluded_methods_not_in_stats(self):
+        """Excluded методы не учитываются в статистике."""
+        throttle = IPCThrottle()
+        throttle.check_rate("ping")
+        throttle.check_rate("start_recording")
+        stats = throttle.get_throttle_stats()
+        # Excluded методы не должны попасть в stats
+        self.assertEqual(stats["total_calls"], 0)
+        self.assertNotIn("ping", stats["methods"])
+
     def test_stats_includes_category_and_limit(self):
         throttle = IPCThrottle()
         throttle.check_rate("transcribe_paths")
@@ -157,7 +184,7 @@ class TestThrottleStats(unittest.TestCase):
 
     def test_reset_stats_clears_counters(self):
         throttle = IPCThrottle()
-        throttle.check_rate("ping")
+        throttle.check_rate("get_settings")
         throttle.reset_stats()
         stats = throttle.get_throttle_stats()
         self.assertEqual(stats["total_calls"], 0)
@@ -174,7 +201,7 @@ class TestCustomLimits(unittest.TestCase):
 
     def test_custom_light_limit(self):
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 5})
-        ok = sum(1 for _ in range(6) if throttle.check_rate("ping"))
+        ok = sum(1 for _ in range(6) if throttle.check_rate("get_settings"))
         self.assertEqual(ok, 5)
 
 
@@ -188,8 +215,8 @@ class TestThreadSafety(unittest.TestCase):
         def worker():
             try:
                 for _ in range(50):
-                    throttle.check_rate("ping")
-                    throttle.get_wait_time("ping")
+                    throttle.check_rate("get_settings")
+                    throttle.get_wait_time("get_settings")
                     throttle.get_throttle_stats()
             except Exception as e:
                 errors.append(str(e))
@@ -273,18 +300,17 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
             transcriber=FakeTranscriber(),
         )
         # Заменяем throttle с очень жёстким лимитом для теста
-        from backend.ipc_throttle import IPCThrottle
         self.service._ipc_throttle = IPCThrottle(
             limits={"heavy": 1, "medium": 1, "light": 1}
         )
 
     def test_throttled_request_returns_rate_limit_error(self):
-        # Первый ping — OK
-        resp1 = self.service.handle_request({"id": "1", "method": "ping", "params": {}})
+        # get_settings — light-метод (не исключён из throttle), лимит=1 в тестовом throttle
+        resp1 = self.service.handle_request({"id": "1", "method": "get_settings", "params": {}})
         self.assertTrue(resp1["ok"])
 
-        # Второй ping — должен быть throttled (лимит = 1)
-        resp2 = self.service.handle_request({"id": "2", "method": "ping", "params": {}})
+        # Второй get_settings — должен быть throttled (лимит = 1)
+        resp2 = self.service.handle_request({"id": "2", "method": "get_settings", "params": {}})
         self.assertFalse(resp2["ok"])
         self.assertEqual(resp2["error"]["code"], "rate_limit_exceeded")
 
@@ -292,10 +318,13 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
         # Отключаем throttle
         self.service._ipc_throttle = None
         for i in range(10):
-            resp = self.service.handle_request({"id": str(i), "method": "ping", "params": {}})
+            resp = self.service.handle_request({"id": str(i), "method": "get_settings", "params": {}})
             self.assertTrue(resp["ok"], f"Call {i} was blocked but throttle is disabled")
 
     def test_get_throttle_stats_ipc_method(self):
+        # Используем get_throttle_stats (не excluded), должен вернуть ok=True на первый вызов
+        # Сначала сбрасываем throttle на более мягкий для этого теста
+        self.service._ipc_throttle = IPCThrottle()
         resp = self.service.handle_request({"id": "1", "method": "get_throttle_stats", "params": {}})
         self.assertTrue(resp["ok"])
         result = resp["result"]
@@ -304,16 +333,29 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
         self.assertIn("methods", result)
 
     def test_throttle_error_response_contains_wait_time(self):
-        # Исчерпать heavy лимит
+        # Исчерпать heavy лимит (limit=1)
         self.service.handle_request({"id": "1", "method": "export_history", "params": {}})
         # Следующий вызов throttled
         resp = self.service.handle_request({"id": "2", "method": "export_history", "params": {}})
-        # Может вернуть ok=False (throttled) или ошибку экспорта, но не IndexError и т.п.
-        # Нас интересует только что rate_limit_exceeded появляется при throttling
+        # Должен быть throttled или ошибка от самого метода
         if not resp["ok"]:
-            # Либо rate_limit_exceeded, либо другая ошибка от самого метода (export_history может упасть)
             error_code = resp["error"]["code"]
             self.assertIn(error_code, ("rate_limit_exceeded", "internal_error"))
+
+    def test_excluded_methods_bypass_throttle_in_service(self):
+        """Excluded методы (start/stop_recording) обходят throttle даже при лимите=1."""
+        # Throttle установлен с limit=1 для всех категорий
+        # start_recording исключён — должен проходить многократно
+        for i in range(10):
+            resp = self.service.handle_request(
+                {"id": str(i), "method": "start_recording", "params": {}}
+            )
+            # Может вернуть "already_recording" но не rate_limit_exceeded
+            if not resp["ok"]:
+                self.assertNotEqual(
+                    resp.get("error", {}).get("code"), "rate_limit_exceeded",
+                    "start_recording should not be throttled"
+                )
 
 
 if __name__ == "__main__":
