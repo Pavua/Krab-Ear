@@ -2696,3 +2696,68 @@ class HistoryService:
             offset_sec += duration
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # HTML report export
+    # ------------------------------------------------------------------
+
+    def handle_export_html_report(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует историю транскрипций в автономный HTML-отчёт.
+
+        Параметры:
+            title (str): заголовок отчёта (по умолчанию «Krab Ear Report»)
+            limit (int): максимальное количество записей (по умолчанию 500, макс 5000)
+            from_ts (str|None): начало диапазона (ISO timestamp или YYYY-MM-DD)
+            to_ts (str|None): конец диапазона (ISO timestamp или YYYY-MM-DD)
+            paste_status (str|None): фильтр по статусу вставки
+            save_to_file (bool): если True, сохраняет файл в transcripts/
+
+        Возвращает:
+            ok (bool): True при успехе
+            html (str): полный HTML-документ
+            entries (int): количество записей в отчёте
+            chars (int): размер HTML в символах
+            path (str|None): путь к сохранённому файлу, если save_to_file=True
+        """
+        from backend.html_report import HTMLReportGenerator
+
+        title = str(params.get("title", "Krab Ear Report")).strip() or "Krab Ear Report"
+        limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
+        from_ts = params.get("from_ts")
+        from_ts_str = None if from_ts is None else str(from_ts)
+        to_ts = params.get("to_ts")
+        to_ts_str = None if to_ts is None else str(to_ts)
+        paste_status = params.get("paste_status")
+        paste_status_str = None if paste_status is None else str(paste_status)
+
+        items_dicts, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=limit,
+            paste_status=paste_status_str,
+            translation_mode=None,
+            from_ts=from_ts_str,
+            to_ts=to_ts_str,
+        )
+
+        generator = HTMLReportGenerator()
+        html_content = generator.generate_report(items=items_dicts, title=title)
+
+        save_path: str | None = None
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                transcripts_dir.mkdir(exist_ok=True)
+                filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                file_path = transcripts_dir / filename
+                file_path.write_text(html_content, encoding="utf-8")
+                save_path = str(file_path)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить HTML-отчёт в файл: %s", exc)
+
+        return {
+            "ok": True,
+            "html": html_content,
+            "entries": len(items_dicts),
+            "chars": len(html_content),
+            "path": save_path,
+        }

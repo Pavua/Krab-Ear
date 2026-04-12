@@ -115,7 +115,7 @@ class NoiseProfiler:
             signal_rms = float(np.sqrt(np.mean(audio ** 2)))
 
         # --- SNR ---
-        snr_db = self._compute_snr(signal_rms, noise_rms)
+        snr_db = self._compute_snr(signal_rms, noise_rms, audio, sample_rate)
 
         # --- Спектральный профиль ---
         freq_profile = self._classify_frequency_profile(audio, sample_rate)
@@ -161,14 +161,61 @@ class NoiseProfiler:
         return float(20.0 * math.log10(rms / _REF_AMPLITUDE))
 
     @staticmethod
-    def _compute_snr(signal_rms: float, noise_rms: float) -> float:
-        """Вычисляет SNR в дБ."""
-        if noise_rms < 1e-10:
-            # Нет шума — идеальный сигнал
-            return 60.0 if signal_rms > 1e-10 else 0.0
+    def _compute_snr(
+        signal_rms: float,
+        noise_rms: float,
+        audio: np.ndarray,
+        sample_rate: int,
+    ) -> float:
+        """Вычисляет SNR в дБ.
+
+        Алгоритм двухступенчатый:
+        1. Если разница между noise_rms и signal_rms значительна (signal > 2× noise),
+           используем классический метод — 20*log10(signal/noise).
+        2. Иначе (непрерывный сигнал без тихих фреймов) — используем спектральный
+           метод: соотношение энергии гармонических пиков к общей мощности спектра.
+           Это хорошо работает для речи (тональный сигнал) vs белый шум.
+        """
         if signal_rms < 1e-10:
             return 0.0
-        snr = 20.0 * math.log10(signal_rms / noise_rms)
+        if noise_rms < 1e-10:
+            return 60.0
+
+        ratio = signal_rms / noise_rms
+        if ratio >= 2.0:
+            # Классический метод: есть явно тихие фреймы
+            snr = 20.0 * math.log10(ratio)
+            return float(max(-20.0, min(80.0, snr)))
+
+        # Спектральный метод: оцениваем SNR через FFT.
+        # Для тонального сигнала (синусоида/голос) большая часть мощности сосредоточена
+        # в узких спектральных пиках. Для шума — мощность распределена равномерно.
+        # SNR_spectral ≈ 10*log10(peak_power / mean_floor_power)
+        n = len(audio)
+        if n < 512:
+            return 0.0
+
+        max_samples = min(n, sample_rate * 2)
+        segment = audio[:max_samples]
+        spectrum = np.abs(np.fft.rfft(segment)) ** 2  # мощность
+        if spectrum.sum() < 1e-20:
+            return 0.0
+
+        # Сортируем по мощности и разделяем: топ 5% — «сигнал», остальные — «шум»
+        sorted_power = np.sort(spectrum)[::-1]
+        n_bins = len(sorted_power)
+        top_k = max(1, n_bins // 20)  # 5% верхних бинов
+
+        peak_mean = float(np.mean(sorted_power[:top_k]))
+        floor_bins = sorted_power[top_k:]
+        if len(floor_bins) == 0:
+            return 0.0
+        floor_mean = float(np.mean(floor_bins))
+
+        if floor_mean < 1e-20:
+            return 60.0
+
+        snr = 10.0 * math.log10(peak_mean / floor_mean)
         return float(max(-20.0, min(80.0, snr)))
 
     def _classify_frequency_profile(self, audio: np.ndarray, sample_rate: int) -> str:

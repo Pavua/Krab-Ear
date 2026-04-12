@@ -200,6 +200,15 @@ class VoiceActivityDetector:
         threshold_db = noise_db + self.margin_db
         # Переводим порог обратно в RMS
         threshold_rms = 10.0 ** (threshold_db / 20.0)
+
+        # Ограничение: порог не может превышать медиану всех фреймов.
+        # Это предотвращает ситуацию, когда весь сигнал одинаковой энергии
+        # (например, непрерывный тон без тишины) ошибочно классифицируется
+        # как тишина из-за слишком высокого адаптивного порога.
+        # При нормальной записи с тишиной медиана ≈ уровень шума, что оставляет
+        # порог значительно ниже речевой энергии.
+        median_rms = float(np.median(frame_rms))
+        threshold_rms = min(threshold_rms, median_rms)
         return threshold_rms
 
     def _apply_hysteresis(self, is_speech: np.ndarray) -> np.ndarray:

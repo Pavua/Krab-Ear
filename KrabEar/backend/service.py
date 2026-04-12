@@ -97,6 +97,8 @@ from core.transcription_scorer import TranscriptionScorer
 from core.emotion_detector import EmotionDetector
 from backend.transcription_queue import TranscriptionQueue
 from backend.sentiment_trends import SentimentTrendAnalyzer
+from backend.obsidian_sync import ObsidianSyncManager
+from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -188,6 +190,7 @@ class BackendService:
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
+        self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
         self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
@@ -225,6 +228,8 @@ class BackendService:
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
+        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir)
+        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -353,6 +358,7 @@ class BackendService:
             "export_history_markdown": self._history.handle_export_history_markdown,
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "export_history_json": self._history.handle_export_history_json,
+            "export_html_report": self._history.handle_export_html_report,  # автономный HTML-отчёт с аналитикой
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
@@ -411,6 +417,7 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -464,11 +471,34 @@ class BackendService:
             "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
             "detect_voice_activity": self._handle_detect_voice_activity,  # VAD: обнаружение участков речи/тишины в аудиофайле
             "profile_noise": self._handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
+            "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
+            "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
+            "get_obsidian_sync_status": self._obsidian_sync.handle_get_status,  # статус синхронизации с Obsidian vault
         }
 
         handler = handlers.get(method)
         if handler is None:
             return self._error(request_id, "unknown_method", f"Неизвестный метод: {method}")
+
+        # IPC signing: верифицируем HMAC-SHA256 подпись если включено
+        if self._request_signer is not None:
+            sig = payload.get("signature", "")
+            ts = payload.get("timestamp")
+            nc = payload.get("nonce")
+            secret = settings.IPC_SIGNING_SECRET
+            if not sig:
+                logger.warning("IPC signing: запрос без подписи метод=%s", method)
+                return self._error(request_id, "unauthorized", "Запрос не подписан")
+            try:
+                ts_float = float(ts) if ts is not None else None
+                valid = self._request_signer.verify_request(
+                    method, params, sig, secret, timestamp=ts_float, nonce=nc
+                )
+            except Exception:
+                valid = False
+            if not valid:
+                logger.warning("IPC signing: неверная подпись метод=%s", method)
+                return self._error(request_id, "unauthorized", "Неверная подпись запроса")
 
         # IPC throttle: проверяем rate limit перед вызовом обработчика
         if self._ipc_throttle is not None:
