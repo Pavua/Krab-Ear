@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).
     PIPELINE_V2: bool = False
 
+    # IPC throttle: защита от злоупотребления тяжёлыми IPC-методами.
+    # False = throttling полностью отключён (удобно для тестов и локальной разработки).
+    IPC_THROTTLE_ENABLED: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

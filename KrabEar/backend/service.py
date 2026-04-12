@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
+from backend.ipc_throttle import IPCThrottle
 from backend.call_assist_service import CallAssistService
 from backend.collection_manager import CollectionManager
 from backend.recording_chain import RecordingChainManager
@@ -172,6 +173,9 @@ class BackendService:
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
+        # IPC throttle — защита от злоупотребления тяжёлыми методами.
+        # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
+        self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -365,12 +369,25 @@ class BackendService:
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
             "get_waveform": self._handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
+            "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
+            "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
         }
 
         handler = handlers.get(method)
         if handler is None:
             return self._error(request_id, "unknown_method", f"Неизвестный метод: {method}")
+
+        # IPC throttle: проверяем rate limit перед вызовом обработчика
+        if self._ipc_throttle is not None:
+            if not self._ipc_throttle.check_rate(method):
+                wait_sec = self._ipc_throttle.get_wait_time(method)
+                logger.warning("IPC rate limit exceeded: method=%s wait=%.2fs", method, wait_sec)
+                return self._error(
+                    request_id,
+                    "rate_limit_exceeded",
+                    f"Превышен лимит запросов для метода {method!r}. Повторите через {wait_sec:.1f}s",
+                )
 
         try:
             result = handler(params)
@@ -378,6 +395,64 @@ class BackendService:
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
             return self._error(request_id, "internal_error", str(exc))
+
+
+    _BATCH_MAX_REQUESTS = 50
+
+    def _handle_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Пакетное выполнение нескольких IPC-методов за один вызов.
+
+        Принимает список sub-запросов, выполняет их последовательно через
+        существующий handle_request. Ошибка в одном запросе не прерывает остальные.
+
+        Параметры:
+            requests — список объектов {method, params?}. Макс. 50 элементов.
+
+        Ответ:
+            {results: [...], total: N, succeeded: N, failed: N}
+        """
+        requests = params.get("requests")
+        if not isinstance(requests, list):
+            raise ValueError("Параметр 'requests' должен быть списком")
+        if len(requests) > self._BATCH_MAX_REQUESTS:
+            raise ValueError(
+                f"Превышен лимит пакетного запроса: {len(requests)} > {self._BATCH_MAX_REQUESTS}"
+            )
+
+        results = []
+        succeeded = 0
+        failed = 0
+        for i, sub_req in enumerate(requests):
+            if not isinstance(sub_req, dict):
+                results.append({
+                    "method": None,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": f"Элемент #{i} не является объектом"},
+                })
+                failed += 1
+                continue
+
+            method = sub_req.get("method")
+            sub_params = sub_req.get("params", {})
+            if not isinstance(sub_params, dict):
+                sub_params = {}
+
+            response = self.handle_request({"id": f"batch_{i}", "method": method, "params": sub_params})
+            entry: dict[str, Any] = {"method": method, "ok": response.get("ok", False)}
+            if response.get("ok"):
+                entry["result"] = response.get("result")
+                succeeded += 1
+            else:
+                entry["error"] = response.get("error", {"code": "unknown", "message": "Неизвестная ошибка"})
+                failed += 1
+            results.append(entry)
+
+        return {
+            "results": results,
+            "total": len(requests),
+            "succeeded": succeeded,
+            "failed": failed,
+        }
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1078,6 +1153,18 @@ class BackendService:
             "rms_amplitude": wf.rms_amplitude,
         }
 
+
+    def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статистику IPC throttle.
+
+        Полезно для диагностики: показывает вызовы и отклонения по методам.
+        Returns dict из IPCThrottle.get_throttle_stats() или {"enabled": false}.
+        """
+        if self._ipc_throttle is None:
+            return {"enabled": False, "total_calls": 0, "total_throttled": 0, "methods": {}}
+        stats = self._ipc_throttle.get_throttle_stats()
+        stats["enabled"] = True
+        return stats
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
@@ -2175,11 +2262,10 @@ class BackendService:
             "total_recordings": digest.total_recordings,
             "total_duration_min": digest.total_duration_min,
             "total_words": digest.total_words,
-            "avg_confidence": digest.avg_confidence,
-            "top_words": digest.top_words,
-            "languages": digest.languages,
-            "notable_phrases": digest.notable_phrases,
-            "markdown": digest.markdown,
+            "languages_used": digest.languages_used,
+            "top_topics": digest.top_topics,
+            "highlights": digest.highlights,
+            "markdown": digest.formatted_markdown,
         }
 
     def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:

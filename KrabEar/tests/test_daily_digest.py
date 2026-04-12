@@ -33,7 +33,7 @@ class DailyDigestTestCase(unittest.TestCase):
         self.assertIsInstance(digest, DailyDigest)
         self.assertEqual(digest.date, "2024-01-15")
         self.assertEqual(digest.total_recordings, 0)
-        self.assertIsInstance(digest.markdown, str)
+        self.assertIsInstance(digest.formatted_markdown, str)
 
     def test_generate_digest_defaults_to_today(self) -> None:
         """generate_digest без date_str использует сегодняшнюю дату."""
@@ -64,20 +64,20 @@ class DailyDigestTestCase(unittest.TestCase):
         self.assertEqual(digest.total_recordings, 2)
         self.assertGreater(digest.total_words, 0)
 
-    def test_digest_markdown_is_string(self) -> None:
-        """markdown-поле дайджеста — непустая строка."""
+    def test_digest_formatted_markdown_is_string(self) -> None:
+        """formatted_markdown-поле дайджеста — непустая строка."""
         digest = self.gen.generate_digest(date_str="2024-01-15", store=self.store)
-        self.assertIsInstance(digest.markdown, str)
-        self.assertGreater(len(digest.markdown), 0)
+        self.assertIsInstance(digest.formatted_markdown, str)
+        self.assertGreater(len(digest.formatted_markdown), 0)
 
-    def test_digest_top_words_is_list(self) -> None:
-        """top_words содержит список кортежей (слово, счётчик)."""
+    def test_digest_top_topics_is_list(self) -> None:
+        """top_topics содержит список ключевых слов дня."""
         today = date.today().isoformat()
         self.store.add_history_item(
             text="привет привет привет мир", paste_status="ok"
         )
         digest = self.gen.generate_digest(date_str=today, store=self.store)
-        self.assertIsInstance(digest.top_words, list)
+        self.assertIsInstance(digest.top_topics, list)
 
 
 class DailyDigestServiceIntegrationTestCase(unittest.TestCase):
