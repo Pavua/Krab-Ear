@@ -28,6 +28,7 @@ import torch
 from pyannote.audio import Pipeline
 
 from .config import settings
+from .text_diff import TextDiffAnalyzer
 from .utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Engine")
@@ -99,6 +100,7 @@ class AudioEngine:
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
+        self._last_llm_diff = None
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
 
         logger.info(
@@ -285,6 +287,7 @@ class AudioEngine:
 
             # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
             llm_result = None
+            llm_diff = None
             if self._llm_rewrite_allowed():
                 llm_result = self._llm_rewriter.rewrite(cleaned_text)
                 if llm_result.ok:
@@ -292,6 +295,8 @@ class AudioEngine:
                         "LLM rewrite: %d chars -> %d chars, %d ms",
                         len(cleaned_text), len(llm_result.text), llm_result.latency_ms,
                     )
+                    llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, llm_result.text)
+                    self._last_llm_diff = llm_diff
                     text = llm_result.text
                 else:
                     logger.debug(
@@ -317,6 +322,17 @@ class AudioEngine:
                 "llm_fallback_reason": (
                     llm_result.fallback_reason
                     if (llm_result is not None and not llm_result.ok)
+                    else None
+                ),
+                "llm_diff": (
+                    {
+                        "similarity_ratio": llm_diff.similarity_ratio,
+                        "words_added": llm_diff.words_added,
+                        "words_removed": llm_diff.words_removed,
+                        "words_unchanged": llm_diff.words_unchanged,
+                        "summary": llm_diff.summary,
+                    }
+                    if llm_diff is not None
                     else None
                 ),
                 "confidence": round(confidence, 3),

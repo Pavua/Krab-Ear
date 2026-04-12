@@ -19,6 +19,7 @@ from flask_smorest import Api, Blueprint
 from flask_sock import Sock
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_cors import CORS
 from marshmallow import Schema, fields as ma_fields, validate
 from werkzeug.utils import secure_filename
 
@@ -47,6 +48,27 @@ app.config["OPENAPI_SWAGGER_UI_URL"] = "https://cdn.jsdelivr.net/npm/swagger-ui-
 
 api = Api(app)
 sock = Sock(app)
+
+# ---------------------------------------------------------------------------
+# CORS — разрешает кросс-доменные запросы из браузера.
+# Список origins берётся из KRAB_EAR_CORS_ORIGINS (по умолчанию "*").
+# ---------------------------------------------------------------------------
+
+def _parse_cors_origins(raw: str):
+    """Парсит строку origins: "*" → "*", иначе список через запятую."""
+    if raw.strip() == "*":
+        return "*"
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+CORS(
+    app,
+    origins=_parse_cors_origins(settings.CORS_ORIGINS),
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
+    expose_headers=["X-Request-ID", "Retry-After"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
 
 # ---------------------------------------------------------------------------
 # Rate limiting — flask-limiter с in-memory хранилищем.

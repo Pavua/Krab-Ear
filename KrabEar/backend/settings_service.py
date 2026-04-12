@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
+from backend.settings_validator import SettingsValidator
+
+_log = logging.getLogger(__name__)
 
 
 class SettingsService:
@@ -62,6 +66,7 @@ class SettingsService:
         self._cache: dict[str, Any] | None = None
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 5.0
+        self._validator = SettingsValidator()
 
     # ------------------------------------------------------------------
     # Кэш
@@ -72,7 +77,13 @@ class SettingsService:
         now = time.monotonic()
         if self._cache is not None and (now - self._cache_ts) < self._cache_ttl:
             return dict(self._cache)
-        self._cache = self.store.load_settings()
+        raw = self.store.load_settings()
+        # Validate and auto-fix on load — warnings only, no hard errors
+        result_v = self._validator.validate(raw)
+        if result_v.warnings:
+            for w in result_v.warnings:
+                _log.debug("settings load: %s", w)
+        self._cache = result_v.fixed
         self._cache_ts = now
         return dict(self._cache)
 
@@ -230,6 +241,15 @@ class SettingsService:
         except (TypeError, ValueError):
             overlay_percent = 45
         settings["overlay_opacity_percent"] = max(15, min(overlay_percent, 90))
+
+        # Final validation pass before persisting — raises on hard errors
+        vr = self._validator.validate(settings)
+        if not vr.valid:
+            raise ValueError(f"Настройки содержат ошибки: {'; '.join(vr.errors)}")
+        if vr.warnings:
+            for w in vr.warnings:
+                _log.warning("settings save: %s", w)
+        settings = vr.fixed
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()

@@ -1531,3 +1531,280 @@ class HistoryService:
                 ]
 
         return "\n".join(fm_lines) + "\n" + "\n".join(body_lines)
+
+    # ------------------------------------------------------------------
+    # Частотный анализ слов
+    # ------------------------------------------------------------------
+
+    # Стоп-слова для русского, испанского, английского
+    _STOP_WORDS: frozenset = frozenset({
+        # RU предлоги/частицы/союзы
+        "в", "на", "с", "по", "из", "от", "до", "за", "под", "над", "к", "о",
+        "об", "про", "при", "для", "без", "через", "между", "перед", "после",
+        "во", "со", "ко", "не", "ни", "бы", "же", "ли", "и", "а", "но", "да",
+        "то", "или", "что", "как", "так", "уже", "ещё", "еще", "все", "этот",
+        "это", "эта", "этой", "этого", "этим", "этих", "он", "она", "оно", "они",
+        "мы", "вы", "я", "его", "её", "ее", "их", "мой", "твой", "наш", "ваш",
+        "свой", "себя", "тот", "та", "те", "такой", "такие", "быть", "есть",
+        "был", "была", "были", "будет", "будут", "там", "здесь", "тут", "где",
+        "когда", "потому", "потом", "затем", "вот", "ну", "вдруг", "если", "нет",
+        "очень", "более", "менее", "больше", "меньше", "можно", "нужно", "надо",
+        # ES
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
+        "al", "en", "con", "por", "para", "sin", "sobre", "entre", "ante",
+        "bajo", "desde", "hasta", "hacia", "durante", "y", "e", "o", "u",
+        "pero", "sino", "que", "como", "si", "se", "me", "te", "le", "nos",
+        "os", "les", "lo", "su", "sus", "mi", "mis", "tu", "tus", "este",
+        "esta", "estos", "estas", "ese", "esa", "esos", "esas", "yo",
+        "él", "ella", "ellos", "ellas", "usted", "ustedes", "nosotros",
+        "vosotros", "es", "son", "era", "fue", "ser", "estar", "hay", "ya",
+        "no", "más", "muy", "bien", "también", "sí", "así", "todo", "todos",
+        # EN
+        "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by",
+        "from", "up", "about", "into", "through", "during", "before", "after",
+        "above", "below", "between", "out", "off", "over", "under", "again",
+        "and", "but", "or", "nor", "so", "yet", "both", "either", "neither",
+        "not", "is", "are", "was", "were", "be", "been", "being", "have",
+        "has", "had", "do", "does", "did", "will", "would", "could", "should",
+        "may", "might", "shall", "can", "must", "it", "its", "this", "that",
+        "these", "those", "i", "you", "he", "she", "we", "they", "me", "him",
+        "her", "us", "them", "my", "your", "his", "our", "their", "what",
+        "which", "who", "when", "where", "how", "all", "each", "more", "also",
+    })
+
+    @staticmethod
+    def _tokenize(text: str) -> list:
+        """Разбивает текст на слова (нижний регистр, только буквы)."""
+        import re
+        return re.findall(r"[^\W\d_]+", text.lower(), re.UNICODE)
+
+    def handle_word_frequency_analysis(self, params: dict) -> dict:
+        """Анализирует частоту слов по истории транскрипций.
+
+        Params:
+            language (str, optional): фильтрация по языку-источнику ('ru', 'es', 'en', …).
+            limit (int, optional): лимит записей для анализа (default 1000).
+
+        Returns:
+            top_words        — топ-50 слов [{word, count, percentage}]
+            total_words      — суммарное количество токенов
+            unique_words     — количество уникальных слов
+            vocabulary_richness — unique/total (0.0 если total=0)
+            bigrams          — топ-20 биграмм [{phrase, count}]
+            by_language      — частоты по языкам {'ru': {'top_words': [...]}, …}
+        """
+        from collections import Counter
+
+        language_filter = str(params.get("language", "")).strip().lower() or None
+        record_limit = max(1, min(int(params.get("limit", 1000)), 10000))
+
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+
+        global_words: list = []
+        global_bigrams: list = []
+        lang_words: dict = {}
+
+        for item in items[:record_limit]:
+            lang = (getattr(item, "source_lang", "") or "").strip().lower()
+            if language_filter and lang != language_filter:
+                continue
+            text = (getattr(item, "text", "") or "").strip()
+            if not text:
+                continue
+            tokens = [w for w in self._tokenize(text) if w not in self._STOP_WORDS and len(w) > 1]
+            global_words.extend(tokens)
+            for i in range(len(tokens) - 1):
+                global_bigrams.append((tokens[i], tokens[i + 1]))
+            if lang:
+                lang_words.setdefault(lang, []).extend(tokens)
+
+        total_words = len(global_words)
+        word_counter: Counter = Counter(global_words)
+        unique_words = len(word_counter)
+        vocabulary_richness = round(unique_words / total_words, 4) if total_words else 0.0
+
+        def _top_words(counter: Counter, n: int = 50) -> list:
+            total = sum(counter.values())
+            return [
+                {
+                    "word": w,
+                    "count": c,
+                    "percentage": round(c / total * 100, 2) if total else 0.0,
+                }
+                for w, c in counter.most_common(n)
+            ]
+
+        bigram_counter: Counter = Counter(global_bigrams)
+        top_bigrams = [
+            {"phrase": f"{a} {b}", "count": c}
+            for (a, b), c in bigram_counter.most_common(20)
+        ]
+
+        by_language: dict = {}
+        for lang, words in lang_words.items():
+            lc: Counter = Counter(words)
+            by_language[lang] = {"top_words": _top_words(lc, 20)}
+
+        return {
+            "top_words": _top_words(word_counter, 50),
+            "total_words": total_words,
+            "unique_words": unique_words,
+            "vocabulary_richness": vocabulary_richness,
+            "bigrams": top_bigrams,
+            "by_language": by_language,
+        }
+
+    # ------------------------------------------------------------------
+    # Backup / Restore
+    # ------------------------------------------------------------------
+
+    def handle_backup_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Создаёт timestamped-резервную копию history.ndjson и settings.json.
+
+        Возвращает:
+            backup_path (str): путь к папке резервной копии
+            size_mb (float): суммарный размер файлов в МБ
+            entries (int): количество активных записей истории
+        """
+        import shutil
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backups_dir = Path(self.store.data_dir) / "backups"
+        backup_dir = backups_dir / f"backup_{ts}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        files_to_backup = [
+            self.store.history_path,
+            self.store.tombstones_path,
+            self.store.status_path,
+            self.store.settings_path,
+        ]
+
+        total_bytes = 0
+        for src in files_to_backup:
+            if src.exists():
+                dst = backup_dir / src.name
+                shutil.copy2(src, dst)
+                total_bytes += dst.stat().st_size
+
+        # Сохраняем метаданные резервной копии
+        import json as _json
+        entries = self.store.count_active_items()
+        meta = {
+            "backup_ts": ts,
+            "entries": entries,
+            "size_bytes": total_bytes,
+            "files": [f.name for f in files_to_backup if f.exists()],
+        }
+        (backup_dir / "backup_meta.json").write_text(
+            _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        size_mb = round(total_bytes / (1024 * 1024), 3)
+        logger.info("Резервная копия создана: %s (%s МБ, %d записей)", backup_dir, size_mb, entries)
+        return {
+            "backup_path": str(backup_dir),
+            "size_mb": size_mb,
+            "entries": entries,
+        }
+
+    def handle_restore_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Восстанавливает историю из резервной копии.
+
+        Params:
+            backup_path (str): путь к папке резервной копии
+            restore_settings (bool): если True — восстанавливает и settings.json (default: False)
+
+        Возвращает:
+            restored_entries (int): количество записей после восстановления
+            backup_date (str): timestamp резервной копии
+        """
+        import shutil
+        import json as _json
+
+        raw_path = str(params.get("backup_path", "")).strip()
+        if not raw_path:
+            raise RuntimeError("backup_path обязателен")
+
+        backup_dir = Path(raw_path).expanduser().resolve()
+        if not backup_dir.exists() or not backup_dir.is_dir():
+            raise RuntimeError(f"Папка резервной копии не найдена: {backup_dir}")
+
+        # Проверяем, что это наш backup (должен содержать history.ndjson или backup_meta.json)
+        history_backup = backup_dir / "history.ndjson"
+        meta_file = backup_dir / "backup_meta.json"
+        if not history_backup.exists() and not meta_file.exists():
+            raise RuntimeError(
+                f"Невалидная резервная копия: нет history.ndjson или backup_meta.json в {backup_dir}"
+            )
+
+        # Читаем метаданные
+        backup_date = "unknown"
+        if meta_file.exists():
+            try:
+                meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+                backup_date = meta.get("backup_ts", "unknown")
+            except Exception:
+                pass
+
+        restore_settings = self._coerce_bool(params.get("restore_settings", False), default=False)
+
+        # Восстанавливаем файлы (под lock)
+        with self.store._lock():
+            if history_backup.exists():
+                shutil.copy2(history_backup, self.store.history_path)
+
+            for aux_name in ("history_tombstones.ndjson", "history_status.ndjson"):
+                src = backup_dir / aux_name
+                if src.exists():
+                    dst = self.store.data_dir / aux_name
+                    shutil.copy2(src, dst)
+
+            if restore_settings:
+                settings_backup = backup_dir / "settings.json"
+                if settings_backup.exists():
+                    shutil.copy2(settings_backup, self.store.settings_path)
+
+        restored_entries = self.store.count_active_items()
+        logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
+        return {
+            "restored_entries": restored_entries,
+            "backup_date": backup_date,
+        }
+
+    def handle_list_backups(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список доступных резервных копий с метаданными.
+
+        Возвращает:
+            backups (list): список объектов с полями path, backup_date, entries, size_mb
+        """
+        import json as _json
+
+        backups_dir = Path(self.store.data_dir) / "backups"
+        if not backups_dir.exists():
+            return {"backups": []}
+
+        result = []
+        for backup_dir in sorted(backups_dir.iterdir(), reverse=True):
+            if not backup_dir.is_dir():
+                continue
+            meta_file = backup_dir / "backup_meta.json"
+            entry: dict[str, Any] = {
+                "path": str(backup_dir),
+                "backup_date": backup_dir.name,
+                "entries": None,
+                "size_mb": None,
+            }
+            if meta_file.exists():
+                try:
+                    meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+                    entry["backup_date"] = meta.get("backup_ts", backup_dir.name)
+                    entry["entries"] = meta.get("entries")
+                    size_bytes = meta.get("size_bytes", 0)
+                    entry["size_mb"] = round(size_bytes / (1024 * 1024), 3)
+                except Exception:
+                    pass
+            result.append(entry)
+
+        return {"backups": result}

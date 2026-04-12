@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
     RATE_LIMIT_ENABLED: bool = True
 
+    # CORS: список разрешённых Origins через запятую. "*" — разрешить всё (локальная разработка).
+    # Пример: "http://localhost:3000,https://app.example.com"
+    CORS_ORIGINS: str = "*"
+
     # Pipeline v2 feature flag.
     # True = BackendService использует transcribe_v2() (pipeline-based path).
     # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).

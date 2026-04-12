@@ -36,8 +36,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.call_assist_service import CallAssistService
+from backend.error_reporter import ErrorReporter
 from backend.history_service import HistoryService
 from backend.session_tracker import SessionTracker
+from backend.usage_tracker import UsageTracker
 from backend.transcript_writer import TranscriptWriter
 from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
@@ -52,6 +54,7 @@ from backend.transcriber import Transcriber
 from backend.vocabulary_store import VocabularyStore
 from backend.translator import Translator
 from core.config import settings
+from core.language_detector import LanguageDetector
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.Service")
@@ -125,6 +128,8 @@ class BackendService:
             start_time=self._start_time,
         )
         self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
+        self._error_reporter = ErrorReporter()
+        self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -228,6 +233,7 @@ class BackendService:
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
+            "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
             "export_history": self._history.handle_export_history,
@@ -239,7 +245,11 @@ class BackendService:
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
+            "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
+            "restore_history": self._history.handle_restore_history,  # восстанавливает историю из резервной копии
+            "list_backups": self._history.handle_list_backups,  # список доступных резервных копий
             "get_history_statistics": self._history.handle_get_history_statistics,  # агрегированная статистика по истории
+            "word_frequency_analysis": self._history.handle_word_frequency_analysis,  # частотный анализ слов по истории
             "apply_profile_preset": self._settings_svc.handle_apply_profile_preset,  # применяет пресет настроек профиля
             "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
             "get_notification_preferences": self._settings_svc.handle_get_notification_preferences,  # настройки уведомлений
@@ -250,8 +260,13 @@ class BackendService:
             "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
             "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
+            "analyze_silence": self._handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
             "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
+            "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
+            "get_error_stats": self._error_reporter.handle_get_error_stats,  # счётчики ошибок по компоненту/типу/окну
+            "detect_language": self._handle_detect_language,  # эвристическое определение языка текста
+            "get_usage_stats": self._handle_get_usage_stats,  # ежедневная статистика использования: записи, длительность, слова
         }
 
         handler = handlers.get(method)
@@ -654,6 +669,30 @@ class BackendService:
         """Возвращает агрегированную статистику по всем сессиям в памяти."""
         return self._session_tracker.get_session_stats()
 
+    def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает ежедневную статистику использования: записи, длительность, слова."""
+        return self._usage_tracker.get_usage_stats()
+
+    def _handle_detect_language(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Определяет язык текста (или пакета текстов) эвристически."""
+        detector = LanguageDetector()
+        texts = params.get("texts")
+        if texts is not None:
+            # Пакетный режим
+            if not isinstance(texts, list):
+                raise ValueError("Параметр 'texts' должен быть массивом строк")
+            results = detector.detect_batch([str(t) for t in texts])
+            return {
+                "results": [
+                    {"language": r.language, "confidence": r.confidence, "script": r.script}
+                    for r in results
+                ]
+            }
+        # Одиночный режим
+        text = str(params.get("text", ""))
+        result = detector.detect(text)
+        return {"language": result.language, "confidence": result.confidence, "script": result.script}
+
     def _handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
         item_id = str(params.get("id", "")).strip()
         paste_status = str(params.get("paste_status", "failed")).strip() or "failed"
@@ -834,6 +873,26 @@ class BackendService:
 
         report = analyze_file(file_path)
         return report.to_dict()
+
+    def _handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обнаруживает участки тишины в аудиофайле.
+
+        Params:
+            file_path (str): путь к аудиофайлу.
+            threshold_db (float, optional): порог тишины в дБ (по умолчанию -40).
+
+        Returns:
+            Словарь с silence_regions, speech_ratio, total_silence_sec, duration_sec.
+        """
+        from core.silence_detector import analyze_silence_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        threshold_db = float(params.get("threshold_db", -40.0))
+        return analyze_silence_file(file_path, threshold_db=threshold_db)
+
 
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1036,6 +1095,27 @@ class BackendService:
             "summary": summary,
             "llm": True,
             "source_chars": len(text),
+        }
+
+    def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последний word-level diff от LLM rewriter'а."""
+        engine = self.transcriber.engine
+        diff = getattr(engine, '_last_llm_diff', None)
+        if diff is None:
+            return {"available": False, "diff": None}
+        return {
+            "available": True,
+            "diff": {
+                "similarity_ratio": diff.similarity_ratio,
+                "words_added": diff.words_added,
+                "words_removed": diff.words_removed,
+                "words_unchanged": diff.words_unchanged,
+                "summary": diff.summary,
+                "changes": [
+                    {"type": c.type, "text": c.text, "position": c.position}
+                    for c in diff.changes
+                ],
+            },
         }
 
     def _handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:

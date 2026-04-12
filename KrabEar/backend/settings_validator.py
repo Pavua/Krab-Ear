@@ -1,0 +1,305 @@
+"""SettingsValidator — валидация и миграция настроек Krab Ear.
+
+Проверяет:
+- типы полей (bool, float, int, str)
+- допустимые диапазоны значений
+- допустимые значения enum-полей
+- автоисправление: clamping, coerce типов
+- миграция схемы между версиями
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+CURRENT_SCHEMA_VERSION = "2.0"
+
+# Определения enum-полей: ключ → допустимые значения
+_ENUM_FIELDS: dict[str, tuple[str, ...]] = {
+    "mode": ("headless", "menubar"),
+    "quality_profile": ("balanced", "max"),
+    "cleanup_profile": ("soft", "strict"),
+    "translation_mode": ("off", "ru_to_es", "es_to_ru", "en_to_ru", "auto", "auto_to_ru", "bilingual_ru_es"),
+    "translation_style": ("neutral", "chat", "formal"),
+    "clipboard_mode": ("always_copy", "copy_on_fail", "never_copy"),
+    "network_mode": ("offline_default", "offline_strict", "online_opt_in"),
+    "hotkey_profile": ("default", "meeting", "translation"),
+    "history_policy": ("unlimited",),
+    "history_text_density": ("normal", "compact"),
+    "capture_source_mode": ("mic", "system_audio", "mic_plus_system"),
+    "ui_last_tab": ("dictation", "live_translation", "history"),
+    "update_channel": ("stable", "beta"),
+}
+
+# Диапазоны числовых полей: ключ → (min, max, default, type)
+_RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
+    "history_page_size": (10, 500, 50, int),
+    "audio_ducking_percent": (0, 100, 50, int),
+    "overlay_opacity_percent": (15, 90, 45, int),
+    "stop_tail_trim_ms": (0, 1200, 180, int),
+    "silence_guard_rms_threshold": (0.0003, 0.05, 0.0020, float),
+    "silence_guard_peak_threshold": (0.001, 0.2, 0.0120, float),
+    "silence_guard_active_ratio_threshold": (0.001, 0.30, 0.015, float),
+    "background_guard_min_peak": (0.003, 0.25, 0.025, float),
+    "background_guard_min_rms": (0.0008, 0.08, 0.0040, float),
+    "background_guard_uniform_frame_threshold": (0.001, 0.20, 0.0060, float),
+    "background_guard_max_uniform_active_ratio": (0.40, 0.99, 0.92, float),
+    "notify_confidence_threshold": (0.0, 1.0, 0.5, float),
+    "call_budget_usd": (0.0, 1000.0, 2.0, float),
+}
+
+# Bool-поля с дефолтными значениями
+_BOOL_FIELDS: dict[str, bool] = {
+    "auto_start_enabled": False,
+    "show_dock_icon": True,
+    "auto_paste": True,
+    "play_start_sound": True,
+    "realtime_preview_enabled": True,
+    "translate_and_paste": False,
+    "onboarding_completed": False,
+    "audio_ducking_enabled": True,
+    "silence_guard_enabled": True,
+    "background_guard_enabled": True,
+    "call_notify_default": True,
+    "call_auto_summary": True,
+    "history_focus_mode": True,
+    "llm_rewrite_enabled": False,
+    "auto_save_transcripts": False,
+    "notifications_enabled": True,
+    "notify_on_low_confidence": True,
+    "notify_on_llm_failure": True,
+    "notify_on_import_complete": True,
+    "notify_sound_enabled": True,
+}
+
+# Миграционные таблицы: (from_version, to_version) → список операций
+# Каждая операция: ("rename", old_key, new_key) | ("add_default", key, value) | ("remove", key)
+_MIGRATIONS: dict[tuple[str, str], list[tuple]] = {
+    ("1.0", "2.0"): [
+        ("rename", "history_limit", "history_policy"),
+        ("add_default", "overlay_opacity_percent", 45),
+        ("add_default", "call_budget_usd", 2.0),
+        ("add_default", "call_notify_default", True),
+        ("add_default", "call_auto_summary", True),
+        ("add_default", "llm_rewrite_enabled", False),
+        ("add_default", "auto_save_transcripts", False),
+        ("add_default", "notifications_enabled", True),
+        ("add_default", "notify_on_low_confidence", True),
+        ("add_default", "notify_confidence_threshold", 0.5),
+        ("add_default", "notify_on_llm_failure", True),
+        ("add_default", "notify_on_import_complete", True),
+        ("add_default", "notify_sound_enabled", True),
+        ("add_default", "capture_source_mode", "mic"),
+        ("add_default", "ui_last_tab", "history"),
+        ("add_default", "history_focus_mode", True),
+    ],
+}
+
+
+@dataclass
+class ValidationResult:
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    fixed: dict[str, Any] = field(default_factory=dict)
+
+
+class SettingsValidator:
+    """Валидатор и мигратор настроек Krab Ear."""
+
+    # ------------------------------------------------------------------
+    # Публичный API
+    # ------------------------------------------------------------------
+
+    def validate(self, settings: dict[str, Any]) -> ValidationResult:
+        """Валидирует settings, автоисправляет где возможно.
+
+        Returns:
+            ValidationResult с флагом valid=True если нет неисправимых ошибок.
+            Поле `fixed` содержит исправленную копию словаря настроек.
+        """
+        fixed = dict(settings)
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # 1. Enum-поля
+        for key, allowed in _ENUM_FIELDS.items():
+            if key not in fixed:
+                continue
+            val = fixed[key]
+            if val not in allowed:
+                warnings.append(
+                    f"'{key}': недопустимое значение {val!r}, исправлено на '{allowed[0]}'"
+                )
+                fixed[key] = allowed[0]
+
+        # 2. Диапазоны числовых полей
+        for key, (min_v, max_v, default, coerce) in _RANGE_FIELDS.items():
+            if key not in fixed:
+                continue
+            val = fixed[key]
+            try:
+                parsed = coerce(val)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"'{key}': не удалось преобразовать {val!r} в {coerce.__name__}, "
+                    f"исправлено на {default}"
+                )
+                fixed[key] = default
+                continue
+            if parsed < min_v or parsed > max_v:
+                clamped = max(min_v, min(parsed, max_v))
+                warnings.append(
+                    f"'{key}': значение {parsed} вне диапазона [{min_v}, {max_v}], "
+                    f"исправлено на {clamped}"
+                )
+                fixed[key] = clamped
+            else:
+                fixed[key] = parsed  # нормализуем тип
+
+        # 3. Bool-поля
+        for key, default_val in _BOOL_FIELDS.items():
+            if key not in fixed:
+                continue
+            val = fixed[key]
+            coerced = self._coerce_bool(val)
+            if coerced is None:
+                warnings.append(
+                    f"'{key}': не удалось преобразовать {val!r} в bool, "
+                    f"исправлено на {default_val}"
+                )
+                fixed[key] = default_val
+            else:
+                fixed[key] = coerced
+
+        # 4. Специальные поля
+        # translation_glossary должен быть dict
+        if "translation_glossary" in fixed and not isinstance(fixed["translation_glossary"], dict):
+            warnings.append(
+                f"'translation_glossary': ожидается dict, получен {type(fixed['translation_glossary']).__name__}, "
+                f"исправлено на {{}}"
+            )
+            fixed["translation_glossary"] = {}
+
+        # text_templates должен быть dict[str, str]
+        if "text_templates" in fixed:
+            tt = fixed["text_templates"]
+            if not isinstance(tt, dict):
+                warnings.append(
+                    f"'text_templates': ожидается dict, получен {type(tt).__name__}, исправлено на {{}}"
+                )
+                fixed["text_templates"] = {}
+            else:
+                cleaned: dict[str, str] = {}
+                for k, v in tt.items():
+                    if not isinstance(k, str) or not isinstance(v, str):
+                        warnings.append(
+                            f"'text_templates': ключ {k!r} или значение {v!r} не строка, пропущено"
+                        )
+                        continue
+                    if k.strip() and v.strip():
+                        cleaned[k.strip()] = v.strip()
+                fixed["text_templates"] = cleaned
+
+        # voice_gateway_url: должен быть localhost или HTTPS
+        if "voice_gateway_url" in fixed:
+            gw_url = str(fixed["voice_gateway_url"]).strip()
+            if not (
+                gw_url.startswith("http://localhost")
+                or gw_url.startswith("http://127.0.0.1")
+                or gw_url.startswith("https://")
+            ):
+                errors.append(
+                    f"'voice_gateway_url': должен быть localhost или HTTPS, получен {gw_url!r}"
+                )
+
+        return ValidationResult(
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings,
+            fixed=fixed,
+        )
+
+    def migrate(self, settings: dict[str, Any], from_version: str, to_version: str) -> dict[str, Any]:
+        """Мигрирует settings из from_version в to_version.
+
+        Поддерживает только последовательные переходы через известные версии.
+        """
+        if from_version == to_version:
+            return dict(settings)
+
+        result = dict(settings)
+        version_chain = self._build_migration_chain(from_version, to_version)
+
+        for step_from, step_to in version_chain:
+            ops = _MIGRATIONS.get((step_from, step_to))
+            if ops is None:
+                raise ValueError(
+                    f"Нет пути миграции из версии {step_from!r} в {step_to!r}"
+                )
+            result = self._apply_migration_ops(result, ops)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Внутренние методы
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool | None:
+        """Пробует преобразовать value в bool. Возвращает None если не удалось."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "on", "yes"}:
+                return True
+            if normalized in {"0", "false", "off", "no"}:
+                return False
+        return None
+
+    @staticmethod
+    def _build_migration_chain(from_version: str, to_version: str) -> list[tuple[str, str]]:
+        """Строит цепочку шагов миграции."""
+        # Упрощённая версия: только прямые переходы
+        known = list(_MIGRATIONS.keys())
+        # Строим граф переходов
+        from_v = from_version
+        chain: list[tuple[str, str]] = []
+        visited: set[str] = {from_v}
+        while from_v != to_version:
+            step = next(
+                ((f, t) for (f, t) in known if f == from_v),
+                None,
+            )
+            if step is None:
+                raise ValueError(f"Нет пути миграции из {from_v!r} в {to_version!r}")
+            chain.append(step)
+            from_v = step[1]
+            if from_v in visited:
+                raise ValueError(f"Цикл в цепочке миграций: {from_v!r}")
+            visited.add(from_v)
+        return chain
+
+    @staticmethod
+    def _apply_migration_ops(settings: dict[str, Any], ops: list[tuple]) -> dict[str, Any]:
+        """Применяет список операций миграции к копии словаря настроек."""
+        result = dict(settings)
+        for op in ops:
+            kind = op[0]
+            if kind == "rename":
+                _, old_key, new_key = op
+                if old_key in result and new_key not in result:
+                    result[new_key] = result.pop(old_key)
+            elif kind == "add_default":
+                _, key, default_value = op
+                if key not in result:
+                    result[key] = default_value
+            elif kind == "remove":
+                _, key = op
+                result.pop(key, None)
+        return result
