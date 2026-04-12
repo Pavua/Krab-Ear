@@ -245,6 +245,36 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let primaryActionsRow = NSStackView()
     private let secondaryActionsRow = NSStackView()
     private let statusRow = NSStackView()
+    // MARK: - Diagnostics & Metrics
+    private var diagnosticsSection: CollapsibleSectionView?
+    private let diagnosticsButton = NSButton(title: "Диагностика", target: nil, action: nil)
+    private let metricsButton = NSButton(title: "Метрики", target: nil, action: nil)
+    private let recordingStatsButton = NSButton(title: "Статистика", target: nil, action: nil)
+    private let storageInfoButton = NSButton(title: "Хранилище", target: nil, action: nil)
+    private let diagnosticsRow = NSStackView()
+    private let diagnosticsOutputScroll = NSScrollView()
+    private let diagnosticsOutputView = NSTextView()
+    // MARK: - Profile Presets & Audio Devices
+    private var profileAudioSection: CollapsibleSectionView?
+    private let profilePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let applyProfileButton = NSButton(title: "Применить", target: nil, action: nil)
+    private let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let testMicButton = NSButton(title: "Тест микрофона", target: nil, action: nil)
+    private let micTestResultLabel = NSTextField(labelWithString: "")
+    private let profileRow = NSStackView()
+    private let audioDeviceRow = NSStackView()
+    // MARK: - Clipboard History
+    private var clipboardSection: CollapsibleSectionView?
+    private let clipboardHistoryButton = NSButton(title: "Буфер обмена", target: nil, action: nil)
+    private let repasteButton = NSButton(title: "Вставить повторно", target: nil, action: nil)
+    private let clipboardRow = NSStackView()
+    // MARK: - History enhancements
+    private let exportSrtButton = NSButton(title: "Экспорт SRT", target: nil, action: nil)
+    private let cleanupHistoryButton = NSButton(title: "Очистка старых", target: nil, action: nil)
+    private let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let vocabSuggestionsButton = NSButton(title: "Словарь", target: nil, action: nil)
+    private let glossarySuggestionsButton = NSButton(title: "Глоссарий авто", target: nil, action: nil)
+    private let historyEnhancementsRow = NSStackView()
 
     init(
         ipcClient: IPCClient,
@@ -306,6 +336,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         startPreviewPolling()
         refreshCallAssistState(silentOnError: false)
         onLoadCallPhraseLibrary()
+        loadProfilePresets()
+        loadAudioDevices()
     }
 
     /// Вызывается агентом после новой транскрибации/обновления статуса вставки.
@@ -1339,6 +1371,100 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.addArrangedSubview(systemSection)
         settingsBar.addArrangedSubview(aiSection)
 
+        // --- DIAGNOSTICS & METRICS SECTION ---
+        let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
+        let diagCard = ThemeCardView()
+        diagnosticsRow.orientation = .horizontal
+        diagnosticsRow.spacing = 8
+        diagnosticsRow.alignment = .centerY
+        diagnosticsRow.translatesAutoresizingMaskIntoConstraints = false
+        diagnosticsButton.target = self
+        diagnosticsButton.action = #selector(onDiagnostics)
+        metricsButton.target = self
+        metricsButton.action = #selector(onMetrics)
+        recordingStatsButton.target = self
+        recordingStatsButton.action = #selector(onRecordingStats)
+        storageInfoButton.target = self
+        storageInfoButton.action = #selector(onStorageInfo)
+        diagnosticsRow.addArrangedSubview(diagnosticsButton)
+        diagnosticsRow.addArrangedSubview(metricsButton)
+        diagnosticsRow.addArrangedSubview(recordingStatsButton)
+        diagnosticsRow.addArrangedSubview(storageInfoButton)
+        diagCard.contentStackView.addArrangedSubview(diagnosticsRow)
+
+        diagnosticsOutputView.isEditable = false
+        diagnosticsOutputView.isSelectable = true
+        diagnosticsOutputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        diagnosticsOutputView.textColor = KrabEarTheme.Colors.textSecondary
+        diagnosticsOutputView.backgroundColor = .clear
+        diagnosticsOutputScroll.documentView = diagnosticsOutputView
+        diagnosticsOutputScroll.hasVerticalScroller = true
+        diagnosticsOutputScroll.translatesAutoresizingMaskIntoConstraints = false
+        diagnosticsOutputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        diagCard.contentStackView.addArrangedSubview(diagnosticsOutputScroll)
+
+        diagSection.contentStackView.addArrangedSubview(diagCard)
+        self.diagnosticsSection = diagSection
+        settingsBar.addArrangedSubview(diagSection)
+
+        // --- PROFILE PRESETS & AUDIO DEVICES SECTION ---
+        let profAudioSection = CollapsibleSectionView(sectionId: "dictation_profile_audio", title: "Профили и устройства", isExpanded: false)
+        let profAudioCard = ThemeCardView()
+        profileRow.orientation = .horizontal
+        profileRow.spacing = 8
+        profileRow.alignment = .centerY
+        profileRow.translatesAutoresizingMaskIntoConstraints = false
+        let profileLabel = NSTextField(labelWithString: "Профиль:")
+        profileLabel.font = KrabEarTheme.Typography.controlLabel
+        profilePresetSelector.removeAllItems()
+        profilePresetSelector.addItem(withTitle: "Загрузка...")
+        applyProfileButton.target = self
+        applyProfileButton.action = #selector(onApplyProfile)
+        profileRow.addArrangedSubview(profileLabel)
+        profileRow.addArrangedSubview(profilePresetSelector)
+        profileRow.addArrangedSubview(applyProfileButton)
+        profAudioCard.contentStackView.addArrangedSubview(profileRow)
+
+        audioDeviceRow.orientation = .horizontal
+        audioDeviceRow.spacing = 8
+        audioDeviceRow.alignment = .centerY
+        audioDeviceRow.translatesAutoresizingMaskIntoConstraints = false
+        let audioLabel = NSTextField(labelWithString: "Микрофон:")
+        audioLabel.font = KrabEarTheme.Typography.controlLabel
+        audioDeviceSelector.removeAllItems()
+        audioDeviceSelector.addItem(withTitle: "По умолчанию")
+        testMicButton.target = self
+        testMicButton.action = #selector(onTestMicrophone)
+        micTestResultLabel.font = KrabEarTheme.Typography.smallCaption
+        micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
+        audioDeviceRow.addArrangedSubview(audioLabel)
+        audioDeviceRow.addArrangedSubview(audioDeviceSelector)
+        audioDeviceRow.addArrangedSubview(testMicButton)
+        audioDeviceRow.addArrangedSubview(micTestResultLabel)
+        profAudioCard.contentStackView.addArrangedSubview(audioDeviceRow)
+
+        profAudioSection.contentStackView.addArrangedSubview(profAudioCard)
+        self.profileAudioSection = profAudioSection
+        settingsBar.addArrangedSubview(profAudioSection)
+
+        // --- CLIPBOARD HISTORY SECTION ---
+        let clipSection = CollapsibleSectionView(sectionId: "dictation_clipboard", title: "Буфер обмена", isExpanded: false)
+        let clipCard = ThemeCardView()
+        clipboardRow.orientation = .horizontal
+        clipboardRow.spacing = 8
+        clipboardRow.alignment = .centerY
+        clipboardRow.translatesAutoresizingMaskIntoConstraints = false
+        clipboardHistoryButton.target = self
+        clipboardHistoryButton.action = #selector(onClipboardHistory)
+        repasteButton.target = self
+        repasteButton.action = #selector(onRepasteItem)
+        clipboardRow.addArrangedSubview(clipboardHistoryButton)
+        clipboardRow.addArrangedSubview(repasteButton)
+        clipCard.contentStackView.addArrangedSubview(clipboardRow)
+        clipSection.contentStackView.addArrangedSubview(clipCard)
+        self.clipboardSection = clipSection
+        settingsBar.addArrangedSubview(clipSection)
+
         dictationStack.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(settingsBar)
         dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
@@ -1427,6 +1553,30 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         secondaryActionsRow.addArrangedSubview(compactButton)
         secondaryActionsRow.addArrangedSubview(NSView()) // Spacer
         advancedSection.contentStackView.addArrangedSubview(secondaryActionsRow)
+
+        // History enhancements row
+        historyEnhancementsRow.orientation = .horizontal
+        historyEnhancementsRow.spacing = 8
+        historyEnhancementsRow.alignment = .centerY
+        historyEnhancementsRow.translatesAutoresizingMaskIntoConstraints = false
+        exportSrtButton.target = self
+        exportSrtButton.action = #selector(onExportSrt)
+        cleanupDaysSelector.removeAllItems()
+        cleanupDaysSelector.addItems(withTitles: ["30 дней", "60 дней", "90 дней", "180 дней", "365 дней"])
+        cleanupHistoryButton.target = self
+        cleanupHistoryButton.action = #selector(onCleanupHistory)
+        vocabSuggestionsButton.target = self
+        vocabSuggestionsButton.action = #selector(onVocabSuggestions)
+        glossarySuggestionsButton.target = self
+        glossarySuggestionsButton.action = #selector(onGlossarySuggestions)
+        historyEnhancementsRow.addArrangedSubview(exportSrtButton)
+        historyEnhancementsRow.addArrangedSubview(cleanupDaysSelector)
+        historyEnhancementsRow.addArrangedSubview(cleanupHistoryButton)
+        historyEnhancementsRow.addArrangedSubview(vocabSuggestionsButton)
+        historyEnhancementsRow.addArrangedSubview(glossarySuggestionsButton)
+        historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
+        advancedSection.contentStackView.addArrangedSubview(historyEnhancementsRow)
+
         self.historyAdvancedSection = advancedSection
 
         let importSection = CollapsibleSectionView(sectionId: "history_import", title: "Импорт аудио", isExpanded: false)
@@ -4073,6 +4223,240 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    // MARK: - Diagnostics & Metrics handlers
+
+    @objc private func onDiagnostics() {
+        guard let response = try? ipcClient.call(method: "get_diagnostics", params: [:]),
+              let result = response["result"] as? [String: Any] else {
+            showDiagnosticsOutput("Ошибка: не удалось получить диагностику")
+            return
+        }
+        showDiagnosticsOutput(formatNestedResult(result, title: "Диагностика"))
+    }
+
+    @objc private func onMetrics() {
+        guard let response = try? ipcClient.call(method: "get_metrics_dashboard", params: [:]),
+              let result = response["result"] as? [String: Any] else {
+            showDiagnosticsOutput("Ошибка: не удалось получить метрики")
+            return
+        }
+        showDiagnosticsOutput(formatNestedResult(result, title: "Метрики"))
+    }
+
+    @objc private func onRecordingStats() {
+        guard let response = try? ipcClient.call(method: "get_recording_stats", params: [:]),
+              let result = response["result"] as? [String: Any] else {
+            showDiagnosticsOutput("Ошибка: не удалось получить статистику")
+            return
+        }
+        showDiagnosticsOutput(formatNestedResult(result, title: "Статистика записей"))
+    }
+
+    @objc private func onStorageInfo() {
+        guard let response = try? ipcClient.call(method: "get_storage_info", params: [:]),
+              let result = response["result"] as? [String: Any] else {
+            showDiagnosticsOutput("Ошибка: не удалось получить информацию о хранилище")
+            return
+        }
+        showDiagnosticsOutput(formatNestedResult(result, title: "Хранилище"))
+    }
+
+    private func showDiagnosticsOutput(_ text: String) {
+        diagnosticsOutputView.string = text
+        diagnosticsSection?.setExpanded(true, animated: true)
+        // Switch to Dictation tab if not already there
+        if mainTabView.selectedTabViewItem?.identifier as? String != PanelTab.dictation.rawValue {
+            mainTabView.selectTabViewItem(at: 0)
+            tabSelector?.setSelected(true, forSegment: 0)
+        }
+    }
+
+    private func formatNestedResult(_ result: [String: Any], title: String) -> String {
+        var lines: [String] = ["=== \(title) ==="]
+        for (key, value) in result.sorted(by: { $0.key < $1.key }) {
+            if let dict = value as? [String: Any] {
+                lines.append("\n[\(key)]")
+                for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
+                    lines.append("  \(k): \(v)")
+                }
+            } else {
+                lines.append("\(key): \(value)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Profile Presets & Audio Devices handlers
+
+    @objc private func onApplyProfile() {
+        let selectedTitle = profilePresetSelector.titleOfSelectedItem ?? ""
+        guard !selectedTitle.isEmpty, selectedTitle != "Загрузка..." else { return }
+        let presetName = (profilePresetSelector.selectedItem?.representedObject as? String) ?? selectedTitle.lowercased()
+        guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
+              let result = response["result"] as? [String: Any],
+              result["applied"] as? Bool == true else {
+            showDiagnosticsOutput("Ошибка: не удалось применить профиль '\(selectedTitle)'")
+            return
+        }
+        showDiagnosticsOutput("Профиль '\(selectedTitle)' применён.")
+        syncSettingsControls()
+    }
+
+    private func loadProfilePresets() {
+        guard let response = try? ipcClient.call(method: "list_profile_presets", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let presets = result["presets"] as? [[String: Any]] else { return }
+        profilePresetSelector.removeAllItems()
+        for preset in presets {
+            if let name = preset["name"] as? String {
+                let label = (preset["label"] as? String) ?? name
+                profilePresetSelector.addItem(withTitle: label)
+                profilePresetSelector.lastItem?.representedObject = name
+            }
+        }
+    }
+
+    private func loadAudioDevices() {
+        guard let response = try? ipcClient.call(method: "get_audio_devices", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let devices = result["devices"] as? [[String: Any]] else { return }
+        audioDeviceSelector.removeAllItems()
+        audioDeviceSelector.addItem(withTitle: "По умолчанию (системный)")
+        for device in devices {
+            if let name = device["name"] as? String {
+                audioDeviceSelector.addItem(withTitle: name)
+            }
+        }
+    }
+
+    @objc private func onTestMicrophone() {
+        micTestResultLabel.stringValue = "Тестирование..."
+        micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            guard let response = try? self.ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self.micTestResultLabel.stringValue = "Ошибка теста"
+                    self.micTestResultLabel.textColor = KrabEarTheme.Colors.error
+                }
+                return
+            }
+            let rms = result["rms"] as? Double ?? 0
+            let peak = result["peak"] as? Double ?? 0
+            let status = rms > 0.01 ? "OK" : "Тихо"
+            DispatchQueue.main.async {
+                self.micTestResultLabel.stringValue = String(format: "RMS: %.3f | Peak: %.3f | %@", rms, peak, status)
+                self.micTestResultLabel.textColor = rms > 0.01 ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.warning
+            }
+        }
+    }
+
+    // MARK: - Clipboard History handlers
+
+    @objc private func onClipboardHistory() {
+        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let items = result["items"] as? [[String: Any]] else {
+            showDiagnosticsOutput("Буфер обмена пуст")
+            return
+        }
+        var lines: [String] = ["=== Буфер обмена (последние \(items.count)) ==="]
+        for (i, item) in items.enumerated() {
+            let text = String((item["text"] as? String ?? "").prefix(80))
+            let ts = item["ts"] as? String ?? ""
+            lines.append("\(i + 1). [\(ts)] \(text)")
+        }
+        showDiagnosticsOutput(lines.joined(separator: "\n"))
+    }
+
+    @objc private func onRepasteItem() {
+        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let clipItems = result["items"] as? [[String: Any]],
+              let firstItem = clipItems.first,
+              let itemId = firstItem["id"] as? String else {
+            notificationService.notify(title: "Krab Ear", body: "Нет элементов для вставки")
+            return
+        }
+        guard let _ = try? ipcClient.call(method: "repaste_item", params: ["id": itemId]) else {
+            notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
+            return
+        }
+        notificationService.notify(title: "Krab Ear", body: "Элемент вставлен повторно")
+    }
+
+    // MARK: - History Enhancement handlers
+
+    @objc private func onExportSrt() {
+        let selectedRow = tableView.selectedRow
+        guard selectedRow >= 0, selectedRow < items.count else {
+            notificationService.notify(title: "Krab Ear", body: "Выберите запись для экспорта SRT")
+            return
+        }
+        let item = items[selectedRow]
+        guard let response = try? ipcClient.call(method: "export_history_srt", params: ["id": item.id]),
+              let result = response["result"] as? [String: Any],
+              let path = result["path"] as? String else {
+            notificationService.notify(title: "Krab Ear", body: "Ошибка экспорта SRT")
+            return
+        }
+        notificationService.notify(title: "Krab Ear", body: "SRT сохранён")
+        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
+
+    @objc private func onCleanupHistory() {
+        let daysMap = [30, 60, 90, 180, 365]
+        let days = daysMap[cleanupDaysSelector.indexOfSelectedItem]
+        let alert = NSAlert()
+        alert.messageText = "Очистка истории"
+        alert.informativeText = "Удалить записи старше \(days) дней? Это действие нельзя отменить."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Удалить")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
+              let result = response["result"] as? [String: Any],
+              let deleted = result["deleted_count"] as? Int else {
+            notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
+            return
+        }
+        notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
+        loadInitial()
+    }
+
+    @objc private func onVocabSuggestions() {
+        guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let suggestions = result["suggestions"] as? [String] else {
+            showDiagnosticsOutput("Нет предложений по словарю")
+            return
+        }
+        var lines: [String] = ["=== Словарь (предложения) ==="]
+        for (i, word) in suggestions.enumerated() {
+            lines.append("\(i + 1). \(word)")
+        }
+        showDiagnosticsOutput(lines.joined(separator: "\n"))
+    }
+
+    @objc private func onGlossarySuggestions() {
+        guard let response = try? ipcClient.call(method: "get_glossary_suggestions", params: [:]),
+              let result = response["result"] as? [String: Any],
+              let suggestions = result["suggestions"] as? [[String: Any]] else {
+            showDiagnosticsOutput("Нет предложений по глоссарию")
+            return
+        }
+        var lines: [String] = ["=== Глоссарий (авто-предложения) ==="]
+        for (i, item) in suggestions.enumerated() {
+            let source = item["source"] as? String ?? "?"
+            let target = item["target"] as? String ?? "?"
+            let count = item["count"] as? Int ?? 0
+            lines.append("\(i + 1). \(source) → \(target) (встречалось: \(count))")
+        }
+        showDiagnosticsOutput(lines.joined(separator: "\n"))
     }
 
     private func updateHistoryFiltersBadge() {
