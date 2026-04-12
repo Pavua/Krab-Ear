@@ -38,6 +38,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.call_assist_service import CallAssistService
 from backend.collection_manager import CollectionManager
+from backend.recording_chain import RecordingChainManager
+from backend.recording_scheduler import RecordingScheduler
 from backend.error_reporter import ErrorReporter
 from backend.history_service import HistoryService
 from backend.speaker_manager import SpeakerManager
@@ -48,6 +50,7 @@ from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
 from backend.system_monitor import SystemMonitor
 from backend.event_bus import bus as event_bus
+from backend.event_replay import EventReplayManager
 from backend.models import DEFAULT_SETTINGS
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.registry import EventType
@@ -61,7 +64,15 @@ from core.audio_converter import AudioConverter
 from core.config import settings
 from core.language_detector import LanguageDetector
 from core.text_comparator import TextComparator
+from core.term_extractor import TermExtractor
 from core.utils import TextUtils
+from backend.daily_digest import DailyDigestGenerator
+from backend.quality_trends import QualityTrendAnalyzer
+from backend.period_comparison import compare_periods as _compare_periods_fn
+from backend.integrity_checker import IntegrityChecker
+from backend.webhook_manager import WebhookManager
+from core.normalization_profiles import NormalizationProfileRegistry
+from core.hallucination_manager import HallucinationManager
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -109,6 +120,9 @@ class BackendService:
         self._preview_error_count: int = 0
         self._clipboard_history: list[dict] = []
         self._collections = CollectionManager(store=self.store)
+        self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
+        self._chains = RecordingChainManager(store=self.store)
+        self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
@@ -146,6 +160,16 @@ class BackendService:
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
         self._transcription_counter: int = 0
+        self._daily_digest = DailyDigestGenerator()
+        self._quality_trends = QualityTrendAnalyzer()
+        self._integrity_checker = IntegrityChecker()
+        self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
+        self._text_comparator = TextComparator()
+        self._term_extractor = TermExtractor()
+        self._event_replay = EventReplayManager(
+            persist_path=self.store.data_dir / "event_replay.ndjson",
+        )
+        self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -272,7 +296,7 @@ class BackendService:
             "batch_export": self._history.handle_batch_export,  # пакетный экспорт в нескольких форматах
             "export_history_markdown": self._history.handle_export_history_markdown,
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
-            "get_clipboard_history": self._history.handle_get_clipboard_history,
+            "export_history_json": self._history.handle_export_history_json,
             "repaste_item": self._history.handle_repaste_item,
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
@@ -316,7 +340,29 @@ class BackendService:
             "list_collections": self._collections.handle_list_collections,  # список всех коллекций
             "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
             "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
+            "list_normalization_profiles": self._handle_list_normalization_profiles,  # список профилей нормализации текста
+            "apply_normalization_profile": self._handle_apply_normalization_profile,  # применить профиль нормализации к тексту
             "get_collection_items": self._collections.handle_get_collection_items,  # получить записи истории из коллекции
+            "start_chain": self._chains.handle_start_chain,  # начать цепочку связанных записей
+            "add_to_chain": self._chains.handle_add_to_chain,  # добавить запись в цепочку
+            "end_chain": self._chains.handle_end_chain,  # завершить цепочку
+            "get_chain": self._chains.handle_get_chain,  # получить цепочку с деталями
+            "list_chains": self._chains.handle_list_chains,  # список цепочек
+            "merge_chain_text": self._chains.handle_merge_chain_text,  # объединённый текст цепочки
+            "schedule_recording": self._recording_scheduler.handle_schedule_recording,  # запланировать запись на определённое время
+            "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
+            "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
+            "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
+            "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
+            "check_integrity": self._handle_check_integrity,  # проверка целостности данных
+            "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
+            "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
+            "compare_texts": self._handle_compare_texts,  # сравнение двух текстов/транскрипций
+            "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
+            "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
+            "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
+            "get_waveform": self._handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
         }
 
         handler = handlers.get(method)
@@ -729,6 +775,18 @@ class BackendService:
 
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
+
+    def _handle_list_normalization_profiles(self, params: dict) -> dict:
+        """Возвращает список всех профилей нормализации текста."""
+        return {"profiles": self._norm_profiles.list_profiles()}
+
+    def _handle_apply_normalization_profile(self, params: dict) -> dict:
+        """Применяет профиль нормализации к переданному тексту."""
+        text = params.get("text", "")
+        profile_name = params.get("profile", "clean")
+        result = self._norm_profiles.apply_profile(text, profile_name)
+        return {"text": result, "profile": profile_name}
+
         return self._usage_tracker.get_usage_stats()
 
     def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -990,6 +1048,32 @@ class BackendService:
         threshold_db = float(params.get("threshold_db", -40.0))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
 
+    def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+            num_points (int, optional): количество точек waveform (по умолчанию 200).
+
+        Returns:
+            Словарь с полями: points, duration_sec, sample_rate, peak_amplitude, rms_amplitude.
+        """
+        from core.waveform_generator import WaveformGenerator
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        num_points = int(params.get("num_points", 200))
+        gen = WaveformGenerator()
+        wf = gen.generate_from_file(file_path, num_points=num_points)
+        return {
+            "points": wf.points,
+            "duration_sec": wf.duration_sec,
+            "sample_rate": wf.sample_rate,
+            "peak_amplitude": wf.peak_amplitude,
+            "rms_amplitude": wf.rms_amplitude,
+        }
 
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2072,6 +2156,180 @@ class BackendService:
             if error is not None:
                 return str(error).strip()
         return ""
+
+
+    # ------------------------------------------------------------------
+    # Handlers: DailyDigest, QualityTrends, PeriodComparison, IntegrityChecker,
+    #           TermExtractor, TextComparator
+    # ------------------------------------------------------------------
+
+    def _handle_generate_daily_digest(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует ежедневный дайджест транскрипций за указанную дату."""
+        date_str = params.get("date")  # None → today
+        digest = self._daily_digest.generate_digest(date_str=date_str, store=self.store)
+        return {
+            "date": digest.date,
+            "total_recordings": digest.total_recordings,
+            "total_duration_min": digest.total_duration_min,
+            "total_words": digest.total_words,
+            "avg_confidence": digest.avg_confidence,
+            "top_words": digest.top_words,
+            "languages": digest.languages,
+            "notable_phrases": digest.notable_phrases,
+            "markdown": digest.markdown,
+        }
+
+    def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует тренды качества распознавания за последние N дней."""
+        days = int(params.get("days", 30))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._quality_trends.analyze_trends(items, days=days)
+        return {
+            "daily_confidence": report.daily_confidence,
+            "overall_trend": report.overall_trend,
+            "trend_slope": report.trend_slope,
+            "best_day": report.best_day,
+            "worst_day": report.worst_day,
+            "confidence_distribution": report.confidence_distribution,
+        }
+
+    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сравнивает статистику двух временных периодов."""
+        p1_start = params.get("period1_start")
+        p1_end = params.get("period1_end")
+        p2_start = params.get("period2_start")
+        p2_end = params.get("period2_end")
+        if not all([p1_start, p1_end, p2_start, p2_end]):
+            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
+        report = _compare_periods_fn(
+            store=self.store,
+            period1_start=p1_start,
+            period1_end=p1_end,
+            period2_start=p2_start,
+            period2_end=p2_end,
+        )
+        from dataclasses import asdict
+        return {
+            "period1": {
+                "recordings": report.period1.recordings,
+                "duration_sec": report.period1.duration_sec,
+                "words": report.period1.words,
+                "avg_confidence": report.period1.avg_confidence,
+                "languages": report.period1.languages,
+            },
+            "period2": {
+                "recordings": report.period2.recordings,
+                "duration_sec": report.period2.duration_sec,
+                "words": report.period2.words,
+                "avg_confidence": report.period2.avg_confidence,
+                "languages": report.period2.languages,
+            },
+            "recordings_change_pct": report.recordings_change_pct,
+            "duration_change_pct": report.duration_change_pct,
+            "confidence_change": report.confidence_change,
+            "new_languages": report.new_languages,
+            "summary": report.summary,
+        }
+
+    def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Проверяет целостность файлов данных Krab Ear."""
+        report = self._integrity_checker.check_integrity(self.store.data_dir)
+        return {
+            "status": report.status,
+            "total_items": report.total_items,
+            "orphaned_tombstones": report.orphaned_tombstones,
+            "invalid_json_lines": report.invalid_json_lines,
+            "checks": [
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "message": c.message,
+                    "auto_fixable": c.auto_fixable,
+                }
+                for c in report.checks
+            ],
+        }
+
+    def _handle_repair_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Исправляет автоматически устраняемые проблемы целостности данных."""
+        report = self._integrity_checker.check_integrity(self.store.data_dir)
+        result = self._integrity_checker.repair(self.store.data_dir, report)
+        return {
+            "fixed": result.fixed,
+            "skipped": result.skipped,
+            "details": result.details,
+        }
+
+    def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Извлекает ключевые термины из текста."""
+        text = params.get("text", "")
+        language = params.get("language", "ru")
+        if not text:
+            return {"terms": []}
+        terms = self._term_extractor.extract_terms(text, language=language)
+        return {
+            "terms": [
+                {
+                    "term": t.term,
+                    "score": t.score,
+                    "frequency": t.frequency,
+                    "language": t.language,
+                    "category": t.category,
+                }
+                for t in terms
+            ]
+        }
+
+    def _handle_compare_texts(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сравнивает два текста или две записи истории по ID."""
+        item_id_1 = params.get("item_id_1")
+        item_id_2 = params.get("item_id_2")
+        text1 = params.get("text1", "")
+        text2 = params.get("text2", "")
+
+        if item_id_1 and item_id_2:
+            result = self._text_comparator.compare_items(item_id_1, item_id_2, self.store)
+        else:
+            result = self._text_comparator.compare_texts(text1, text2)
+
+        return {
+            "similarity": result.similarity,
+            "text_1": result.text_1,
+            "text_2": result.text_2,
+            "common_phrases": result.common_phrases,
+            "unique_to_1": result.unique_to_1,
+            "unique_to_2": result.unique_to_2,
+            "word_count_diff": result.word_count_diff,
+            "summary": result.summary,
+        }
+
+    # ── Hallucination patterns management ───────────────────────────────────
+
+    def _handle_add_hallucination_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет пользовательский паттерн галлюцинации."""
+        pattern = str(params.get("pattern", "")).strip()
+        category = str(params.get("category", "custom")).strip() or "custom"
+        if not pattern:
+            raise RuntimeError("Параметр 'pattern' обязателен")
+        entry = self._hallucination_manager.add_pattern(pattern, category=category)
+        return {"added": entry}
+
+    def _handle_remove_hallucination_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет пользовательский паттерн галлюцинации."""
+        pattern = str(params.get("pattern", "")).strip()
+        if not pattern:
+            raise RuntimeError("Параметр 'pattern' обязателен")
+        removed = self._hallucination_manager.remove_pattern(pattern)
+        return {"removed": removed}
+
+    def _handle_list_hallucination_patterns(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает все паттерны галлюцинаций (встроенные + пользовательские)."""
+        patterns = self._hallucination_manager.list_patterns()
+        return {"patterns": patterns, "total": len(patterns)}
 
 
 class IPCServer:

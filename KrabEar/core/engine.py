@@ -28,6 +28,7 @@ import torch
 from pyannote.audio import Pipeline
 
 from .config import settings
+from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
 from .utils import TextUtils
 
@@ -102,6 +103,7 @@ class AudioEngine:
         self._llm_rewriter = llm_rewriter
         self._last_llm_diff = None
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._confidence_calibrator = ConfidenceCalibrator()
 
         logger.info(
             "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d, LLM=%s",
@@ -311,7 +313,23 @@ class AudioEngine:
                 confidence = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
 
             duration = time.time() - start_time
-            logger.info("STT готово: %.2fs, уверенность: %.2f, язык: %s", duration, confidence, resolved_lang or "auto")
+
+            # 5a. Калибровка уверенности
+            audio_duration_sec = result.get("audio_duration_sec", duration)
+            calibrated_score = self._confidence_calibrator.calibrate_detailed(
+                raw_confidence=confidence,
+                duration_sec=audio_duration_sec,
+                language=result.get("language", resolved_lang) or "",
+                model=result.get("model_used", self.current_model) or "",
+            )
+
+            logger.info(
+                "STT готово: %.2fs, уверенность: raw=%.2f calibrated=%.2f, язык: %s",
+                duration,
+                confidence,
+                calibrated_score.calibrated,
+                resolved_lang or "auto",
+            )
 
             return {
                 "text": text,
@@ -335,7 +353,9 @@ class AudioEngine:
                     if llm_diff is not None
                     else None
                 ),
-                "confidence": round(confidence, 3),
+                "confidence": round(calibrated_score.calibrated, 3),
+                "raw_confidence": round(confidence, 3),
+                "confidence_adjustments": calibrated_score.adjustments,
                 "duration_ms": int(duration * 1000),
                 "engine": result.get("engine", "mlx-whisper"),
                 "model": result.get("model_used", self.current_model),

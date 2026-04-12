@@ -862,6 +862,149 @@ class HistoryService:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     # ------------------------------------------------------------------
+    # JSON export (structured, machine-readable)
+    # ------------------------------------------------------------------
+
+    def handle_export_history_json(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует историю транскрипций в структурированный JSON.
+
+        Параметры:
+            limit (int): максимальное количество записей (по умолчанию 500, макс 5000)
+            from_ts (str|None): начало диапазона (ISO timestamp или YYYY-MM-DD)
+            to_ts (str|None): конец диапазона (ISO timestamp или YYYY-MM-DD)
+            paste_status (str|None): фильтр по статусу вставки
+            pretty (bool): форматировать JSON с отступами (по умолчанию True)
+            save_to_file (bool): если True, сохранить файл в transcripts/
+            copy_to_clipboard (bool): если True, скопировать JSON в буфер обмена
+
+        Возвращает:
+            ok (bool): True при успехе
+            entries (int): количество экспортированных записей
+            chars (int): размер JSON в символах
+            path (str|None): путь к файлу, если save_to_file=True
+        """
+        import json as _json
+        import subprocess
+
+        limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
+        from_ts = params.get("from_ts")
+        from_ts_str = None if from_ts is None else str(from_ts)
+        to_ts = params.get("to_ts")
+        to_ts_str = None if to_ts is None else str(to_ts)
+        paste_status = params.get("paste_status")
+        paste_status_str = None if paste_status is None else str(paste_status)
+        pretty = self._coerce_bool(params.get("pretty", True), default=True)
+
+        items_dicts, _ = self.store.get_history_page_filtered(
+            cursor=None,
+            limit=limit,
+            paste_status=paste_status_str,
+            translation_mode=None,
+            from_ts=from_ts_str,
+            to_ts=to_ts_str,
+        )
+
+        from backend.models import HistoryItem as _HI
+
+        # Загружаем все аннотации одним вызовом для эффективности (без N+1)
+        with self.store._lock():
+            annotation_map: dict[str, str] = self.store._load_annotation_overrides_unlocked()
+
+        entries: list[dict] = []
+        for d in items_dicts:
+            item = _HI.from_dict(d)
+
+            # Блок перевода
+            translation_block: dict | None = None
+            if item.translated_text or item.translation_status not in (None, "", "not_requested"):
+                translation_block = {
+                    "text": item.translated_text or None,
+                    "engine": item.translation_engine or None,
+                    "status": item.translation_status or None,
+                    "mode": item.translation_mode or None,
+                    "source_lang": item.source_lang or None,
+                    "target_lang": item.target_lang or None,
+                }
+
+            # Блок диаризации
+            diarization_block: dict | None = None
+            diar = item.diarization
+            if diar and isinstance(diar, dict):
+                turns = diar.get("speaker_turns", [])
+                segments = diar.get("speaker_segments", [])
+                speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+                diarization_block = {
+                    "enabled": bool(diar.get("enabled", False)),
+                    "speakers": len(speakers),
+                    "segments": turns or segments,
+                }
+
+            entry: dict = {
+                "id": item.id,
+                "timestamp": item.ts,
+                "text": item.text,
+                "language": item.source_lang or None,
+                "confidence": item.confidence if item.confidence is not None else None,
+                "duration_sec": item.audio_duration_sec if item.audio_duration_sec is not None else None,
+                "paste_status": item.paste_status or None,
+                "translation": translation_block,
+                "diarization": diarization_block,
+                "tags": list(item.tags) if item.tags else [],
+                "favorite": bool(item.favorite) if item.favorite is not None else False,
+                "annotation": annotation_map.get(item.id) or None,
+            }
+            entries.append(entry)
+
+        export_ts = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "export_info": {
+                "version": "2.0",
+                "exported_at": export_ts,
+                "total_entries": len(entries),
+                "filters": {
+                    "from_ts": from_ts_str,
+                    "to_ts": to_ts_str,
+                    "paste_status": paste_status_str,
+                    "limit": limit,
+                },
+            },
+            "entries": entries,
+        }
+
+        indent = 2 if pretty else None
+        json_text = _json.dumps(payload, ensure_ascii=False, indent=indent)
+
+        save_path: str | None = None
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                transcripts_dir.mkdir(exist_ok=True)
+                filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                file_path = transcripts_dir / filename
+                file_path.write_text(json_text, encoding="utf-8")
+                save_path = str(file_path)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить JSON-экспорт в файл: %s", exc)
+
+        if self._coerce_bool(params.get("copy_to_clipboard", False), default=False):
+            try:
+                subprocess.run(
+                    ["pbcopy"],
+                    input=json_text.encode("utf-8"),
+                    check=False,
+                    timeout=5,
+                )
+            except Exception as exc:
+                logger.warning("Не удалось скопировать JSON в буфер обмена: %s", exc)
+
+        return {
+            "ok": True,
+            "entries": len(entries),
+            "chars": len(json_text),
+            "path": save_path,
+        }
+
+    # ------------------------------------------------------------------
     # CSV export
     # ------------------------------------------------------------------
 
@@ -1908,41 +2051,13 @@ class HistoryService:
     # Частотный анализ слов
     # ------------------------------------------------------------------
 
-    # Стоп-слова для русского, испанского, английского
-    _STOP_WORDS: frozenset = frozenset({
-        # RU предлоги/частицы/союзы
-        "в", "на", "с", "по", "из", "от", "до", "за", "под", "над", "к", "о",
-        "об", "про", "при", "для", "без", "через", "между", "перед", "после",
-        "во", "со", "ко", "не", "ни", "бы", "же", "ли", "и", "а", "но", "да",
-        "то", "или", "что", "как", "так", "уже", "ещё", "еще", "все", "этот",
-        "это", "эта", "этой", "этого", "этим", "этих", "он", "она", "оно", "они",
-        "мы", "вы", "я", "его", "её", "ее", "их", "мой", "твой", "наш", "ваш",
-        "свой", "себя", "тот", "та", "те", "такой", "такие", "быть", "есть",
-        "был", "была", "были", "будет", "будут", "там", "здесь", "тут", "где",
-        "когда", "потому", "потом", "затем", "вот", "ну", "вдруг", "если", "нет",
-        "очень", "более", "менее", "больше", "меньше", "можно", "нужно", "надо",
-        # ES
-        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
-        "al", "en", "con", "por", "para", "sin", "sobre", "entre", "ante",
-        "bajo", "desde", "hasta", "hacia", "durante", "y", "e", "o", "u",
-        "pero", "sino", "que", "como", "si", "se", "me", "te", "le", "nos",
-        "os", "les", "lo", "su", "sus", "mi", "mis", "tu", "tus", "este",
-        "esta", "estos", "estas", "ese", "esa", "esos", "esas", "yo",
-        "él", "ella", "ellos", "ellas", "usted", "ustedes", "nosotros",
-        "vosotros", "es", "son", "era", "fue", "ser", "estar", "hay", "ya",
-        "no", "más", "muy", "bien", "también", "sí", "así", "todo", "todos",
-        # EN
-        "the", "a", "an", "of", "in", "on", "at", "to", "for", "with", "by",
-        "from", "up", "about", "into", "through", "during", "before", "after",
-        "above", "below", "between", "out", "off", "over", "under", "again",
-        "and", "but", "or", "nor", "so", "yet", "both", "either", "neither",
-        "not", "is", "are", "was", "were", "be", "been", "being", "have",
-        "has", "had", "do", "does", "did", "will", "would", "could", "should",
-        "may", "might", "shall", "can", "must", "it", "its", "this", "that",
-        "these", "those", "i", "you", "he", "she", "we", "they", "me", "him",
-        "her", "us", "them", "my", "your", "his", "our", "their", "what",
-        "which", "who", "when", "where", "how", "all", "each", "more", "also",
-    })
+    # Стоп-слова: ru + es + en + uk из core.stop_words
+    _STOP_WORDS: frozenset = (
+        __import__("core.stop_words", fromlist=["StopWords"]).StopWords.get_stop_words("ru")
+        | __import__("core.stop_words", fromlist=["StopWords"]).StopWords.get_stop_words("es")
+        | __import__("core.stop_words", fromlist=["StopWords"]).StopWords.get_stop_words("en")
+        | __import__("core.stop_words", fromlist=["StopWords"]).StopWords.get_stop_words("uk")
+    )
 
     @staticmethod
     def _tokenize(text: str) -> list:

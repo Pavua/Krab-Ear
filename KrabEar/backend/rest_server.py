@@ -30,6 +30,7 @@ from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
 from backend.metrics_collector import metrics
+from backend.api_versioning import api_version_header, get_api_info
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +49,9 @@ app.config["OPENAPI_SWAGGER_UI_URL"] = "https://cdn.jsdelivr.net/npm/swagger-ui-
 
 api = Api(app)
 sock = Sock(app)
+
+# Attach API version header to every response.
+app.after_request(api_version_header())
 
 # ---------------------------------------------------------------------------
 # CORS — разрешает кросс-доменные запросы из браузера.
@@ -268,6 +272,12 @@ monitoring_blp = Blueprint(
     url_prefix="",
     description="Liveness, readiness, and metrics endpoints",
 )
+
+
+@monitoring_blp.route("/info", methods=["GET"])
+def api_info():
+    """Return API version metadata — supported versions, current default, deprecated."""
+    return jsonify(get_api_info())
 
 
 @monitoring_blp.route("/health", methods=["GET"])

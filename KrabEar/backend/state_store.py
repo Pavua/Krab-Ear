@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .models import DEFAULT_SETTINGS, HistoryItem
+from core.search_index import SearchIndex
 
 logger = logging.getLogger("KrabEar.Backend.Store")
 
@@ -53,6 +54,9 @@ class StateStore:
         self._recent_search_index_signature: tuple[int, ...] | None = None
         self._recent_search_index: list[tuple[HistoryItem, str]] = []
         self._recent_search_index_limit = 4000
+
+        # Инвертированный индекс для быстрого полнотекстового поиска.
+        self._search_index: SearchIndex = SearchIndex()
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -254,6 +258,29 @@ class StateStore:
         with self._lock():
             active = self._load_active_items_unlocked()
             recent_index = self._get_recent_search_index_unlocked(active)
+
+        # Быстрый путь через инвертированный индекс (без фильтров по дате/статусу).
+        no_extra_filters = (
+            filter_paste is None
+            and filter_mode is None
+            and filter_translation_status is None
+            and filter_from_ts is None
+            and filter_to_ts is None
+        )
+        if needle and no_extra_filters:
+            self._search_index.build_index([item.to_dict() for item in active])
+            idx_results = self._search_index.search(needle, limit=safe_cursor + safe_limit)
+            if idx_results is not None:
+                # idx_results — неупорядоченные по времени; восстанавливаем порядок.
+                matched_ids = {r.item_id for r in idx_results}
+                filtered_by_index = [
+                    item for item in reversed(active) if item.id in matched_ids
+                ]
+                start = safe_cursor
+                end = safe_cursor + safe_limit
+                page = filtered_by_index[start:end]
+                next_cursor = str(end) if end < len(filtered_by_index) else None
+                return [item.to_dict() for item in page], next_cursor
 
         # Быстрый путь: проверяем сначала последние N записей.
         # Если найденных результатов достаточно для текущей страницы,
