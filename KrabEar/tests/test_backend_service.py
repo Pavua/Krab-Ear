@@ -1634,5 +1634,93 @@ class GlossarySuggestionsTestCase(unittest.TestCase):
                 self.assertIn(field, s)
 
 
+class BackendServiceInitTestCase(unittest.TestCase):
+    """Проверяет корректную инициализацию BackendService и таблицу диспетчеризации."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def request(self, method: str, params=None, request_id="t1"):
+        return self.service.handle_request(
+            {"id": request_id, "method": method, "params": params or {}}
+        )
+
+    def test_dispatch_table_has_all_methods(self):
+        """Все IPC-методы присутствуют в таблице диспетчеризации."""
+        # Собираем список доступных методов через ping + unknown probe
+        expected_methods = [
+            "ping",
+            "start_recording",
+            "stop_recording",
+            "get_recording_state",
+            "start_call_assist",
+            "stop_call_assist",
+            "get_call_assist_state",
+            "get_history_page",
+            "search_history",
+            "delete_history_item",
+            "get_settings",
+            "set_settings",
+            "translate_text",
+            "get_diagnostics",
+            "summarize_text",
+            "get_clipboard_history",
+            "get_audio_devices",
+            "test_microphone",
+            "list_profile_presets",
+            "apply_profile_preset",
+            "get_storage_info",
+            "cleanup_old_history",
+        ]
+        for method in expected_methods:
+            resp = self.request(method)
+            self.assertNotEqual(
+                resp.get("result", {}).get("error") if not resp.get("ok") else None,
+                "unknown_method",
+                msg=f"Метод '{method}' отсутствует в таблице диспетчеризации",
+            )
+            # unknown_method error means method not in dispatch table
+            if not resp.get("ok"):
+                error_code = resp.get("error", {}).get("code", "")
+                self.assertNotEqual(
+                    error_code,
+                    "unknown_method",
+                    msg=f"Метод '{method}' отсутствует в таблице диспетчеризации",
+                )
+
+    def test_call_assist_service_wired(self):
+        """CallAssistService инициализирован и доступен через _call_assist."""
+        self.assertTrue(
+            hasattr(self.service, "_call_assist"),
+            "_call_assist должен быть атрибутом BackendService",
+        )
+        call_assist = self.service._call_assist
+        self.assertTrue(
+            hasattr(call_assist, "handle_start"),
+            "CallAssistService должен иметь метод handle_start",
+        )
+
+    def test_start_time_set(self):
+        """_start_time устанавливается при инициализации для расчёта uptime."""
+        self.assertTrue(
+            hasattr(self.service, "_start_time"),
+            "_start_time должен быть атрибутом BackendService",
+        )
+        self.assertIsInstance(self.service._start_time, float)
+        self.assertGreater(self.service._start_time, 0.0)
+        # uptime должен быть неотрицательным
+        resp = self.request("ping")
+        self.assertTrue(resp["ok"])
+        self.assertGreaterEqual(resp["result"]["uptime_sec"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
