@@ -1722,5 +1722,96 @@ class BackendServiceInitTestCase(unittest.TestCase):
         self.assertGreaterEqual(resp["result"]["uptime_sec"], 0.0)
 
 
+class BackendServiceErrorHandlingTestCase(unittest.TestCase):
+    """Test graceful error handling for edge cases."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def _is_valid_response(self, resp) -> bool:
+        """Проверяет, что ответ является валидным словарём с полем ok."""
+        self.assertIsInstance(resp, dict, "Ответ должен быть словарём")
+        self.assertIn("ok", resp, "Ответ должен содержать поле ok")
+        # Должна быть возможность сериализовать ответ в JSON без исключений
+        json.dumps(resp)
+        return True
+
+    def test_handle_request_missing_method(self) -> None:
+        """Запрос без ключа method должен вернуть валидный ответ (unknown_method), а не упасть."""
+        resp = self.service.handle_request({"id": "e1", "params": {}})
+        self._is_valid_response(resp)
+        # method="" приведёт к unknown_method
+        self.assertFalse(resp["ok"])
+        self.assertIn("error", resp)
+
+    def test_handle_request_null_params(self) -> None:
+        """Метод с params=None должен вернуть ошибку invalid_params, не крашиться."""
+        resp = self.service.handle_request({"id": "e2", "method": "ping", "params": None})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+
+    def test_handle_request_empty_params(self) -> None:
+        """Метод ping с params={} должен работать нормально."""
+        resp = self.service.handle_request({"id": "e3", "method": "ping", "params": {}})
+        self._is_valid_response(resp)
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["result"]["status"], "ok")
+
+    def test_handle_request_invalid_json_type(self) -> None:
+        """params в виде строки вместо dict должен вернуть ошибку invalid_params."""
+        resp = self.service.handle_request({"id": "e4", "method": "ping", "params": "not_a_dict"})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+
+    def test_handle_request_very_long_method(self) -> None:
+        """Метод с именем >1000 символов должен вернуть unknown_method, а не упасть."""
+        long_method = "x" * 1001
+        resp = self.service.handle_request({"id": "e5", "method": long_method, "params": {}})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "unknown_method")
+
+    def test_concurrent_requests(self) -> None:
+        """10 параллельных запросов ping не должны вызывать краш или data race."""
+        import threading
+
+        results: list[dict] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def do_request(i: int) -> None:
+            try:
+                resp = self.service.handle_request(
+                    {"id": f"c{i}", "method": "ping", "params": {}}
+                )
+                with lock:
+                    results.append(resp)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=do_request, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(len(errors), 0, f"Исключения в потоках: {errors}")
+        self.assertEqual(len(results), 10, "Должно быть ровно 10 ответов")
+        for resp in results:
+            self._is_valid_response(resp)
+            self.assertTrue(resp["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()
