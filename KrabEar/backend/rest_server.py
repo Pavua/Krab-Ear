@@ -8,7 +8,7 @@ import time
 import uuid
 import logging
 from pathlib import Path
-from flask import Flask, Response, request, jsonify, stream_with_context
+from flask import Flask, Response, request, jsonify, stream_with_context, g
 from werkzeug.utils import secure_filename
 
 from core.config import settings
@@ -27,6 +27,19 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max
 
 ALLOWED_EXTENSIONS = {'.wav', '.mp3', '.ogg', '.m4a', '.flac', '.opus', '.webm', '.mp4', '.aac'}
+
+
+@app.before_request
+def start_timer():
+    g._request_start = time.time()
+
+
+@app.after_request
+def log_request(response):
+    logger.info("%s %s %s %dms", request.method, request.path, response.status_code,
+                int((time.time() - g.get('_request_start', time.time())) * 1000))
+    return response
+
 
 VALID_QUALITY = {"fast", "balanced", "accurate"}
 VALID_CLEANUP = {"off", "soft", "strict"}
@@ -62,6 +75,9 @@ def get_metrics():
     """Возвращает агрегированные метрики производительности и качества."""
     return jsonify(metrics.get_summary())
 
+MAX_VOCABULARY_SIZE = 500
+MAX_WORD_LENGTH = 100
+
 @app.route("/v1/vocabulary", methods=["GET", "POST"])
 def manage_vocabulary():
     """Управление пользовательским словарем (для улучшения распознавания редких слов)."""
@@ -70,9 +86,13 @@ def manage_vocabulary():
         new_words = data.get("words", [])
         if not isinstance(new_words, list):
             return jsonify({"error": "words must be a list"}), 400
-        
+
+        # Validate each word: strip, truncate, drop empty
+        new_words = [str(w).strip()[:MAX_WORD_LENGTH] for w in new_words if str(w).strip()]
         current = store.load_vocabulary()
-        updated = list(set(current + [str(w).strip() for w in new_words]))
+        updated = list(set(current + new_words))
+        if len(updated) > MAX_VOCABULARY_SIZE:
+            return jsonify({"error": f"Vocabulary limit exceeded ({MAX_VOCABULARY_SIZE} words max)"}), 400
         store.save_vocabulary(updated)
         return jsonify({"status": "ok", "count": len(updated)})
     

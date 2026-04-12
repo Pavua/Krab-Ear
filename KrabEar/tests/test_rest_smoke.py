@@ -121,6 +121,39 @@ class VocabularyEndpointTest(unittest.TestCase):
         resp = self.client.get("/v1/vocabulary")
         self.assertIn("application/json", resp.content_type)
 
+    def test_vocabulary_post_valid_words_returns_200(self):
+        _mock_store.load_vocabulary.return_value = []
+        resp = self.client.post(
+            "/v1/vocabulary",
+            json={"words": ["антигравитация", "краб", "whisper"]},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("count", data)
+        self.assertIsInstance(data["count"], int)
+
+    def test_vocabulary_post_empty_list_returns_200(self):
+        _mock_store.load_vocabulary.return_value = []
+        resp = self.client.post(
+            "/v1/vocabulary",
+            json={"words": []},
+        )
+        # Пустой список — допустимый запрос; сервер должен принять его без ошибки
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["count"], 0)
+
+    def test_vocabulary_post_non_list_words_returns_400(self):
+        resp = self.client.post(
+            "/v1/vocabulary",
+            json={"words": "не список"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("error", data)
+
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class TranscribeEndpointTest(unittest.TestCase):
@@ -135,6 +168,35 @@ class TranscribeEndpointTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         data = resp.get_json()
         self.assertIn("error", data)
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class ReadinessEndpointTest(unittest.TestCase):
+    """Тесты эндпоинта /v1/readiness."""
+
+    def setUp(self):
+        app.config["TESTING"] = True
+        self.client = app.test_client()
+
+    def test_readiness_returns_valid_status_code(self):
+        resp = self.client.get("/v1/readiness")
+        self.assertIn(resp.status_code, (200, 503))
+
+    def test_readiness_json_has_overall_ready(self):
+        resp = self.client.get("/v1/readiness")
+        data = resp.get_json()
+        self.assertIn("overall_ready", data)
+        self.assertIsInstance(data["overall_ready"], bool)
+
+    def test_readiness_json_has_components(self):
+        resp = self.client.get("/v1/readiness")
+        data = resp.get_json()
+        # Должен содержать хотя бы один ключ-компонент помимо overall_ready
+        self.assertGreater(len(data), 1)
+
+    def test_readiness_content_type(self):
+        resp = self.client.get("/v1/readiness")
+        self.assertIn("application/json", resp.content_type)
 
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
