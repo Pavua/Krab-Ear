@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     # Пример: "http://localhost:3000,https://app.example.com"
     CORS_ORIGINS: str = "*"
 
+    # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
+    SMART_SILENCE_SKIP_ENABLED: bool = False
+
     # Pipeline v2 feature flag.
     # True = BackendService использует transcribe_v2() (pipeline-based path).
     # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).
@@ -174,6 +177,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "llm_rewrite_enabled": False,
     # Автосохранение каждой транскрибации в .md файл в transcripts/.
     "auto_save_transcripts": False,
+    # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
+    "smart_silence_skip_enabled": False,
     # --- Настройки уведомлений ---
     # Мастер-переключатель уведомлений.
     "notifications_enabled": True,

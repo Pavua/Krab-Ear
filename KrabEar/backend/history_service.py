@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.fuzzy_search import FuzzySearcher
+from core.search_highlighter import SearchHighlighter
 
 from core.duplicate_detector import DuplicateDetector
 from backend.summary_profiles import SummaryProfileManager
@@ -168,6 +169,63 @@ class HistoryService:
             })
 
         return {"matches": results}
+
+    def handle_search_with_highlights(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Поиск по истории с подсветкой совпадений в результатах.
+
+        Выполняет обычный поиск через store.search_history и дополнительно
+        добавляет поля highlighted_text и snippets с подсвеченными совпадениями.
+
+        Params:
+            query (str): поисковый запрос.
+            marker (str): маркер для подсветки, по умолчанию '**'.
+            context_chars (int): кол-во символов контекста в сниппетах, по умолчанию 50.
+            max_snippets (int): максимальное кол-во сниппетов на запись, по умолчанию 3.
+            limit (int): максимальное кол-во результатов, по умолчанию 50.
+            cursor (str | None): курсор пагинации.
+
+        Returns:
+            {"items": [...], "next_cursor": ...}
+            Каждый элемент содержит дополнительные поля:
+              - highlighted_text (str): текст с маркерами вокруг совпадений
+              - snippets (list[str]): контекстные сниппеты
+        """
+        query = str(params.get("query", "")).strip()
+        marker = str(params.get("marker", "**"))
+        context_chars = int(params.get("context_chars", 50))
+        max_snippets = int(params.get("max_snippets", 3))
+        cursor = params.get("cursor")
+        cursor_str = None if cursor is None else str(cursor)
+        limit = int(params.get("limit", 50))
+
+        if not query:
+            return {"items": [], "next_cursor": None}
+
+        items, next_cursor = self.store.search_history(
+            query=query,
+            cursor=cursor_str,
+            limit=limit,
+            paste_status=None,
+            translation_mode=None,
+            translation_status=None,
+            from_ts=None,
+            to_ts=None,
+        )
+
+        highlighter = SearchHighlighter()
+        results = []
+        for item in items:
+            text = item.get("text", "") or ""
+            enriched = dict(item)
+            enriched["highlighted_text"] = highlighter.highlight(text, query, marker=marker)
+            enriched["snippets"] = highlighter.extract_snippets(
+                text, query,
+                context_chars=context_chars,
+                max_snippets=max_snippets,
+            )
+            results.append(enriched)
+
+        return {"items": results, "next_cursor": next_cursor}
 
     def handle_delete_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
         item_id = str(params.get("id", "")).strip()

@@ -40,6 +40,7 @@ from backend.ipc_throttle import IPCThrottle
 from backend.call_assist_service import CallAssistService
 from backend.collection_manager import CollectionManager
 from backend.recording_chain import RecordingChainManager
+from backend.recording_merger import RecordingMerger
 from backend.recording_scheduler import RecordingScheduler
 from backend.error_reporter import ErrorReporter
 from backend.history_service import HistoryService
@@ -81,6 +82,9 @@ from core.speech_pace import SpeechPaceAnalyzer
 from backend.sharing_manager import SharingManager
 from backend.transcript_versioning import TranscriptVersionManager
 from core.context_memory import ContextMemory
+from core.auto_title import AutoTitleGenerator
+from backend.language_learning import LanguageLearningManager
+from core.paste_formatter import PasteFormatter
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -177,17 +181,22 @@ class BackendService:
         self._term_extractor = TermExtractor()
         self._readability_scorer = ReadabilityScorer()
         self._audio_fingerprinter = AudioFingerprinter()
+        self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
         self._readability_scorer = ReadabilityScorer()
+        self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
+        self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
+        self._language_learning = LanguageLearningManager()
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
+        self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -391,6 +400,13 @@ class BackendService:
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
+            "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
+            "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
+            "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
+            "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: WPM, CPM, категория темпа
+            "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
+            "format_for_paste": self._paste_formatter.handle_format_for_paste,  # форматирование текста под целевое приложение (telegram, notes, email и др.)
+            "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
         }
 
         handler = handlers.get(method)
@@ -2467,6 +2483,22 @@ class BackendService:
             "longest_sentence": report.longest_sentence,
             "shortest_sentence": report.shortest_sentence,
         }
+
+    def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует темп речи транскрибации.
+
+        Params:
+            text (str): транскрибированный текст.
+            duration_sec (float): длительность аудиозаписи в секундах.
+
+        Returns:
+            Словарь с полями PaceReport: words_per_minute, chars_per_minute,
+            pace_category, estimated_reading_time_sec, word_count, char_count, duration_sec.
+        """
+        text = params.get("text", "")
+        duration_sec = float(params.get("duration_sec", 0.0))
+        report = self._speech_pace_analyzer.analyze(text=text, duration_sec=duration_sec)
+        return report.as_dict()
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует данные облака ключевых слов из истории транскрипций."""
