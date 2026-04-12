@@ -24,8 +24,6 @@ import sys
 import threading
 import time
 from typing import Any, Callable
-from urllib import parse as urllib_parse
-from urllib import error as urllib_error, request as urllib_request
 import uuid
 
 import numpy as np
@@ -239,7 +237,18 @@ class BackendService:
             return self._error(request_id, "internal_error", str(exc))
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"status": "ok", "service": "krabear-backend", "version": "1.0.0"}
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+        return {
+            "status": "ok",
+            "service": "krabear-backend",
+            "version": "1.0.0",
+            "uptime_sec": round(time.monotonic() - self._start_time, 1),
+            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
+            "history_count": history_count,
+        }
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         started = self.recorder.start()
