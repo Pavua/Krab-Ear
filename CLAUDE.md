@@ -17,22 +17,29 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 │  Swift Agent (macOS)    │ ◄────────────────────────── ►│  Python Backend      │
 │  - HotkeyManager        │                              │  - IPCServer         │
 │  - PasteService         │                              │  - BackendService    │
-│  - HistoryPanel         │    Krab Ear.app/             │  - AudioRecorder     │
-│  - BackendSupervisor    │    (bundle wraps agent       │  - Transcriber       │
-│  - KrabEarTheme         │     + Python venv)           │  - Translator        │
-│  - CollapsibleSection   │                              │  - LLMRewriter       │
-│  - RealtimeOverlay      │                              │  - StateStore (NDJSON)│
-│  - NotificationService  │                              │  - MetricsCollector  │
-│  - LaunchAgentManager   │                              │  - VGWSClient        │
-│  - SystemAudioDucking   │                              └──────────────────────┘
-└─────────────────────────┘
+│  - HistoryPanel         │    Krab Ear.app/             │    → CallAssistSvc   │
+│  - BackendSupervisor    │    (bundle wraps agent       │    → HistorySvc      │
+│  - KrabEarTheme         │     + Python venv)           │    → TranslationSvc  │
+│  - CollapsibleSection   │                              │    → SettingsSvc     │
+│  - RealtimeOverlay      │                              │  - AudioRecorder     │
+│  - NotificationService  │                              │  - Transcriber       │
+│  - LaunchAgentManager   │                              │  - Translator        │
+│  - SystemAudioDucking   │                              │  - LLMRewriter       │
+│                         │                              │  - StateStore (NDJSON)│
+│                         │                              │  - MetricsCollector  │
+│                         │                              │  - VGWSClient        │
+└─────────────────────────┘                              └──────────────────────┘
 ```
 
 ### Key layers inside `KrabEar/`:
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~2700 lines. The `handle_request` method dispatches JSON-RPC methods.
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~1969 lines. The `handle_request` method dispatches JSON-RPC methods, delegating to 4 extracted services.
+- **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
+- **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
+- **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
+- **`backend/settings_service.py`** — `SettingsService`: settings CRUD, profile presets, 5s TTL cache.
 - **`backend/recorder.py`** — `AudioRecorder`: thread-safe start/stop audio capture via `sounddevice`.
 - **`backend/state_store.py`** — `StateStore`: append-only NDJSON history with tombstone deletes, file-lock, and compaction. Settings stored as `settings.json`.
 - **`backend/transcriber.py`** — Thin wrapper over `AudioEngine` for profile/vocabulary management.
@@ -110,7 +117,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 367 tests.
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 411 tests.
 
 ### Swift agent
 
@@ -157,6 +164,8 @@ make lint          # Flake8 on Python backend
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
+- **Service extraction pattern**: each extracted service takes `store` + specific collaborators in its constructor; handler methods named `handle_*`; `BackendService` imports the service and delegates matching IPC methods to it.
+- **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`.
 - **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
 - **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`). When set to `json`, all backend log output uses structured JSON lines for easier parsing/filtering.
 - **GitHub Actions CI**: `.github/workflows/ci.yml` runs Python tests (pytest) and Swift build on every push/PR.
