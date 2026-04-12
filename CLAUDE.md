@@ -48,6 +48,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - Communicates with backend exclusively through Unix socket JSON-RPC.
 - Resolves project root by checking for `KrabEar/backend/service.py`.
 - **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
+- **`HistoryPanelController.swift`** (2196 lines) + 7 extension files: `+CallAssist`, `+Diagnostics`, `+History`, `+HistoryEnhancements`, `+Import`, `+Settings` (split for maintainability).
 - **`RealtimeOverlayController.swift`** — floating overlay for live transcription feedback.
 - **`NotificationService.swift`** — macOS user notifications (confidence warnings, errors).
 - **`LaunchAgentManager.swift`** — install/remove launchd plist for auto-start.
@@ -109,7 +110,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 264 tests (260 pass, 4 skip).
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 367 tests.
 
 ### Swift agent
 
@@ -121,6 +122,16 @@ cd native/KrabEarAgent && swift build -c release
 
 # Rebuild + sign Swift agent (full cycle)
 cd native/KrabEarAgent && swift build -c release && cp -f .build/release/KrabEarAgent ../runtime/KrabEarAgent && codesign -s - -f ../runtime/KrabEarAgent
+```
+
+### Makefile shortcuts
+
+```bash
+# Use Makefile for common operations
+make test          # Run all Python tests
+make build         # Build Swift agent
+make sign          # Build + copy + codesign
+make lint          # Flake8 on Python backend
 ```
 
 ### One-click shortcuts
@@ -146,6 +157,9 @@ cd native/KrabEarAgent && swift build -c release && cp -f .build/release/KrabEar
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
+- **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
+- **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`). When set to `json`, all backend log output uses structured JSON lines for easier parsing/filtering.
+- **GitHub Actions CI**: `.github/workflows/ci.yml` runs Python tests (pytest) and Swift build on every push/PR.
 - **Profile presets**: four built-in presets (`default`, `meeting`, `translation`, `call_recording`) applied via `apply_profile_preset` IPC method. `list_profile_presets` returns their names/descriptions.
 - **Diagnostics**: `get_diagnostics` IPC method returns a structured dict with sections: `system`, `stt`, `llm`, `history`, `settings_cache`. Use for debug panels and status reporting.
 - **Metrics dashboard**: `get_metrics_dashboard` returns sliding-window latency percentiles, confidence stats, and diarization usage rate from `MetricsCollector`.

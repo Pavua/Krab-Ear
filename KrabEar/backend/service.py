@@ -197,8 +197,6 @@ class BackendService:
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "translate_text": self._handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "get_capabilities": self._handle_get_capabilities,  # UNUSED: consider deprecation (no Swift callers)
-            "get_readiness": self._handle_get_readiness,  # UNUSED: consider deprecation (no Swift callers)
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
@@ -211,7 +209,7 @@ class BackendService:
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
-            "llm_status": self._handle_llm_status,  # UNUSED: consider deprecation (no Swift callers)
+
             "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
             "export_history": self._handle_export_history,
             "export_history_srt": self._handle_export_history_srt,
@@ -1036,10 +1034,6 @@ class BackendService:
             "translation": translation,
         }
 
-    def _handle_get_readiness(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает детальный отчёт о реальной готовности компонентов."""
-        return self._build_readiness_report_static()
-
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
         try:
@@ -1078,108 +1072,6 @@ class BackendService:
             },
         }
 
-    def _handle_get_capabilities(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает матрицу доступных возможностей текущей сборки."""
-        settings = self._cached_settings()
-        diarization_probe = BackendService._probe_diarization()
-        translation_probe = BackendService._probe_translation()
-        return {
-            "stt": {
-                "offline": True,
-                "realtime_preview": True,
-                "silence_guard_enabled": bool(settings.get("silence_guard_enabled", True)),
-                "silence_guard_rms_threshold": float(settings.get("silence_guard_rms_threshold", 0.0020)),
-                "silence_guard_peak_threshold": float(settings.get("silence_guard_peak_threshold", 0.0120)),
-                "silence_guard_active_ratio_threshold": float(
-                    settings.get("silence_guard_active_ratio_threshold", 0.015)
-                ),
-                "background_guard_enabled": bool(settings.get("background_guard_enabled", True)),
-                "background_guard_min_peak": float(settings.get("background_guard_min_peak", 0.025)),
-                "background_guard_min_rms": float(settings.get("background_guard_min_rms", 0.0040)),
-                "background_guard_uniform_frame_threshold": float(
-                    settings.get("background_guard_uniform_frame_threshold", 0.0060)
-                ),
-                "background_guard_max_uniform_active_ratio": float(
-                    settings.get("background_guard_max_uniform_active_ratio", 0.92)
-                ),
-            },
-            "translation": {
-                "modes": ["off", "ru_to_es", "es_to_ru", "en_to_ru", "auto", "auto_to_ru", "bilingual_ru_es"],
-                "styles": ["neutral", "chat", "formal"],
-                "offline_default": True,
-                "network_mode": str(settings.get("network_mode", "offline_default")),
-                "modes_cached_locally": translation_probe["modes_cached"],
-                "modes_missing_offline": translation_probe["modes_missing_offline"],
-            },
-            "summarization": {
-                "available": True,
-                "modes": ["summary_short", "summary_detailed"],
-            },
-            "hotkey": {
-                "profiles": ["default", "meeting", "translation"],
-                "current_profile": str(settings.get("hotkey_profile", "default")),
-                "trigger": str(settings.get("hotkey", "right_option_toggle")),
-            },
-            "clipboard": {
-                "modes": ["always_copy", "copy_on_fail", "never_copy"],
-                "current_mode": str(settings.get("clipboard_mode", "always_copy")),
-            },
-            "audio_ducking": {
-                "enabled": bool(settings.get("audio_ducking_enabled", True)),
-                "percent": int(settings.get("audio_ducking_percent", 50)),
-                "stop_tail_trim_ms": int(settings.get("stop_tail_trim_ms", 180)),
-            },
-            "overlay": {
-                "opacity_percent": int(settings.get("overlay_opacity_percent", 45)),
-            },
-            "diarization": {
-                "import_audio_beta": diarization_probe["ready"],
-                "realtime": False,
-                "has_hf_token": diarization_probe["has_hf_token"],
-                "model_cached": diarization_probe["model_cached"],
-            },
-            "batch_import": {
-                "drag_drop_queue": True,
-                "preview_paths": True,
-                "cancel_after_current": True,
-            },
-            "system_audio": {
-                "capture_translation": True,
-                "modes": ["mic", "system_audio", "mic_plus_system"],
-                "current_mode": str(settings.get("capture_source_mode", "mic")),
-                "status": "beta",
-            },
-            "call_assist": {
-                "available": True,
-                "default_notify": bool(settings.get("call_notify_default", True)),
-                "default_auto_summary": bool(settings.get("call_auto_summary", True)),
-                "voice_gateway_url": str(settings.get("voice_gateway_url", "")),
-                "notify_modes": ["auto_on", "auto_off"],
-                "tts_modes": ["local", "cloud", "hybrid"],
-                "tools": [
-                    "diagnostics",
-                    "summary",
-                    "quick_phrase",
-                    "quick_phrase_library",
-                    "cost_estimate",
-                    "timeline",
-                    "timeline_stats",
-                    "timeline_summary",
-                    "timeline_export",
-                    "timeline_clear",
-                    "timeline_to_history",
-                ],
-            },
-            "ops": {
-                "update_channel": str(settings.get("update_channel", "stable")),
-                "channels": ["stable", "beta"],
-            },
-            "history": {
-                "text_density": str(settings.get("history_text_density", "normal")),
-                "density_modes": ["normal", "compact"],
-                "overview": True,
-            },
-        }
 
     def _handle_set_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
         """Добавляет/обновляет одну пару глоссария перевода."""
@@ -1936,35 +1828,6 @@ class BackendService:
             "summary": summary,
             "llm": True,
             "source_chars": len(text),
-        }
-
-    def _handle_llm_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает диагностическую информацию о LLM rewriter'е.
-
-        D.10a. Используется для Swift UI статус-индикатора и dev smoke тестов.
-        """
-        runtime_enabled = bool(self._cached_settings().get("llm_rewrite_enabled", False))
-
-        if self._llm_rewriter is None:
-            return {
-                "enabled": False,
-                "admin_enabled": bool(settings.LLM_ENABLED),
-                "runtime_enabled": runtime_enabled,
-                "reachable": False,
-                "model": None,
-                "circuit_state": None,
-                "last_latency_ms": None,
-                "last_error": "llm_rewriter не инициализирован",
-            }
-
-        inner = self._llm_rewriter.status()
-        reachable = bool(inner.get("reachable", False))
-        admin_enabled = True  # если мы здесь, settings.LLM_ENABLED=True (инвариант _init_llm_rewriter)
-        return {
-            **inner,
-            "admin_enabled": admin_enabled,
-            "runtime_enabled": runtime_enabled,
-            "enabled": bool(admin_enabled and runtime_enabled and reachable),
         }
 
     # ── Стоп-слова для фильтрации vocabulary suggestions ──────────────
