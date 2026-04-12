@@ -13,16 +13,19 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 ## Architecture
 
 ```
-┌─────────────────────┐      Unix socket (JSON-RPC)      ┌──────────────────────┐
-│  Swift Agent (macOS) │ ◄──────────────────────────────► │  Python Backend      │
-│  - HotkeyManager     │                                  │  - IPCServer         │
-│  - PasteService      │                                  │  - BackendService    │
-│  - HistoryPanel      │                                  │  - AudioRecorder     │
-│  - BackendSupervisor │                                  │  - Transcriber       │
-│  - KrabEarTheme      │                                  │  - Translator        │
-│  - CollapsibleSection│                                  │  - LLMRewriter       │
-└─────────────────────┘                                   │  - StateStore (NDJSON)│
-                                                          └──────────────────────┘
+┌─────────────────────────┐    Unix socket (JSON-RPC)    ┌──────────────────────┐
+│  Swift Agent (macOS)    │ ◄────────────────────────── ►│  Python Backend      │
+│  - HotkeyManager        │                              │  - IPCServer         │
+│  - PasteService         │                              │  - BackendService    │
+│  - HistoryPanel         │    Krab Ear.app/             │  - AudioRecorder     │
+│  - BackendSupervisor    │    (bundle wraps agent       │  - Transcriber       │
+│  - KrabEarTheme         │     + Python venv)           │  - Translator        │
+│  - CollapsibleSection   │                              │  - LLMRewriter       │
+│  - RealtimeOverlay      │                              │  - StateStore (NDJSON)│
+│  - NotificationService  │                              │  - MetricsCollector  │
+│  - LaunchAgentManager   │                              │  - VGWSClient        │
+│  - SystemAudioDucking   │                              └──────────────────────┘
+└─────────────────────────┘
 ```
 
 ### Key layers inside `KrabEar/`:
@@ -45,6 +48,32 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - Communicates with backend exclusively through Unix socket JSON-RPC.
 - Resolves project root by checking for `KrabEar/backend/service.py`.
 - **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
+- **`RealtimeOverlayController.swift`** — floating overlay for live transcription feedback.
+- **`NotificationService.swift`** — macOS user notifications (confidence warnings, errors).
+- **`LaunchAgentManager.swift`** — install/remove launchd plist for auto-start.
+- **`SystemAudioDuckingService.swift`** — lower system volume during recording.
+- **`PermissionWizard.swift`** — guided Accessibility + Microphone permission setup.
+
+### `.app` bundle (`Krab Ear.app/`):
+- Standard macOS app bundle (`com.antigravity.krab-ear`, LSUIElement=true, macOS 13+).
+- `Contents/MacOS/KrabEarAgent` is the compiled Swift binary (same as `native/runtime/KrabEarAgent`).
+- Build and install into bundle:
+  ```bash
+  cd native/KrabEarAgent && swift build -c release
+  cp -f .build/release/KrabEarAgent "../../Krab Ear.app/Contents/MacOS/KrabEarAgent"
+  codesign -s - -f "../../Krab Ear.app/Contents/MacOS/KrabEarAgent"
+  ```
+
+## Krab ecosystem start/stop (НЕ трогать из этого проекта!)
+
+Основной Краб (Telegram userbot) запускается/останавливается ТОЛЬКО через:
+```bash
+/Users/pablito/Antigravity_AGENTS/new\ start_krab.command   # СТАРТ
+/Users/pablito/Antigravity_AGENTS/new\ Stop\ Krab.command    # СТОП
+```
+
+**ЗАПРЕЩЕНО:** `kill -9`, `SIGHUP`, `Restart Krab.command`, прямой `python -m src.main`.
+OpenClaw Gateway: `openclaw gateway stop && sleep 2 && openclaw gateway start` (НЕ SIGHUP).
 
 ## Common Commands
 
@@ -80,7 +109,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite.
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 264 tests (260 pass, 4 skip).
 
 ### Swift agent
 
@@ -117,6 +146,17 @@ cd native/KrabEarAgent && swift build -c release && cp -f .build/release/KrabEar
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
+- **Profile presets**: four built-in presets (`default`, `meeting`, `translation`, `call_recording`) applied via `apply_profile_preset` IPC method. `list_profile_presets` returns their names/descriptions.
+- **Diagnostics**: `get_diagnostics` IPC method returns a structured dict with sections: `system`, `stt`, `llm`, `history`, `settings_cache`. Use for debug panels and status reporting.
+- **Metrics dashboard**: `get_metrics_dashboard` returns sliding-window latency percentiles, confidence stats, and diarization usage rate from `MetricsCollector`.
+- **Audio device management**: `list_audio_inputs` / `get_audio_devices` enumerate sounddevice inputs; `test_microphone` records a short clip and returns RMS/peak levels. Used by GUI audio device picker.
+- **Clipboard history**: last 20 paste items stored in memory; `get_clipboard_history` / `repaste_item` IPC methods. `cleanup_old_history` deletes NDJSON entries older than N days; `get_storage_info` returns file sizes.
+- **SRT export**: `export_history_srt` IPC method exports history items as SubRip subtitle file.
+- **Glossary auto-learn**: `get_glossary_suggestions` proposes new glossary entries from recent transcripts; `set_translation_glossary_item` / `remove_translation_glossary_item` manage the glossary.
+- **Vocabulary suggestions**: `get_vocabulary_suggestions` proposes STT vocabulary entries from recent history.
+- **Diarization on Metal GPU**: pyannote.audio + torch 2.11, device selected via `diarization_device` setting (auto-selects `mps` on Apple Silicon when available).
+- **GUI layout**: 3 tabs (Main, History, Settings) with 9 total collapsible sections. Tab state is persisted via NSUserDefaults.
+- **Call Assist**: `start_call_assist` / `stop_call_assist` and related IPC methods (`call_assist_diagnostics`, `call_assist_summary`, `call_assist_timeline_*`, `call_assist_quick_phrase`) manage a real-time call translation/assist session.
 
 ## Non-goals (from PRD)
 
