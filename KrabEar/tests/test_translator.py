@@ -215,6 +215,127 @@ class TranslatorTestCase(unittest.TestCase):
         self.assertIn("ES: hola gracias", result.text)
         self.assertIn("RU: RU:hola gracias", result.text)
 
+    # --- Новые edge-case тесты ---
+
+    def test_translate_empty_string(self) -> None:
+        """Пустой ввод (и whitespace) возвращает пустой результат без вызова модели."""
+        translator = Translator()
+        for empty in ("", "   ", "\t\n"):
+            result = translator.translate(empty, mode="ru_to_es", network_mode="offline_default")
+            self.assertEqual(result.text, "")
+            self.assertEqual(result.status, "empty_text")
+
+    def test_translate_very_long_text_chunking(self) -> None:
+        """Текст длиннее 1000 символов разбивается на несколько чанков (>1 вызова пайплайна)."""
+        translator = Translator()
+        call_counter = {"count": 0}
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                call_counter["count"] += 1
+                return [{"translation_text": f"T:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            long_text = ("Длинный текст без остановки. " * 60).strip()  # ~1740 chars
+            self.assertGreater(len(long_text), 1000)
+            result = translator.translate(long_text, mode="ru_to_es", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "ok")
+        self.assertGreater(call_counter["count"], 1, "Длинный текст должен разбиваться на >1 чанка")
+
+    def test_cache_hit(self) -> None:
+        """Один и тот же текст, переведённый дважды, использует кэш (пайплайн вызывается 1 раз)."""
+        translator = Translator()
+        calls = {"count": 0}
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                calls["count"] += 1
+                return [{"translation_text": f"ES:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            first = translator.translate("привет кэш", mode="ru_to_es", network_mode="offline_default")
+            second = translator.translate("привет кэш", mode="ru_to_es", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(first.status, "ok")
+        self.assertEqual(second.status, "ok")
+        self.assertEqual(first.text, second.text)
+        self.assertEqual(calls["count"], 1, "Второй вызов должен попасть в кэш, а не звать пайплайн снова")
+
+    def test_bilingual_mode(self) -> None:
+        """bilingual_ru_es возвращает обе языковые метки (RU: и ES:) в тексте результата."""
+        translator = Translator()
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                return [{"translation_text": f"TRANSLATED:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            result = translator.translate(
+                "привет мир bilingual",
+                mode="bilingual_ru_es",
+                network_mode="offline_default",
+            )
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.mode, "bilingual_ru_es")
+        self.assertIn("RU:", result.text)
+        self.assertIn("ES:", result.text)
+
+    def test_auto_detect_language(self) -> None:
+        """Режим auto корректно определяет язык и маршрутизирует перевод."""
+        translator = Translator()
+        calls: list[str] = []
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                calls.append(model_name)
+                return [{"translation_text": f"OUT:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            # Русский текст → должен уйти в ru_to_es
+            result_ru = translator.translate(
+                "это русский текст для авто",
+                mode="auto",
+                network_mode="offline_default",
+            )
+            # Испанский текст → должен уйти в es_to_ru
+            result_es = translator.translate(
+                "hola amigo, como estas",
+                mode="auto",
+                network_mode="offline_default",
+            )
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result_ru.status, "ok")
+        self.assertEqual(result_ru.source_lang, "ru")
+
+        self.assertEqual(result_es.status, "ok")
+        self.assertEqual(result_es.source_lang, "es")
+
     def test_cache_separates_network_modes(self) -> None:
         translator = Translator()
         calls = {"count": 0}

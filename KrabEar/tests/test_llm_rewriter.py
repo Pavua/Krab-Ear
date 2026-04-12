@@ -538,5 +538,146 @@ class LLMRewriterStatusTestCase(unittest.TestCase):
         self.assertFalse(status["reachable"])
 
 
+class LLMRewriterChatbotGuardTestCase(unittest.TestCase):
+    """test_chatbot_guard_rejects — ответы в режиме ассистента отклоняются."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+        )
+
+    def _mock_resp(self, content: str):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": content}}]}
+        return mock_resp
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_chatbot_guard_rejects_sure(self, mock_post):
+        mock_post.return_value = self._mock_resp("Sure, here is the corrected text: привет.")
+        result = self.rewriter.rewrite("привет мир тест строка")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "chatbot_response")
+        self.assertIsNone(result.text)
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_chatbot_guard_rejects_here_is(self, mock_post):
+        mock_post.return_value = self._mock_resp("Here is the corrected version: текст.")
+        result = self.rewriter.rewrite("некоторый текст для проверки guard")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "chatbot_response")
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_chatbot_guard_rejects_k_sozhaleniyu(self, mock_post):
+        mock_post.return_value = self._mock_resp("К сожалению, я не могу это исправить.")
+        result = self.rewriter.rewrite("какой-то текст для обработки guard")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "chatbot_response")
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_chatbot_guard_passes_normal_correction(self, mock_post):
+        mock_post.return_value = self._mock_resp("Привет, мир! Как дела?")
+        result = self.rewriter.rewrite("привет мир как дела")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text, "Привет, мир! Как дела?")
+
+
+class LLMRewriterLengthRatioGuardTestCase(unittest.TestCase):
+    """test_length_ratio_too_short / test_length_ratio_too_long."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+        )
+
+    def _mock_resp(self, content: str):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": content}}]}
+        return mock_resp
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_length_ratio_too_short(self, mock_post):
+        # input 100 chars, output 5 chars → ratio 0.05 < 0.35
+        long_input = "а" * 100
+        short_output = "б" * 5
+        mock_post.return_value = self._mock_resp(short_output)
+        result = self.rewriter.rewrite(long_input)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "output_too_short")
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_length_ratio_too_long(self, mock_post):
+        # input 25 chars, output 200 chars → ratio 8.0 > 3.0
+        short_input = "а" * 25
+        long_output = "б" * 200
+        mock_post.return_value = self._mock_resp(long_output)
+        result = self.rewriter.rewrite(short_input)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "output_too_long")
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_length_ratio_guard_skipped_for_short_input(self, mock_post):
+        # input <= 20 chars — guard не применяется, даже если ratio экстремальный
+        short_input = "а" * 20  # ровно 20 — guard не активен
+        tiny_output = "б"
+        mock_post.return_value = self._mock_resp(tiny_output)
+        result = self.rewriter.rewrite(short_input)
+        # guard пропущен, ok=True
+        self.assertTrue(result.ok)
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_length_ratio_within_bounds_passes(self, mock_post):
+        # input 100 chars, output 80 chars → ratio 0.8 — в норме
+        normal_input = "а" * 100
+        normal_output = "б" * 80
+        mock_post.return_value = self._mock_resp(normal_output)
+        result = self.rewriter.rewrite(normal_input)
+        self.assertTrue(result.ok)
+
+
+class LLMRewriterTimeoutHandlingTestCase(unittest.TestCase):
+    """test_timeout_handling — таймаут обрабатывается как graceful fallback."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=0.1,
+            circuit_fail_threshold=3,
+        )
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_timeout_returns_fallback_no_raise(self, mock_post):
+        import requests as req
+        mock_post.side_effect = req.Timeout("timed out")
+        result = self.rewriter.rewrite("какой-то текст для транскрипции")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "timeout")
+        self.assertIsNone(result.text)
+        self.assertIsNone(result.latency_ms)
+
+    @patch("backend.llm_rewriter.requests.post")
+    def test_timeout_accumulates_circuit_failures(self, mock_post):
+        import requests as req
+        mock_post.side_effect = req.Timeout()
+        input_text = "текст один два три четыре пять шесть"
+        # 3 таймаута открывают circuit (fail_threshold=3)
+        for _ in range(3):
+            self.rewriter.rewrite(input_text)
+        result = self.rewriter.rewrite(input_text)
+        self.assertEqual(result.fallback_reason, "circuit_open")
+        # 4-й вызов не должен делать HTTP запрос
+        self.assertEqual(mock_post.call_count, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

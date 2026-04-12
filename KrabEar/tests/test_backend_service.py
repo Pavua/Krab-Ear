@@ -211,6 +211,14 @@ class BackendServiceTestCase(unittest.TestCase):
     def test_ping_and_settings(self) -> None:
         ping = self.request("ping")
         self.assertTrue(ping["ok"])
+        result = ping["result"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["service"], "krabear-backend")
+        self.assertEqual(result["version"], "1.0.0")
+        self.assertGreaterEqual(result["uptime_sec"], 0)
+        self.assertIn("is_recording", result)
+        self.assertFalse(result["is_recording"])
+        self.assertGreaterEqual(result["history_count"], 0)
 
         get_settings = self.request("get_settings")
         self.assertTrue(get_settings["ok"])

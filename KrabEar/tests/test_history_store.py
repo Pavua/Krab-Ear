@@ -372,6 +372,118 @@ class HistoryStoreTestCase(unittest.TestCase):
         from backend.models import DEFAULT_SETTINGS
         self.assertEqual(result, dict(DEFAULT_SETTINGS))
 
+    # ------------------------------------------------------------------
+    # Новые edge-case тесты
+    # ------------------------------------------------------------------
+
+    def test_concurrent_writes(self) -> None:
+        """5 потоков одновременно пишут записи — все должны оказаться в истории."""
+        num_threads = 5
+        items_per_thread = 20
+        errors: list[Exception] = []
+
+        def worker(thread_idx: int) -> None:
+            try:
+                for n in range(items_per_thread):
+                    self.store.add_history_item(
+                        text=f"t{thread_idx}-i{n}",
+                        paste_status="failed",
+                    )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки в потоках: {errors}")
+        expected = num_threads * items_per_thread
+        self.assertEqual(self.store.count_active_items(), expected)
+
+    def test_tombstone_delete_and_compaction(self) -> None:
+        """Удалённая через tombstone запись не должна появляться после компактации."""
+        item_keep = self.store.add_history_item(text="keep me", paste_status="ok")
+        item_del = self.store.add_history_item(text="delete me", paste_status="ok")
+
+        self.store.delete_history_item(item_del.id)
+
+        # До компактации tombstone уже скрывает запись
+        page_before, _ = self.store.get_history_page(cursor=None, limit=50)
+        ids_before = [i["id"] for i in page_before]
+        self.assertIn(item_keep.id, ids_before)
+        self.assertNotIn(item_del.id, ids_before)
+
+        self.store.compact()
+
+        page_after, _ = self.store.get_history_page(cursor=None, limit=50)
+        ids_after = [i["id"] for i in page_after]
+        self.assertIn(item_keep.id, ids_after)
+        self.assertNotIn(item_del.id, ids_after)
+        self.assertEqual(len(ids_after), 1)
+
+    def test_large_history_pagination(self) -> None:
+        """100 записей — полная постраничная навигация собирает все элементы."""
+        total = 100
+        for idx in range(total):
+            self.store.add_history_item(text=f"item-{idx}", paste_status="failed")
+
+        collected: list[dict] = []
+        cursor: str | None = None
+        page_size = 30
+        iterations = 0
+
+        while True:
+            page, cursor = self.store.get_history_page(cursor=cursor, limit=page_size)
+            collected.extend(page)
+            iterations += 1
+            if cursor is None:
+                break
+            self.assertLessEqual(iterations, total, "Бесконечная пагинация")
+
+        self.assertEqual(len(collected), total)
+        # Порядок: новые вперёд
+        self.assertEqual(collected[0]["text"], "item-99")
+        self.assertEqual(collected[-1]["text"], "item-0")
+
+    def test_corrupted_ndjson_line(self) -> None:
+        """Битая строка в NDJSON-файле не должна ронять store — остальные записи читаются."""
+        item_before = self.store.add_history_item(text="before corrupt", paste_status="ok")
+
+        # Добавляем мусорную строку напрямую в файл
+        with self.store.history_path.open("a", encoding="utf-8") as fh:
+            fh.write("{invalid json line!!!\n")
+
+        item_after = self.store.add_history_item(text="after corrupt", paste_status="ok")
+
+        # Store должен вернуть обе нормальные записи, игнорируя мусор
+        page, _ = self.store.get_history_page(cursor=None, limit=50)
+        ids = [i["id"] for i in page]
+        self.assertIn(item_before.id, ids)
+        self.assertIn(item_after.id, ids)
+        self.assertEqual(len(page), 2)
+
+    def test_settings_save_and_load(self) -> None:
+        """Сохранённые настройки должны совпадать с загруженными после reload."""
+        custom = {
+            "translation_mode": "ru_to_es",
+            "llm_rewrite_enabled": True,
+            "stt_model": "medium",
+        }
+        saved = self.store.save_settings(custom)
+
+        # Reload через новый экземпляр store (тот же data_dir)
+        store2 = StateStore(self.store.data_dir)
+        loaded = store2.load_settings()
+
+        for key, val in custom.items():
+            self.assertEqual(loaded[key], val, f"Ключ {key!r} не совпадает")
+
+        # save_settings должен вернуть словарь с нашими ключами
+        for key, val in custom.items():
+            self.assertEqual(saved[key], val)
+
 
 if __name__ == "__main__":
     unittest.main()
