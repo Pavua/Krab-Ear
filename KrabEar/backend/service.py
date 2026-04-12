@@ -86,6 +86,10 @@ from core.context_memory import ContextMemory
 from core.auto_title import AutoTitleGenerator
 from backend.language_learning import LanguageLearningManager
 from core.paste_formatter import PasteFormatter
+from backend.data_migrator import DataMigrator
+from core.text_anonymizer import TextAnonymizer
+from core.transcription_scorer import TranscriptionScorer
+from core.emotion_detector import EmotionDetector
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -186,6 +190,7 @@ class BackendService:
         self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
         self._readability_scorer = ReadabilityScorer()
+        self._transcription_scorer = TranscriptionScorer()
         self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
@@ -199,6 +204,7 @@ class BackendService:
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
+        self._text_anonymizer = TextAnonymizer()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -392,6 +398,7 @@ class BackendService:
             "compare_texts": self._handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
             "score_readability": self._handle_score_readability,  # оценка читабельности текста транскрибации
+            "score_transcription": self._handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
@@ -416,6 +423,7 @@ class BackendService:
             "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "anonymize_text": self._handle_anonymize_text,  # редактирование персональных данных из транскрипции
         }
 
         handler = handlers.get(method)
