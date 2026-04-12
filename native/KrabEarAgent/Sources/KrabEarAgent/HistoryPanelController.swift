@@ -377,6 +377,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             stack.spacing = 8
             stack.alignment = .centerY
             stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.distribution = .fill
+            // Prevent buttons from wrapping/stacking on narrow windows
+            stack.setHuggingPriority(.defaultLow, for: .horizontal)
+            stack.setClippingResistancePriority(.required, for: .horizontal)
         }
 
         let dictationContentView = NSView()
@@ -445,6 +449,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         controlRow.spacing = 8
         controlRow.alignment = .centerY
         controlRow.translatesAutoresizingMaskIntoConstraints = false
+        controlRow.distribution = .fill
+        controlRow.setHuggingPriority(.defaultLow, for: .horizontal)
+        controlRow.setClippingResistancePriority(.required, for: .horizontal)
 
         searchField.placeholderString = "Поиск по истории"
         searchField.target = self
@@ -1272,15 +1279,25 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             importRow,
             dropZoneView,
         ]
-        historyContentView.addSubview(historyStack)
+        // Wrap historyStack in a scroll view so the History tab scrolls on small windows
+        let historyOuterScroll = NSScrollView()
+        historyOuterScroll.documentView = historyStack
+        historyOuterScroll.hasVerticalScroller = true
+        historyOuterScroll.hasHorizontalScroller = false
+        historyOuterScroll.drawsBackground = false
+        historyOuterScroll.translatesAutoresizingMaskIntoConstraints = false
+        historyContentView.addSubview(historyOuterScroll)
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         historyScrollMinHeightConstraint.isActive = true
         self.historyScrollMinHeightConstraint = historyScrollMinHeightConstraint
         NSLayoutConstraint.activate([
-            historyStack.topAnchor.constraint(equalTo: historyContentView.topAnchor, constant: 12),
-            historyStack.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor, constant: 12),
-            historyStack.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor, constant: -12),
-            historyStack.bottomAnchor.constraint(lessThanOrEqualTo: historyContentView.bottomAnchor, constant: -12),
+            historyOuterScroll.topAnchor.constraint(equalTo: historyContentView.topAnchor),
+            historyOuterScroll.leadingAnchor.constraint(equalTo: historyContentView.leadingAnchor),
+            historyOuterScroll.trailingAnchor.constraint(equalTo: historyContentView.trailingAnchor),
+            historyOuterScroll.bottomAnchor.constraint(equalTo: historyContentView.bottomAnchor),
+            historyStack.topAnchor.constraint(equalTo: historyOuterScroll.contentView.topAnchor, constant: 12),
+            historyStack.leadingAnchor.constraint(equalTo: historyOuterScroll.contentView.leadingAnchor, constant: 12),
+            historyStack.trailingAnchor.constraint(equalTo: historyOuterScroll.contentView.trailingAnchor, constant: -12),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
@@ -1536,6 +1553,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         advancedToolbarRow.orientation = .horizontal
         advancedToolbarRow.spacing = 8
         advancedToolbarRow.alignment = .centerY
+        advancedToolbarRow.distribution = .fill
+        advancedToolbarRow.setHuggingPriority(.defaultLow, for: .horizontal)
+        advancedToolbarRow.setClippingResistancePriority(.required, for: .horizontal)
         helpButton.removeFromSuperview()
         liveTranslatePresetButton.removeFromSuperview()
         advancedToolbarRow.addArrangedSubview(helpButton)
@@ -1561,6 +1581,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyEnhancementsRow.spacing = 8
         historyEnhancementsRow.alignment = .centerY
         historyEnhancementsRow.translatesAutoresizingMaskIntoConstraints = false
+        historyEnhancementsRow.distribution = .fill
+        historyEnhancementsRow.setHuggingPriority(.defaultLow, for: .horizontal)
+        historyEnhancementsRow.setClippingResistancePriority(.required, for: .horizontal)
         exportSrtButton.target = self
         exportSrtButton.action = #selector(onExportSrt)
         cleanupDaysSelector.removeAllItems()
