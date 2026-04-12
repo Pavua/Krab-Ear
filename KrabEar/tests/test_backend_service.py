@@ -807,13 +807,18 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(response["result"]["text"].startswith("ES:"))
 
     def test_call_assist_flow_and_list_audio_inputs(self) -> None:
-        self.service._request_voice_gateway_start = lambda **kwargs: {  # type: ignore[method-assign]
-            "ok": True,
-            "session_id": "gw-session-1",
-        }
-        self.service._request_voice_gateway_stop = lambda **kwargs: {  # type: ignore[method-assign]
-            "ok": True,
-        }
+        class _MockGW:
+            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "session_id": "gw-session-1"}
+            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True}
+            def get(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "payload": {}}
+            def post(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "payload": {}}
+            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "payload": {}}
+        self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
         self.service._list_audio_inputs = lambda: [  # type: ignore[method-assign]
             {
                 "id": 3,
@@ -857,32 +862,32 @@ class BackendServiceTestCase(unittest.TestCase):
     def test_call_assist_stop_auto_summary_saves_to_history(self) -> None:
         called_summary_paths: list[str] = []
         called_summary_payloads: list[dict[str, object]] = []
-        self.service._request_voice_gateway_start = lambda **kwargs: {  # type: ignore[method-assign]
-            "ok": True,
-            "session_id": "gw-session-summary-1",
-        }
 
-        def fake_gateway_post(*args, **kwargs):  # type: ignore[no-untyped-def]
-            path = str(kwargs.get("path", ""))
-            payload = kwargs.get("payload", {})
-            if not path and len(args) >= 3:
-                path = str(args[2])
-            if (not payload or not isinstance(payload, dict)) and len(args) >= 4 and isinstance(args[3], dict):
-                payload = dict(args[3])
-            if path.endswith("/summary"):
-                called_summary_paths.append(path)
-                called_summary_payloads.append(dict(payload) if isinstance(payload, dict) else {})
-                return {
-                    "ok": True,
-                    "payload": {
-                        "summary": "Обсудили доставку и документы.",
-                        "tasks": ["Отправить копию паспорта", "Подтвердить адрес"],
-                    },
-                }
-            return {"ok": True, "payload": {"ok": True}}
+        class _MockGW:
+            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "session_id": "gw-session-summary-1"}
+            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True}
+            def get(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "payload": {}}
+            def post(self, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(kwargs.get("path", ""))
+                payload = kwargs.get("payload", {})
+                if path.endswith("/summary"):
+                    called_summary_paths.append(path)
+                    called_summary_payloads.append(dict(payload) if isinstance(payload, dict) else {})
+                    return {
+                        "ok": True,
+                        "payload": {
+                            "summary": "Обсудили доставку и документы.",
+                            "tasks": ["Отправить копию паспорта", "Подтвердить адрес"],
+                        },
+                    }
+                return {"ok": True, "payload": {"ok": True}}
+            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "payload": {}}
 
-        self.service._request_voice_gateway_post = fake_gateway_post  # type: ignore[method-assign]
-        self.service._request_voice_gateway_stop = lambda **kwargs: {"ok": True}  # type: ignore[method-assign]
+        self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
 
         start = self.request("start_call_assist", {"translation_mode": "auto_to_ru"})
         self.assertTrue(start["ok"])
@@ -906,72 +911,66 @@ class BackendServiceTestCase(unittest.TestCase):
         post_paths: list[str] = []
         delete_paths: list[str] = []
 
-        self.service._request_voice_gateway_start = lambda **kwargs: {  # type: ignore[method-assign]
-            "ok": True,
-            "session_id": "gw-session-77",
-        }
-
-        def fake_gateway_get(**kwargs):  # type: ignore[no-untyped-def]
-            path = str(kwargs.get("path", ""))
-            get_paths.append(path)
-            if path.startswith("/v1/telephony/cost/estimate"):
-                return {
-                    "ok": True,
-                    "payload": {
+        class _MockGW:
+            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True, "session_id": "gw-session-77"}
+            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+                return {"ok": True}
+            def get(self, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(kwargs.get("path", ""))
+                get_paths.append(path)
+                if path.startswith("/v1/telephony/cost/estimate"):
+                    return {
                         "ok": True,
-                        "country": "ES",
-                        "rates_source": "manual",
-                        "telephony_usd": {"total": 1.3},
-                        "ai_usd": {"total": 0.8},
-                        "total_usd": 2.1,
-                    },
-                }
-            if "/timeline/summary" in path:
-                return {
-                    "ok": True,
-                    "payload": {
-                        "ok": True,
-                        "summary": "Краткая сводка звонка",
-                        "tasks": ["Отправить договор", "Перезвонить завтра"],
-                        "stats": {"count": 4},
-                        "items_used": 4,
-                    },
-                }
-            if "/timeline/stats" in path:
-                return {
-                    "ok": True,
-                    "payload": {
-                        "ok": True,
-                        "stats": {
-                            "count": 4,
-                            "text_chars": 40,
-                            "first_ts": "2026-02-12T10:00:00+00:00",
-                            "last_ts": "2026-02-12T10:00:10+00:00",
-                            "by_kind": {"stt.partial": 2, "translation.partial": 2},
+                        "payload": {
+                            "ok": True,
+                            "country": "ES",
+                            "rates_source": "manual",
+                            "telephony_usd": {"total": 1.3},
+                            "ai_usd": {"total": 0.8},
+                            "total_usd": 2.1,
                         },
-                    },
-                }
-            if "/timeline/export" in path:
-                return {"ok": True, "payload": {"ok": True, "format": "md", "content": "# timeline\nentry"}}
-            if "/timeline" in path:
-                return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"kind": "stt.partial", "text": "x"}]}}
-            return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"source_text": "x"}]}}
+                    }
+                if "/timeline/summary" in path:
+                    return {
+                        "ok": True,
+                        "payload": {
+                            "ok": True,
+                            "summary": "Краткая сводка звонка",
+                            "tasks": ["Отправить договор", "Перезвонить завтра"],
+                            "stats": {"count": 4},
+                            "items_used": 4,
+                        },
+                    }
+                if "/timeline/stats" in path:
+                    return {
+                        "ok": True,
+                        "payload": {
+                            "ok": True,
+                            "stats": {
+                                "count": 4,
+                                "text_chars": 40,
+                                "first_ts": "2026-02-12T10:00:00+00:00",
+                                "last_ts": "2026-02-12T10:00:10+00:00",
+                                "by_kind": {"stt.partial": 2, "translation.partial": 2},
+                            },
+                        },
+                    }
+                if "/timeline/export" in path:
+                    return {"ok": True, "payload": {"ok": True, "format": "md", "content": "# timeline\nentry"}}
+                if "/timeline" in path:
+                    return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"kind": "stt.partial", "text": "x"}]}}
+                return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"source_text": "x"}]}}
+            def post(self, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(kwargs.get("path", ""))
+                post_paths.append(path)
+                return {"ok": True, "payload": {"ok": True, "summary": "sum", "tasks": [], "translated_text": "hola"}}
+            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(kwargs.get("path", ""))
+                delete_paths.append(path)
+                return {"ok": True, "payload": {"ok": True, "before": 10, "after": 1, "keep_last": 1}}
 
-        def fake_gateway_post(*args, **kwargs):  # type: ignore[no-untyped-def]
-            path = str(kwargs.get("path", ""))
-            if not path and len(args) >= 3:
-                path = str(args[2])
-            post_paths.append(path)
-            return {"ok": True, "payload": {"ok": True, "summary": "sum", "tasks": [], "translated_text": "hola"}}
-
-        def fake_gateway_delete(**kwargs):  # type: ignore[no-untyped-def]
-            path = str(kwargs.get("path", ""))
-            delete_paths.append(path)
-            return {"ok": True, "payload": {"ok": True, "before": 10, "after": 1, "keep_last": 1}}
-
-        self.service._request_voice_gateway_get = fake_gateway_get  # type: ignore[method-assign]
-        self.service._request_voice_gateway_post = fake_gateway_post  # type: ignore[method-assign]
-        self.service._request_voice_gateway_delete = fake_gateway_delete  # type: ignore[method-assign]
+        self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
 
         start = self.request("start_call_assist", {"translation_mode": "auto_to_ru"})
         self.assertTrue(start["ok"])

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import tempfile
 import logging
 import os
 from pathlib import Path
@@ -37,6 +38,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.call_assist_service import CallAssistService
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
 from contracts.stt_events import SttFailed, SttFinal
@@ -100,6 +102,13 @@ class BackendService:
         }
         self._preview_error_count: int = 0
         self._clipboard_history: list[dict] = []
+        self._call_assist = CallAssistService(
+            store=self.store,
+            recorder=self.recorder,
+            transcriber=self.transcriber,
+            reset_preview_fn=self._reset_preview_state,
+            start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
+        )
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -170,20 +179,20 @@ class BackendService:
             "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
             "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
             "get_recording_state": self._handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "start_call_assist": self._handle_start_call_assist,  # VERIFIED: called from Swift (HistoryPanel)
-            "stop_call_assist": self._handle_stop_call_assist,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_call_assist_state": self._handle_get_call_assist_state,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_diagnostics": self._handle_call_assist_diagnostics,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_summary": self._handle_call_assist_summary,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_quick_phrase": self._handle_call_assist_quick_phrase,  # VERIFIED: called from Swift (HistoryPanel)
-            "list_call_assist_quick_phrases": self._handle_list_call_assist_quick_phrases,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_cost_estimate": self._handle_call_assist_cost_estimate,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline": self._handle_call_assist_timeline,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline_stats": self._handle_call_assist_timeline_stats,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline_summary": self._handle_call_assist_timeline_summary,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline_export": self._handle_call_assist_timeline_export,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline_clear": self._handle_call_assist_timeline_clear,  # VERIFIED: called from Swift (HistoryPanel)
-            "call_assist_timeline_to_history": self._handle_call_assist_timeline_to_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "start_call_assist": self._call_assist.handle_start,  # VERIFIED: called from Swift (HistoryPanel)
+            "stop_call_assist": self._call_assist.handle_stop,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_call_assist_state": self._call_assist.handle_get_state,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_diagnostics": self._call_assist.handle_diagnostics,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_summary": self._call_assist.handle_summary,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_quick_phrase": self._call_assist.handle_quick_phrase,  # VERIFIED: called from Swift (HistoryPanel)
+            "list_call_assist_quick_phrases": self._call_assist.handle_list_quick_phrases,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_cost_estimate": self._call_assist.handle_cost_estimate,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline": self._call_assist.handle_timeline,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_stats": self._call_assist.handle_timeline_stats,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_summary": self._call_assist.handle_timeline_summary,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_export": self._call_assist.handle_timeline_export,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_clear": self._call_assist.handle_timeline_clear,  # VERIFIED: called from Swift (HistoryPanel)
+            "call_assist_timeline_to_history": self._call_assist.handle_timeline_to_history,  # VERIFIED: called from Swift (HistoryPanel)
             "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_page": self._handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
             "search_history": self._handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
@@ -1292,7 +1301,11 @@ class BackendService:
         raw_path = str(params.get("path", "")).strip()
         if not raw_path:
             raise RuntimeError("path обязателен")
-        result = self.store.import_history_ndjson(Path(raw_path))
+        resolved = Path(raw_path).expanduser().resolve()
+        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            return {"error": {"message": f"Path outside allowed directories: {resolved}"}}
+        result = self.store.import_history_ndjson(resolved)
         return {
             "path": raw_path,
             "imported": int(result.get("imported", 0)),
@@ -1790,7 +1803,7 @@ class BackendService:
                 "model": settings.get("llm_model", "?"),
                 "status": self._llm_rewriter.status() if self._llm_rewriter else None,
             },
-            "call_assist": self._call_assist_state.copy(),
+            "call_assist": self._call_assist.state,
             "import": {
                 # Check if import is active by looking at import queue state
                 "active": False,  # Would need import state tracking
@@ -2939,7 +2952,15 @@ class BackendService:
         )
         network_mode = str(settings.get("network_mode", "offline_default"))
 
-        selected = [str(item).strip() for item in raw_paths if str(item).strip()]
+        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
+        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
+        selected: list[str] = []
+        for p in selected_raw:
+            resolved = Path(p).expanduser().resolve()
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+                selected.append(str(resolved))
+            else:
+                return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
         audio_paths = self._collect_audio_paths(selected)
         if not audio_paths:
             return {"items": [], "processed": 0, "errors": ["Не найдено аудиофайлов для транскрибации"]}
@@ -3098,7 +3119,15 @@ class BackendService:
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
 
-        selected = [str(item).strip() for item in raw_paths if str(item).strip()]
+        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
+        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
+        selected: list[str] = []
+        for p in selected_raw:
+            resolved = Path(p).expanduser().resolve()
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+                selected.append(str(resolved))
+            else:
+                return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
         audio_paths = self._collect_audio_paths(selected)
         sample_limit = int(params.get("sample_limit", 5) or 5)
         safe_sample_limit = max(1, min(sample_limit, 50))
@@ -3865,6 +3894,7 @@ class IPCServer:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self.socket_path))
+        os.chmod(str(self.socket_path), 0o600)
         server.listen(32)
         server.settimeout(0.8)
 
