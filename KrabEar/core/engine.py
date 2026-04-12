@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from backend.llm_rewriter import LLMRewriter, LLMRewriteResult
+    from backend.llm_rewriter import LLMRewriter
 
 import mlx_whisper
 import numpy as np
@@ -522,7 +522,7 @@ class AudioEngine:
             error_log_path = "/tmp/krab_ear_diarization_error.log"
             logging.error(f"FATAL: Unhandled exception in diarization pipeline. Writing details to {error_log_path}")
             with open(error_log_path, "w") as f:
-                f.write(f"A critical error occurred in the pyannote.audio pipeline block.\\n")
+                f.write("A critical error occurred in the pyannote.audio pipeline block.\\n")
                 f.write(f"Exception Type: {type(e).__name__}\\n")
                 f.write(f"Exception Args: {e}\\n\\n")
                 f.write("--- Traceback ---\\n")
@@ -665,7 +665,7 @@ class AudioEngine:
             with open(audio_path, "rb") as f:
                 resp = requests.post(
                     settings.STT_GATEWAY_URL,
-                    headers={"Authorization": f"Bearer token_here"},  # Placeholder: local gateway не требует auth
+                    headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
                     timeout=60,

@@ -2070,21 +2070,6 @@ class BackendService:
         finally:
             loop.close()
 
-    def _request_voice_gateway_post(self, voice_gateway_url: str, api_key: str, path: str, payload: dict) -> dict:
-        """POST helper для событий."""
-        try:
-            url = f"{voice_gateway_url.rstrip('/')}{path}"
-            data = json.dumps(payload).encode("utf-8")
-            logger.debug(f"POST {url} payload={json.dumps(payload)}")
-            req = urllib_request.Request(url, data=data, method="POST")
-            req.add_header("Content-Type", "application/json")
-            if api_key:
-                req.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(req, timeout=2.0) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            logger.error(f"POST {url} failed: {e}")
-            return {"ok": False, "error": str(e)}
 
     def _handle_start_call_assist(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запускает сессию ассистента звонка с интеграцией Voice Gateway."""

@@ -147,7 +147,6 @@ def transcribe_audio():
         })
 
     except Exception as e:
-        is_error = True
         logger.exception("Ошибка при обработке аудио-запроса")
         metrics.record(0, 0, is_error=True)
         return jsonify({"error": str(e)}), 500
