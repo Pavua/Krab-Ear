@@ -24,7 +24,6 @@ import sys
 import threading
 import time
 from typing import Any, Callable
-import uuid
 
 import numpy as np
 
@@ -87,10 +86,6 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
-        # Зеркалируем кэш-атрибуты для обратной совместимости (старые пути кода)
-        self._settings_cache: dict[str, Any] | None = None
-        self._settings_cache_ts: float = 0.0
-        self._settings_cache_ttl: float = 5.0
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
         self._preview_stop_event = threading.Event()
@@ -756,8 +751,8 @@ class BackendService:
                 "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
             },
             "settings_cache": {
-                "ttl_sec": self._settings_cache_ttl,
-                "cached": self._settings_cache is not None,
+                "ttl_sec": self._settings_svc._cache_ttl,
+                "cached": self._settings_svc._cache is not None,
             },
         }
 

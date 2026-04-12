@@ -331,6 +331,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Сделать "История" дефолтной вкладкой при открытии
         mainTabView.selectTabViewItem(at: 2)
         
+        // Принудительный layout всех табов: выбираем каждый таб и делаем
+        // micro-resize чтобы NSTabView пересчитал фрейм для каждого content view.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.window else { return }
+            self.isSyncingTabs = true
+            var frame = window.frame
+            for i in 0..<self.mainTabView.numberOfTabViewItems {
+                self.mainTabView.selectTabViewItem(at: i)
+                frame.size.height += 1
+                window.setFrame(frame, display: true)
+                frame.size.height -= 1
+                window.setFrame(frame, display: true)
+            }
+            self.mainTabView.selectTabViewItem(at: 2) // Вернуть на "История"
+            self.isSyncingTabs = false
+        }
+
         syncSettingsControls()
         loadInitial()
         startPreviewPolling()
@@ -1459,6 +1476,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         diagnosticsOutputScroll.hasVerticalScroller = true
         diagnosticsOutputScroll.translatesAutoresizingMaskIntoConstraints = false
         diagnosticsOutputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        diagnosticsOutputScroll.widthAnchor.constraint(equalTo: diagCard.contentStackView.widthAnchor).isActive = true
         diagCard.contentStackView.addArrangedSubview(diagnosticsOutputScroll)
 
         diagSection.contentStackView.addArrangedSubview(diagCard)
