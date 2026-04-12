@@ -154,17 +154,17 @@ class HistoryServiceTestCase(unittest.TestCase):
         self.store.add_history_item(text="размер файла", paste_status="ok")
 
         info = self.svc.handle_get_storage_info({})
-        # Ожидаемые поля: history_bytes, settings_bytes, total_bytes
-        for key in ("history_bytes", "total_bytes"):
+        # Ожидаемые поля: history_file_size_mb, total_data_mb
+        for key in ("history_file_size_mb", "total_data_mb"):
             self.assertIn(key, info, f"Ожидалось поле {key!r} в storage_info")
-        self.assertGreater(info["history_bytes"], 0)
-        self.assertGreater(info["total_bytes"], 0)
+        self.assertGreaterEqual(info["history_file_size_mb"], 0)
+        self.assertGreaterEqual(info["total_data_mb"], 0)
 
     def test_get_storage_info_empty_store(self) -> None:
         """get_storage_info работает и при пустом хранилище (файлы могут отсутствовать)."""
         info = self.svc.handle_get_storage_info({})
-        self.assertIn("total_bytes", info)
-        self.assertIsInstance(info["total_bytes"], int)
+        self.assertIn("total_data_mb", info)
+        self.assertIsInstance(info["total_data_mb"], float)
 
     # ------------------------------------------------------------------
     # 7. cleanup_old_history

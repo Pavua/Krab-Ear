@@ -37,6 +37,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.call_assist_service import CallAssistService
+from backend.history_service import HistoryService
+from backend.settings_service import SettingsService
+from backend.translation_service import TranslationService
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -83,6 +86,8 @@ class BackendService:
 
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
+        self._settings_svc = SettingsService(store=self.store)
+        # Зеркалируем кэш-атрибуты для обратной совместимости (старые пути кода)
         self._settings_cache: dict[str, Any] | None = None
         self._settings_cache_ts: float = 0.0
         self._settings_cache_ttl: float = 5.0
@@ -94,12 +99,22 @@ class BackendService:
         self._preview_updated_at = 0.0
         self._preview_error_count: int = 0
         self._clipboard_history: list[dict] = []
+        self._history = HistoryService(
+            store=self.store,
+            clipboard_history=self._clipboard_history,
+        )
         self._call_assist = CallAssistService(
             store=self.store,
             recorder=self.recorder,
             transcriber=self.transcriber,
             reset_preview_fn=self._reset_preview_state,
             start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
+        )
+        self._translation = TranslationService(
+            translator=self.translator,
+            store=self.store,
+            cached_settings=self._cached_settings,
+            invalidate_settings_cache=self._invalidate_settings_cache,
         )
 
     def _init_llm_rewriter(self):
@@ -135,18 +150,12 @@ class BackendService:
             return None
 
     def _cached_settings(self) -> dict[str, Any]:
-        """Возвращает копию настроек с TTL-кэшем (5 сек). Избегает повторного чтения файла."""
-        now = time.monotonic()
-        if self._settings_cache is not None and (now - self._settings_cache_ts) < self._settings_cache_ttl:
-            return dict(self._settings_cache)
-        self._settings_cache = self.store.load_settings()
-        self._settings_cache_ts = now
-        return dict(self._settings_cache)
+        """Делегирует к SettingsService. Обратная совместимость."""
+        return self._settings_svc.cached_settings()
 
     def _invalidate_settings_cache(self) -> None:
-        """Сбрасывает кэш настроек (вызывать после save_settings)."""
-        self._settings_cache = None
-        self._settings_cache_ts = 0.0
+        """Делегирует к SettingsService. Обратная совместимость."""
+        self._settings_svc.invalidate_cache()
 
     def _get_runtime_setting(self, key: str, default: Any) -> Any:
         """Callback для AudioEngine: читает runtime toggle из StateStore.
@@ -186,39 +195,39 @@ class BackendService:
             "call_assist_timeline_clear": self._call_assist.handle_timeline_clear,  # VERIFIED: called from Swift (HistoryPanel)
             "call_assist_timeline_to_history": self._call_assist.handle_timeline_to_history,  # VERIFIED: called from Swift (HistoryPanel)
             "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_history_page": self._handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
-            "search_history": self._handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
-            "delete_history_item": self._handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_page": self._history.handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
+            "search_history": self._history.handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
-            "get_settings": self._handle_get_settings,  # VERIFIED: called from Swift (main)
-            "set_settings": self._handle_set_settings,  # VERIFIED: called from Swift (main)
-            "compact_history": self._handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "add_history_item": self._handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "get_settings": self._settings_svc.handle_get_settings,  # VERIFIED: called from Swift (main)
+            "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
+            "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
-            "translate_text": self._handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
-            "set_translation_glossary_item": self._handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
-            "remove_translation_glossary_item": self._handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_glossary_suggestions": self._handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
-            "import_history_ndjson": self._handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_history_stats": self._handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_history_overview": self._handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
-            "get_history_item": self._handle_get_history_item,  # полные детали одной записи истории по ID
+            "set_translation_glossary_item": self._translation.handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "remove_translation_glossary_item": self._translation.handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_glossary_suggestions": self._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
+            "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
+            "get_history_item": self._history.handle_get_history_item,  # полные детали одной записи истории по ID
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
 
-            "get_vocabulary_suggestions": self._handle_get_vocabulary_suggestions,
-            "export_history": self._handle_export_history,
-            "export_history_srt": self._handle_export_history_srt,
-            "get_clipboard_history": self._handle_get_clipboard_history,
-            "repaste_item": self._handle_repaste_item,
-            "cleanup_old_history": self._handle_cleanup_old_history,  # удаляет записи старше N дней
-            "get_storage_info": self._handle_get_storage_info,  # размер файлов данных
-            "apply_profile_preset": self._handle_apply_profile_preset,  # применяет пресет настроек профиля
-            "list_profile_presets": self._handle_list_profile_presets,  # список доступных пресетов профилей
+            "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
+            "export_history": self._history.handle_export_history,
+            "export_history_srt": self._history.handle_export_history_srt,
+            "get_clipboard_history": self._history.handle_get_clipboard_history,
+            "repaste_item": self._history.handle_repaste_item,
+            "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
+            "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
+            "apply_profile_preset": self._settings_svc.handle_apply_profile_preset,  # применяет пресет настроек профиля
+            "list_profile_presets": self._settings_svc.handle_list_profile_presets,  # список доступных пресетов профилей
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
         }
@@ -680,222 +689,20 @@ class BackendService:
         return {"updated": True, "id": item_id, "paste_status": paste_status}
 
     def _handle_get_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._cached_settings()
+        """Делегирует к SettingsService. Обратная совместимость."""
+        return self._settings_svc.handle_get_settings(params)
 
     def _handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        settings = self._cached_settings()
-        settings.update(params)
-
-        # Нормализуем критичные поля, чтобы UI и агент не расходились по форматам.
-        if settings.get("mode") not in {"headless", "menubar"}:
-            settings["mode"] = "headless"
-
-        if settings.get("quality_profile") not in {"balanced", "max"}:
-            settings["quality_profile"] = "balanced"
-        if settings.get("cleanup_profile") not in {"soft", "strict"}:
-            settings["cleanup_profile"] = "soft"
-        if settings.get("translation_mode") not in {
-            "off",
-            "ru_to_es",
-            "es_to_ru",
-            "en_to_ru",
-            "auto",
-            "auto_to_ru",
-            "bilingual_ru_es",
-        }:
-            settings["translation_mode"] = "off"
-        if settings.get("translation_style") not in {"neutral", "chat", "formal"}:
-            settings["translation_style"] = "neutral"
-        if settings.get("clipboard_mode") not in {"always_copy", "copy_on_fail", "never_copy"}:
-            settings["clipboard_mode"] = "always_copy"
-        if settings.get("update_channel") not in {"stable", "beta"}:
-            settings["update_channel"] = "stable"
-        if not isinstance(settings.get("translation_glossary"), dict):
-            settings["translation_glossary"] = {}
-        if not isinstance(settings.get("text_templates"), dict):
-            settings["text_templates"] = dict(DEFAULT_SETTINGS.get("text_templates", {}))
-        else:
-            normalized_templates: dict[str, str] = {}
-            for key, value in settings.get("text_templates", {}).items():
-                clean_key = str(key).strip()
-                clean_value = str(value).strip()
-                if clean_key and clean_value:
-                    normalized_templates[clean_key] = clean_value
-            settings["text_templates"] = (
-                normalized_templates or dict(DEFAULT_SETTINGS.get("text_templates", {}))
-            )
-
-        if settings.get("network_mode") not in {"offline_default", "offline_strict", "online_opt_in"}:
-            settings["network_mode"] = "offline_default"
-        if settings.get("hotkey_profile") not in {"default", "meeting", "translation"}:
-            settings["hotkey_profile"] = "default"
-
-        if settings.get("history_policy") not in {"unlimited"}:
-            settings["history_policy"] = "unlimited"
-        if settings.get("history_text_density") not in {"normal", "compact"}:
-            settings["history_text_density"] = "normal"
-        if settings.get("capture_source_mode") not in {"mic", "system_audio", "mic_plus_system"}:
-            settings["capture_source_mode"] = "mic"
-        if settings.get("ui_last_tab") not in {"dictation", "live_translation", "history"}:
-            settings["ui_last_tab"] = "history"
-
-        settings["auto_start_enabled"] = bool(settings.get("auto_start_enabled", False))
-        settings["show_dock_icon"] = bool(settings.get("show_dock_icon", True))
-        settings["auto_paste"] = bool(settings.get("auto_paste", True))
-        settings["play_start_sound"] = bool(settings.get("play_start_sound", True))
-        settings["realtime_preview_enabled"] = bool(settings.get("realtime_preview_enabled", True))
-        settings["translate_and_paste"] = bool(settings.get("translate_and_paste", False))
-        settings["onboarding_completed"] = bool(settings.get("onboarding_completed", False))
-        settings["audio_ducking_enabled"] = bool(settings.get("audio_ducking_enabled", True))
-        settings["silence_guard_enabled"] = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
-        settings["background_guard_enabled"] = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
-        settings["call_notify_default"] = self._coerce_bool(settings.get("call_notify_default", True), default=True)
-        settings["call_auto_summary"] = self._coerce_bool(settings.get("call_auto_summary", True), default=True)
-        settings["history_focus_mode"] = self._coerce_bool(settings.get("history_focus_mode", True), default=True)
-        _gw_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
-        if not (_gw_url.startswith("http://localhost") or _gw_url.startswith("http://127.0.0.1") or _gw_url.startswith("https://")):
-            raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
-        settings["voice_gateway_url"] = _gw_url
-        settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
-
-        try:
-            page_size = int(settings.get("history_page_size", 50))
-        except (TypeError, ValueError):
-            page_size = 50
-        settings["history_page_size"] = max(10, min(page_size, 500))
-
-        try:
-            duck_percent = int(settings.get("audio_ducking_percent", 50))
-        except (TypeError, ValueError):
-            duck_percent = 50
-        settings["audio_ducking_percent"] = max(0, min(duck_percent, 100))
-
-        settings["stop_tail_trim_ms"] = self._coerce_bounded_int(
-            value=settings.get("stop_tail_trim_ms", 180),
-            default=180,
-            min_value=0,
-            max_value=1200,
-        )
-        settings["silence_guard_rms_threshold"] = self._coerce_bounded_float(
-            value=settings.get("silence_guard_rms_threshold", 0.0020),
-            default=0.0020,
-            min_value=0.0003,
-            max_value=0.05,
-        )
-        settings["silence_guard_peak_threshold"] = self._coerce_bounded_float(
-            value=settings.get("silence_guard_peak_threshold", 0.0120),
-            default=0.0120,
-            min_value=0.001,
-            max_value=0.2,
-        )
-        settings["silence_guard_active_ratio_threshold"] = self._coerce_bounded_float(
-            value=settings.get("silence_guard_active_ratio_threshold", 0.015),
-            default=0.015,
-            min_value=0.001,
-            max_value=0.30,
-        )
-        settings["background_guard_min_peak"] = self._coerce_bounded_float(
-            value=settings.get("background_guard_min_peak", 0.025),
-            default=0.025,
-            min_value=0.003,
-            max_value=0.25,
-        )
-        settings["background_guard_min_rms"] = self._coerce_bounded_float(
-            value=settings.get("background_guard_min_rms", 0.0040),
-            default=0.0040,
-            min_value=0.0008,
-            max_value=0.08,
-        )
-        settings["background_guard_uniform_frame_threshold"] = self._coerce_bounded_float(
-            value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
-            default=0.0060,
-            min_value=0.001,
-            max_value=0.20,
-        )
-        settings["background_guard_max_uniform_active_ratio"] = self._coerce_bounded_float(
-            value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
-            default=0.92,
-            min_value=0.40,
-            max_value=0.99,
-        )
-
-        try:
-            overlay_percent = int(settings.get("overlay_opacity_percent", 45))
-        except (TypeError, ValueError):
-            overlay_percent = 45
-        settings["overlay_opacity_percent"] = max(15, min(overlay_percent, 90))
-
-        result = self.store.save_settings(settings)
-        self._invalidate_settings_cache()
-        return result
-
-    # ---------------------------------------------------------------------------
-    # Пресеты профилей настроек
-    # ---------------------------------------------------------------------------
-
-    _PROFILE_PRESETS: dict[str, dict[str, Any]] = {
-        "default": {
-            "quality_profile": "balanced",
-            "cleanup_profile": "soft",
-            "translation_mode": "off",
-            "realtime_preview_enabled": True,
-            "auto_paste": True,
-        },
-        "meeting": {
-            "quality_profile": "max",
-            "cleanup_profile": "strict",
-            "translation_mode": "off",
-            "realtime_preview_enabled": True,
-            "auto_paste": False,  # не вставлять автоматически во время митинга
-        },
-        "translation": {
-            "quality_profile": "balanced",
-            "cleanup_profile": "soft",
-            "translation_mode": "auto",
-            "translate_and_paste": True,
-            "realtime_preview_enabled": True,
-            "auto_paste": True,
-        },
-        "call_recording": {
-            "quality_profile": "max",
-            "cleanup_profile": "strict",
-            "translation_mode": "off",
-            "realtime_preview_enabled": False,
-            "auto_paste": False,
-        },
-    }
-
-    _PROFILE_PRESET_DESCRIPTIONS: dict[str, str] = {
-        "default": "Стандартный режим: сбалансированное качество, мягкая очистка, автовставка включена",
-        "meeting": "Режим митинга: максимальное качество, строгая очистка, автовставка отключена",
-        "translation": "Режим перевода: авто-перевод с автовставкой результата",
-        "call_recording": "Режим записи звонка: максимальное качество, без превью и автовставки",
-    }
+        """Делегирует к SettingsService. Обратная совместимость."""
+        return self._settings_svc.handle_set_settings(params)
 
     def _handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Применяет пресет настроек профиля, сохраняет и сбрасывает кэш."""
-        profile = str(params.get("profile", "")).strip()
-        preset = self._PROFILE_PRESETS.get(profile)
-        if preset is None:
-            available = ", ".join(self._PROFILE_PRESETS.keys())
-            raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
-
-        settings = self._cached_settings()
-        settings.update(preset)
-        result = self.store.save_settings(settings)
-        self._invalidate_settings_cache()
-        return result
+        """Делегирует к SettingsService. Обратная совместимость."""
+        return self._settings_svc.handle_apply_profile_preset(params)
 
     def _handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список доступных пресетов профилей с описаниями и значениями."""
-        presets = []
-        for name, values in self._PROFILE_PRESETS.items():
-            presets.append({
-                "name": name,
-                "description": self._PROFILE_PRESET_DESCRIPTIONS.get(name, ""),
-                "settings": dict(values),
-            })
-        return {"presets": presets}
+        """Делегирует к SettingsService. Обратная совместимость."""
+        return self._settings_svc.handle_list_profile_presets(params)
 
     def _handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
