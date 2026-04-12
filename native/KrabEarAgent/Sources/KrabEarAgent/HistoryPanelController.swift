@@ -1306,7 +1306,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         applyVisualTheme()
     }
 
-    // MARK: - Keyboard Shortcuts (Cmd+1/2/3, Cmd+F, Cmd+R, Esc)
+    // MARK: - Keyboard Shortcuts (Cmd+1/2/3, Cmd+F, Cmd+R, Cmd+D, Cmd+E, Cmd+I, Esc)
 
     private func setupKeyboardShortcuts() {
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -1333,6 +1333,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                     return nil
                 case "r":
                     self.loadInitial()
+                    return nil
+                case "d":
+                    self.onDiagnostics()
+                    return nil
+                case "e":
+                    self.onExportSrt()
+                    return nil
+                case "i":
+                    self.onStorageInfo()
                     return nil
                 default:
                     break
@@ -1522,8 +1531,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.addArrangedSubview(callAssistSection)
         liveStack.addArrangedSubview(realtimeScroll)
 
-        for card in [translationSettingsCard, gatewayCard] as [ThemeCardView] {
-            card.widthAnchor.constraint(equalTo: liveStack.widthAnchor).isActive = true
+        // Width constraints for all live translation children (consistent with historyStack pattern)
+        for child in liveStack.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: liveStack.widthAnchor).isActive = true
         }
 
         // --- HISTORY TAB ---
