@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # False = throttling полностью отключён (удобно для тестов и локальной разработки).
     IPC_THROTTLE_ENABLED: bool = True
 
+    # IPC request signing: HMAC-SHA256 верификация входящих запросов.
+    # False = подпись отключена (обратная совместимость, дефолт для локальной разработки).
+    # True = все входящие IPC-запросы должны содержать поля signature, timestamp, nonce.
+    # Секрет задаётся через KRAB_EAR_IPC_SIGNING_SECRET или .secrets файл.
+    IPC_SIGNING_ENABLED: bool = False
+    IPC_SIGNING_SECRET: str = ""
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

@@ -24,7 +24,12 @@ class STTStage:
     - ctx.segments
 
     При любой ошибке добавляет сообщение в ctx.errors и не поднимает исключение.
+
+    Атрибут cacheable=True указывает PipelineExecutor, что результаты этой
+    стадии можно кэшировать через StageCache.
     """
+
+    cacheable: bool = True
 
     def __init__(self, engine: Any) -> None:
         """

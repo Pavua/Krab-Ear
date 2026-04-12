@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.ipc_throttle import IPCThrottle
+from backend.request_signing import RequestSigner
 from backend.call_assist_service import CallAssistService
 from backend.collection_manager import CollectionManager
 from backend.recording_chain import RecordingChainManager
@@ -211,10 +212,16 @@ class BackendService:
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
+        # IPC request signing — HMAC-SHA256 верификация входящих запросов.
+        # Включается через KRAB_EAR_IPC_SIGNING_ENABLED=true.
+        self._request_signer: RequestSigner | None = (
+            RequestSigner() if settings.IPC_SIGNING_ENABLED else None
+        )
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
         self._text_anonymizer = TextAnonymizer()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
+        self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
@@ -404,6 +411,7 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
@@ -1215,6 +1223,72 @@ class BackendService:
 
         threshold_db = float(params.get("threshold_db", -40.0))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
+
+    def _handle_profile_noise(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Профилирует фоновый шум в аудиофайле.
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+
+        Returns:
+            Словарь с полями: noise_type, noise_level_db, snr_db,
+            frequency_profile, recommendations, suitable_for_stt.
+        """
+        from core.noise_profiler import NoiseProfiler
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        import soundfile as sf  # lazy import, аналогично analyze_audio_quality
+
+        path = Path(file_path).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Аудиофайл не найден: {path}")
+
+        audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
+        profiler = NoiseProfiler()
+        result = profiler.profile(audio_data, sample_rate)
+        return result.to_dict()
+
+    def _handle_detect_voice_activity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обнаруживает участки речи/тишины в аудиофайле (VAD).
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+            frame_ms (int, optional): длина фрейма анализа в мс (по умолчанию 30).
+            margin_db (float, optional): добавка к шумовому порогу в дБ (по умолчанию 10).
+            onset_frames (int, optional): фреймов для открытия сегмента (по умолчанию 3).
+            offset_frames (int, optional): тихих фреймов для закрытия сегмента (по умолчанию 5).
+
+        Returns:
+            Словарь с speech_segments, speech_ratio, total_speech_sec, total_silence_sec.
+        """
+        import soundfile as sf
+        from core.vad import VoiceActivityDetector
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        frame_ms = int(params.get("frame_ms", 30))
+        margin_db = float(params.get("margin_db", 10.0))
+        onset_frames = int(params.get("onset_frames", 3))
+        offset_frames = int(params.get("offset_frames", 5))
+
+        audio, sr = sf.read(file_path, dtype="float32", always_2d=False)
+        detector = VoiceActivityDetector(
+            margin_db=margin_db,
+            onset_frames=onset_frames,
+            offset_frames=offset_frames,
+        )
+        result = detector.detect(audio, sample_rate=sr, frame_ms=frame_ms)
+        out = result.to_dict()
+        out["file_path"] = file_path
+        out["sample_rate"] = sr
+        out["duration_sec"] = round(len(audio) / sr, 4)
+        return out
+
 
     def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
@@ -2375,6 +2449,17 @@ class BackendService:
             "worst_day": report.worst_day,
             "confidence_distribution": report.confidence_distribution,
         }
+
+    def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует тренды тональности транскрипций за последние N дней."""
+        days = int(params.get("days", 30))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
+        return self._sentiment_trends.to_dict(report)
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает статистику двух временных периодов."""
