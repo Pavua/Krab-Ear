@@ -95,6 +95,7 @@ from core.topic_tracker import TopicTracker
 from core.transcription_scorer import TranscriptionScorer
 from core.emotion_detector import EmotionDetector
 from backend.transcription_queue import TranscriptionQueue
+from backend.sentiment_trends import SentimentTrendAnalyzer
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -453,6 +454,8 @@ class BackendService:
             "add_abbreviation": self._handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
             "remove_abbreviation": self._handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
+            "detect_voice_activity": self._handle_detect_voice_activity,  # VAD: обнаружение участков речи/тишины в аудиофайле
+            "profile_noise": self._handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
         }
 
         handler = handlers.get(method)

@@ -7,6 +7,7 @@ Usage:
     python -m KrabEar.cli stats
     python -m KrabEar.cli health
     python -m KrabEar.cli transcribe FILE
+    python -m KrabEar.cli interactive
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+
+try:
+    import readline as _readline
+    _READLINE_AVAILABLE = True
+except ImportError:
+    _readline = None  # type: ignore[assignment]
+    _READLINE_AVAILABLE = False
 
 # ─── ANSI colors ─────────────────────────────────────────────────────────────
 
@@ -261,6 +269,229 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
         print(text)
 
 
+# ─── Interactive REPL ────────────────────────────────────────────────────────
+
+_REPL_HELP = """
+Available commands:
+  status              Show backend status and diagnostics
+  history [--limit N] List recent transcription history
+  export [--format F] Export history (formats: srt, md, obsidian)
+  stats               Show usage statistics
+  health              Health check all subsystems
+  transcribe FILE     Transcribe an audio file
+  search QUERY        Quick search through history
+  last                Show last transcription
+  clear               Clear the screen
+  help                Show this help message
+  quit / exit         Exit the REPL
+"""
+
+_REPL_COMMANDS = [
+    "status", "history", "export", "stats", "health", "transcribe",
+    "search", "last", "clear", "help", "quit", "exit",
+]
+
+
+def _setup_readline() -> None:
+    """Configure readline with tab completion and history if available."""
+    if not _READLINE_AVAILABLE or _readline is None:
+        return
+    try:
+        def _completer(text: str, state: int) -> str | None:
+            matches = [c for c in _REPL_COMMANDS if c.startswith(text)]
+            return matches[state] if state < len(matches) else None
+
+        _readline.set_completer(_completer)
+        _readline.parse_and_bind("tab: complete")
+    except Exception:
+        pass
+
+
+def _repl_last(sock_path: str | None) -> None:
+    """Print the most recent transcription entry."""
+    resp = _ipc_call("get_history_page", {"page": 0, "page_size": 1}, sock_path=sock_path)
+    if not resp.get("ok"):
+        print(yellow("Could not retrieve history."))
+        return
+    items = resp["result"].get("items", [])
+    if not items:
+        print(dim("No transcriptions found."))
+        return
+    item = items[0]
+    ts = item.get("created_at", item.get("timestamp", ""))
+    text = item.get("text", "")
+    lang = item.get("lang", "")
+    confidence = item.get("confidence")
+    print(bold("Last transcription:"))
+    if ts:
+        print(f"  {bold('Time:')}  {dim(ts[:19])}")
+    if lang:
+        print(f"  {bold('Lang:')}  {cyan(lang)}")
+    if confidence is not None:
+        print(f"  {bold('Conf:')}  {confidence:.1%}")
+    print(f"  {bold('Text:')}  {text}")
+
+
+def _repl_search(query: str, sock_path: str | None) -> None:
+    """Search history items for QUERY (case-insensitive substring match)."""
+    if not query.strip():
+        print(yellow("Usage: search QUERY"))
+        return
+    resp = _ipc_call("get_history_page", {"page": 0, "page_size": 200}, sock_path=sock_path)
+    if not resp.get("ok"):
+        print(yellow("Could not retrieve history."))
+        return
+    items = resp["result"].get("items", [])
+    q = query.lower()
+    hits = [it for it in items if q in it.get("text", "").lower()]
+    if not hits:
+        print(dim(f"No results for '{query}'."))
+        return
+    print(bold(f"Search results for '{query}' ({len(hits)} found):"))
+    print()
+    for item in hits:
+        ts = item.get("created_at", item.get("timestamp", ""))
+        text = item.get("text", "").replace("\n", " ")
+        if len(text) > 120:
+            text = text[:117] + "..."
+        print(f"{dim(ts[:19])}  {text}")
+
+
+def _dispatch_repl_line(line: str, sock_path: str | None) -> bool:
+    """Parse and execute a single REPL input line.
+
+    Returns True to continue, False to exit the loop.
+    """
+    parts = line.strip().split()
+    if not parts:
+        return True
+    cmd, rest = parts[0].lower(), parts[1:]
+
+    if cmd in ("quit", "exit"):
+        print(dim("Goodbye."))
+        return False
+
+    if cmd == "clear":
+        print("\033[2J\033[H", end="")
+        return True
+
+    if cmd == "help":
+        print(_REPL_HELP)
+        return True
+
+    if cmd == "last":
+        _repl_last(sock_path)
+        return True
+
+    if cmd == "search":
+        _repl_search(" ".join(rest), sock_path)
+        return True
+
+    # For the remaining commands we re-use the existing cmd_* functions by
+    # constructing a fake Namespace, which avoids duplicating logic.
+    ns = argparse.Namespace(socket=sock_path)
+
+    if cmd == "status":
+        try:
+            cmd_status(ns)
+        except SystemExit:
+            pass
+        return True
+
+    if cmd == "history":
+        # accept optional --limit N
+        limit = 20
+        if "--limit" in rest:
+            try:
+                limit = int(rest[rest.index("--limit") + 1])
+            except (ValueError, IndexError):
+                pass
+        ns.limit = limit
+        try:
+            cmd_history(ns)
+        except SystemExit:
+            pass
+        return True
+
+    if cmd == "export":
+        fmt = "md"
+        output = None
+        if "--format" in rest:
+            try:
+                fmt = rest[rest.index("--format") + 1]
+            except IndexError:
+                pass
+        if "--output" in rest:
+            try:
+                output = rest[rest.index("--output") + 1]
+            except IndexError:
+                pass
+        ns.format = fmt
+        ns.output = output
+        try:
+            cmd_export(ns)
+        except SystemExit:
+            pass
+        return True
+
+    if cmd == "stats":
+        try:
+            cmd_stats(ns)
+        except SystemExit:
+            pass
+        return True
+
+    if cmd == "health":
+        try:
+            cmd_health(ns)
+        except SystemExit:
+            pass
+        return True
+
+    if cmd == "transcribe":
+        if not rest:
+            print(yellow("Usage: transcribe FILE"))
+            return True
+        ns.file = rest[0]
+        try:
+            cmd_transcribe(ns)
+        except SystemExit:
+            pass
+        return True
+
+    print(yellow(f"Unknown command: {cmd!r}. Type 'help' for a list of commands."))
+    return True
+
+
+def cmd_interactive(args: argparse.Namespace) -> None:
+    """Start an interactive REPL for Krab Ear CLI."""
+    sock_path = getattr(args, "socket", None)
+
+    _setup_readline()
+
+    prompt = cyan("krab-ear") + dim("> ") if _USE_COLOR else "krab-ear> "
+
+    print(bold("Krab Ear Interactive REPL"))
+    print(dim("Type 'help' for available commands, 'quit' to exit."))
+    print()
+
+    while True:
+        try:
+            try:
+                line = input(prompt)
+            except EOFError:
+                # Ctrl+D
+                print()
+                print(dim("Goodbye."))
+                break
+            if not _dispatch_repl_line(line, sock_path):
+                break
+        except KeyboardInterrupt:
+            # Ctrl+C — cancel current input but stay in loop
+            print()
+            continue
+
+
 # ─── Argument parser ─────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -310,6 +541,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_tx = sub.add_parser("transcribe", help="Transcribe an audio file")
     p_tx.add_argument("file", metavar="FILE", help="Audio file path")
     p_tx.set_defaults(func=cmd_transcribe)
+
+    # interactive
+    p_int = sub.add_parser("interactive", help="Start an interactive REPL session")
+    p_int.set_defaults(func=cmd_interactive)
 
     return parser
 
