@@ -143,6 +143,36 @@ class HistoryService:
         """Возвращает обзорный срез истории для панели управления."""
         return self.store.get_history_overview()
 
+    def handle_search_by_speaker(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает записи истории, в которых участвует указанный спикер.
+
+        Params:
+            speaker (str): идентификатор спикера, например "SPEAKER_00".
+            limit (int, optional): максимальное количество результатов (1–500, default 100).
+
+        Returns:
+            {"items": [...], "count": N}
+        """
+        speaker = str(params.get("speaker", "")).strip()
+        if not speaker:
+            raise RuntimeError("speaker обязателен")
+        safe_limit = max(1, min(int(params.get("limit", 100)), 500))
+
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        matched = []
+        for item in reversed(active):
+            if item.diarization is None:
+                continue
+            segments = item.diarization.get("speaker_segments", [])
+            if any(str(seg.get("speaker", "")) == speaker for seg in segments):
+                matched.append(item.to_dict())
+                if len(matched) >= safe_limit:
+                    break
+
+        return {"items": matched, "count": len(matched)}
+
     def handle_get_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает полные детали одной записи истории по ID."""
         item_id = str(params.get("id", "")).strip()
@@ -917,6 +947,69 @@ class HistoryService:
 
         summary = key_points[0] if key_points else ""
         return {"summary": summary, "key_points": key_points}
+
+    # ------------------------------------------------------------------
+    # Фильтрация по уровню уверенности STT
+    # ------------------------------------------------------------------
+
+    def handle_filter_by_confidence(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает записи истории, отфильтрованные по STT confidence score.
+
+        Параметры:
+            min_confidence (float): нижняя граница confidence (0.0–1.0), обязательна
+            max_confidence (float|None): верхняя граница confidence (0.0–1.0), опционально
+
+        Возвращает:
+            items (list): записи истории, у которых confidence в заданном диапазоне
+            count (int): количество найденных записей
+            avg_confidence (float): среднее значение confidence среди найденных записей
+        """
+        raw_min = params.get("min_confidence")
+        if raw_min is None:
+            raise RuntimeError("Параметр min_confidence обязателен")
+        try:
+            min_confidence = float(raw_min)
+        except (TypeError, ValueError):
+            raise RuntimeError("min_confidence должен быть числом от 0.0 до 1.0")
+        if not (0.0 <= min_confidence <= 1.0):
+            raise RuntimeError("min_confidence должен быть в диапазоне 0.0–1.0")
+
+        raw_max = params.get("max_confidence")
+        max_confidence: float | None = None
+        if raw_max is not None:
+            try:
+                max_confidence = float(raw_max)
+            except (TypeError, ValueError):
+                raise RuntimeError("max_confidence должен быть числом от 0.0 до 1.0")
+            if not (0.0 <= max_confidence <= 1.0):
+                raise RuntimeError("max_confidence должен быть в диапазоне 0.0–1.0")
+            if max_confidence < min_confidence:
+                raise RuntimeError("max_confidence не может быть меньше min_confidence")
+
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+
+        matched = []
+        for item in reversed(active):
+            c = item.confidence
+            if c is None:
+                continue
+            if c < min_confidence:
+                continue
+            if max_confidence is not None and c > max_confidence:
+                continue
+            matched.append(item)
+
+        avg_confidence = (
+            round(sum(it.confidence for it in matched) / len(matched), 4)  # type: ignore[arg-type]
+            if matched
+            else 0.0
+        )
+        return {
+            "items": [it.to_dict() for it in matched],
+            "count": len(matched),
+            "avg_confidence": avg_confidence,
+        }
 
     # ------------------------------------------------------------------
     # Статические хелперы (копированы из BackendService для автономности)

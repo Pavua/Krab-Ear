@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Если задан, защищённые эндпоинты требуют заголовок: Authorization: Bearer <key>
     REST_API_KEY: str = ""
 
+    # Rate limiting для REST API (flask-limiter).
+    # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
+    RATE_LIMIT_ENABLED: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -152,4 +156,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # D.10a runtime toggle: юзер может включать/выключать LLM rewriter через
     # IPC update_settings без рестарта. Дефолт False — safety.
     "llm_rewrite_enabled": False,
+    # Автосохранение каждой транскрибации в .md файл в transcripts/.
+    "auto_save_transcripts": False,
 }

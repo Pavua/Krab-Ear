@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.call_assist_service import CallAssistService
 from backend.history_service import HistoryService
+from backend.transcript_writer import TranscriptWriter
 from backend.settings_service import SettingsService
 from backend.translation_service import TranslationService
 from backend.event_bus import bus as event_bus
@@ -111,6 +112,13 @@ class BackendService:
             store=self.store,
             cached_settings=self._cached_settings,
             invalidate_settings_cache=self._invalidate_settings_cache,
+        )
+        from backend.health_checker import HealthChecker
+        self._health_checker = HealthChecker(
+            store=self.store,
+            transcriber=self.transcriber,
+            llm_rewriter=self._llm_rewriter,
+            start_time=self._start_time,
         )
 
     def _init_llm_rewriter(self):
@@ -193,6 +201,7 @@ class BackendService:
             "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_page": self._history.handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
             "search_history": self._history.handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
+            "search_by_speaker": self._history.handle_search_by_speaker,
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
             "get_settings": self._settings_svc.handle_get_settings,  # VERIFIED: called from Swift (main)
@@ -229,6 +238,8 @@ class BackendService:
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
+            "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
+            "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
         }
 
         handler = handlers.get(method)
@@ -590,6 +601,25 @@ class BackendService:
             language=tp.get("language"),
             confidence=tp.get("confidence"),
         ))
+
+        # Автосохранение транскрибации в .md файл
+        if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
+            try:
+                transcripts_dir = Path(self.store.data_dir) / "transcripts"
+                item_dict = {
+                    "text": display_text,
+                    "ts": item.ts,
+                    "audio_duration_sec": duration_sec,
+                    "confidence": tp.get("confidence"),
+                    "translated_text": translated_text,
+                    "translation_status": translation_status,
+                    "diarization": diarization_data,
+                }
+                saved_path = TranscriptWriter.write_transcript(item_dict, transcripts_dir)
+                result_payload["transcript_file"] = str(saved_path)
+            except Exception:
+                logger.exception("Не удалось автосохранить транскрибацию в .md")
+
         return result_payload
 
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -759,6 +789,10 @@ class BackendService:
                 "cached": self._settings_svc._cache is not None,
             },
         }
+
+    def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Агрегированный health check всех ключевых подсистем бэкенда."""
+        return self._health_checker.check_all()
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.

@@ -5,16 +5,20 @@ OpenAPI 3.0 документация доступна по адресу /api/doc
 """
 
 import json
+import math
 import os
 import queue
 import time
 import uuid
 import logging
 import functools
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, Response, request, jsonify, stream_with_context, g
 from flask_smorest import Api, Blueprint
 from flask_sock import Sock
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from marshmallow import Schema, fields as ma_fields, validate
 from werkzeug.utils import secure_filename
 
@@ -43,6 +47,35 @@ app.config["OPENAPI_SWAGGER_UI_URL"] = "https://cdn.jsdelivr.net/npm/swagger-ui-
 
 api = Api(app)
 sock = Sock(app)
+
+# ---------------------------------------------------------------------------
+# Rate limiting — flask-limiter с in-memory хранилищем.
+# Отключается через KRAB_EAR_RATE_LIMIT_ENABLED=false (тесты/dev).
+# ---------------------------------------------------------------------------
+
+def _rate_limit_exceeded_handler(e):
+    """Возвращает 429 JSON с retry_after вместо стандартного HTML."""
+    retry_after = 60
+    try:
+        retry_after = math.ceil(e.description.retry_after.total_seconds())
+    except Exception:
+        pass
+    response = jsonify({"error": "rate_limit_exceeded", "retry_after": retry_after})
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["60 per minute"] if settings.RATE_LIMIT_ENABLED else [],
+    storage_uri="memory://",
+    enabled=settings.RATE_LIMIT_ENABLED,
+    headers_enabled=True,
+)
+
+app.register_error_handler(429, _rate_limit_exceeded_handler)
 
 # WebSocket heartbeat interval (seconds)
 _WS_HEARTBEAT_SEC = 30
@@ -167,12 +200,38 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 @app.before_request
 def start_timer():
     g._request_start = time.time()
+    g._request_id = str(uuid.uuid4())
 
 
 @app.after_request
 def log_request(response):
-    logger.info("%s %s %s %dms", request.method, request.path, response.status_code,
-                int((time.time() - g.get('_request_start', time.time())) * 1000))
+    duration_ms = int((time.time() - g.get('_request_start', time.time())) * 1000)
+    request_id = g.get('_request_id', str(uuid.uuid4()))
+
+    # Attach request ID to response header for traceability
+    response.headers['X-Request-ID'] = request_id
+
+    if settings.LOG_FORMAT == "json":
+        log_record = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.path,
+            "status": response.status_code,
+            "duration_ms": duration_ms,
+            "ip": request.remote_addr or "",
+            "content_length": request.content_length or 0,
+        }
+        logger.info(json.dumps(log_record))
+    else:
+        logger.info(
+            "%s %s %s %dms [%s]",
+            request.method,
+            request.path,
+            response.status_code,
+            duration_ms,
+            request_id,
+        )
     return response
 
 
@@ -191,6 +250,7 @@ monitoring_blp = Blueprint(
 
 @monitoring_blp.route("/health", methods=["GET"])
 @monitoring_blp.response(200, HealthResponseSchema)
+@limiter.limit("120 per minute")
 def health():
     """Liveness check — verifies the server process is running."""
     return {"status": "ok", "service": "krab-ear", "profile": engine.quality_profile}
@@ -263,6 +323,7 @@ def add_vocabulary(args):
 
 @v1_blp.route("/stt/transcribe", methods=["POST"])
 @v1_blp.response(200, TranscribeResponseSchema)
+@limiter.limit("10 per minute")
 def transcribe_audio():
     """Transcribe an audio file to text.
 
