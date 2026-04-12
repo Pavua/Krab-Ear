@@ -251,7 +251,7 @@ class PasteFormatter:
         for key, fn in _BUILTIN_FORMATTERS.items():
             if key == "default":
                 continue
-            if key in normalized or normalized in key:
+            if normalized and (key in normalized or normalized in key):
                 try:
                     return fn(text)
                 except Exception as exc:

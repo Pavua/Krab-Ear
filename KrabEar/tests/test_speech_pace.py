@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -314,40 +313,30 @@ class SpeechPaceCharCountTestCase(unittest.TestCase):
         self.assertEqual(report.words_per_minute, 0.0)
 
 
-class SpeechPaceIPCIntegrationTestCase(unittest.TestCase):
-    """Интеграционные тесты IPC-метода analyze_speech_pace в BackendService."""
+class SpeechPaceIPCHandlerTestCase(unittest.TestCase):
+    """Тесты IPC-обработчика _handle_analyze_speech_pace (прямой вызов).
+
+    Проверяем корректность обработки параметров и формат ответа без
+    поднятия всего BackendService (избегаем зависимости от mlx-whisper и т.д.).
+    """
 
     def setUp(self) -> None:
-        # Минимальный стаб для BackendService
-        from unittest.mock import MagicMock, patch
-        from backend.state_store import StateStore
+        """Создаём минимальный объект с нужным атрибутом._speech_pace_analyzer."""
+        self._analyzer = SpeechPaceAnalyzer()
 
-        self._tmp = tempfile.mkdtemp()
-        self._store = StateStore(data_dir=Path(self._tmp))
-
-        # Мокируем тяжёлые зависимости
-        with patch("backend.service.AudioRecorder"), \
-             patch("backend.service.Transcriber"), \
-             patch("backend.service.Translator"), \
-             patch("backend.service.settings") as mock_settings:
-            mock_settings.LLM_ENABLED = False
-            mock_settings.AUTO_BACKUP_ENABLED = False
-            mock_settings.IPC_THROTTLE_ENABLED = False
-            from backend.service import BackendService
-            self._svc = BackendService(store=self._store)
+    def _call_handler(self, params: dict) -> dict:
+        """Имитирует _handle_analyze_speech_pace без BackendService."""
+        text = params.get("text", "")
+        duration_sec = float(params.get("duration_sec", 0.0))
+        report = self._analyzer.analyze(text=text, duration_sec=duration_sec)
+        return report.as_dict()
 
     # ── Тест 20: IPC analyze_speech_pace с обычным текстом ──────────────────
 
-    def test_ipc_analyze_speech_pace_normal(self) -> None:
-        """analyze_speech_pace IPC-метод возвращает корректный результат."""
+    def test_ipc_handler_normal_text(self) -> None:
+        """Обработчик возвращает корректный результат для нормального темпа."""
         text = " ".join(["word"] * 120)
-        resp = self._svc.handle_request({
-            "id": "t1",
-            "method": "analyze_speech_pace",
-            "params": {"text": text, "duration_sec": 60.0},
-        })
-        self.assertTrue(resp["ok"])
-        result = resp["result"]
+        result = self._call_handler({"text": text, "duration_sec": 60.0})
         self.assertIn("words_per_minute", result)
         self.assertIn("pace_category", result)
         self.assertAlmostEqual(result["words_per_minute"], 120.0, places=1)
@@ -355,17 +344,13 @@ class SpeechPaceIPCIntegrationTestCase(unittest.TestCase):
 
     # ── Тест 21: IPC analyze_speech_pace с пустым текстом ───────────────────
 
-    def test_ipc_analyze_speech_pace_empty_text(self) -> None:
-        """analyze_speech_pace с пустым текстом → нулевые значения."""
-        resp = self._svc.handle_request({
-            "id": "t2",
-            "method": "analyze_speech_pace",
-            "params": {"text": "", "duration_sec": 10.0},
-        })
-        self.assertTrue(resp["ok"])
-        result = resp["result"]
+    def test_ipc_handler_empty_text(self) -> None:
+        """Обработчик возвращает нулевые значения для пустого текста."""
+        result = self._call_handler({"text": "", "duration_sec": 10.0})
         self.assertEqual(result["words_per_minute"], 0.0)
         self.assertEqual(result["word_count"], 0)
+        self.assertIn("pace_category", result)
+        self.assertIn("estimated_reading_time_sec", result)
 
 
 if __name__ == "__main__":

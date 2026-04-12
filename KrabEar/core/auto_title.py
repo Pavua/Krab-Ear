@@ -129,7 +129,7 @@ class AutoTitleGenerator:
             results.append({
                 "id": item_id,
                 "title": title,
-                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             })
 
         return results
@@ -241,7 +241,7 @@ class AutoTitleGenerator:
     def _format_date(self, timestamp: str) -> str:
         """Форматирует timestamp в строку YYYY-MM-DD."""
         if not timestamp:
-            return datetime.utcnow().strftime("%Y-%m-%d")
+            return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         # Пробуем распарсить ISO 8601 (с или без время)
         for fmt in (

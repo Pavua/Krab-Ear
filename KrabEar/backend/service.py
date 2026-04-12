@@ -68,6 +68,7 @@ from core.language_detector import LanguageDetector
 from core.text_comparator import TextComparator
 from core.term_extractor import TermExtractor
 from core.utils import TextUtils
+from backend.analytics_dashboard import AnalyticsDashboard
 from backend.daily_digest import DailyDigestGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.keyword_cloud import KeywordCloudGenerator
@@ -172,6 +173,7 @@ class BackendService:
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
         self._transcription_counter: int = 0
+        self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
         self._keyword_cloud_gen = KeywordCloudGenerator()
@@ -284,6 +286,7 @@ class BackendService:
             "get_history_page": self._history.handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
             "search_history": self._history.handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
             "fuzzy_search": self._history.handle_fuzzy_search,  # нечёткий поиск по истории транскрипций
+            "search_with_highlights": self._history.handle_search_with_highlights,  # поиск с подсветкой совпадений в результатах
             "search_by_speaker": self._history.handle_search_by_speaker,
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
@@ -406,7 +409,13 @@ class BackendService:
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: WPM, CPM, категория темпа
             "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
             "format_for_paste": self._paste_formatter.handle_format_for_paste,  # форматирование текста под целевое приложение (telegram, notes, email и др.)
+            "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
+            "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
+            "extract_learning_vocabulary": self._handle_extract_learning_vocabulary,  # режим изучения языков: извлечение словаря из двуязычных транскрипций
+            "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
+            "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
+            "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
         }
 
         handler = handlers.get(method)
@@ -2614,6 +2623,78 @@ class BackendService:
             result["activity_heatmap"] = heatmap
 
         return result
+
+
+    def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует автоматический заголовок для транскрибации.
+
+        Параметры:
+            text (str): текст транскрибации (обязательный).
+            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
+            max_length (int): максимальная длина заголовка (по умолчанию 50).
+            with_date (bool): если true и timestamp указан — включает дату.
+            items (list): список записей для пакетной генерации (альтернатива text).
+
+        Ответ (одиночный):
+            {title: str}
+
+        Ответ (пакетный):
+            {titles: [{id, title, generated_at}]}
+        """
+        # Пакетный режим
+        items = params.get("items")
+        if items is not None:
+            if not isinstance(items, list):
+                raise ValueError("Параметр 'items' должен быть списком")
+            titles = self._auto_title_generator.batch_generate(items)
+            return {"titles": titles}
+
+        # Одиночный режим
+        text = str(params.get("text", "") or "")
+        timestamp = str(params.get("timestamp", "") or "")
+        max_length = int(params.get("max_length", 50))
+        with_date = bool(params.get("with_date", False))
+
+        if not text:
+            return {"title": "Запись"}
+
+        if with_date and timestamp:
+            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
+        else:
+            title = self._auto_title_generator.generate_title(text, max_length=max_length)
+
+        return {"title": title}
+
+
+    def _handle_extract_learning_vocabulary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: extract_learning_vocabulary — извлечение словаря из двуязычных транскрипций."""
+        params_with_store = dict(params)
+        params_with_store.setdefault("store", self.store)
+        return self._language_learning.handle_extract_learning_vocabulary(params_with_store)
+
+    def _handle_generate_flashcards(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: generate_flashcards — генерация флеш-карточек для изучения языка."""
+        params_with_store = dict(params)
+        params_with_store.setdefault("store", self.store)
+        return self._language_learning.handle_generate_flashcards(params_with_store)
+
+    def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_learning_stats — статистика прогресса изучения языка."""
+        params_with_store = dict(params)
+        params_with_store.setdefault("store", self.store)
+        return self._language_learning.handle_get_learning_stats(params_with_store)
+
+    def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
+
+        Параметры:
+            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
+
+        Возвращает:
+            overview, today, trends, languages, quality, engagement, storage, performance
+        """
+        days = max(1, min(int(params.get("days", 30) or 30), 365))
+        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
 
 
 class IPCServer:
