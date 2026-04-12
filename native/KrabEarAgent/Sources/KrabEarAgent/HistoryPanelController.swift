@@ -29,7 +29,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
         }
     }
-    private struct ImportJob {
+    struct ImportJob {
         let paths: [String]
         let sourceTag: String
         let audioCount: Int
@@ -38,7 +38,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let byExtension: [String: Int]
     }
 
-    private struct ImportPreview {
+    struct ImportPreview {
         let audioCount: Int
         let folderCount: Int
         let sample: [String]
@@ -47,9 +47,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }
 
     let ipcClient: IPCClient
-    private let settingsProvider: () -> AgentSettings
-    private let settingsUpdater: ([String: Any]) -> AgentSettings
-    private let onToggleRecording: () -> Void
+    let settingsProvider: () -> AgentSettings
+    let settingsUpdater: ([String: Any]) -> AgentSettings
+    let onToggleRecording: () -> Void
     private let onRestartAgent: () -> Void
     private let onStopAgent: () -> Void
     private let onPasteHistoryItem: (HistoryItem) -> Void
@@ -59,88 +59,88 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var items: [HistoryItem] = []
     private var nextCursor: String?
     var currentQuery: String = ""
-    private var isSyncingSettings = false
-    private var importQueue: [ImportJob] = []
-    private var importJobSignatures: Set<String> = []
-    private var currentImportJob: ImportJob?
-    private var isImportRunning = false
-    private var isImportPaused = false
-    private var importCancellationRequested = false
-    private var importJobsPlanned = 0
-    private var importJobsCompleted = 0
-    private var importProcessedTotal = 0
-    private var importErrorsTotal = 0
-    private var importDurationTotalSec: Double = 0
-    private var importSessionStartedAt: Date?
-    private var lastImportReportPath: String?
-    private var importSourceStats: [String: Int] = [:]
-    private var importFormatStats: [String: Int] = [:]
-    private var importFilesPlanned = 0
-    private var importBytesPlanned = 0
-    private var importElapsedTimer: Timer?
-    private var currentImportJobStartedAt: Date?
-    private var isSyncingTabs = false
+    var isSyncingSettings = false
+    var importQueue: [ImportJob] = []
+    var importJobSignatures: Set<String> = []
+    var currentImportJob: ImportJob?
+    var isImportRunning = false
+    var isImportPaused = false
+    var importCancellationRequested = false
+    var importJobsPlanned = 0
+    var importJobsCompleted = 0
+    var importProcessedTotal = 0
+    var importErrorsTotal = 0
+    var importDurationTotalSec: Double = 0
+    var importSessionStartedAt: Date?
+    var lastImportReportPath: String?
+    var importSourceStats: [String: Int] = [:]
+    var importFormatStats: [String: Int] = [:]
+    var importFilesPlanned = 0
+    var importBytesPlanned = 0
+    var importElapsedTimer: Timer?
+    var currentImportJobStartedAt: Date?
+    var isSyncingTabs = false
     private var previewPollTick = 0
     private var isRecoveringHistoryFromFilters = false
 
     let mainTabView = NSTabView()
     let tableView = NSTableView()
     let searchField = NSSearchField()
-    private let historyPageSizeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let historyDensitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let historyPageSizeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let historyDensitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyPasteStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyTranslationModeFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyTranslationStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyFromDateField = NSTextField(frame: .zero)
     let historyToDateField = NSTextField(frame: .zero)
     private let historyFocusModeButton = NSButton(title: "Фокус истории: ON", target: nil, action: nil)
-    private let qualitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let cleanupSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let translationSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let translationStyleSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let networkSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let captureSourceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let clipboardModeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let audioDuckingButton = NSButton(checkboxWithTitle: "Приглушать звук", target: nil, action: nil)
-    private let audioDuckingSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
-    private let audioDuckingValueLabel = NSTextField(labelWithString: "50%")
+    let qualitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let cleanupSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let translationSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let translationStyleSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let networkSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let captureSourceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let clipboardModeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let audioDuckingButton = NSButton(checkboxWithTitle: "Приглушать звук", target: nil, action: nil)
+    let audioDuckingSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
+    let audioDuckingValueLabel = NSTextField(labelWithString: "50%")
     // D.10a: AI Settings Controls
     private let aiSectionLabel: NSTextField = {
         let label = NSTextField(labelWithString: "AI и обработка")
         label.font = .boldSystemFont(ofSize: 13)
         return label
     }()
-    private let diarizationButton = NSButton(checkboxWithTitle: "Диаризация (определение говорящих)", target: nil, action: nil)
-    private let llmRewriteButton = NSButton(checkboxWithTitle: "LLM постобработка текста", target: nil, action: nil)
-    private let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
-    private let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
-    private let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let autoPasteButton = NSButton(checkboxWithTitle: "Автовставка", target: nil, action: nil)
-    private let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
-    private let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
-    private let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
-    private let callNotifyButton = NSButton(checkboxWithTitle: "Уведомлять собеседника", target: nil, action: nil)
-    private let callAutoSummaryButton = NSButton(checkboxWithTitle: "Авто-summary звонка", target: nil, action: nil)
-    private let voiceGatewayURLField = NSTextField(frame: .zero)
-    private let voiceGatewayAPIKeyField = NSTextField(frame: .zero)
-    private let voiceGatewayCheckButton = NSButton(title: "Проверить Gateway", target: nil, action: nil)
-    private let autoStartButton = NSButton(checkboxWithTitle: "Автозапуск", target: nil, action: nil)
-    private let dockIconButton = NSButton(checkboxWithTitle: "Иконка в Dock", target: nil, action: nil)
-    private let hotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let hotkeyProfileSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let realtimeStatusLabel = NSTextField(labelWithString: "Realtime: ожидание")
-    private let callAssistStatusLabel = NSTextField(labelWithString: "Call Assist: idle")
-    private let realtimeTextView = NSTextView()
+    let diarizationButton = NSButton(checkboxWithTitle: "Диаризация (определение говорящих)", target: nil, action: nil)
+    let llmRewriteButton = NSButton(checkboxWithTitle: "LLM постобработка текста", target: nil, action: nil)
+    let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
+    let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
+    let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let autoPasteButton = NSButton(checkboxWithTitle: "Автовставка", target: nil, action: nil)
+    let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
+    let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
+    let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
+    let callNotifyButton = NSButton(checkboxWithTitle: "Уведомлять собеседника", target: nil, action: nil)
+    let callAutoSummaryButton = NSButton(checkboxWithTitle: "Авто-summary звонка", target: nil, action: nil)
+    let voiceGatewayURLField = NSTextField(frame: .zero)
+    let voiceGatewayAPIKeyField = NSTextField(frame: .zero)
+    let voiceGatewayCheckButton = NSButton(title: "Проверить Gateway", target: nil, action: nil)
+    let autoStartButton = NSButton(checkboxWithTitle: "Автозапуск", target: nil, action: nil)
+    let dockIconButton = NSButton(checkboxWithTitle: "Иконка в Dock", target: nil, action: nil)
+    let hotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let hotkeyProfileSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let realtimeStatusLabel = NSTextField(labelWithString: "Realtime: ожидание")
+    let callAssistStatusLabel = NSTextField(labelWithString: "Call Assist: idle")
+    let realtimeTextView = NSTextView()
     private let dictationHistoryHintLabel = NSTextField(labelWithString: "История пока пустая. После первой транскрибации записи появятся здесь.")
     private let dictationHistoryOpenButton = NSButton(title: "Открыть историю", target: nil, action: nil)
     private let dictationHistoryPreviewView = NSTextView()
-    private let callAssistStartButton = NSButton(title: "Старт звонка", target: nil, action: nil)
-    private let callAssistStopButton = NSButton(title: "Стоп звонка", target: nil, action: nil)
-    private let callPhrasePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let callAssistStartButton = NSButton(title: "Старт звонка", target: nil, action: nil)
+    let callAssistStopButton = NSButton(title: "Стоп звонка", target: nil, action: nil)
+    let callPhrasePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let callPhraseLoadButton = NSButton(title: "Загрузить фразы", target: nil, action: nil)
-    private let callPhraseDirectionSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let callPhraseInputField = NSTextField(frame: .zero)
+    let callPhraseDirectionSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let callPhraseInputField = NSTextField(frame: .zero)
     private let callPhraseSendButton = NSButton(title: "Сказать фразу", target: nil, action: nil)
     private let callSummaryButton = NSButton(title: "Summary звонка", target: nil, action: nil)
     private let callDiagnosticsButton = NSButton(title: "Диагностика", target: nil, action: nil)
@@ -149,9 +149,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let callTimelineExportButton = NSButton(title: "Экспорт Timeline", target: nil, action: nil)
     private let callTimelineToHistoryButton = NSButton(title: "Timeline -> история", target: nil, action: nil)
     private let callTimelineClearButton = NSButton(title: "Очистить Timeline", target: nil, action: nil)
-    private let callTimelineKeepLastSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let callAssistOutputView = NSTextView()
-    private var callPhrasePresets: [[String: Any]] = []
+    let callTimelineKeepLastSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let callAssistOutputView = NSTextView()
+    var callPhrasePresets: [[String: Any]] = []
 
     private let topBar = NSStackView()
     private let topSearchRow = NSStackView()
@@ -196,13 +196,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let openTranscriptsButton = NSButton(title: "Транскрипты", target: nil, action: nil)
     private let historyOverviewLabel = NSTextField(labelWithString: "")
     private let historyStatusLabel = NSTextField(labelWithString: "")
-    private let glossaryStatusLabel = NSTextField(labelWithString: "Глоссарий: 0")
-    private let importStatusLabel = NSTextField(labelWithString: "Импорт: idle")
-    private let cancelImportButton = NSButton(title: "Отменить импорт", target: nil, action: nil)
-    private let pauseImportButton = NSButton(title: "Пауза импорта", target: nil, action: nil)
-    private let swapRuEsButton = NSButton(title: "Swap RU<->ES", target: nil, action: nil)
-    private let openImportReportButton = NSButton(title: "Открыть отчёт", target: nil, action: nil)
-    private let dropZoneView = ImportDropZoneView(frame: .zero)
+    let glossaryStatusLabel = NSTextField(labelWithString: "Глоссарий: 0")
+    let importStatusLabel = NSTextField(labelWithString: "Импорт: idle")
+    let cancelImportButton = NSButton(title: "Отменить импорт", target: nil, action: nil)
+    let pauseImportButton = NSButton(title: "Пауза импорта", target: nil, action: nil)
+    let swapRuEsButton = NSButton(title: "Swap RU<->ES", target: nil, action: nil)
+    let openImportReportButton = NSButton(title: "Открыть отчёт", target: nil, action: nil)
+    let dropZoneView = ImportDropZoneView(frame: .zero)
     private var previewTimer: Timer?
     private var historyFocusManagedRows: [NSView] = []
     private var historyScrollMinHeightConstraint: NSLayoutConstraint?
@@ -221,7 +221,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let callPhrasePresetRow = NSStackView()
     private let callPhraseActionRow = NSStackView()
     private let callTimelineRow = NSStackView()
-    private let callAssistOutputScroll = NSScrollView()
+    let callAssistOutputScroll = NSScrollView()
     private let realtimeScroll = NSScrollView()
     private let historyPreviewContainer = NSStackView()
     private let scrollView = NSScrollView()
@@ -1846,20 +1846,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         )
     }
 
-    @objc private func onImportAudio() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.title = "Выберите аудиофайлы или папки"
-        panel.message = "Выберите аудиофайлы или папки с записями звонков для транскрибации"
-        panel.prompt = "Транскрибировать"
-
-        guard panel.runModal() == .OK else { return }
-        let paths = panel.urls.map(\.path)
-        enqueueImport(paths: paths, sourceTag: "open_panel")
-    }
-
     @objc private func onOpenHistoryTabFromDictation() {
         // Если история есть, но текущие фильтры её скрывают, сразу сбрасываем фильтры.
         if items.isEmpty,
@@ -1872,39 +1858,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         window?.makeFirstResponder(searchField)
     }
 
-    @objc private func onCancelImport() {
-        guard isImportRunning || !importQueue.isEmpty else { return }
-        importCancellationRequested = true
-        isImportPaused = false
-        importQueue.removeAll()
-        if let currentImportJob {
-            importJobSignatures = [normalizedImportSignature(currentImportJob.paths)]
-        } else {
-            importJobSignatures.removeAll()
-        }
-        cancelImportButton.isEnabled = false
-        pauseImportButton.isEnabled = false
-        pauseImportButton.title = "Пауза импорта"
-        importStatusLabel.stringValue = "Импорт: остановка после текущей задачи..."
-    }
-
-    @objc private func onToggleImportPause() {
-        guard isImportRunning || !importQueue.isEmpty else { return }
-        isImportPaused.toggle()
-        pauseImportButton.title = isImportPaused ? "Продолжить импорт" : "Пауза импорта"
-        if isImportPaused {
-            importStatusLabel.stringValue = "Импорт: пауза (текущая задача завершится, новые не стартуют)"
-            return
-        }
-        updateImportStatusLabel()
-        processNextImportIfNeeded()
-    }
-
-    @objc private func onOpenImportReport() {
-        guard let lastImportReportPath else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: lastImportReportPath))
-    }
-
     @objc private func onRestartFromPanel() {
         onRestartAgent()
     }
@@ -1913,793 +1866,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         onStopAgent()
     }
 
-    @objc private func onQualityChanged() {
-        guard !isSyncingSettings else { return }
-        let qualityProfile = qualitySelector.indexOfSelectedItem == 1 ? "max" : "balanced"
-        applySettingsPatch(["quality_profile": qualityProfile])
-    }
-
-    @objc private func onModeChanged() {
-        guard !isSyncingSettings else { return }
-        let mode = modeSelector.indexOfSelectedItem == 1 ? "menubar" : "headless"
-        applySettingsPatch(["mode": mode])
-    }
-
-    @objc private func onCleanupProfileChanged() {
-        guard !isSyncingSettings else { return }
-        let profile = cleanupSelector.indexOfSelectedItem == 1 ? "strict" : "soft"
-        applySettingsPatch(["cleanup_profile": profile])
-    }
-
-    @objc private func onTranslationModeChanged() {
-        guard !isSyncingSettings else { return }
-        let mode: String
-        switch translationSelector.indexOfSelectedItem {
-        case 1:
-            mode = "ru_to_es"
-        case 2:
-            mode = "es_to_ru"
-        case 3:
-            mode = "en_to_ru"
-        case 4:
-            mode = "auto"
-        case 5:
-            mode = "bilingual_ru_es"
-        case 6:
-            mode = "auto_to_ru"
-        default:
-            mode = "off"
-        }
-        applySettingsPatch(["translation_mode": mode])
-    }
-
-    @objc private func onHistoryPageSizeChanged() {
-        guard !isSyncingSettings else { return }
-        let raw = historyPageSizeSelector.titleOfSelectedItem ?? "50"
-        let value = Int(raw) ?? 50
-        applySettingsPatch(["history_page_size": value])
-        loadInitial()
-    }
-
-    @objc private func onHistoryDensityChanged() {
-        guard !isSyncingSettings else { return }
-        let density = historyDensitySelector.indexOfSelectedItem == 1 ? "compact" : "normal"
-        applySettingsPatch(["history_text_density": density])
-        tableView.reloadData()
-    }
-
-    @objc private func onNetworkModeChanged() {
-        guard !isSyncingSettings else { return }
-        let mode: String
-        switch networkSelector.indexOfSelectedItem {
-        case 1:
-            mode = "offline_strict"
-        case 2:
-            mode = "online_opt_in"
-        default:
-            mode = "offline_default"
-        }
-        applySettingsPatch(["network_mode": mode])
-    }
-
-    @objc private func onTranslationStyleChanged() {
-        guard !isSyncingSettings else { return }
-        let style: String
-        switch translationStyleSelector.indexOfSelectedItem {
-        case 1:
-            style = "chat"
-        case 2:
-            style = "formal"
-        default:
-            style = "neutral"
-        }
-        applySettingsPatch(["translation_style": style])
-    }
-
-    @objc private func onAutoPasteChanged() {
-        guard !isSyncingSettings else { return }
-        let autoPaste = autoPasteButton.state == .on
-        applySettingsPatch(["auto_paste": autoPaste])
-    }
-
-    @objc private func onStartSoundChanged() {
-        guard !isSyncingSettings else { return }
-        let playStartSound = startSoundButton.state == .on
-        applySettingsPatch(["play_start_sound": playStartSound])
-    }
-
-    @objc private func onRealtimePreviewChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = realtimePreviewButton.state == .on
-        applySettingsPatch(["realtime_preview_enabled": enabled])
-        if !enabled {
-            realtimeStatusLabel.stringValue = "Realtime: выключен"
-            realtimeTextView.string = "Realtime preview отключен в настройках."
-        } else {
-            refreshRealtimePreview()
-        }
-    }
-
-    @objc private func onTranslateAndPasteChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = translateAndPasteButton.state == .on
-        applySettingsPatch(["translate_and_paste": enabled])
-    }
-
-    @objc private func onClipboardModeChanged() {
-        guard !isSyncingSettings else { return }
-        let mode: String
-        switch clipboardModeSelector.indexOfSelectedItem {
-        case 1:
-            mode = "copy_on_fail"
-        case 2:
-            mode = "never_copy"
-        default:
-            mode = "always_copy"
-        }
-        applySettingsPatch(["clipboard_mode": mode])
-    }
-
-    @objc private func onAudioDuckingChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = audioDuckingButton.state == .on
-        applySettingsPatch(["audio_ducking_enabled": enabled])
-    }
-
-    @objc private func onAudioDuckingPercentChanged() {
-        guard !isSyncingSettings else { return }
-        let percent = Int(audioDuckingSlider.doubleValue.rounded())
-        audioDuckingValueLabel.stringValue = "\(percent)%"
-        applySettingsPatch(["audio_ducking_percent": percent])
-    }
-
-    @objc private func onDiarizationChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = diarizationButton.state == .on
-        applySettingsPatch(["diarization_enabled": enabled])
-    }
-
-    @objc private func onLlmRewriteChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = llmRewriteButton.state == .on
-        llmModelSelector.isEnabled = enabled
-        applySettingsPatch(["llm_rewrite_enabled": enabled])
-    }
-
-    @objc private func onLlmModelChanged() {
-        guard !isSyncingSettings else { return }
-        guard let selectedModel = llmModelSelector.titleOfSelectedItem else { return }
-        applySettingsPatch(["llm_model": selectedModel])
-    }
-
-    @objc private func onOverlayOpacityChanged() {
-        guard !isSyncingSettings else { return }
-        let percent = Int(overlayOpacitySlider.doubleValue.rounded())
-        overlayOpacityValueLabel.stringValue = "\(percent)%"
-        applySettingsPatch(["overlay_opacity_percent": percent])
-    }
-
-    @objc private func onAutostartChanged() {
-        guard !isSyncingSettings else { return }
-        let autoStartEnabled = autoStartButton.state == .on
-        applySettingsPatch(["auto_start_enabled": autoStartEnabled])
-    }
-
-    @objc private func onDockChanged() {
-        guard !isSyncingSettings else { return }
-        let showDockIcon = dockIconButton.state == .on
-        applySettingsPatch(["show_dock_icon": showDockIcon])
-    }
-
-    @objc private func onHotkeyChanged() {
-        guard !isSyncingSettings else { return }
-        let idx = hotkeySelector.indexOfSelectedItem
-        let val: String
-        switch idx {
-        case 1: val = "left_option"
-        case 2: val = "any_option"
-        default: val = "right_option"
-        }
-        applySettingsPatch(["hotkey": val])
-    }
-
-    @objc private func onHotkeyProfileChanged() {
-        guard !isSyncingSettings else { return }
-        let idx = hotkeyProfileSelector.indexOfSelectedItem
-        let val: String
-        switch idx {
-        case 1: val = "meeting"
-        case 2: val = "translation"
-        default: val = "default"
-        }
-        applySettingsPatch(["hotkey_profile": val])
-    }
-
-
-    @objc private func onCaptureSourceModeChanged() {
-        guard !isSyncingSettings else { return }
-        applySettingsPatch(["capture_source_mode": selectedCaptureSourceMode()])
-    }
-
-    @objc private func onCallNotifyChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = callNotifyButton.state == .on
-        applySettingsPatch(["call_notify_default": enabled])
-    }
-
-    @objc private func onCallAutoSummaryChanged() {
-        guard !isSyncingSettings else { return }
-        let enabled = callAutoSummaryButton.state == .on
-        applySettingsPatch(["call_auto_summary": enabled])
-    }
-
-    @objc private func onVoiceGatewayURLChanged() {
-        guard !isSyncingSettings else { return }
-        let raw = voiceGatewayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        applySettingsPatch(["voice_gateway_url": raw])
-    }
-
-    @objc private func onVoiceGatewayAPIKeyChanged() {
-        guard !isSyncingSettings else { return }
-        let raw = voiceGatewayAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        applySettingsPatch(["voice_gateway_api_key": raw])
-    }
-
-    @objc private func onCheckVoiceGateway() {
-        var url = voiceGatewayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if url.isEmpty {
-            url = "http://127.0.0.1:8090"
-        }
-        if url.hasSuffix("/") {
-            url.removeLast()
-        }
-        guard let healthURL = URL(string: "\(url)/health") else {
-            showInfoAlert(title: "Voice Gateway", body: "Некорректный URL: \(url)")
-            return
-        }
-
-        voiceGatewayCheckButton.isEnabled = false
-        voiceGatewayCheckButton.title = "Проверяю..."
-
-        var request = URLRequest(url: healthURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 3.0)
-        request.httpMethod = "GET"
-
-        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.voiceGatewayCheckButton.isEnabled = true
-                self.voiceGatewayCheckButton.title = "Проверить Gateway"
-
-                if let error {
-                    self.showInfoAlert(title: "Voice Gateway", body: "Связь не установлена: \(error.localizedDescription)")
-                    return
-                }
-
-                guard let http = response as? HTTPURLResponse else {
-                    self.showInfoAlert(title: "Voice Gateway", body: "Gateway вернул некорректный ответ.")
-                    return
-                }
-
-                let payloadPreview: String
-                if let data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                    payloadPreview = text
-                } else {
-                    payloadPreview = "(пустой ответ)"
-                }
-
-                if 200 <= http.statusCode && http.statusCode < 300 {
-                    self.showInfoAlert(
-                        title: "Voice Gateway",
-                        body: "Gateway доступен.\nURL: \(healthURL.absoluteString)\nHTTP: \(http.statusCode)\nОтвет: \(payloadPreview)"
-                    )
-                } else {
-                    self.showInfoAlert(
-                        title: "Voice Gateway",
-                        body: "Gateway ответил с ошибкой.\nURL: \(healthURL.absoluteString)\nHTTP: \(http.statusCode)\nОтвет: \(payloadPreview)"
-                    )
-                }
-            }
-        }
-        task.resume()
-    }
-
-    @objc private func onStartCallAssist() {
-        let settings = settingsProvider()
-        let captureMode = selectedCaptureSourceMode()
-        let notifyMode = callNotifyButton.state == .on ? "auto_on" : "auto_off"
-        let translationMode = settings.translationMode == "off" ? "auto_to_ru" : settings.translationMode
-
-        guard
-            let response = try? ipcClient.call(
-                method: "start_call_assist",
-                params: [
-                    "capture_source_mode": captureMode,
-                    "notify_mode": notifyMode,
-                    "translation_mode": translationMode,
-                    "tts_mode": "hybrid",
-                    "auto_summary": callAutoSummaryButton.state == .on,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Call Assist", body: "Не удалось запустить звонковую сессию.")
-            return
-        }
-
-        applySettingsPatch([
-            "capture_source_mode": captureMode,
-            "call_notify_default": callNotifyButton.state == .on,
-            "call_auto_summary": callAutoSummaryButton.state == .on,
-        ])
-        applyCallAssistState(result)
-    }
-
-    @objc private func onStopCallAssist() {
-        guard
-            let response = try? ipcClient.call(
-                method: "stop_call_assist",
-                params: [
-                    "auto_summary": callAutoSummaryButton.state == .on,
-                    "summary_max_items": 60,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Call Assist", body: "Не удалось остановить звонковую сессию.")
-            return
-        }
-        applyCallAssistState(result)
-        if let summaryStatus = result["summary_status"] as? String {
-            if summaryStatus == "ok", let summary = result["summary"] as? [String: Any] {
-                appendCallAssistOutput(title: "Summary звонка", body: formatCallSummary(summary))
-                if let historyId = result["summary_history_id"] as? String, !historyId.isEmpty {
-                    appendCallAssistOutput(title: "Summary сохранён", body: "Добавлено в историю. id: \(historyId)")
-                }
-            } else if summaryStatus == "degraded" {
-                let errorText = (result["summary_error"] as? String) ?? "unknown"
-                appendCallAssistOutput(title: "Summary звонка", body: "Не удалось получить summary: \(errorText)")
-            }
-        }
-    }
-
-    @objc private func onLoadCallPhraseLibrary() {
-        let pair = selectedCallPhraseDirection()
-        guard
-            let response = try? ipcClient.call(
-                method: "list_call_assist_quick_phrases",
-                params: [
-                    "source_lang": pair.sourceLang,
-                    "target_lang": pair.targetLang,
-                    "category": "all",
-                    "limit": 60,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Библиотека фраз", body: "Не удалось получить список быстрых фраз.")
-            return
-        }
-
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        callPhrasePresets = items
-        callPhrasePresetSelector.removeAllItems()
-        if items.isEmpty {
-            callPhrasePresetSelector.addItem(withTitle: "— фразы не найдены —")
-            appendCallAssistOutput(title: "Библиотека фраз", body: "Список пуст.")
-            return
-        }
-        for item in items {
-            let text = (item["source_text"] as? String) ?? ""
-            let category = (item["category"] as? String) ?? "base"
-            callPhrasePresetSelector.addItem(withTitle: "[\(category)] \(text)")
-        }
-        callPhrasePresetSelector.selectItem(at: 0)
-        onCallPhrasePresetSelected()
-        appendCallAssistOutput(title: "Библиотека фраз", body: "Загружено фраз: \(items.count)")
-    }
-
-    @objc private func onCallPhrasePresetSelected() {
-        let idx = callPhrasePresetSelector.indexOfSelectedItem
-        guard idx >= 0, idx < callPhrasePresets.count else { return }
-        let item = callPhrasePresets[idx]
-        let text = ((item["source_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty {
-            callPhraseInputField.stringValue = text
-        }
-    }
-
-    @objc private func onCallPhraseDirectionChanged() {
-        onLoadCallPhraseLibrary()
-    }
-
-    @objc private func onSendCallPhrase() {
-        let text = callPhraseInputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            showInfoAlert(title: "Call Assist", body: "Введите фразу для отправки.")
-            return
-        }
-        let pair = selectedCallPhraseDirection()
-        let params: [String: Any] = [
-            "text": text,
-            "source_lang": pair.sourceLang,
-            "target_lang": pair.targetLang,
-            "voice": "default",
-            "style": "chat",
-        ]
-        guard
-            let response = try? ipcClient.call(method: "call_assist_quick_phrase", params: params),
-            let result = response["result"] as? [String: Any],
-            let quick = result["quick_phrase"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Quick Phrase", body: "Ошибка отправки фразы в Gateway.")
-            return
-        }
-
-        let translated = (quick["translated_text"] as? String) ?? ""
-        let audioURL = (quick["audio_url"] as? String) ?? "-"
-        let cacheHit = (quick["cache_hit"] as? Bool) ?? false
-        appendCallAssistOutput(
-            title: "Quick Phrase",
-            body: """
-            \(pair.sourceLang) -> \(pair.targetLang)
-            source: \(text)
-            translated: \(translated)
-            audio: \(audioURL)
-            cache_hit: \(cacheHit)
-            """
-        )
-    }
-
-    @objc private func onFetchCallSummary() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_summary",
-                params: ["max_items": 40]
-            ),
-            let result = response["result"] as? [String: Any],
-            let summaryPayload = result["summary"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Summary", body: "Не удалось получить summary звонка.")
-            return
-        }
-        appendCallAssistOutput(title: "Summary", body: formatCallSummary(summaryPayload))
-    }
-
-    @objc private func onFetchCallDiagnostics() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_diagnostics",
-                params: ["include_why": true]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Diagnostics", body: "Не удалось получить diagnostics.")
-            return
-        }
-        let diagnostics = (result["diagnostics"] as? [String: Any]) ?? [:]
-        let whyPayload = (result["why"] as? [String: Any]) ?? [:]
-        let counters = (diagnostics["counters"] as? [String: Any]) ?? [:]
-        let pipeline = (diagnostics["pipeline"] as? [String: Any]) ?? [:]
-        let why = (whyPayload["why"] as? [String: Any]) ?? [:]
-        let whyCode = (why["code"] as? String) ?? "-"
-        let whyMessage = (why["message"] as? String) ?? "-"
-        appendCallAssistOutput(
-            title: "Diagnostics",
-            body: """
-            translation_partial: \(counters["translation_partial"] ?? 0)
-            tts_ready: \(counters["tts_ready"] ?? 0)
-            cache_hits: \(pipeline["cache_hits"] ?? 0)
-            cache_misses: \(pipeline["cache_misses"] ?? 0)
-            fallback: \(pipeline["last_fallback"] ?? "-")
-            why: \(whyCode) — \(whyMessage)
-            """
-        )
-    }
-
-    @objc private func onEstimateCallCost() {
-        let countryField = NSTextField(frame: NSRect(x: 0, y: 0, width: 90, height: 24))
-        countryField.stringValue = "ES"
-        countryField.placeholderString = "ISO2"
-
-        let inboundField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-        inboundField.stringValue = "200"
-        let landlineField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-        landlineField.stringValue = "100"
-        let mobileField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-        mobileField.stringValue = "100"
-        let mediaField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-        mediaField.stringValue = "400"
-
-        let livePricingButton = NSButton(checkboxWithTitle: "Live pricing (Twilio API)", target: nil, action: nil)
-        livePricingButton.state = .on
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Страна:"), countryField],
-            [NSTextField(labelWithString: "Inbound (мин):"), inboundField],
-            [NSTextField(labelWithString: "Outbound landline (мин):"), landlineField],
-            [NSTextField(labelWithString: "Outbound mobile (мин):"), mobileField],
-            [NSTextField(labelWithString: "Media stream (мин):"), mediaField],
-            [NSTextField(labelWithString: ""), livePricingButton],
-        ])
-        grid.rowSpacing = 6
-        grid.columnSpacing = 10
-
-        let alert = NSAlert()
-        alert.messageText = "Оценка стоимости звонков"
-        alert.informativeText = "Введите месячный микс минут. В live-режиме Gateway запросит Twilio Pricing API."
-        alert.accessoryView = grid
-        alert.addButton(withTitle: "Рассчитать")
-        alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let country = countryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let inbound = Double(inboundField.stringValue) ?? 200
-        let landline = Double(landlineField.stringValue) ?? 100
-        let mobile = Double(mobileField.stringValue) ?? 100
-        let media = Double(mediaField.stringValue) ?? 400
-        let useLivePricing = livePricingButton.state == .on
-
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_cost_estimate",
-                params: [
-                    "country": country,
-                    "minutes_inbound": inbound,
-                    "minutes_outbound_landline": landline,
-                    "minutes_outbound_mobile": mobile,
-                    "minutes_media_stream": media,
-                    "use_live_pricing": useLivePricing,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Оценка стоимости", body: "Не удалось получить расчёт от Gateway.")
-            return
-        }
-
-        let report = formatCallCostEstimate(result)
-        appendCallAssistOutput(title: "Оценка стоимости", body: report)
-        showInfoAlert(title: "Оценка стоимости", body: report)
-    }
-
-    @objc private func onFetchCallTimeline() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline",
-                params: ["limit": 50]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline", body: "Не удалось получить timeline.")
-            return
-        }
-
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        if items.isEmpty {
-            appendCallAssistOutput(title: "Timeline", body: "Пока событий нет.")
-            return
-        }
-        var summaryText = ""
-        if
-            let summaryResponse = try? ipcClient.call(
-                method: "call_assist_timeline_summary",
-                params: ["limit": 200, "max_tasks": 5]
-            ),
-            let summaryResult = summaryResponse["result"] as? [String: Any]
-        {
-            let summary = ((summaryResult["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !summary.isEmpty {
-                summaryText = "summary: \(summary)\n\n"
-            }
-        }
-        var statsText = ""
-        if
-            let statsResponse = try? ipcClient.call(
-                method: "call_assist_timeline_stats",
-                params: ["limit": 200]
-            ),
-            let statsResult = statsResponse["result"] as? [String: Any],
-            let stats = statsResult["stats"] as? [String: Any]
-        {
-            let count = (stats["count"] as? Int) ?? 0
-            let chars = (stats["text_chars"] as? Int) ?? 0
-            var kindsChunk = ""
-            if let byKind = stats["by_kind"] as? [String: Any], !byKind.isEmpty {
-                let pairs = byKind.keys.sorted().map { key -> String in
-                    let value = byKind[key] ?? 0
-                    return "\(key)=\(value)"
-                }
-                kindsChunk = pairs.joined(separator: ", ")
-            }
-            statsText = "stats: count=\(count), text_chars=\(chars)\nby_kind: \(kindsChunk)\n\n"
-        }
-        let preview = formatCallTimelinePreview(items: Array(items.prefix(12)))
-        appendCallAssistOutput(
-            title: "Timeline",
-            body: "Событий: \(items.count)\n\(summaryText)\(statsText)\(preview)"
-        )
-    }
-
-    @objc private func onExportCallTimeline() {
-        let formatAlert = NSAlert()
-        formatAlert.messageText = "Экспорт Timeline"
-        formatAlert.informativeText = "Выберите формат выгрузки текущей звонковой сессии."
-        let formatSelector = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 24), pullsDown: false)
-        formatSelector.addItems(withTitles: ["Markdown (.md)", "NDJSON (.ndjson)"])
-        formatSelector.selectItem(at: 0)
-        formatAlert.accessoryView = formatSelector
-        formatAlert.addButton(withTitle: "Экспорт")
-        formatAlert.addButton(withTitle: "Отмена")
-        guard formatAlert.runModal() == .alertFirstButtonReturn else { return }
-
-        let selected = formatSelector.indexOfSelectedItem
-        let exportFormat = selected == 1 ? "ndjson" : "md"
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_export",
-                params: [
-                    "format": exportFormat,
-                    "limit": 400,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline export", body: "Не удалось выгрузить timeline.")
-            return
-        }
-        let content = (result["content"] as? String) ?? ""
-        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appendCallAssistOutput(title: "Timeline export", body: "Timeline пуст, экспортировать нечего.")
-            return
-        }
-
-        let savePanel = NSSavePanel()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let suffix = exportFormat == "ndjson" ? "ndjson" : "md"
-        savePanel.nameFieldStringValue = "krab_call_timeline_\(formatter.string(from: Date())).\(suffix)"
-        savePanel.canCreateDirectories = true
-        if savePanel.runModal() != .OK {
-            return
-        }
-        guard let url = savePanel.url else { return }
-        do {
-            try content.write(to: url, atomically: true, encoding: .utf8)
-            appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
-        } catch {
-            appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
-        }
-    }
-
-    @objc private func onClearCallTimeline() {
-        let keepLast = selectedCallTimelineKeepLast()
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_clear",
-                params: ["keep_last": keepLast]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline clear", body: "Не удалось очистить timeline.")
-            return
-        }
-        let before = (result["before"] as? Int) ?? -1
-        let after = (result["after"] as? Int) ?? -1
-        appendCallAssistOutput(
-            title: "Timeline clear",
-            body: "Очистка завершена. keep_last=\(keepLast), before=\(before), after=\(after)"
-        )
-    }
-
-    @objc private func onSaveCallTimelineToHistory() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_to_history",
-                params: [
-                    "format": "md",
-                    "limit": 500,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(
-                title: "Timeline -> история",
-                body: "Не удалось сохранить timeline в историю."
-            )
-            return
-        }
-        let historyId = (result["history_id"] as? String) ?? "-"
-        let chars = (result["chars"] as? Int) ?? 0
-        appendCallAssistOutput(
-            title: "Timeline -> история",
-            body: "Сохранено в историю. id=\(historyId), chars=\(chars)"
-        )
-        loadInitial()
-    }
-
-    private func selectedCallTimelineKeepLast() -> Int {
-        let raw = callTimelineKeepLastSelector.titleOfSelectedItem ?? "keep 1"
-        let digits = raw.filter(\.isNumber)
-        return Int(digits) ?? 1
-    }
-
-    private func formatCallTimelinePreview(items: [[String: Any]]) -> String {
-        var lines: [String] = []
-        for item in items {
-            let ts = (item["ts"] as? String) ?? "-"
-            let kind = (item["kind"] as? String) ?? "unknown"
-            let text = ((item["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let shortText: String
-            if text.isEmpty {
-                shortText = "(без текста)"
-            } else if text.count > 120 {
-                shortText = String(text.prefix(120)) + "…"
-            } else {
-                shortText = text
-            }
-            lines.append("[\(ts)] \(kind): \(shortText)")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func formatCallSummary(_ payload: [String: Any]) -> String {
-        let summaryText = ((payload["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawTasks = (payload["tasks"] as? [Any]) ?? []
-        var tasks: [String] = []
-        for raw in rawTasks {
-            if let dict = raw as? [String: Any] {
-                let candidate = (
-                    (dict["task"] as? String)
-                    ?? (dict["title"] as? String)
-                    ?? (dict["text"] as? String)
-                    ?? ""
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !candidate.isEmpty {
-                    tasks.append(candidate)
-                }
-            } else if let rawText = raw as? String {
-                let candidate = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !candidate.isEmpty {
-                    tasks.append(candidate)
-                }
-            }
-        }
-        let safeSummary = summaryText.isEmpty ? "—" : summaryText
-        let tasksText = tasks.isEmpty ? "- (нет задач)" : tasks.prefix(10).enumerated().map { "\($0 + 1). \($1)" }.joined(separator: "\n")
-        return """
-        \(safeSummary)
-        tasks:
-        \(tasksText)
-        """
-    }
-
-    private func formatCallCostEstimate(_ payload: [String: Any]) -> String {
-        let country = (payload["country"] as? String) ?? "n/a"
-        let ratesSource = (payload["rates_source"] as? String) ?? "unknown"
-        let ratesNote = ((payload["rates_note"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let telephony = (payload["telephony_usd"] as? [String: Any]) ?? [:]
-        let ai = (payload["ai_usd"] as? [String: Any]) ?? [:]
-        let total = (payload["total_usd"] as? Double)
-            ?? (payload["total_usd"] as? NSNumber)?.doubleValue
-            ?? 0.0
-
-        let telephonyTotal = (telephony["total"] as? Double)
-            ?? (telephony["total"] as? NSNumber)?.doubleValue
-            ?? 0.0
-        let aiTotal = (ai["total"] as? Double)
-            ?? (ai["total"] as? NSNumber)?.doubleValue
-            ?? 0.0
-
-        let noteLine = ratesNote.isEmpty ? "" : "\nrates_note: \(ratesNote)"
-        return """
-        country: \(country)
-        rates_source: \(ratesSource)\(noteLine)
-        telephony_total_usd: \(String(format: "%.3f", telephonyTotal))
-        ai_total_usd: \(String(format: "%.3f", aiTotal))
-        total_usd: \(String(format: "%.3f", total))
-        """
-    }
 
     @objc private func onLoadMore() {
         guard let nextCursor else {
@@ -3038,324 +2204,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         NSWorkspace.shared.open(url)
     }
 
-    private func enqueueImport(paths: [String], sourceTag: String) {
-        let clean = paths
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !clean.isEmpty else { return }
-        let signature = normalizedImportSignature(clean)
-        if importJobSignatures.contains(signature) {
-            importStatusLabel.stringValue = "Импорт: дубликат задачи пропущен"
-            return
-        }
-        if importQueue.count >= 30 {
-            showInfoAlert(title: "Импорт аудио", body: "Очередь переполнена (макс. 30 задач). Дождитесь завершения текущих задач.")
-            return
-        }
-
-        let preview = previewImport(paths: clean)
-        if preview.audioCount == 0 {
-            showInfoAlert(title: "Импорт аудио", body: "Не найдено поддерживаемых аудиофайлов.")
-            return
-        }
-
-        if importSessionStartedAt == nil {
-            importSessionStartedAt = Date()
-            lastImportReportPath = nil
-            openImportReportButton.isEnabled = false
-        }
-        importQueue.append(
-            ImportJob(
-                paths: clean,
-                sourceTag: sourceTag,
-                audioCount: preview.audioCount,
-                folderCount: preview.folderCount,
-                totalBytes: preview.totalBytes,
-                byExtension: preview.byExtension
-            )
-        )
-        importJobSignatures.insert(signature)
-        importJobsPlanned += 1
-        importFilesPlanned += preview.audioCount
-        importBytesPlanned += preview.totalBytes
-        importSourceStats[sourceTag, default: 0] += 1
-        for (ext, count) in preview.byExtension {
-            importFormatStats[ext, default: 0] += count
-        }
-        cancelImportButton.isEnabled = true
-        pauseImportButton.isEnabled = true
-        pauseImportButton.title = isImportPaused ? "Продолжить импорт" : "Пауза импорта"
-        let extSummary = preview.byExtension
-            .sorted { $0.key < $1.key }
-            .map { "\($0.key)=\($0.value)" }
-            .joined(separator: ", ")
-        let folderLine = preview.folderCount > 1
-            ? "Папок: \(preview.folderCount)\n"
-            : ""
-        importStatusLabel.toolTip = preview.sample.isEmpty
-            ? "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)"
-            : "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)\nПримеры:\n\(preview.sample.joined(separator: "\n"))"
-        updateImportStatusLabel()
-        processNextImportIfNeeded()
-    }
-
-    private func processNextImportIfNeeded() {
-        guard !isImportRunning else { return }
-        guard !isImportPaused else {
-            updateImportStatusLabel()
-            return
-        }
-        guard !importQueue.isEmpty else {
-            finishImportQueueIfNeeded()
-            return
-        }
-
-        isImportRunning = true
-        currentImportJob = importQueue.removeFirst()
-        currentImportJobStartedAt = Date()
-        startImportElapsedTimer()
-        updateImportStatusLabel()
-
-        guard let job = currentImportJob else {
-            isImportRunning = false
-            stopImportElapsedTimer()
-            return
-        }
-        let endpoint = ipcClient.endpoint
-        let settings = settingsProvider()
-        let jobPaths = job.paths
-        let qualityProfile = settings.qualityProfile
-        let cleanupProfile = settings.cleanupProfile
-        let translationMode = settings.translationMode
-        let translationStyle = settings.translationStyle
-        let translateAndPaste = settings.translateAndPaste
-        let startedAt = Date()
-        let signature = normalizedImportSignature(jobPaths)
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, endpoint, jobPaths, qualityProfile, cleanupProfile, translationMode, translationStyle, translateAndPaste] in
-            let backgroundClient = IPCClient(socketPath: endpoint)
-            let response = try? backgroundClient.call(
-                method: "transcribe_paths",
-                params: [
-                    "paths": jobPaths,
-                    "quality_profile": qualityProfile,
-                    "cleanup_profile": cleanupProfile,
-                    "translation_mode": translationMode,
-                    "translation_style": translationStyle,
-                    "translate_and_paste": translateAndPaste,
-                ]
-            )
-            let result = response?["result"] as? [String: Any]
-            let processed = (result?["processed"] as? Int) ?? 0
-            let errors = ((result?["errors"] as? [String]) ?? []).count
-            let failed = (result == nil)
-            let durationSec = Date().timeIntervalSince(startedAt)
-
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.isImportRunning = false
-                self.stopImportElapsedTimer()
-                self.currentImportJobStartedAt = nil
-                self.importJobsCompleted += 1
-                self.importProcessedTotal += processed
-                self.importErrorsTotal += failed ? 1 : errors
-                self.importDurationTotalSec += durationSec
-                self.importJobSignatures.remove(signature)
-                self.currentImportJob = nil
-                self.loadInitial()
-
-                if self.importCancellationRequested {
-                    self.importCancellationRequested = false
-                    self.isImportPaused = false
-                    self.importQueue.removeAll()
-                }
-                self.updateImportStatusLabel()
-                self.processNextImportIfNeeded()
-            }
-        }
-    }
-
-    private func finishImportQueueIfNeeded() {
-        stopImportElapsedTimer()
-        guard importJobsPlanned > 0 else {
-            importStatusLabel.stringValue = "Импорт: idle"
-            cancelImportButton.isEnabled = false
-            pauseImportButton.isEnabled = false
-            pauseImportButton.title = "Пауза импорта"
-            return
-        }
-        if importJobsCompleted < importJobsPlanned {
-            return
-        }
-
-        cancelImportButton.isEnabled = false
-        pauseImportButton.isEnabled = false
-        pauseImportButton.title = "Пауза импорта"
-        isImportPaused = false
-        let totalSec = max(0, Int(importDurationTotalSec.rounded()))
-        let summary = "Импорт завершён: файлов \(importProcessedTotal)/\(importFilesPlanned), ошибок \(importErrorsTotal), задач \(importJobsCompleted), время \(totalSec)с."
-        importStatusLabel.stringValue = summary
-        let reportPath = writeImportQueueReport(summary: summary)
-        lastImportReportPath = reportPath
-        openImportReportButton.isEnabled = (reportPath != nil)
-        if let reportPath {
-            showInfoAlert(title: "Импорт аудио", body: "\(summary)\nОтчёт: \(reportPath)")
-        } else {
-            showInfoAlert(title: "Импорт аудио", body: summary)
-        }
-
-        // macOS-уведомление для случая, когда пользователь переключился в другое приложение.
-        sendImportNotification(
-            filesProcessed: importProcessedTotal,
-            errors: importErrorsTotal,
-            duration: totalSec
-        )
-        // Звук завершения импорта.
-        NSSound(named: "Purr")?.play()
-
-        // Сбрасываем агрегаторы для следующей очереди.
-        importJobsPlanned = 0
-        importJobsCompleted = 0
-        importProcessedTotal = 0
-        importErrorsTotal = 0
-        importDurationTotalSec = 0
-        importSessionStartedAt = nil
-        importJobSignatures.removeAll()
-        importSourceStats.removeAll()
-        importFormatStats.removeAll()
-        importFilesPlanned = 0
-        importBytesPlanned = 0
-    }
-
-    private func sendImportNotification(filesProcessed: Int, errors: Int, duration: Int) {
-        notificationService.notify(
-            title: "Krab Ear — Импорт завершён",
-            body: "Файлов: \(filesProcessed), ошибок: \(errors), время: \(duration)с"
-        )
-    }
-
-    private func updateImportStatusLabel() {
-        if isImportRunning {
-            let current = min(importJobsPlanned, importJobsCompleted + 1)
-            let avgSec = importJobsCompleted > 0 ? (importDurationTotalSec / Double(importJobsCompleted)) : 0
-            let remainingJobs = max(0, importJobsPlanned - importJobsCompleted)
-            let eta = Int((Double(remainingJobs) * avgSec).rounded())
-            let currentFiles = currentImportJob?.audioCount ?? 0
-            let currentFolders = currentImportJob?.folderCount ?? 0
-            let elapsed = currentImportJobStartedAt.map { Int(Date().timeIntervalSince($0).rounded()) } ?? 0
-            let folderSuffix = currentFolders > 1 ? " (\(currentFolders) папок)" : ""
-            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов \(currentFiles)\(folderSuffix), \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
-            return
-        }
-        if isImportPaused {
-            importStatusLabel.stringValue = "Импорт: пауза, в очереди \(importQueue.count), обработано \(importProcessedTotal)/\(importFilesPlanned)"
-            return
-        }
-        if !importQueue.isEmpty {
-            let totalFolders = importQueue.reduce(0) { $0 + $1.folderCount }
-            let folderSuffix = totalFolders > 1 ? " в \(totalFolders) папках" : ""
-            importStatusLabel.stringValue = "Импорт: в очереди \(importQueue.count), файлов \(importFilesPlanned)\(folderSuffix), объём \(formatBytes(importBytesPlanned))"
-            return
-        }
-        if importJobsPlanned > 0 && importJobsCompleted >= importJobsPlanned {
-            importStatusLabel.stringValue = "Импорт: завершён"
-            return
-        }
-        importStatusLabel.stringValue = "Импорт: idle"
-    }
-
-    private func startImportElapsedTimer() {
-        stopImportElapsedTimer()
-        importElapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self, self.isImportRunning else { return }
-                self.updateImportStatusLabel()
-            }
-        }
-    }
-
-    private func stopImportElapsedTimer() {
-        importElapsedTimer?.invalidate()
-        importElapsedTimer = nil
-    }
-
-    private func normalizedImportSignature(_ paths: [String]) -> String {
-        let normalized = paths
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .sorted()
-        return normalized.joined(separator: "|")
-    }
-
-    private func previewImport(paths: [String]) -> ImportPreview {
-        guard
-            let response = try? ipcClient.call(
-                method: "preview_transcribe_paths",
-                params: ["paths": paths, "sample_limit": 3]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            return ImportPreview(audioCount: 0, folderCount: 0, sample: [], byExtension: [:], totalBytes: 0)
-        }
-        let audioCount = (result["audio_count"] as? Int) ?? 0
-        let folderCount = (result["folder_count"] as? Int) ?? 0
-        let sample = (result["sample"] as? [String]) ?? []
-        let totalBytes = (result["total_bytes"] as? Int) ?? 0
-        let byExtension = (result["by_ext"] as? [String: Int]) ?? [:]
-        return ImportPreview(
-            audioCount: audioCount,
-            folderCount: folderCount,
-            sample: sample,
-            byExtension: byExtension,
-            totalBytes: totalBytes
-        )
-    }
-
-    private func writeImportQueueReport(summary: String) -> String? {
-        let reportsDir = (NSString(string: "~/Library/Application Support/KrabEar/reports").expandingTildeInPath)
-        do {
-            try FileManager.default.createDirectory(
-                atPath: reportsDir,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-        } catch {
-            return nil
-        }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let timestamp = formatter.string(from: Date())
-        let reportPath = (reportsDir as NSString).appendingPathComponent("import_queue_\(timestamp).md")
-        let startedText = importSessionStartedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "-"
-        let finishedText = ISO8601DateFormatter().string(from: Date())
-
-        let body = """
-        # Import Queue Report
-
-        - started_at: \(startedText)
-        - finished_at: \(finishedText)
-        - planned_jobs: \(importJobsPlanned)
-        - completed_jobs: \(importJobsCompleted)
-        - planned_files: \(importFilesPlanned)
-        - processed_files: \(importProcessedTotal)
-        - planned_bytes: \(importBytesPlanned)
-        - errors: \(importErrorsTotal)
-        - duration_sec: \(Int(importDurationTotalSec.rounded()))
-        - sources: \(importSourceStats.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", "))
-        - formats: \(importFormatStats.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", "))
-
-        ## Summary
-        \(summary)
-        """
-
-        do {
-            try body.write(toFile: reportPath, atomically: true, encoding: .utf8)
-            return reportPath
-        } catch {
-            return nil
-        }
-    }
-
     @objc private func onAddGlossaryTerm() {
         let sourceField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
         let targetField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
@@ -3532,243 +2380,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         updateDictationHistoryPreview()
     }
 
-    private func applySettingsPatch(_ patch: [String: Any]) {
-        var payload = settingsProvider().toPayload()
-        for (key, value) in patch {
-            payload[key] = value
-        }
-        let updated = settingsUpdater(payload)
-        syncSettingsControls(using: updated)
-    }
-
-    private func selectedCaptureSourceMode() -> String {
-        switch captureSourceSelector.indexOfSelectedItem {
-        case 1:
-            return "system_audio"
-        case 2:
-            return "mic_plus_system"
-        default:
-            return "mic"
-        }
-    }
-
-    private func selectCaptureSourceMode(_ mode: String) {
-        switch mode {
-        case "system_audio":
-            captureSourceSelector.selectItem(at: 1)
-        case "mic_plus_system":
-            captureSourceSelector.selectItem(at: 2)
-        default:
-            captureSourceSelector.selectItem(at: 0)
-        }
-    }
-
-    private func selectedCallPhraseDirection() -> (sourceLang: String, targetLang: String) {
-        switch callPhraseDirectionSelector.indexOfSelectedItem {
-        case 1:
-            return ("es", "ru")
-        case 2:
-            return ("auto", "ru")
-        default:
-            return ("ru", "es")
-        }
-    }
-
-    private func appendCallAssistOutput(title: String, body: String) {
-        let ts = ISO8601DateFormatter().string(from: Date())
-        let chunk = "[\(ts)] \(title)\n\(body)\n\n"
-        let existing = callAssistOutputView.string
-        let combined = chunk + existing
-        callAssistOutputView.string = String(combined.prefix(6000))
-    }
-
-    private func applyCallAssistState(_ state: [String: Any]) {
-        let active = (state["active"] as? Bool) ?? false
-        let status = ((state["status"] as? String) ?? (active ? "running" : "idle")).lowercased()
-        let gatewayStatus = (state["gateway_status"] as? String) ?? ""
-        let gatewayError = (state["gateway_error"] as? String) ?? ""
-        let sessionId = (state["session_id"] as? String) ?? ""
-
-        var chunks: [String] = []
-        chunks.append("Call Assist: \(status)")
-        if !sessionId.isEmpty {
-            chunks.append("id \(sessionId)")
-        }
-        if !gatewayStatus.isEmpty {
-            chunks.append("GW \(gatewayStatus)")
-        }
-        if !gatewayError.isEmpty {
-            chunks.append("err \(gatewayError)")
-        }
-        callAssistStatusLabel.stringValue = chunks.joined(separator: " • ")
-        callAssistStartButton.isEnabled = !active
-        callAssistStopButton.isEnabled = active || status == "running"
-    }
-
-    private func refreshCallAssistState(silentOnError: Bool = true) {
-        guard
-            let response = try? ipcClient.call(method: "get_call_assist_state", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            if !silentOnError {
-                callAssistStatusLabel.stringValue = "Call Assist: backend недоступен"
-            }
-            return
-        }
-        applyCallAssistState(result)
-    }
-
-    private func refreshCaptureSourceHint() {
-        guard
-            let response = try? ipcClient.call(method: "list_audio_inputs", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            captureSourceSelector.toolTip = "Список входных устройств недоступен."
-            return
-        }
-        let count = (result["count"] as? Int) ?? 0
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        let defaultName = items.first(where: { ($0["is_default"] as? Bool) == true })?["name"] as? String
-        if let defaultName, !defaultName.isEmpty {
-            captureSourceSelector.toolTip = "Доступно входов: \(count). По умолчанию: \(defaultName)"
-        } else {
-            captureSourceSelector.toolTip = "Доступно входов: \(count)"
-        }
-    }
-
-    func syncSettingsControls(using value: AgentSettings? = nil) {
-        let settings = value ?? settingsProvider()
-
-        isSyncingSettings = true
-        qualitySelector.selectItem(at: settings.qualityProfile == "max" ? 1 : 0)
-        cleanupSelector.selectItem(at: settings.cleanupProfile == "strict" ? 1 : 0)
-        switch settings.translationMode {
-        case "ru_to_es":
-            translationSelector.selectItem(at: 1)
-            swapRuEsButton.title = "Swap: RU -> ES"
-        case "es_to_ru":
-            translationSelector.selectItem(at: 2)
-            swapRuEsButton.title = "Swap: ES -> RU"
-        case "en_to_ru":
-            translationSelector.selectItem(at: 3)
-            swapRuEsButton.title = "Swap RU<->ES"
-        case "auto":
-            translationSelector.selectItem(at: 4)
-            swapRuEsButton.title = "Swap RU<->ES"
-        case "bilingual_ru_es":
-            translationSelector.selectItem(at: 5)
-            swapRuEsButton.title = "Swap RU<->ES"
-        case "auto_to_ru":
-            translationSelector.selectItem(at: 6)
-            swapRuEsButton.title = "Swap RU<->ES"
-        default:
-            translationSelector.selectItem(at: 0)
-            swapRuEsButton.title = "Swap RU<->ES"
-        }
-        swapRuEsButton.isEnabled = settings.translationMode == "ru_to_es"
-            || settings.translationMode == "es_to_ru"
-            || settings.translationMode == "auto"
-            || settings.translationMode == "bilingual_ru_es"
-        let normalizedPageSize = normalizePageSize(settings.historyPageSize)
-        let idx = historyPageSizeSelector.indexOfItem(withTitle: "\(normalizedPageSize)")
-        if idx >= 0 {
-            historyPageSizeSelector.selectItem(at: idx)
-        } else {
-            historyPageSizeSelector.selectItem(withTitle: "50")
-        }
-        historyDensitySelector.selectItem(at: settings.historyTextDensity == "compact" ? 1 : 0)
-        switch settings.networkMode {
-        case "offline_strict":
-            networkSelector.selectItem(at: 1)
-        case "online_opt_in":
-            networkSelector.selectItem(at: 2)
-        default:
-            networkSelector.selectItem(at: 0)
-        }
-        switch settings.translationStyle {
-        case "chat":
-            translationStyleSelector.selectItem(at: 1)
-        case "formal":
-            translationStyleSelector.selectItem(at: 2)
-        default:
-            translationStyleSelector.selectItem(at: 0)
-        }
-        modeSelector.selectItem(at: settings.mode == "menubar" ? 1 : 0)
-        autoPasteButton.state = settings.autoPaste ? .on : .off
-        startSoundButton.state = settings.playStartSound ? .on : .off
-        realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
-        translateAndPasteButton.state = settings.translateAndPaste ? .on : .off
-        autoStartButton.state = settings.autoStartEnabled ? .on : .off
-        dockIconButton.state = settings.showDockIcon ? .on : .off
-        callNotifyButton.state = settings.callNotifyDefault ? .on : .off
-        callAutoSummaryButton.state = settings.callAutoSummary ? .on : .off
-        voiceGatewayURLField.stringValue = settings.voiceGatewayURL
-        voiceGatewayAPIKeyField.stringValue = settings.voiceGatewayAPIKey
-        selectCaptureSourceMode(settings.captureSourceMode)
-        switch settings.clipboardMode {
-        case "copy_on_fail":
-            clipboardModeSelector.selectItem(at: 1)
-        case "never_copy":
-            clipboardModeSelector.selectItem(at: 2)
-        default:
-            clipboardModeSelector.selectItem(at: 0)
-        }
-        audioDuckingButton.state = settings.audioDuckingEnabled ? .on : .off
-        let safeDuckPercent = max(0, min(settings.audioDuckingPercent, 100))
-        audioDuckingSlider.doubleValue = Double(safeDuckPercent)
-        audioDuckingValueLabel.stringValue = "\(safeDuckPercent)%"
-        let safeOverlayPercent = max(15, min(settings.overlayOpacityPercent, 90))
-        overlayOpacitySlider.doubleValue = Double(safeOverlayPercent)
-        overlayOpacityValueLabel.stringValue = "\(safeOverlayPercent)%"
-        // D.10a: AI Settings Sync
-        diarizationButton.state = settings.diarizationEnabled ? .on : .off
-        llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
-        if let idx = llmModelSelector.itemTitles.firstIndex(of: settings.llmModel) {
-            llmModelSelector.selectItem(at: idx)
-        }
-        llmModelSelector.isEnabled = settings.llmRewriteEnabled
-        glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
-
-        switch settings.hotkey {
-        case "left_option":
-            hotkeySelector.selectItem(at: 1)
-        case "any_option":
-            hotkeySelector.selectItem(at: 2)
-        default:
-            hotkeySelector.selectItem(at: 0)
-        }
-
-        switch settings.hotkeyProfile {
-        case "meeting":
-            hotkeyProfileSelector.selectItem(at: 1)
-        case "translation":
-            hotkeyProfileSelector.selectItem(at: 2)
-        default:
-            hotkeyProfileSelector.selectItem(at: 0)
-        }
-
-        isSyncingTabs = true
-
-        let tab = PanelTab.from(settingsValue: settings.uiLastTab)
-        switch tab {
-        case .dictation:
-            mainTabView.selectTabViewItem(at: 0)
-        case .liveTranslation:
-            mainTabView.selectTabViewItem(at: 1)
-        case .history:
-            mainTabView.selectTabViewItem(at: 2)
-        }
-        isSyncingTabs = false
-        applyHistoryFocusMode(settings.historyFocusMode)
-        applyHistoryTextDensity(settings.historyTextDensity)
-        isSyncingSettings = false
-        updateLoadMoreButtonCaption()
-        refreshCaptureSourceHint()
-        refreshCallAssistState()
-    }
-
-
-    private func applyHistoryFocusMode(_ enabled: Bool) {
+    func applyHistoryFocusMode(_ enabled: Bool) {
         // Collapse or expand all history collapsible sections
         historyFiltersSection?.setExpanded(!enabled, animated: true)
         historyAdvancedSection?.setExpanded(!enabled, animated: true)
@@ -3783,7 +2395,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyFocusModeButton.title = enabled ? "Фокус истории: ON" : "Фокус истории: OFF"
     }
 
-    private func applyHistoryTextDensity(_ density: String) {
+    func applyHistoryTextDensity(_ density: String) {
         let compact = (density == "compact")
         tableView.rowHeight = compact ? 24 : 28
         historyDensitySelector.selectItem(at: compact ? 1 : 0)
@@ -3799,13 +2411,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         return settingsProvider().historyTextDensity == "compact" ? 24 : 28
     }
 
-    private func updateLoadMoreButtonCaption() {
+    func updateLoadMoreButtonCaption() {
         let pageSize = settingsProvider().historyPageSize
         loadMoreButton.title = "Показать ещё (\(pageSize))"
         loadAllButton.title = "Загрузить всё"
     }
 
-    private func normalizePageSize(_ value: Int) -> Int {
+    func normalizePageSize(_ value: Int) -> Int {
         if value <= 25 { return 25 }
         if value <= 50 { return 50 }
         if value <= 100 { return 100 }
@@ -3898,7 +2510,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
     }
 
-    private func formatBytes(_ value: Int) -> String {
+    func formatBytes(_ value: Int) -> String {
         let safe = max(0, value)
         if safe < 1024 {
             return "\(safe) B"
@@ -4116,7 +2728,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         previewPollTick = 0
     }
 
-    private func refreshRealtimePreview() {
+    func refreshRealtimePreview() {
         let settings = settingsProvider()
         guard settings.realtimePreviewEnabled else {
             realtimeStatusLabel.stringValue = "Realtime: выключен"
@@ -4292,91 +2904,5 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
         }
         return super.performKeyEquivalent(with: event)
-    }
-}
-
-/// Drop zone для drag-and-drop импорта аудио/папок.
-final class ImportDropZoneView: NSView {
-    var onPathsDropped: (([String]) -> Void)?
-    private let hintLabel = NSTextField(wrappingLabelWithString: "Перетащите сюда аудиофайлы или папки для пакетной транскрибации")
-    private var isHighlighted = false
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
-
-        registerForDraggedTypes([.fileURL])
-
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.alignment = .center
-        hintLabel.font = .systemFont(ofSize: 12)
-        hintLabel.textColor = .secondaryLabelColor
-        hintLabel.maximumNumberOfLines = 2
-        hintLabel.lineBreakMode = .byWordWrapping
-        addSubview(hintLabel)
-
-        NSLayoutConstraint.activate([
-            hintLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            hintLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            hintLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        setHighlighted(true)
-        return .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        setHighlighted(false)
-        super.draggingExited(sender)
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        setHighlighted(false)
-        let pasteboard = sender.draggingPasteboard
-        guard
-            let urls = pasteboard.readObjects(
-                forClasses: [NSURL.self],
-                options: [.urlReadingFileURLsOnly: true]
-            ) as? [URL]
-        else {
-            return false
-        }
-
-        let paths = urls.map(\.path).filter { !$0.isEmpty }
-        guard !paths.isEmpty else { return false }
-        onPathsDropped?(paths)
-        return true
-    }
-
-    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
-        setHighlighted(false)
-        super.concludeDragOperation(sender)
-    }
-
-    private func setHighlighted(_ value: Bool) {
-        guard isHighlighted != value else { return }
-        isHighlighted = value
-        layer?.borderColor = value
-            ? NSColor.systemBlue.withAlphaComponent(0.95).cgColor
-            : NSColor.separatorColor.cgColor
-        layer?.backgroundColor = value
-            ? NSColor.systemBlue.withAlphaComponent(0.16).cgColor
-            : NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
-        hintLabel.textColor = value ? NSColor.systemBlue : NSColor.secondaryLabelColor
     }
 }
