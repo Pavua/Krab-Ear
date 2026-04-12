@@ -73,6 +73,7 @@ from backend.integrity_checker import IntegrityChecker
 from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
+from core.audio_fingerprint import AudioFingerprinter
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -166,6 +167,7 @@ class BackendService:
         self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
+        self._audio_fingerprinter = AudioFingerprinter()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
@@ -363,6 +365,7 @@ class BackendService:
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
             "get_waveform": self._handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
+            "check_audio_duplicate": self._handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
         }
 
         handler = handlers.get(method)
@@ -2305,6 +2308,42 @@ class BackendService:
             "unique_to_2": result.unique_to_2,
             "word_count_diff": result.word_count_diff,
             "summary": result.summary,
+        }
+
+    # ── Audio fingerprinting ─────────────────────────────────────────────────
+
+    def _handle_check_audio_duplicate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Проверяет, являются ли два аудио-сигнала дубликатами по фингерпринту.
+
+        Параметры (params):
+          - audio1: list[float] — первый аудио-сигнал (PCM float32).
+          - audio2: list[float] — второй аудио-сигнал (PCM float32).
+          - sample_rate: int — частота дискретизации (по умолчанию 16000).
+          - threshold: float — порог сходства [0..1] (по умолчанию 0.95).
+
+        Возвращает dict с ключами:
+          fingerprint1, fingerprint2, similarity, is_duplicate.
+        """
+        audio1_raw = params.get("audio1")
+        audio2_raw = params.get("audio2")
+        if audio1_raw is None or audio2_raw is None:
+            raise RuntimeError("audio1 и audio2 обязательны")
+
+        sample_rate = int(params.get("sample_rate", 16000))
+        threshold = float(params.get("threshold", 0.95))
+
+        audio1 = np.asarray(audio1_raw, dtype=np.float32)
+        audio2 = np.asarray(audio2_raw, dtype=np.float32)
+
+        fp1 = self._audio_fingerprinter.fingerprint(audio1, sample_rate)
+        fp2 = self._audio_fingerprinter.fingerprint(audio2, sample_rate)
+        similarity = self._audio_fingerprinter.compare(fp1, fp2)
+
+        return {
+            "fingerprint1": fp1,
+            "fingerprint2": fp2,
+            "similarity": round(similarity, 6),
+            "is_duplicate": similarity >= threshold,
         }
 
     # ── Hallucination patterns management ───────────────────────────────────

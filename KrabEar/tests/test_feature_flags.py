@@ -1,0 +1,253 @@
+"""Тесты для FeatureFlags — управление feature-флагами Krab Ear.
+
+Покрывает:
+- Дефолтные значения встроенных флагов
+- is_enabled / set_flag / list_flags / get_flag_info
+- Персистентность в feature_flags.json
+- IPC-обработчики handle_get_feature_flags / handle_set_feature_flag
+- Граничные случаи: неизвестный флаг, пустое имя, некорректный enabled
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.feature_flags import FeatureFlags, _BUILTIN_FLAGS
+
+
+class TestFeatureFlagsDefaults(unittest.TestCase):
+    """Проверяем дефолтные значения встроенных флагов."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_pipeline_v2_disabled_by_default(self) -> None:
+        self.assertFalse(self.ff.is_enabled("pipeline_v2"))
+
+    def test_auto_backup_enabled_by_default(self) -> None:
+        self.assertTrue(self.ff.is_enabled("auto_backup"))
+
+    def test_llm_rewrite_enabled_by_default(self) -> None:
+        self.assertTrue(self.ff.is_enabled("llm_rewrite"))
+
+    def test_confidence_calibration_enabled_by_default(self) -> None:
+        self.assertTrue(self.ff.is_enabled("confidence_calibration"))
+
+    def test_search_index_enabled_by_default(self) -> None:
+        self.assertTrue(self.ff.is_enabled("search_index"))
+
+    def test_webhook_notifications_disabled_by_default(self) -> None:
+        self.assertFalse(self.ff.is_enabled("webhook_notifications"))
+
+    def test_unknown_flag_returns_false(self) -> None:
+        self.assertFalse(self.ff.is_enabled("nonexistent_flag_xyz"))
+
+    def test_all_builtin_flags_present_in_list(self) -> None:
+        flags = self.ff.list_flags()
+        for name in _BUILTIN_FLAGS:
+            self.assertIn(name, flags)
+
+
+class TestFeatureFlagsSetGet(unittest.TestCase):
+    """Тесты set_flag / is_enabled / list_flags."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_set_flag_changes_value(self) -> None:
+        self.ff.set_flag("pipeline_v2", True)
+        self.assertTrue(self.ff.is_enabled("pipeline_v2"))
+
+    def test_set_flag_disable(self) -> None:
+        self.ff.set_flag("auto_backup", False)
+        self.assertFalse(self.ff.is_enabled("auto_backup"))
+
+    def test_set_flag_creates_custom_flag(self) -> None:
+        self.ff.set_flag("my_custom_feature", True)
+        self.assertTrue(self.ff.is_enabled("my_custom_feature"))
+
+    def test_list_flags_returns_dict_of_bools(self) -> None:
+        flags = self.ff.list_flags()
+        self.assertIsInstance(flags, dict)
+        for value in flags.values():
+            self.assertIsInstance(value, bool)
+
+    def test_list_flags_reflects_set(self) -> None:
+        self.ff.set_flag("pipeline_v2", True)
+        flags = self.ff.list_flags()
+        self.assertTrue(flags["pipeline_v2"])
+
+    def test_set_flag_empty_name_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("", True)
+
+    def test_set_flag_none_name_raises(self) -> None:
+        with self.assertRaises((ValueError, AttributeError, TypeError)):
+            self.ff.set_flag(None, True)  # type: ignore[arg-type]
+
+
+class TestFeatureFlagsGetFlagInfo(unittest.TestCase):
+    """Тесты get_flag_info."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_get_flag_info_builtin_fields(self) -> None:
+        info = self.ff.get_flag_info("auto_backup")
+        self.assertEqual(info["name"], "auto_backup")
+        self.assertIn("enabled", info)
+        self.assertIn("description", info)
+        self.assertIn("since_version", info)
+        self.assertTrue(info["is_builtin"])
+
+    def test_get_flag_info_enabled_matches_is_enabled(self) -> None:
+        self.ff.set_flag("pipeline_v2", True)
+        info = self.ff.get_flag_info("pipeline_v2")
+        self.assertEqual(info["enabled"], self.ff.is_enabled("pipeline_v2"))
+
+    def test_get_flag_info_unknown_raises_keyerror(self) -> None:
+        with self.assertRaises(KeyError):
+            self.ff.get_flag_info("absolutely_unknown_flag")
+
+    def test_get_flag_info_custom_flag(self) -> None:
+        self.ff.set_flag("beta_feature", True)
+        info = self.ff.get_flag_info("beta_feature")
+        self.assertEqual(info["name"], "beta_feature")
+        self.assertTrue(info["enabled"])
+        self.assertFalse(info["is_builtin"])
+
+    def test_get_flag_info_description_nonempty_for_builtins(self) -> None:
+        for flag_name in _BUILTIN_FLAGS:
+            info = self.ff.get_flag_info(flag_name)
+            self.assertTrue(len(info["description"]) > 0, f"Пустое описание для {flag_name}")
+
+
+class TestFeatureFlagsPersistence(unittest.TestCase):
+    """Тесты персистентности в JSON-файл."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._data_dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_flags_persist_across_instances(self) -> None:
+        ff1 = FeatureFlags(data_dir=self._data_dir)
+        ff1.set_flag("pipeline_v2", True)
+        ff1.set_flag("auto_backup", False)
+
+        # Создаём новый экземпляр — должен прочитать из файла
+        ff2 = FeatureFlags(data_dir=self._data_dir)
+        self.assertTrue(ff2.is_enabled("pipeline_v2"))
+        self.assertFalse(ff2.is_enabled("auto_backup"))
+
+    def test_flags_file_is_valid_json(self) -> None:
+        ff = FeatureFlags(data_dir=self._data_dir)
+        ff.set_flag("pipeline_v2", True)
+
+        flags_path = self._data_dir / "feature_flags.json"
+        self.assertTrue(flags_path.exists())
+        data = json.loads(flags_path.read_text(encoding="utf-8"))
+        self.assertIsInstance(data, dict)
+
+    def test_flags_file_persists_custom_flag(self) -> None:
+        ff = FeatureFlags(data_dir=self._data_dir)
+        ff.set_flag("my_new_flag", True)
+
+        ff2 = FeatureFlags(data_dir=self._data_dir)
+        self.assertTrue(ff2.is_enabled("my_new_flag"))
+
+    def test_default_flags_without_file(self) -> None:
+        """Если файла нет — используются дефолты встроенных флагов."""
+        flags_path = self._data_dir / "feature_flags.json"
+        self.assertFalse(flags_path.exists())
+
+        ff = FeatureFlags(data_dir=self._data_dir)
+        self.assertFalse(ff.is_enabled("pipeline_v2"))
+        self.assertTrue(ff.is_enabled("auto_backup"))
+
+    def test_corrupted_file_falls_back_to_defaults(self) -> None:
+        """Повреждённый файл → молча используем дефолты."""
+        flags_path = self._data_dir / "feature_flags.json"
+        flags_path.write_text("NOT_JSON_AT_ALL", encoding="utf-8")
+
+        # Не должно бросать исключений
+        ff = FeatureFlags(data_dir=self._data_dir)
+        self.assertFalse(ff.is_enabled("pipeline_v2"))
+        self.assertTrue(ff.is_enabled("auto_backup"))
+
+
+class TestFeatureFlagsIPC(unittest.TestCase):
+    """Тесты IPC-обработчиков handle_get_feature_flags / handle_set_feature_flag."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_handle_get_feature_flags_returns_list(self) -> None:
+        result = self.ff.handle_get_feature_flags({})
+        self.assertIn("flags", result)
+        self.assertIn("count", result)
+        self.assertIsInstance(result["flags"], list)
+        self.assertGreater(result["count"], 0)
+
+    def test_handle_get_feature_flags_all_builtins_present(self) -> None:
+        result = self.ff.handle_get_feature_flags({})
+        names = {f["name"] for f in result["flags"]}
+        for builtin_name in _BUILTIN_FLAGS:
+            self.assertIn(builtin_name, names)
+
+    def test_handle_set_feature_flag_enable(self) -> None:
+        result = self.ff.handle_set_feature_flag({"flag_name": "pipeline_v2", "enabled": True})
+        self.assertEqual(result["flag_name"], "pipeline_v2")
+        self.assertTrue(result["enabled"])
+        self.assertTrue(self.ff.is_enabled("pipeline_v2"))
+
+    def test_handle_set_feature_flag_disable(self) -> None:
+        result = self.ff.handle_set_feature_flag({"flag_name": "auto_backup", "enabled": False})
+        self.assertFalse(result["enabled"])
+        self.assertFalse(self.ff.is_enabled("auto_backup"))
+
+    def test_handle_set_feature_flag_missing_name_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.ff.handle_set_feature_flag({"enabled": True})
+
+    def test_handle_set_feature_flag_non_bool_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.ff.handle_set_feature_flag({"flag_name": "pipeline_v2", "enabled": "yes"})
+
+    def test_handle_set_feature_flag_result_has_ts(self) -> None:
+        result = self.ff.handle_set_feature_flag({"flag_name": "pipeline_v2", "enabled": True})
+        self.assertIn("ts", result)
+
+    def test_handle_get_feature_flags_has_ts(self) -> None:
+        result = self.ff.handle_get_feature_flags({})
+        self.assertIn("ts", result)
+
+
+if __name__ == "__main__":
+    unittest.main()
