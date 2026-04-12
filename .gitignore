@@ -2,10 +2,12 @@
 .DS_Store
 
 # Python virtualenv и кэш
-.venv/
+.venv*/
 .venv_krab_ear/
 KrabEar/.venv_krab_ear/
 __pycache__/
+*.pyc
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 

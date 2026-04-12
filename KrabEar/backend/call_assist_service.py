@@ -171,15 +171,15 @@ class CallAssistService:
         start_preview_fn: Callable[[str], None] | None = None,
         coerce_bool_fn: Callable[[Any, bool], bool] | None = None,
     ) -> None:
-        self.store = store
-        self.recorder = recorder
-        self.transcriber = transcriber
-        self.gateway = gateway or VoiceGatewayClient()
-        self._extract_text = extract_text_fn or self._default_extract_text
-        self._reset_preview = reset_preview_fn or (lambda: None)
-        self._start_preview = start_preview_fn or (lambda qp: None)
-        self._coerce_bool = coerce_bool_fn or self._default_coerce_bool
-        self._lock = threading.Lock()
+        self.store: Any = store
+        self.recorder: Any = recorder
+        self.transcriber: Any = transcriber
+        self.gateway: VoiceGatewayClient = gateway or VoiceGatewayClient()
+        self._extract_text: Callable[[Any], str] = extract_text_fn or self._default_extract_text
+        self._reset_preview: Callable[[], None] = reset_preview_fn or (lambda: None)
+        self._start_preview: Callable[[str], None] = start_preview_fn or (lambda qp: None)
+        self._coerce_bool: Callable[[Any, bool], bool] = coerce_bool_fn or self._default_coerce_bool
+        self._lock: threading.Lock = threading.Lock()
         self._state: dict[str, Any] = {
             "active": False,
             "status": "idle",
