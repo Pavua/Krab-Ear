@@ -1038,6 +1038,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tableView.delegate = self
         tableView.dataSource = self
         tableView.rowHeight = 28
+        tableView.target = self
+        tableView.doubleAction = #selector(onTableViewDoubleClick)
 
         scrollView.documentView = tableView
 
@@ -1606,6 +1608,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             child.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
         }
 
+        // Width constraints for settingsBar children (Dictation tab sections)
+        for child in settingsBar.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor).isActive = true
+        }
+
         // --- BUTTON STYLING ---
         // Only true primary action buttons get accent color
         for button in [startStopButton, callAssistStartButton, callPhraseSendButton] {
@@ -1617,7 +1624,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Secondary buttons — standard appearance
         for button in [restartButton, stopButton, loadMoreButton, jumpToLatestButton,
-                       copyButton, pasteSelectedButton, deleteButton] as [NSButton] {
+                       copyButton, pasteSelectedButton, deleteButton,
+                       diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
+                       applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
+                       exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton] as [NSButton] {
             button.bezelStyle = .push
             button.isBordered = true
             button.bezelColor = nil
@@ -2745,6 +2755,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 title: "Экспорт истории",
                 body: "Не удалось сохранить файл: \(error.localizedDescription)"
             )
+        }
+        // Также сохраняем копию через IPC (export_history) в transcripts/
+        if let ipcResponse = try? ipcClient.call(
+            method: "export_history",
+            params: ["format": "md", "save_to_file": true]
+        ), let ipcResult = ipcResponse["result"] as? [String: Any],
+           let serverPath = ipcResult["path"] as? String {
+            notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
         }
     }
 
@@ -4457,6 +4475,71 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             lines.append("\(i + 1). \(source) → \(target) (встречалось: \(count))")
         }
         showDiagnosticsOutput(lines.joined(separator: "\n"))
+    }
+
+    // MARK: - get_history_item (double-click detail)
+
+    @objc private func onTableViewDoubleClick() {
+        let row = tableView.clickedRow
+        guard row >= 0, row < items.count else { return }
+        let item = items[row]
+        guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": item.id]),
+              let result = response["result"] as? [String: Any] else {
+            showInfoAlert(title: "Запись", body: "Не удалось загрузить детали записи.")
+            return
+        }
+        let text = result["text"] as? String ?? item.text
+        let ts = result["ts"] as? String ?? ""
+        let wordCount = result["word_count"] as? Int ?? 0
+        let transcriptFile = result["transcript_file"] as? String
+        var info = """
+        \(text)
+
+        --- Метаданные ---
+        ID: \(item.id)
+        Время: \(ts)
+        Слов: \(wordCount)
+        """
+        if let tf = transcriptFile {
+            info += "\nТранскрипт: \(tf)"
+        }
+        let alert = NSAlert()
+        alert.messageText = "Детали записи"
+        alert.informativeText = info
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Скопировать")
+        alert.addButton(withTitle: "Закрыть")
+        let resp = alert.runModal()
+        if resp == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+    }
+
+    // MARK: - summarize_item (single item by ID)
+
+    @objc private func onSummarizeItem() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showDiagnosticsOutput("Выберите запись для summary.")
+            return
+        }
+        let item = items[selected]
+        guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": item.id]),
+              let result = response["result"] as? [String: Any] else {
+            showDiagnosticsOutput("Ошибка: не удалось построить summary для записи.")
+            return
+        }
+        let summary = result["summary"] as? String ?? "(нет текста)"
+        let isLLM = result["llm"] as? Bool ?? false
+        let sourceChars = result["source_chars"] as? Int ?? 0
+        let text = """
+        === Summary (ID: \(item.id.prefix(8))…) ===
+        \(summary)
+
+        [LLM: \(isLLM ? "да" : "нет"), источник: \(sourceChars) символов]
+        """
+        showDiagnosticsOutput(text)
     }
 
     private func updateHistoryFiltersBadge() {
