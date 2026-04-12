@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
 
+    # Формат логов: "text" (стандартный) или "json" (структурированный JSON)
+    LOG_FORMAT: str = "text"
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

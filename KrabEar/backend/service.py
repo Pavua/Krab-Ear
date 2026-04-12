@@ -2984,16 +2984,31 @@ def default_socket_path(data_dir: Path) -> Path:
 
 def configure_logging(data_dir: Path) -> None:
     """Настраивает логирование backend в файл и stdout."""
+    import json as _json
     data_dir.mkdir(parents=True, exist_ok=True)
     log_path = data_dir / "backend.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_path, encoding="utf-8"),
-        ],
-    )
+
+    if settings.LOG_FORMAT == "json":
+        class JsonFormatter(logging.Formatter):
+            def format(self, record: logging.LogRecord) -> str:
+                return _json.dumps({
+                    "ts": self.formatTime(record),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "msg": record.getMessage(),
+                })
+        formatter: logging.Formatter = JsonFormatter()
+    else:
+        formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+
+    handlers: list[logging.Handler] = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_path, encoding="utf-8"),
+    ]
+    for h in handlers:
+        h.setFormatter(formatter)
+
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
 
 
 def build_service(data_dir: Path) -> BackendService:
