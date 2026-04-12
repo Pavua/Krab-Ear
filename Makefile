@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -33,3 +33,19 @@ clean:
 
 schemas:
 	cd KrabEar && $(PYTHON) -m contracts.export
+
+# Update .app bundle binary
+app: sign
+	cp -f "Krab Ear.app/Contents/MacOS/KrabEarAgent" "Krab Ear.app/Contents/MacOS/KrabEarAgent.bak" 2>/dev/null || true
+	cp -f native/runtime/KrabEarAgent "Krab Ear.app/Contents/MacOS/KrabEarAgent"
+	codesign -s - -f "Krab Ear.app"
+	@echo "✓ App bundle updated"
+
+# Verify everything
+verify: test build
+	codesign -v "Krab Ear.app"
+	@echo "✓ All checks passed"
+
+# Full release cycle
+release: verify app
+	@echo "✓ Release ready"
