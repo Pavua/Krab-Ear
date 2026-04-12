@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 
 /// Нативная панель истории с пагинацией, поиском, копированием и удалением.
 final class HistoryPanelController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSTabViewDelegate {
-    private enum PanelTab: String {
+    enum PanelTab: String {
         case dictation = "dictation"
         case liveTranslation = "live_translation"
         case history = "history"
@@ -46,7 +46,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let totalBytes: Int
     }
 
-    private let ipcClient: IPCClient
+    let ipcClient: IPCClient
     private let settingsProvider: () -> AgentSettings
     private let settingsUpdater: ([String: Any]) -> AgentSettings
     private let onToggleRecording: () -> Void
@@ -54,11 +54,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let onStopAgent: () -> Void
     private let onPasteHistoryItem: (HistoryItem) -> Void
     private let onSwapRuEsDirection: () -> Void
-    private let notificationService = NotificationService()
+    let notificationService = NotificationService()
 
-    private var items: [HistoryItem] = []
+    var items: [HistoryItem] = []
     private var nextCursor: String?
-    private var currentQuery: String = ""
+    var currentQuery: String = ""
     private var isSyncingSettings = false
     private var importQueue: [ImportJob] = []
     private var importJobSignatures: Set<String> = []
@@ -83,16 +83,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private var previewPollTick = 0
     private var isRecoveringHistoryFromFilters = false
 
-    private let mainTabView = NSTabView()
-    private let tableView = NSTableView()
-    private let searchField = NSSearchField()
+    let mainTabView = NSTabView()
+    let tableView = NSTableView()
+    let searchField = NSSearchField()
     private let historyPageSizeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let historyDensitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let historyPasteStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let historyTranslationModeFilter = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let historyTranslationStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let historyFromDateField = NSTextField(frame: .zero)
-    private let historyToDateField = NSTextField(frame: .zero)
+    let historyPasteStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    let historyTranslationModeFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    let historyTranslationStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    let historyFromDateField = NSTextField(frame: .zero)
+    let historyToDateField = NSTextField(frame: .zero)
     private let historyFocusModeButton = NSButton(title: "Фокус истории: ON", target: nil, action: nil)
     private let qualitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let cleanupSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -206,7 +206,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private var previewTimer: Timer?
     private var historyFocusManagedRows: [NSView] = []
     private var historyScrollMinHeightConstraint: NSLayoutConstraint?
-    private let historyFiltersBadge = NSTextField(labelWithString: "Фильтры: 0")
+    let historyFiltersBadge = NSTextField(labelWithString: "Фильтры: 0")
     private let historyPreviewScroll = NSScrollView()
     private let historyPreviewTextView = NSTextView()
     private let historyPreviewHeader = NSTextField(labelWithString: "Последние транскрипты")
@@ -238,7 +238,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private var historyAdvancedSection: CollapsibleSectionView?
     private var historyImportSection: CollapsibleSectionView?
     // MARK: - Tab selector
-    private var tabSelector: NSSegmentedControl!
+    var tabSelector: NSSegmentedControl!
     // MARK: - Keyboard shortcut monitor
     nonisolated(unsafe) private var keyboardMonitor: Any?
     // MARK: - Reorganized History action rows
@@ -246,21 +246,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let secondaryActionsRow = NSStackView()
     private let statusRow = NSStackView()
     // MARK: - Diagnostics & Metrics
-    private var diagnosticsSection: CollapsibleSectionView?
+    var diagnosticsSection: CollapsibleSectionView?
     private let diagnosticsButton = NSButton(title: "Диагностика", target: nil, action: nil)
     private let metricsButton = NSButton(title: "Метрики", target: nil, action: nil)
     private let recordingStatsButton = NSButton(title: "Статистика", target: nil, action: nil)
     private let storageInfoButton = NSButton(title: "Хранилище", target: nil, action: nil)
     private let diagnosticsRow = NSStackView()
     private let diagnosticsOutputScroll = NSScrollView()
-    private let diagnosticsOutputView = NSTextView()
+    let diagnosticsOutputView = NSTextView()
     // MARK: - Profile Presets & Audio Devices
     private var profileAudioSection: CollapsibleSectionView?
-    private let profilePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let profilePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let applyProfileButton = NSButton(title: "Применить", target: nil, action: nil)
-    private let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let testMicButton = NSButton(title: "Тест микрофона", target: nil, action: nil)
-    private let micTestResultLabel = NSTextField(labelWithString: "")
+    let micTestResultLabel = NSTextField(labelWithString: "")
     private let profileRow = NSStackView()
     private let audioDeviceRow = NSStackView()
     // MARK: - Clipboard History
@@ -271,7 +271,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // MARK: - History enhancements
     private let exportSrtButton = NSButton(title: "Экспорт SRT", target: nil, action: nil)
     private let cleanupHistoryButton = NSButton(title: "Очистка старых", target: nil, action: nil)
-    private let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let vocabSuggestionsButton = NSButton(title: "Словарь", target: nil, action: nil)
     private let glossarySuggestionsButton = NSButton(title: "Глоссарий авто", target: nil, action: nil)
     private let historyEnhancementsRow = NSStackView()
@@ -3438,7 +3438,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         syncSettingsControls()
     }
 
-    private func loadInitial() {
+    func loadInitial() {
         items = []
         nextCursor = nil
         tableView.reloadData()
@@ -3636,7 +3636,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }
     }
 
-    private func syncSettingsControls(using value: AgentSettings? = nil) {
+    func syncSettingsControls(using value: AgentSettings? = nil) {
         let settings = value ?? settingsProvider()
 
         isSyncingSettings = true
@@ -4061,7 +4061,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         return lines.joined(separator: "\n")
     }
 
-    private func showInfoAlert(title: String, body: String) {
+    func showInfoAlert(title: String, body: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = body
@@ -4292,324 +4292,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
         }
         return super.performKeyEquivalent(with: event)
-    }
-
-    // MARK: - Diagnostics & Metrics handlers
-
-    @objc private func onDiagnostics() {
-        guard let response = try? ipcClient.call(method: "get_diagnostics", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить диагностику")
-            return
-        }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Диагностика"))
-    }
-
-    @objc private func onMetrics() {
-        guard let response = try? ipcClient.call(method: "get_metrics_dashboard", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить метрики")
-            return
-        }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Метрики"))
-    }
-
-    @objc private func onRecordingStats() {
-        guard let response = try? ipcClient.call(method: "get_recording_stats", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить статистику")
-            return
-        }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Статистика записей"))
-    }
-
-    @objc private func onStorageInfo() {
-        guard let response = try? ipcClient.call(method: "get_storage_info", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить информацию о хранилище")
-            return
-        }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Хранилище"))
-    }
-
-    private func showDiagnosticsOutput(_ text: String) {
-        diagnosticsOutputView.string = text
-        diagnosticsSection?.setExpanded(true, animated: true)
-        // Switch to Dictation tab if not already there
-        if mainTabView.selectedTabViewItem?.identifier as? String != PanelTab.dictation.rawValue {
-            mainTabView.selectTabViewItem(at: 0)
-            tabSelector?.setSelected(true, forSegment: 0)
-        }
-    }
-
-    private func formatNestedResult(_ result: [String: Any], title: String) -> String {
-        var lines: [String] = ["=== \(title) ==="]
-        for (key, value) in result.sorted(by: { $0.key < $1.key }) {
-            if let dict = value as? [String: Any] {
-                lines.append("\n[\(key)]")
-                for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
-                    lines.append("  \(k): \(v)")
-                }
-            } else {
-                lines.append("\(key): \(value)")
-            }
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    // MARK: - Profile Presets & Audio Devices handlers
-
-    @objc private func onApplyProfile() {
-        let selectedTitle = profilePresetSelector.titleOfSelectedItem ?? ""
-        guard !selectedTitle.isEmpty, selectedTitle != "Загрузка..." else { return }
-        let presetName = (profilePresetSelector.selectedItem?.representedObject as? String) ?? selectedTitle.lowercased()
-        guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
-              let result = response["result"] as? [String: Any],
-              result["applied"] as? Bool == true else {
-            showDiagnosticsOutput("Ошибка: не удалось применить профиль '\(selectedTitle)'")
-            return
-        }
-        showDiagnosticsOutput("Профиль '\(selectedTitle)' применён.")
-        syncSettingsControls()
-    }
-
-    private func loadProfilePresets() {
-        guard let response = try? ipcClient.call(method: "list_profile_presets", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let presets = result["presets"] as? [[String: Any]] else { return }
-        profilePresetSelector.removeAllItems()
-        for preset in presets {
-            if let name = preset["name"] as? String {
-                let label = (preset["label"] as? String) ?? name
-                profilePresetSelector.addItem(withTitle: label)
-                profilePresetSelector.lastItem?.representedObject = name
-            }
-        }
-    }
-
-    private func loadAudioDevices() {
-        guard let response = try? ipcClient.call(method: "get_audio_devices", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let devices = result["devices"] as? [[String: Any]] else { return }
-        audioDeviceSelector.removeAllItems()
-        audioDeviceSelector.addItem(withTitle: "По умолчанию (системный)")
-        for device in devices {
-            if let name = device["name"] as? String {
-                audioDeviceSelector.addItem(withTitle: name)
-            }
-        }
-    }
-
-    @objc private func onTestMicrophone() {
-        micTestResultLabel.stringValue = "Тестирование..."
-        micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            guard let response = try? self.ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
-                  let result = response["result"] as? [String: Any] else {
-                DispatchQueue.main.async {
-                    self.micTestResultLabel.stringValue = "Ошибка теста"
-                    self.micTestResultLabel.textColor = KrabEarTheme.Colors.error
-                }
-                return
-            }
-            let rms = result["rms"] as? Double ?? 0
-            let peak = result["peak"] as? Double ?? 0
-            let status = rms > 0.01 ? "OK" : "Тихо"
-            DispatchQueue.main.async {
-                self.micTestResultLabel.stringValue = String(format: "RMS: %.3f | Peak: %.3f | %@", rms, peak, status)
-                self.micTestResultLabel.textColor = rms > 0.01 ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.warning
-            }
-        }
-    }
-
-    // MARK: - Clipboard History handlers
-
-    @objc private func onClipboardHistory() {
-        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let items = result["items"] as? [[String: Any]] else {
-            showDiagnosticsOutput("Буфер обмена пуст")
-            return
-        }
-        var lines: [String] = ["=== Буфер обмена (последние \(items.count)) ==="]
-        for (i, item) in items.enumerated() {
-            let text = String((item["text"] as? String ?? "").prefix(80))
-            let ts = item["ts"] as? String ?? ""
-            lines.append("\(i + 1). [\(ts)] \(text)")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
-    }
-
-    @objc private func onRepasteItem() {
-        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let clipItems = result["items"] as? [[String: Any]],
-              let firstItem = clipItems.first,
-              let itemId = firstItem["id"] as? String else {
-            notificationService.notify(title: "Krab Ear", body: "Нет элементов для вставки")
-            return
-        }
-        guard let _ = try? ipcClient.call(method: "repaste_item", params: ["id": itemId]) else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
-            return
-        }
-        notificationService.notify(title: "Krab Ear", body: "Элемент вставлен повторно")
-    }
-
-    // MARK: - History Enhancement handlers
-
-    @objc private func onExportSrt() {
-        let selectedRow = tableView.selectedRow
-        guard selectedRow >= 0, selectedRow < items.count else {
-            notificationService.notify(title: "Krab Ear", body: "Выберите запись для экспорта SRT")
-            return
-        }
-        let item = items[selectedRow]
-        guard let response = try? ipcClient.call(method: "export_history_srt", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any],
-              let path = result["path"] as? String else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка экспорта SRT")
-            return
-        }
-        notificationService.notify(title: "Krab Ear", body: "SRT сохранён")
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-    }
-
-    @objc private func onCleanupHistory() {
-        let daysMap = [30, 60, 90, 180, 365]
-        let days = daysMap[cleanupDaysSelector.indexOfSelectedItem]
-        let alert = NSAlert()
-        alert.messageText = "Очистка истории"
-        alert.informativeText = "Удалить записи старше \(days) дней? Это действие нельзя отменить."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Удалить")
-        alert.addButton(withTitle: "Отмена")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
-              let result = response["result"] as? [String: Any],
-              let deleted = result["deleted_count"] as? Int else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
-            return
-        }
-        notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
-        loadInitial()
-    }
-
-    @objc private func onVocabSuggestions() {
-        guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let suggestions = result["suggestions"] as? [String] else {
-            showDiagnosticsOutput("Нет предложений по словарю")
-            return
-        }
-        var lines: [String] = ["=== Словарь (предложения) ==="]
-        for (i, word) in suggestions.enumerated() {
-            lines.append("\(i + 1). \(word)")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
-    }
-
-    @objc private func onGlossarySuggestions() {
-        guard let response = try? ipcClient.call(method: "get_glossary_suggestions", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let suggestions = result["suggestions"] as? [[String: Any]] else {
-            showDiagnosticsOutput("Нет предложений по глоссарию")
-            return
-        }
-        var lines: [String] = ["=== Глоссарий (авто-предложения) ==="]
-        for (i, item) in suggestions.enumerated() {
-            let source = item["source"] as? String ?? "?"
-            let target = item["target"] as? String ?? "?"
-            let count = item["count"] as? Int ?? 0
-            lines.append("\(i + 1). \(source) → \(target) (встречалось: \(count))")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
-    }
-
-    // MARK: - get_history_item (double-click detail)
-
-    @objc private func onTableViewDoubleClick() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < items.count else { return }
-        let item = items[row]
-        guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any] else {
-            showInfoAlert(title: "Запись", body: "Не удалось загрузить детали записи.")
-            return
-        }
-        let text = result["text"] as? String ?? item.text
-        let ts = result["ts"] as? String ?? ""
-        let wordCount = result["word_count"] as? Int ?? 0
-        let transcriptFile = result["transcript_file"] as? String
-        var info = """
-        \(text)
-
-        --- Метаданные ---
-        ID: \(item.id)
-        Время: \(ts)
-        Слов: \(wordCount)
-        """
-        if let tf = transcriptFile {
-            info += "\nТранскрипт: \(tf)"
-        }
-        let alert = NSAlert()
-        alert.messageText = "Детали записи"
-        alert.informativeText = info
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Скопировать")
-        alert.addButton(withTitle: "Закрыть")
-        let resp = alert.runModal()
-        if resp == .alertFirstButtonReturn {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-        }
-    }
-
-    // MARK: - summarize_item (single item by ID)
-
-    @objc private func onSummarizeItem() {
-        let selected = tableView.selectedRow
-        guard selected >= 0, selected < items.count else {
-            showDiagnosticsOutput("Выберите запись для summary.")
-            return
-        }
-        let item = items[selected]
-        guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось построить summary для записи.")
-            return
-        }
-        let summary = result["summary"] as? String ?? "(нет текста)"
-        let isLLM = result["llm"] as? Bool ?? false
-        let sourceChars = result["source_chars"] as? Int ?? 0
-        let text = """
-        === Summary (ID: \(item.id.prefix(8))…) ===
-        \(summary)
-
-        [LLM: \(isLLM ? "да" : "нет"), источник: \(sourceChars) символов]
-        """
-        showDiagnosticsOutput(text)
-    }
-
-    private func updateHistoryFiltersBadge() {
-        var count = 0
-        if !currentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { count += 1 }
-        if historyPasteStatusFilter.indexOfSelectedItem > 0 { count += 1 }
-        if historyTranslationModeFilter.indexOfSelectedItem > 0 { count += 1 }
-        if historyTranslationStatusFilter.indexOfSelectedItem > 0 { count += 1 }
-        if !historyFromDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { count += 1 }
-        if !historyToDateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { count += 1 }
-        
-        if count > 0 {
-            historyFiltersBadge.stringValue = "Фильтры: \(count)"
-            historyFiltersBadge.textColor = .controlAccentColor
-            historyFiltersBadge.isHidden = false
-        } else {
-            historyFiltersBadge.stringValue = "Фильтры: 0"
-            historyFiltersBadge.isHidden = true
-        }
     }
 }
 
