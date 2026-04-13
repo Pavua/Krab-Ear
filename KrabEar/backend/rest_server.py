@@ -400,6 +400,340 @@ def get_metrics_prometheus():
     )
 
 
+# ---------------------------------------------------------------------------
+# Health dashboard HTML page
+# ---------------------------------------------------------------------------
+
+def _status_dot_color(status: str) -> str:
+    """Возвращает CSS-цвет индикатора по строке статуса."""
+    green = {"ok", "healthy", "closed"}
+    yellow = {"warning", "degraded", "circuit_open", "unavailable", "waiting_data"}
+    if status in green:
+        return "#4ade80"
+    if status in yellow:
+        return "#fbbf24"
+    return "#f87171"
+
+
+def _build_dashboard_html() -> str:
+    """Строит самодостаточную HTML-страницу дашборда состояния."""
+    import platform
+
+    try:
+        import psutil  # type: ignore
+        cpu_pct = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        mem_used_gb = round(mem.used / (1024 ** 3), 2)
+        mem_total_gb = round(mem.total / (1024 ** 3), 2)
+        mem_pct = mem.percent
+        disk = psutil.disk_usage("/")
+        disk_free_gb = round(disk.free / (1024 ** 3), 2)
+        disk_total_gb = round(disk.total / (1024 ** 3), 2)
+        sys_info_available = True
+    except Exception:
+        cpu_pct = mem_used_gb = mem_total_gb = mem_pct = None
+        disk_free_gb = disk_total_gb = None
+        sys_info_available = False
+
+    # Health checks
+    try:
+        from backend.health_checker import HealthChecker
+        checker = HealthChecker(store=store, transcriber=transcriber)
+        health_data = checker.check_all()
+    except Exception as exc:
+        health_data = {
+            "status": "error",
+            "checks": {},
+            "uptime_sec": round(time.time() - _SERVER_START_TIME, 1),
+            "version": "unknown",
+            "error": str(exc),
+        }
+
+    # Metrics summary
+    try:
+        metrics_summary = metrics.get_summary()
+    except Exception:
+        metrics_summary = {}
+
+    uptime_sec = health_data.get("uptime_sec", round(time.time() - _SERVER_START_TIME, 1))
+    uptime_str = _format_uptime(uptime_sec)
+    overall_status = health_data.get("status", "unknown")
+    overall_color = _status_dot_color(overall_status)
+    version = health_data.get("version", "unknown")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    py_version = platform.python_version()
+    platform_str = platform.platform()
+
+    # Build health check rows
+    check_rows = ""
+    for name, result in health_data.get("checks", {}).items():
+        st = result.get("status", "unknown")
+        color = _status_dot_color(st)
+        details_parts = []
+        for k, v in result.items():
+            if k == "status":
+                continue
+            details_parts.append(f"{k}: {v}")
+        details = " | ".join(details_parts) if details_parts else ""
+        check_rows += f"""
+            <tr>
+              <td><span class="dot" style="background:{color}"></span>{name}</td>
+              <td><span class="badge" style="background:{color}22;color:{color};border:1px solid {color}44">{st}</span></td>
+              <td class="detail">{details}</td>
+            </tr>"""
+
+    # Build metrics section
+    stt = metrics_summary.get("stt_metrics", {}) or {}
+    lat = stt.get("latency_ms", {}) or {}
+    conf = stt.get("confidence", {}) or {}
+    p50 = lat.get("p50")
+    p95 = lat.get("p95")
+    p99 = lat.get("p99")
+    conf_avg = conf.get("avg")
+    total_req = metrics_summary.get("total_requests", 0)
+    err_rate = metrics_summary.get("error_rate", 0)
+
+    def _fmt(v, suffix=""):
+        return f"{v:.1f}{suffix}" if v is not None else "—"
+
+    metrics_rows = f"""
+            <tr><td>Total requests</td><td>{total_req}</td></tr>
+            <tr><td>Error rate</td><td>{_fmt(err_rate * 100 if err_rate else None, '%') if err_rate else '0%'}</td></tr>
+            <tr><td>Latency p50</td><td>{_fmt(p50, ' ms')}</td></tr>
+            <tr><td>Latency p95</td><td>{_fmt(p95, ' ms')}</td></tr>
+            <tr><td>Latency p99</td><td>{_fmt(p99, ' ms')}</td></tr>
+            <tr><td>Confidence avg</td><td>{_fmt(conf_avg)}</td></tr>"""
+
+    # System info rows
+    if sys_info_available:
+        sys_rows = f"""
+            <tr><td>CPU usage</td><td>{cpu_pct:.1f}%</td></tr>
+            <tr><td>Memory</td><td>{mem_used_gb} / {mem_total_gb} GB ({mem_pct:.1f}%)</td></tr>
+            <tr><td>Disk free</td><td>{disk_free_gb} / {disk_total_gb} GB</td></tr>"""
+    else:
+        sys_rows = "<tr><td colspan='2' class='detail'>psutil not available</td></tr>"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="30">
+  <title>Krab Ear — Health Dashboard</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    :root {{
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #6366f1;
+    }}
+    body {{
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      padding: 24px;
+      max-width: 1000px;
+      margin: 0 auto;
+    }}
+    header {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+      flex-wrap: wrap;
+    }}
+    header h1 {{
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }}
+    .overall-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      border: 1px solid;
+    }}
+    .meta {{
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }}
+    .card {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+    }}
+    .card h2 {{
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 14px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    td {{
+      padding: 6px 4px;
+      vertical-align: middle;
+    }}
+    tr + tr td {{
+      border-top: 1px solid var(--border);
+    }}
+    td:last-child {{
+      text-align: right;
+      color: var(--muted);
+    }}
+    .dot {{
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 8px;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }}
+    .badge {{
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+    }}
+    .detail {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .full-width {{
+      grid-column: 1 / -1;
+    }}
+    .refresh-note {{
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 24px;
+    }}
+    @media (max-width: 600px) {{
+      body {{ padding: 12px; }}
+      header {{ gap: 8px; }}
+      .meta {{ margin-left: 0; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <span style="font-size:28px">🦀</span>
+    <h1>Krab Ear — Health Dashboard</h1>
+    <span class="overall-badge" style="background:{overall_color}22;color:{overall_color};border-color:{overall_color}44">
+      <span class="dot" style="background:{overall_color}"></span>
+      {overall_status.upper()}
+    </span>
+    <div class="meta">
+      <div>v{version} · Python {py_version}</div>
+      <div>Updated: {now_str}</div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Uptime + identity -->
+    <div class="card">
+      <h2>Service</h2>
+      <table>
+        <tr><td>Uptime</td><td>{uptime_str}</td></tr>
+        <tr><td>Platform</td><td class="detail" style="font-size:11px">{platform_str}</td></tr>
+        <tr><td>Quality profile</td><td>{engine.quality_profile}</td></tr>
+      </table>
+    </div>
+
+    <!-- System resources -->
+    <div class="card">
+      <h2>System Resources</h2>
+      <table>{sys_rows}
+      </table>
+    </div>
+
+    <!-- Metrics -->
+    <div class="card">
+      <h2>Recent Metrics</h2>
+      <table>{metrics_rows}
+      </table>
+    </div>
+
+    <!-- Health checks — full width -->
+    <div class="card full-width">
+      <h2>Health Checks</h2>
+      <table>
+        <colgroup>
+          <col style="width:22%">
+          <col style="width:18%">
+          <col>
+        </colgroup>
+        <tr style="color:var(--muted);font-size:12px">
+          <td>Check</td><td>Status</td><td>Details</td>
+        </tr>{check_rows}
+      </table>
+    </div>
+  </div>
+
+  <p class="refresh-note">Auto-refreshes every 30 seconds &mdash; <a href="/health/dashboard" style="color:var(--accent)">refresh now</a></p>
+</body>
+</html>"""
+    return html
+
+
+def _format_uptime(seconds: float) -> str:
+    """Форматирует секунды в читаемую строку вида '2d 3h 14m 05s'."""
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs:02d}s")
+    return " ".join(parts)
+
+
+@monitoring_blp.route("/health/dashboard", methods=["GET"])
+def health_dashboard():
+    """Self-contained HTML health dashboard with auto-refresh every 30 seconds.
+
+    Returns a dark-themed, responsive HTML page showing:
+      - Overall service status
+      - Health check results (stt_model, llm, disk_space, history_store, audio_devices)
+      - System resources (CPU, memory, disk) — requires psutil
+      - Recent STT metrics (latency percentiles, confidence, error rate)
+      - Uptime and version info
+
+    No external CSS/JS dependencies — everything is inlined.
+    """
+    html = _build_dashboard_html()
+    return Response(html, status=200, mimetype="text/html; charset=utf-8")
+
+
 # ── v1 APIs ──────────────────────────────────────────────────────────────────
 v1_blp = Blueprint(
     "v1",
