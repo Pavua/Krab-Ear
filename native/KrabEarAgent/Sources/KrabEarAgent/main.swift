@@ -181,7 +181,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         )
 
     // PermissionWizard удален, используем QuickStartWindowController
-
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
             settingsProvider: { [weak self] in
