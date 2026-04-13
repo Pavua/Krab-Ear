@@ -1586,6 +1586,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         controlCard.contentStackView.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(controlCard)
         dictationStack.addArrangedSubview(settingsBar)
+        // Gemini 3.1 Pro: аналитика + здоровье системы
+        let (analyticsSection, systemHealthSection) = setupAnalyticsSections()
+        dictationStack.addArrangedSubview(analyticsSection)
+        dictationStack.addArrangedSubview(systemHealthSection)
         dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
         dictationStack.addArrangedSubview(dictationHistoryHintLabel)
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
@@ -1748,6 +1752,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(primaryActionsCard)
         historyStack.addArrangedSubview(advancedSection)
         historyStack.addArrangedSubview(importSection)
+        // Gemini 3.1 Pro: управление + статистика
+        let (managementSection, statsSection) = setupManagementSections()
+        historyStack.addArrangedSubview(managementSection)
+        historyStack.addArrangedSubview(statsSection)
         historyStack.addArrangedSubview(statusCard)
 
         // Width constraints for history children
