@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
+from backend.export_scheduler import ExportScheduler
 from backend.ipc_throttle import IPCThrottle
 from backend.request_signing import RequestSigner
 from backend.call_assist_service import CallAssistService
@@ -92,6 +93,7 @@ from core.paste_formatter import PasteFormatter
 from backend.config_presets_library import ConfigPresetsLibrary
 from backend.data_migrator import DataMigrator
 from core.text_anonymizer import TextAnonymizer
+from core.text_postprocessor import TextPostProcessor
 from core.topic_tracker import TopicTracker
 from core.transcription_scorer import TranscriptionScorer
 from core.emotion_detector import EmotionDetector
@@ -99,6 +101,10 @@ from backend.transcription_queue import TranscriptionQueue
 from backend.sentiment_trends import SentimentTrendAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.speaker_statistics import SpeakerStatisticsAnalyzer
+from backend.playback_tracker import PlaybackTracker
+from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
+from backend.smart_vocabulary import SmartVocabularyBuilder
+from backend.recording_insights import RecordingInsightsGenerator
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -186,11 +192,13 @@ class BackendService:
             max_copies=AUTO_BACKUP_MAX_COPIES,
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
+        self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
         self._transcription_counter: int = 0
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
         self._speaker_statistics = SpeakerStatisticsAnalyzer()
+        self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
         self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
@@ -222,6 +230,7 @@ class BackendService:
         )
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
         self._text_anonymizer = TextAnonymizer()
+        self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
@@ -230,11 +239,40 @@ class BackendService:
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
+        self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
+        self._recording_comparison = RecordingComparison()
+        self._smart_vocabulary = SmartVocabularyBuilder()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
         except Exception:
             pass
+
+        # Диагностика при старте
+        from backend.startup_diagnostics import StartupDiagnostics
+        self._startup_diagnostics = StartupDiagnostics(
+            data_dir=self.store.data_dir,
+        )
+        try:
+            _startup_report = self._startup_diagnostics.run_all_checks()
+            if _startup_report.status == "critical":
+                logger.error(
+                    "Startup diagnostics CRITICAL — errors: %s",
+                    "; ".join(_startup_report.errors),
+                )
+            elif _startup_report.status == "degraded":
+                logger.warning(
+                    "Startup diagnostics DEGRADED — warnings: %s",
+                    "; ".join(_startup_report.warnings),
+                )
+            else:
+                logger.info(
+                    "Startup diagnostics OK (%.0f ms, %d checks passed)",
+                    _startup_report.startup_time_ms,
+                    len(_startup_report.checks),
+                )
+        except Exception:
+            logger.exception("Startup diagnostics завершились с исключением")
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -366,6 +404,9 @@ class BackendService:
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
             "get_auto_backup_status": lambda p: self._auto_backup.get_auto_backup_status(),  # статус авто-резервного копирования
+            "configure_auto_export": self._handle_configure_auto_export,  # настроить расписание авто-экспорта
+            "get_export_schedule_status": lambda p: self._export_scheduler.get_schedule_status(),  # статус расписания авто-экспорта
+            "list_auto_exports": lambda p: {"exports": self._export_scheduler.list_exports()},  # список файлов авто-экспорта
             "restore_history": self._history.handle_restore_history,  # восстанавливает историю из резервной копии
             "list_backups": self._history.handle_list_backups,  # список доступных резервных копий
             "get_history_statistics": self._history.handle_get_history_statistics,  # агрегированная статистика по истории
@@ -418,6 +459,7 @@ class BackendService:
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
+            "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -474,6 +516,16 @@ class BackendService:
             "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
             "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
             "get_obsidian_sync_status": self._obsidian_sync.handle_get_status,  # статус синхронизации с Obsidian vault
+            "record_playback": self._playback_tracker.handle_record_playback,  # зарегистрировать воспроизведение записи (item_id, duration_listened_sec)
+            "get_playback_stats": self._playback_tracker.handle_get_playback_stats,  # статистика воспроизведения одной записи: play_count, total_listened_sec, last_played
+            "get_most_replayed": self._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
+            "post_process_text": self._handle_post_process_text,  # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
+            "list_post_process_steps": self._handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
+            "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
+            "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
+            "auto_update_vocabulary": self._handle_auto_update_vocabulary,  # умный авто-апдейт словаря STT из истории транскрибаций
+            "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
+            "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
         }
 
         handler = handlers.get(method)
@@ -575,6 +627,30 @@ class BackendService:
             "succeeded": succeeded,
             "failed": failed,
         }
+
+
+    def _handle_configure_auto_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Настраивает расписание авто-экспорта.
+
+        Параметры:
+            format (str): формат экспорта — srt, csv, markdown, json, obsidian, html
+            interval_hours (int): интервал в часах (по умолчанию 24)
+            output_dir (str|None): папка для файлов (None = авто)
+            enabled (bool): включить авто-экспорт (по умолчанию True)
+
+        Возвращает:
+            Обновлённый статус расписания (dict).
+        """
+        fmt = str(params.get("format", "json")).strip()
+        interval_hours = int(params.get("interval_hours", 24))
+        output_dir = params.get("output_dir")
+        enabled = bool(params.get("enabled", True))
+        return self._export_scheduler.configure(
+            fmt=fmt,
+            interval_hours=interval_hours,
+            output_dir=output_dir,
+            enabled=enabled,
+        )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1215,6 +1291,11 @@ class BackendService:
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
         return self._health_checker.check_all()
+
+    def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает результаты диагностики при старте бэкенда."""
+        report = self._startup_diagnostics.run_all_checks()
+        return report.to_dict()
 
     def _handle_analyze_audio_quality(self, params: dict[str, Any]) -> dict[str, Any]:
         """Pre-flight анализ качества аудиофайла перед транскрипцией.
@@ -2537,6 +2618,14 @@ class BackendService:
             "summary": report.summary,
         }
 
+    def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сравнивает несколько записей side-by-side."""
+        item_ids = params.get("item_ids")
+        if not isinstance(item_ids, list) or not item_ids:
+            raise ValueError("Параметр item_ids обязателен (список строк)")
+        view = self._recording_comparison.compare(item_ids=item_ids, store=self.store)
+        return _comparison_view_to_dict(view)
+
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Проверяет целостность файлов данных Krab Ear."""
         report = self._integrity_checker.check_integrity(self.store.data_dir)
@@ -3082,6 +3171,85 @@ class BackendService:
         abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
         return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
 
+    # ── Text post-processing IPC handlers ──────────────────────────────────────
+
+    def _handle_post_process_text(self, params: dict) -> dict:
+        """IPC: post_process_text — прогнать текст через конвейер пост-обработки.
+
+        Params:
+            text  (str)       — исходный текст для обработки.
+            steps (list[str]) — список имён шагов в нужном порядке.
+                                Если не указан, применяется цепочка по умолчанию:
+                                [strip_whitespace, fix_punctuation, normalize_entities].
+
+        Возвращает:
+            text           — обработанный текст.
+            steps_applied  — список имён выполненных шагов.
+            changes_count  — число шагов, изменивших текст.
+        """
+        text = str(params.get("text", ""))
+        steps = params.get("steps")  # None → цепочка по умолчанию
+        if steps is not None and not isinstance(steps, list):
+            raise ValueError("Параметр 'steps' должен быть списком строк или null")
+        if steps is not None:
+            steps = [str(s) for s in steps]
+
+        result = self._text_postprocessor.process(text, steps=steps)
+        return {
+            "text": result.text,
+            "steps_applied": result.steps_applied,
+            "changes_count": result.changes_count,
+        }
+
+    def _handle_list_post_process_steps(self, params: dict) -> dict:
+        """IPC: list_post_process_steps — список доступных шагов пост-обработки.
+
+        Возвращает:
+            steps — список имён доступных шагов.
+        """
+        return {"steps": self._text_postprocessor.list_steps()}
+
+
+    def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: select_model — умный выбор STT-модели на основе условий.
+
+        Параметры:
+            duration_sec  — длительность аудио в секундах (float, обязательный).
+            quality       — "balanced" | "max" (строка, опциональный, по умолчанию "balanced").
+            is_preview    — True если это превью-транскрибация (bool, опциональный).
+            system_load   — нагрузка CPU 0.0–1.0 (float, опциональный, по умолчанию 0).
+
+        Возвращает:
+            {model_name, reason, estimated_latency_ms, quality_tier}
+        """
+        from core.model_selector import SmartModelSelector
+
+        try:
+            duration_sec = float(params.get("duration_sec", 0.0))
+        except (TypeError, ValueError):
+            raise ValueError("Параметр 'duration_sec' должен быть числом")
+
+        quality = str(params.get("quality", "balanced")).strip()
+        is_preview = bool(params.get("is_preview", False))
+
+        try:
+            system_load = float(params.get("system_load", 0.0))
+        except (TypeError, ValueError):
+            system_load = 0.0
+
+        selector = SmartModelSelector()
+        sel = selector.select_model(
+            duration_sec=duration_sec,
+            quality=quality,
+            is_preview=is_preview,
+            system_load=system_load,
+        )
+        return {
+            "model_name": sel.model_name,
+            "reason": sel.reason,
+            "estimated_latency_ms": sel.estimated_latency_ms,
+            "quality_tier": sel.quality_tier,
+        }
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""

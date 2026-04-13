@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Авто-резервное копирование
     AUTO_BACKUP_ENABLED: bool = True
 
+    # Авто-экспорт истории по расписанию
+    AUTO_EXPORT_ENABLED: bool = False
+
     # Формат логов: "text" (стандартный) или "json" (структурированный JSON)
     LOG_FORMAT: str = "text"
 

@@ -106,9 +106,15 @@ class DailySentimentAggregationTestCase(unittest.TestCase):
         self._analyzer = SentimentTrendAnalyzer()
 
     def test_single_day_produces_one_daily_entry(self) -> None:
+        # Фиксируем оба элемента в пределах одной UTC-даты (noon ± 1ч),
+        # чтобы исключить пересечение границы дня независимо от времени запуска.
+        base = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        base = base - timedelta(days=2)
+        ts1 = (base - timedelta(hours=1)).isoformat()
+        ts2 = (base + timedelta(hours=1)).isoformat()
         items = [
-            _make_item("хорошо", days_ago=2.0),
-            _make_item("отлично", days_ago=2.1),
+            {"text": "хорошо", "ts": ts1, "language": "ru"},
+            {"text": "отлично", "ts": ts2, "language": "ru"},
         ]
         report = self._analyzer.analyze_sentiment_trends(items, days=30)
         self.assertEqual(len(report.daily_sentiment), 1)

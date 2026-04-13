@@ -1,8 +1,83 @@
 # Changelog
 
+## v2.1.0 — 2026-04-12 (branch: claude/objective-wu)
+
+Продолжение крупного цикла разработки. 27 коммитов поверх `codex/krab-ear-v2`.
+244 файла изменено, +60 027 строк. 148 тест-файлов, 601 IPC-метод, 74 888 строк Python.
+
+---
+
+### Новые функции
+
+#### Аудио / STT
+- **VAD** (Voice Activity Detection) — детектор активности голоса в пайплайне
+- **Noise Profiler** — профилирование шума для адаптивного шумоподавления
+- **Stage Cache** — кэш этапов детерминированного пайплайна Phase 4
+- **Recording Merger** — объединение нескольких записей в одну
+- **Speech Pace Analyzer** — детектор темпа речи, интеграция с IPC
+- Smart silence skip во время записи
+- Калибратор STT (`AudioCalibrator`)
+- Экспорт данных форм волны (waveform)
+- Улучшенное управление галлюцинациями
+
+#### Текстовая обработка
+- **Abbreviation Expander** — раскрытие аббревиатур в транскриптах
+- **Anonymizer** — замена PII (имена, телефоны) плейсхолдерами
+- **Text Chunker** — разбивка длинных транскриптов на смысловые чанки
+- **Punctuation Fixer** (`core/punctuation_fixer.py`)
+- **Term Extractor** (`core/term_extractor.py`)
+- **Text Comparator** (`core/text_comparator.py`)
+- Readability scorer, stop words filter, paste formatter, search highlights
+
+#### История и хранилище
+- **Transcript Versioning** — хранение нескольких версий одной записи
+- **Collection Manager** (`backend/collection_manager.py`)
+- **Period Comparison** (`backend/period_comparison.py`)
+- **Quality Trends** (`backend/quality_trends.py`)
+- **Integrity Checker** (`backend/integrity_checker.py`)
+- **Daily Digest** (`backend/daily_digest.py`)
+- Fuzzy search, дедупликация, избранное, теги, hotwords
+- Экспорт: CSV, JSON, SRT, Markdown, Obsidian, HTML, batch
+- **Obsidian Sync** — синхронизация транскриптов с Obsidian Vault
+
+#### Спикеры и сессии
+- **Speaker Manager** (`backend/speaker_manager.py`) — алиасы, профили, статистика
+- **Topic Tracker** — автоматическое отслеживание тем разговора
+- **Emotion Detector** — определение эмоциональной окраски фраз
+- **Sentiment Analysis** — общий тон транскрипта
+- Auto-title для сессий, context memory, keyword cloud
+
+#### Аналитика и мониторинг
+- **Analytics Dashboard** — сводка по сессиям, языкам, качеству
+- **Cost Estimator** — оценка стоимости вычислений (MLX, GPU time)
+- **HTML Report Generator** — красивые отчёты по сессии / периоду
+- **Speaker Statistics** — время говорения по спикерам
+- **Language Learning Integration** — словарные подсказки из транскриптов
+- **Period Comparison Reports** — сравнение недель/месяцев
+
+#### Инфраструктура / бэкенд
+- **Transcription Queue** — очередь задач транскрипции с приоритетами
+- **Request Signing** — HMAC-подпись IPC-запросов
+- **Feature Flags** — включение/отключение экспериментальных функций
+- **Retry Strategy** — настраиваемые политики повтора для STT и LLM
+- Auto-backup с планировщиком, audit logging, Prometheus metrics
+- Security layer (API key auth), CORS, CLI tool
+- Webhooks, plugin system, API versioning
+- Conveyor batch executor, IPC throttle, chains
+
+#### Тесты
+- **148 тест-файлов** (+23 по сравнению с предыдущим checkoint 125)
+- CLI comprehensive tests (88 тест-кейсов)
+- REST E2E tests (68 тест-кейсов)
+- Property-based tests (hypothesis)
+- Новые наборы: `test_annotations`, `test_collection_manager`,
+  `test_punctuation_fixer`, `test_speaker_manager`
+
+---
+
 ## v2.0.0 — 2026-04-12
 
-Крупный релиз. Полный roadmap Krab Ear закрыт: 33+ коммита, 2114 тестов, 100+ новых компонентов.
+Крупный релиз. Полный roadmap Krab Ear закрыт: 16 коммитов в первой волне, 2114 тестов, 100+ новых компонентов.
 
 ---
 

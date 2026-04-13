@@ -132,7 +132,10 @@ class TestObsidianSyncSync(unittest.TestCase):
 
     def test_sync_creates_md_files(self) -> None:
         """sync() создаёт .md файлы в папке vault/folder."""
-        items = [_make_item(), _make_item(text="Второй текст.")]
+        items = [
+            _make_item(item_id="aaa00000-0000-0000-0000-000000000001"),
+            _make_item(text="Второй текст.", item_id="bbb00000-0000-0000-0000-000000000002"),
+        ]
         result = self.mgr.sync(items)
         self.assertEqual(result.synced_count, 2)
         self.assertEqual(len(result.new_files), 2)
@@ -149,7 +152,6 @@ class TestObsidianSyncSync(unittest.TestCase):
     def test_sync_incremental_skips_old(self) -> None:
         """Инкрементальная синхронизация пропускает записи старше last_sync_ts."""
         old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        new_ts = datetime.now(timezone.utc).isoformat()
 
         # Первый sync устанавливает last_sync_ts
         self.mgr.sync([_make_item(ts=old_ts)])
@@ -158,6 +160,10 @@ class TestObsidianSyncSync(unittest.TestCase):
         result = self.mgr.sync([_make_item(ts=old_ts)])
         self.assertEqual(result.skipped_count, 1)
         self.assertEqual(result.synced_count, 0)
+
+        # new_ts захватываем ПОСЛЕ последнего sync, чтобы гарантировать,
+        # что он новее last_sync_ts
+        new_ts = datetime.now(timezone.utc).isoformat()
 
         # Новая запись не должна быть пропущена
         result2 = self.mgr.sync([_make_item(ts=new_ts)])
@@ -197,7 +203,10 @@ class TestObsidianSyncSync(unittest.TestCase):
 
     def test_sync_file_count_in_status(self) -> None:
         """get_sync_status() корректно возвращает количество .md файлов."""
-        self.mgr.sync([_make_item(), _make_item(text="Ещё один.")])
+        self.mgr.sync([
+            _make_item(item_id="ccc00000-0000-0000-0000-000000000001"),
+            _make_item(text="Ещё один.", item_id="ddd00000-0000-0000-0000-000000000002"),
+        ])
         status = self.mgr.get_sync_status()
         self.assertEqual(status["file_count"], 2)
 
