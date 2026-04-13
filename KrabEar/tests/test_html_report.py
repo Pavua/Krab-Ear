@@ -120,8 +120,10 @@ class TestHTMLReportGeneratorBasic(unittest.TestCase):
     # 5. Корректное количество карточек записей
     def test_entries_count_matches_items(self) -> None:
         result = self.gen.generate_report(self.items)
-        # Каждая запись имеет class="entry-card" или "entry-card favorite"
-        count = result.count("entry-card")
+        # Каждая карточка имеет атрибут class="entry-card"
+        # Считаем вхождения внутри HTML-тегов (не в CSS)
+        import re
+        count = len(re.findall(r'class="entry-card', result))
         self.assertEqual(count, len(self.items),
                          f"Ожидалось {len(self.items)} карточек, найдено {count}")
 
@@ -139,9 +141,11 @@ class TestHTMLReportGeneratorBasic(unittest.TestCase):
 
     # 8. Пустой список — корректный документ
     def test_empty_items_produces_valid_html(self) -> None:
+        import re
         result = self.gen.generate_report([])
         self.assertIn("<!DOCTYPE html>", result)
-        self.assertNotIn("entry-card", result)
+        # При пустом списке — нет HTML-элементов с классом entry-card
+        self.assertEqual(len(re.findall(r'class="entry-card', result)), 0)
         self.assertIn("stats-card", result)
 
 

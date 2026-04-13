@@ -2480,6 +2480,14 @@ class BackendService:
             "confidence_distribution": report.confidence_distribution,
         }
 
+    def _handle_get_speaker_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает per-speaker статистику речи из диаризованных записей истории."""
+        return self._speaker_statistics.handle_get_speaker_statistics(
+            params,
+            store=self.store,
+            speaker_manager=self._speaker_manager,
+        )
+
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
         days = int(params.get("days", 30))
