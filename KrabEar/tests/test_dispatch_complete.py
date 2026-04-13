@@ -1238,6 +1238,45 @@ class TestNewMethodsGroup(_DispatchBase):
 
 
 # ===========================================================================
+# Группа 32: Поиск, архив, активность и word timing
+# ===========================================================================
+
+class TestSearchArchiveGroup(_DispatchBase):
+    """Поиск (история запросов), архив, активность, word timing."""
+
+    def test_get_recent_searches(self):
+        self.assert_dispatch("get_recent_searches", ok_required=True)
+
+    def test_get_popular_searches(self):
+        self.assert_dispatch("get_popular_searches", ok_required=True)
+
+    def test_clear_search_history(self):
+        self.assert_dispatch("clear_search_history", ok_required=True)
+
+    def test_archive_items(self):
+        # Пустой список → ok=True или ok=False, метод должен ответить
+        self.assert_dispatch("archive_items", {"item_ids": []})
+
+    def test_unarchive_items(self):
+        self.assert_dispatch("unarchive_items", {"item_ids": []})
+
+    def test_list_archived(self):
+        self.assert_dispatch("list_archived", ok_required=True)
+
+    def test_get_archive_stats(self):
+        self.assert_dispatch("get_archive_stats", ok_required=True)
+
+    def test_get_activity_calendar(self):
+        self.assert_dispatch("get_activity_calendar", ok_required=True)
+
+    def test_analyze_word_timing(self):
+        # Требует word-level timing из Whisper — без реального аудио ok=False допустимо
+        self.assert_dispatch("analyze_word_timing", {
+            "word_timestamps": [],
+        })
+
+
+# ===========================================================================
 # Группа 30: Метод unknown — проверка fallback
 # ===========================================================================
 
@@ -1341,10 +1380,14 @@ class TestMethodCountSummary(_DispatchBase):
         "compare_recordings", "select_model",
         "auto_update_vocabulary", "get_smart_vocabulary_suggestions",
         "get_startup_diagnostics",
-        # New methods (post-main dev)
+        # New methods (post-main dev batch 1)
         "enrich_recording", "get_shutdown_status",
         "check_duplicate", "run_deduplication", "get_dedup_stats",
         "get_timeline_view", "export_timeline",
+        # New methods (post-main dev batch 2)
+        "get_recent_searches", "get_popular_searches", "clear_search_history",
+        "archive_items", "unarchive_items", "list_archived", "get_archive_stats",
+        "get_activity_calendar", "analyze_word_timing",
     ]
 
     def test_all_methods_return_valid_response(self):
