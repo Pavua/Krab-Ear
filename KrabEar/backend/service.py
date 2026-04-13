@@ -78,6 +78,7 @@ from backend.quality_trends import QualityTrendAnalyzer
 from backend.keyword_cloud import KeywordCloudGenerator
 from backend.period_comparison import compare_periods as _compare_periods_fn
 from backend.integrity_checker import IntegrityChecker
+from backend.activity_calendar import ActivityCalendar
 from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
@@ -85,6 +86,7 @@ from core.audio_fingerprint import AudioFingerprinter
 from core.abbreviation_expander import AbbreviationExpander
 from core.readability_scorer import ReadabilityScorer
 from core.speech_pace import SpeechPaceAnalyzer
+from core.word_timing import WordTimingAnalyzer
 from backend.sharing_manager import SharingManager
 from backend.transcript_versioning import TranscriptVersionManager
 from core.context_memory import ContextMemory
@@ -110,6 +112,7 @@ from backend.metadata_enricher import MetadataEnricher
 from backend.auto_deduplication import AutoDeduplicator
 from backend.timeline_export import TimelineExporter
 from backend.timeline_view import TimelineViewGenerator
+from backend.archive_manager import ArchiveManager
 from backend.search_history import SearchHistoryManager
 
 logger = logging.getLogger("KrabEar.Backend.Service")
@@ -203,6 +206,7 @@ class BackendService:
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
+        self._activity_calendar = ActivityCalendar()
         self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
@@ -217,6 +221,7 @@ class BackendService:
         self._readability_scorer = ReadabilityScorer()
         self._transcription_scorer = TranscriptionScorer()
         self._speech_pace_analyzer = SpeechPaceAnalyzer()
+        self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
@@ -253,6 +258,7 @@ class BackendService:
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
+        self._archive_manager = ArchiveManager(store=self.store)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -472,6 +478,7 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
             "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
@@ -498,6 +505,7 @@ class BackendService:
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: WPM, CPM, категория темпа
+            "analyze_word_timing": self._handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
             "format_for_paste": self._paste_formatter.handle_format_for_paste,  # форматирование текста под целевое приложение (telegram, notes, email и др.)
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
@@ -550,6 +558,10 @@ class BackendService:
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
+            "archive_items": self._archive_manager.handle_archive_items,  # переместить записи истории в архив
+            "unarchive_items": self._archive_manager.handle_unarchive_items,  # восстановить записи из архива
+            "list_archived": self._archive_manager.handle_list_archived,  # список архивированных записей
+            "get_archive_stats": self._archive_manager.handle_get_archive_stats,  # статистика архива: количество, размер, oldest/newest
         }
 
         handler = handlers.get(method)
