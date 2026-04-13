@@ -160,26 +160,22 @@ class EmptyStringEdgeCases(EdgeCaseMatrixBase):
         self.assertIn("ok", r)
 
     def test_delete_history_item_empty_id(self):
-        """delete_history_item с пустым item_id → ошибка."""
-        r = self.req("delete_history_item", {"item_id": ""})
-        # Пустой ID не может быть удалён — либо ошибка, либо deleted=False
-        if r["ok"]:
-            self.assertFalse(r["result"].get("deleted", True),
-                             "Пустой ID не должен считаться удалённым")
+        """delete_history_item с пустым id → ошибка (handle использует params["id"])."""
+        r = self.req("delete_history_item", {"id": ""})
+        # Пустой ID не может быть удалён — ожидаем ok=False
+        self.assertFalse(r["ok"], "Пустой id должен быть отклонён")
 
     def test_set_paste_status_empty_item_id(self):
-        """set_paste_status с пустым item_id → не ok или updated=False."""
-        r = self.req("set_paste_status", {"item_id": "", "paste_status": "pasted"})
-        if r["ok"]:
-            self.assertFalse(r["result"].get("updated", True),
-                             "Пустой item_id не должен обновляться")
+        """set_paste_status с пустым id → не ok (handle использует params["id"])."""
+        r = self.req("set_paste_status", {"id": "", "paste_status": "pasted"})
+        # Пустой id → store.set_paste_status вернёт False → RuntimeError → ok=False
+        self.assertFalse(r["ok"], "Пустой id должен быть отклонён")
 
     def test_get_history_item_empty_id(self):
-        """get_history_item с пустым item_id → item=None или ошибка."""
-        r = self.req("get_history_item", {"item_id": ""})
-        if r["ok"]:
-            self.assertIsNone(r["result"].get("item"),
-                              "Пустой item_id должен вернуть item=None")
+        """get_history_item с пустым id → ошибка (handle использует params["id"])."""
+        r = self.req("get_history_item", {"id": ""})
+        # Пустой id → RuntimeError "id обязателен" → ok=False
+        self.assertFalse(r["ok"], "Пустой id должен быть отклонён")
 
     def test_fuzzy_search_empty_query(self):
         """fuzzy_search с пустым query — не падает."""
@@ -424,12 +420,17 @@ class NonExistentIdEdgeCases(EdgeCaseMatrixBase):
         self.assertIn("error", r, "Ответ должен содержать поле error")
 
     def test_delete_nonexistent_item(self):
-        """delete_history_item с несуществующим ID → ошибка не найдено."""
+        """delete_history_item с несуществующим ID → ok=True, deleted=True (tombstone-semantics).
+
+        StateStore.delete_history_item всегда делает append tombstone и возвращает True —
+        идемпотентное удаление не требует существования записи.
+        """
         # handle_delete_history_item использует params["id"], не params["item_id"]
         r = self.req("delete_history_item", {"id": self.FAKE_ID})
-        # Tombstone-семантика: несуществующий ID вызывает ValueError "Запись не найдена"
-        self.assertFalse(r["ok"], "Удаление несуществующего ID должно вернуть ok=False")
-        self.assertIn("error", r, "Ответ должен содержать поле error")
+        # Tombstone-семантика: StateStore.delete_history_item всегда возвращает True
+        self.assertTrue(r["ok"], f"Tombstone для несуществующего ID должен вернуть ok=True: {r}")
+        self.assertTrue(r["result"].get("deleted", False),
+                        "deleted должен быть True (tombstone-семантика)")
 
     def test_toggle_favorite_nonexistent(self):
         """toggle_favorite с несуществующим ID — не падает."""
