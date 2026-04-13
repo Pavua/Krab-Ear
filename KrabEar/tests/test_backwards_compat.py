@@ -412,22 +412,32 @@ class TestExportFormatBackwardsCompat(unittest.TestCase):
         self.assertIn("История пуста", result["content"])
         self.assertEqual(result["total_items"], 0)
 
-    def test_json_export_contains_items_array(self):
-        """JSON-экспорт содержит массив items."""
+    def test_json_export_returns_ok_and_entries_count(self):
+        """JSON-экспорт возвращает ok=True и корректное число entries."""
         self.store.add_history_item(text="json тест", paste_status="ok")
         result = self.svc.handle_export_history_json({"limit": 10})
-        self.assertIn("items", result)
-        self.assertIsInstance(result["items"], list)
-        self.assertEqual(len(result["items"]), 1)
-        self.assertEqual(result["items"][0]["text"], "json тест")
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result.get("entries"), 1)
+        self.assertIn("chars", result)
 
-    def test_json_export_item_has_required_fields(self):
-        """JSON-экспорт содержит обязательные поля id, ts, text."""
+    def test_json_export_writes_valid_json_to_file(self):
+        """JSON-экспорт с save_to_file=True создаёт валидный JSON-файл.
+
+        Формат v2.0: {"export_info": {...}, "entries": [{id, timestamp, text, ...}]}
+        """
         self.store.add_history_item(text="поля экспорта", paste_status="ok")
-        result = self.svc.handle_export_history_json({"limit": 10})
-        item = result["items"][0]
-        for field in ("id", "ts", "text", "paste_status"):
-            self.assertIn(field, item)
+        result = self.svc.handle_export_history_json({"limit": 10, "save_to_file": True})
+        self.assertTrue(result.get("ok"))
+        file_path = result.get("path")
+        self.assertIsNotNone(file_path)
+        exported_data = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        # Формат v2.0: {"export_info": {...}, "entries": [...]}
+        self.assertIn("entries", exported_data)
+        entries = exported_data["entries"]
+        self.assertGreater(len(entries), 0)
+        # Каждая запись должна иметь id, timestamp, text
+        for field in ("id", "timestamp", "text"):
+            self.assertIn(field, entries[0])
 
 
 # ---------------------------------------------------------------------------

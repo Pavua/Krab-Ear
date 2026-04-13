@@ -433,12 +433,12 @@ class NonExistentIdEdgeCases(EdgeCaseMatrixBase):
 
     def test_toggle_favorite_nonexistent(self):
         """toggle_favorite с несуществующим ID — не падает."""
-        r = self.req("toggle_favorite", {"item_id": self.FAKE_ID})
+        r = self.req("toggle_favorite", {"id": self.FAKE_ID})
         self.assertIn("ok", r)
 
     def test_get_annotation_nonexistent(self):
         """get_annotation с несуществующим ID → annotation=None или пустая строка."""
-        r = self.req("get_annotation", {"item_id": self.FAKE_ID})
+        r = self.req("get_annotation", {"id": self.FAKE_ID})
         self.assertIn("ok", r)
 
     def test_set_paste_status_nonexistent(self):
@@ -447,19 +447,21 @@ class NonExistentIdEdgeCases(EdgeCaseMatrixBase):
         self.assertIn("ok", r)
 
     def test_add_tag_nonexistent_item(self):
-        """add_tag к несуществующему item_id — не падает."""
-        r = self.req("add_tag", {"item_id": self.FAKE_ID, "tag": "тест"})
-        self.assertIn("ok", r)
+        """add_tag к несуществующему item_id → ошибка "не найдена"."""
+        r = self.req("add_tag", {"id": self.FAKE_ID, "tag": "тест"})
+        # Метод требует существующую запись — ожидаем ошибку
+        self.assertFalse(r["ok"], "add_tag к несуществующей записи должен вернуть ok=False")
 
     def test_remove_tag_nonexistent_item(self):
-        """remove_tag с несуществующим item_id — не падает."""
-        r = self.req("remove_tag", {"item_id": self.FAKE_ID, "tag": "несуществующий"})
-        self.assertIn("ok", r)
+        """remove_tag с несуществующим item_id → ошибка "не найдена"."""
+        r = self.req("remove_tag", {"id": self.FAKE_ID, "tag": "несуществующий"})
+        # Метод требует существующую запись — ожидаем ошибку
+        self.assertFalse(r["ok"], "remove_tag для несуществующей записи должен вернуть ok=False")
 
     def test_set_annotation_nonexistent_item(self):
         """set_annotation для несуществующего item_id — не падает."""
         r = self.req("set_annotation", {
-            "item_id": self.FAKE_ID,
+            "id": self.FAKE_ID,
             "annotation": "заметка к несуществующей записи"
         })
         self.assertIn("ok", r)
@@ -715,14 +717,16 @@ class TagAnnotationEdgeCases(EdgeCaseMatrixBase):
     def test_add_empty_tag(self):
         """add_tag с пустым тегом — не даёт добавить пустой тег."""
         item_id = self.add_item("элемент для тегов")
-        r = self.req("add_tag", {"item_id": item_id, "tag": ""})
-        self.assertIn("ok", r)
+        # handle_add_tag использует params["id"] и params["tag"]
+        r = self.req("add_tag", {"id": item_id, "tag": ""})
+        # Пустой тег должен быть отклонён
+        self.assertFalse(r["ok"], "Пустой тег должен быть отклонён")
 
     def test_add_very_long_tag(self):
         """add_tag с тегом длиной 1000 символов — не падает."""
         item_id = self.add_item("элемент для длинного тега")
         long_tag = "т" * 1000
-        r = self.req("add_tag", {"item_id": item_id, "tag": long_tag})
+        r = self.req("add_tag", {"id": item_id, "tag": long_tag})
         self.assertIn("ok", r)
 
     def test_search_by_nonexistent_tag(self):
@@ -735,7 +739,8 @@ class TagAnnotationEdgeCases(EdgeCaseMatrixBase):
     def test_set_annotation_empty_text(self):
         """set_annotation с пустым текстом заметки — не падает."""
         item_id = self.add_item("элемент для пустой заметки")
-        r = self.req("set_annotation", {"item_id": item_id, "annotation": ""})
+        # handle_set_annotation использует params["id"]
+        r = self.req("set_annotation", {"id": item_id, "annotation": ""})
         self.assertIn("ok", r)
 
     def test_set_annotation_very_long(self):
@@ -743,7 +748,7 @@ class TagAnnotationEdgeCases(EdgeCaseMatrixBase):
         item_id = self.add_item("элемент для длинной заметки")
         long_note = "Длинная заметка. " * 555
         long_note = long_note[:10000]
-        r = self.req("set_annotation", {"item_id": item_id, "annotation": long_note})
+        r = self.req("set_annotation", {"id": item_id, "annotation": long_note})
         self.assertIn("ok", r)
 
 
