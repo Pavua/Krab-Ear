@@ -307,11 +307,16 @@ class TestTagsGroup(_DispatchBase):
         return items[0]["id"] if items else None
 
     def test_add_tag(self):
-        item_id = self._seed_item_id()
-        if item_id:
-            self.assert_dispatch("add_tag", {"id": item_id, "tag": "test_tag"}, ok_required=True)
-        else:
-            self.assert_dispatch("add_tag", {"id": "fake", "tag": "x"})
+        # add_tag uses "id" key; create own item for reliability
+        add = self.req("add_history_item", {
+            "text": "тест тегов",
+            "paste_status": "ok",
+            "translation_mode": "off",
+            "translation_status": "not_requested",
+        })
+        item_id = add.get("result", {}).get("id", "")
+        self.assertTrue(item_id, "Не удалось создать запись для теста тегов")
+        self.assert_dispatch("add_tag", {"id": item_id, "tag": "test_tag"}, ok_required=True)
 
     def test_remove_tag(self):
         item_id = self._seed_item_id()
