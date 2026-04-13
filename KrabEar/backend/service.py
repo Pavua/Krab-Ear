@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
+from backend.shutdown_handler import GracefulShutdownHandler
 from backend.export_scheduler import ExportScheduler
 from backend.ipc_throttle import IPCThrottle
 from backend.request_signing import RequestSigner
@@ -105,6 +106,9 @@ from backend.playback_tracker import PlaybackTracker
 from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
 from backend.smart_vocabulary import SmartVocabularyBuilder
 from backend.recording_insights import RecordingInsightsGenerator
+from backend.metadata_enricher import MetadataEnricher
+from backend.auto_deduplication import AutoDeduplicator
+from backend.timeline_export import TimelineExporter
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -242,6 +246,9 @@ class BackendService:
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
+        self._metadata_enricher = MetadataEnricher()
+        self._timeline_exporter = TimelineExporter()
+        self._auto_deduplicator = AutoDeduplicator()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -273,6 +280,9 @@ class BackendService:
                 )
         except Exception:
             logger.exception("Startup diagnostics завершились с исключением")
+
+        # Обработчик корректного завершения (регистрация сигналов — через register())
+        self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -526,6 +536,11 @@ class BackendService:
             "auto_update_vocabulary": self._handle_auto_update_vocabulary,  # умный авто-апдейт словаря STT из истории транскрибаций
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
+            "enrich_recording": self._metadata_enricher.handle_enrich_recording,  # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
+            "get_shutdown_status": self._handle_get_shutdown_status,  # статус последнего graceful shutdown: clean, last_shutdown_time
+            "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
+            "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
+            "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
         }
 
         handler = handlers.get(method)
