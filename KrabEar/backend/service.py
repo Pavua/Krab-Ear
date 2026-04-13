@@ -79,6 +79,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.period_comparison import compare_periods as _compare_periods_fn
 from backend.integrity_checker import IntegrityChecker
 from backend.activity_calendar import ActivityCalendar
+from backend.stats_report import StatsReportGenerator
 from backend.webhook_manager import WebhookManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from core.hallucination_manager import HallucinationManager
@@ -144,7 +145,7 @@ class BackendService:
             self.transcriber = transcriber
             if self._llm_rewriter is not None:
                 if hasattr(transcriber, "engine"):
-                    if transcriber.engine._llm_rewriter is None:
+                    if getattr(transcriber.engine, "_llm_rewriter", None) is None:
                         transcriber.engine._llm_rewriter = self._llm_rewriter
                     transcriber.engine._settings_get = self._get_runtime_setting
 
@@ -207,6 +208,7 @@ class BackendService:
         self._daily_digest = DailyDigestGenerator()
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
+        self._stats_report = StatsReportGenerator()
         self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
@@ -562,6 +564,8 @@ class BackendService:
             "unarchive_items": self._archive_manager.handle_unarchive_items,  # восстановить записи из архива
             "list_archived": self._archive_manager.handle_list_archived,  # список архивированных записей
             "get_archive_stats": self._archive_manager.handle_get_archive_stats,  # статистика архива: количество, размер, oldest/newest
+            "generate_stats_report": self._handle_generate_stats_report,  # полный Markdown-отчёт статистики за период
+            "generate_mini_stats_report": self._handle_generate_mini_stats_report,  # краткий 5-строчный отчёт состояния
         }
 
         handler = handlers.get(method)
@@ -2569,6 +2573,29 @@ class BackendService:
 
 
     # ------------------------------------------------------------------
+    # Handlers: ActivityCalendar
+    # ------------------------------------------------------------------
+
+    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_activity_calendar — GitHub-style activity calendar данные.
+
+        Params:
+            months (int): количество последних месяцев (по умолчанию 12, макс. 24).
+
+        Returns:
+            CalendarData в виде словаря: {days, weeks, total_active_days,
+            longest_streak, current_streak}
+        """
+        months = max(1, min(int(params.get("months", 12)), 24))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        cal_data = self._activity_calendar.generate_calendar(items, months=months)
+        return cal_data.to_dict()
+
+    # ------------------------------------------------------------------
     # Handlers: DailyDigest, QualityTrends, PeriodComparison, IntegrityChecker,
     #           TermExtractor, TextComparator
     # ------------------------------------------------------------------
@@ -2588,6 +2615,17 @@ class BackendService:
             "markdown": digest.formatted_markdown,
         }
 
+    def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует полный Markdown-отчёт статистики использования за период."""
+        days = int(params.get("days", 30))
+        markdown = self._stats_report.generate_report(store=self.store, days=days)
+        return {"markdown": markdown, "days": days}
+
+    def _handle_generate_mini_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
+        markdown = self._stats_report.generate_mini_report(store=self.store)
+        return {"markdown": markdown}
+
     def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды качества распознавания за последние N дней."""
         days = int(params.get("days", 30))
@@ -2605,6 +2643,39 @@ class BackendService:
             "worst_day": report.worst_day,
             "confidence_distribution": report.confidence_distribution,
         }
+
+    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
+        months = int(params.get("months", 12))
+        months = max(1, min(months, 24))
+        include_svg = bool(params.get("include_svg", False))
+        cell_size = int(params.get("cell_size", 12))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        calendar = self._activity_calendar.generate_calendar(items, months=months)
+        result = calendar.to_dict()
+        if include_svg:
+            result["svg"] = self._activity_calendar.generate_calendar_svg(
+                items, months=months, cell_size=cell_size
+            )
+        return result
+
+    def _handle_analyze_word_timing(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует ритм речи по пословным таймстемпам Whisper.
+
+        Params:
+            segments: list[dict] — список сегментов Whisper (с полем 'words' или без).
+
+        Возвращает TimingReport в виде словаря.
+        """
+        segments = params.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("Параметр 'segments' должен быть списком")
+        report = self._word_timing_analyzer.analyze(segments)
+        return report.as_dict()
 
     def _handle_get_speaker_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает per-speaker статистику речи из диаризованных записей истории."""

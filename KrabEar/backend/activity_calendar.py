@@ -103,15 +103,19 @@ def _parse_ts(ts: Any) -> date | None:
         s = str(ts).strip()
         if not s:
             return None
-        # Парсим ISO-формат: 2024-03-15T12:34:56 или 2024-03-15T12:34:56+00:00
-        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s[:19], fmt[:len(fmt)])  # type: ignore[arg-type]
-            except ValueError:
-                pass
-        # Fallback: fromisoformat для Python 3.7+
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return dt.date()
+        # Нормализуем и парсим ISO-формат через fromisoformat (Python 3.7+)
+        normalized = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+            return dt.date()
+        except ValueError:
+            pass
+        # Fallback: только дата YYYY-MM-DD
+        try:
+            return date.fromisoformat(s[:10])
+        except ValueError:
+            pass
+        return None
     except Exception:
         return None
 
