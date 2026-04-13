@@ -1268,7 +1268,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.addArrangedSubview(callAssistOutputScroll)
         liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(realtimeScroll)
-        liveStack.addArrangedSubview(NSView())
         let liveOuterScroll = NSScrollView()
         liveOuterScroll.documentView = liveStack
         liveOuterScroll.hasVerticalScroller = true
@@ -1284,6 +1283,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             liveStack.topAnchor.constraint(equalTo: liveOuterScroll.contentView.topAnchor, constant: 12),
             liveStack.leadingAnchor.constraint(equalTo: liveOuterScroll.contentView.leadingAnchor, constant: 12),
             liveStack.trailingAnchor.constraint(equalTo: liveOuterScroll.contentView.trailingAnchor, constant: -12),
+            liveStack.bottomAnchor.constraint(lessThanOrEqualTo: liveOuterScroll.contentView.bottomAnchor, constant: -12),
             liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             toolsRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callAssistControlRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
@@ -1357,6 +1357,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             historyStack.topAnchor.constraint(equalTo: historyOuterScroll.contentView.topAnchor, constant: 12),
             historyStack.leadingAnchor.constraint(equalTo: historyOuterScroll.contentView.leadingAnchor, constant: 12),
             historyStack.trailingAnchor.constraint(equalTo: historyOuterScroll.contentView.trailingAnchor, constant: -12),
+            historyStack.bottomAnchor.constraint(lessThanOrEqualTo: historyOuterScroll.contentView.bottomAnchor, constant: -12),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])
@@ -1522,6 +1523,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         self.diagnosticsSection = diagSection
         settingsBar.addArrangedSubview(diagSection)
 
+        // Now that diagCard is in the view hierarchy, activate the width constraint
+        diagnosticsOutputScroll.widthAnchor.constraint(equalTo: diagCard.contentStackView.widthAnchor).isActive = true
+
         // --- PROFILE PRESETS & AUDIO DEVICES SECTION ---
         let profAudioSection = CollapsibleSectionView(sectionId: "dictation_profile_audio", title: "Профили и устройства", isExpanded: false)
         let profAudioCard = ThemeCardView()
@@ -1584,10 +1588,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         controlCard.contentStackView.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(controlCard)
         dictationStack.addArrangedSubview(settingsBar)
-        // TODO: Gemini 3.1 Pro sections — temporarily disabled for debugging
-        // let (analyticsSection, systemHealthSection) = setupAnalyticsSections()
-        // dictationStack.addArrangedSubview(analyticsSection)
-        // dictationStack.addArrangedSubview(systemHealthSection)
+        // Gemini 3.1 Pro: аналитика + здоровье
+        let (analyticsSection, healthSection) = setupAnalyticsSections()
+        dictationStack.addArrangedSubview(analyticsSection)
+        dictationStack.addArrangedSubview(healthSection)
         dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
         dictationStack.addArrangedSubview(dictationHistoryHintLabel)
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
@@ -1750,10 +1754,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(primaryActionsCard)
         historyStack.addArrangedSubview(advancedSection)
         historyStack.addArrangedSubview(importSection)
-        // TODO: Gemini 3.1 Pro sections — temporarily disabled for debugging
-        // let (managementSection, statsSection) = setupManagementSections()
-        // historyStack.addArrangedSubview(managementSection)
-        // historyStack.addArrangedSubview(statsSection)
+        // Gemini 3.1 Pro: управление + статистика
+        let (managementSection, statsSection) = setupManagementSections()
+        historyStack.addArrangedSubview(managementSection)
+        historyStack.addArrangedSubview(statsSection)
         historyStack.addArrangedSubview(statusCard)
 
         // Width constraints for history children
