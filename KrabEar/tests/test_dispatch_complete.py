@@ -58,6 +58,8 @@ class _FakeEngine:
     _last_llm_diff = None
     _llm_rewriter = None
     _settings_get = None
+    quality_profile = "balanced"
+    current_model = "fake-model"
 
     def _resolve_diarization_device(self) -> str:
         return "cpu"
