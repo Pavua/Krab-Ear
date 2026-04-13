@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from KrabEar.__version__ import __version__ as APP_VERSION
+
 logger = logging.getLogger("KrabEar.Backend.StartupDiagnostics")
 
 # Порог свободного места: критический уровень — 1 ГБ
@@ -59,6 +61,7 @@ class StartupReport:
         """Сериализует отчёт в JSON-совместимый словарь."""
         return {
             "status": self.status,
+            "version": APP_VERSION,
             "startup_time_ms": round(self.startup_time_ms, 2),
             "warnings": self.warnings,
             "errors": self.errors,

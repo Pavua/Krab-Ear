@@ -215,7 +215,7 @@ class TestGetApiInfo(unittest.TestCase):
         info = get_api_info()
         self.assertSetEqual(
             set(info.keys()),
-            {"current_version", "supported_versions", "deprecated_versions"},
+            {"app_version", "current_version", "supported_versions", "deprecated_versions"},
         )
 
 

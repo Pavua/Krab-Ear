@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.HealthChecker")
 
-VERSION = "2.0.0"
+from KrabEar.__version__ import __version__ as VERSION
 
 # Порог «мало места» — 2 ГБ
 DISK_WARN_GB = 2.0

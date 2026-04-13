@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.translator import TranslationResult
+from KrabEar.__version__ import __version__ as APP_VERSION
 
 
 class FakeRecorder:
@@ -214,7 +215,7 @@ class BackendServiceTestCase(unittest.TestCase):
         result = ping["result"]
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["service"], "krabear-backend")
-        self.assertEqual(result["version"], "1.0.0")
+        self.assertEqual(result["version"], APP_VERSION)
         self.assertGreaterEqual(result["uptime_sec"], 0)
         self.assertIn("is_recording", result)
         self.assertFalse(result["is_recording"])

@@ -115,6 +115,12 @@ from backend.timeline_export import TimelineExporter
 from backend.timeline_view import TimelineViewGenerator
 from backend.archive_manager import ArchiveManager
 from backend.search_history import SearchHistoryManager
+from backend.template_manager import TemplateManager
+from backend.feature_flags import FeatureFlags
+from backend.plugin_system import PluginManager
+from backend.hotword_detector import HotwordDetector
+from backend.model_cache_manager import ModelCacheManager
+from KrabEar.__version__ import __version__ as APP_VERSION
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -261,6 +267,11 @@ class BackendService:
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
+        self._template_manager = TemplateManager(data_dir=self.store.data_dir)
+        self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
+        self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
+        self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
+        self._model_cache_manager = ModelCacheManager()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -272,6 +283,7 @@ class BackendService:
         self._startup_diagnostics = StartupDiagnostics(
             data_dir=self.store.data_dir,
         )
+        logger.info("Krab Ear backend version %s starting up", APP_VERSION)
         try:
             _startup_report = self._startup_diagnostics.run_all_checks()
             if _startup_report.status == "critical":
@@ -566,6 +578,39 @@ class BackendService:
             "get_archive_stats": self._archive_manager.handle_get_archive_stats,  # статистика архива: количество, размер, oldest/newest
             "generate_stats_report": self._handle_generate_stats_report,  # полный Markdown-отчёт статистики за период
             "generate_mini_stats_report": self._handle_generate_mini_stats_report,  # краткий 5-строчный отчёт состояния
+            # --- call_assist template management ---
+            "call_assist_list_templates": self._call_assist.handle_list_templates,  # список шаблонов быстрых реплик call assist
+            "call_assist_add_template": self._call_assist.handle_add_template,  # добавить шаблон быстрой реплики
+            "call_assist_remove_template": self._call_assist.handle_remove_template,  # удалить шаблон быстрой реплики
+            "call_assist_template": self._call_assist.handle_template,  # отправить шаблонную реплику в Gateway
+            "call_assist_cost_report": self._call_assist.handle_cost_report,  # подробный cost report текущей звонковой сессии
+            # --- text templates ---
+            "get_templates": self._template_manager.handle_get_templates,  # список шаблонов быстрой вставки текста
+            "add_template": self._template_manager.handle_add_template,  # добавить шаблон текста
+            "remove_template": self._template_manager.handle_remove_template,  # удалить шаблон текста
+            "apply_template": self._template_manager.handle_apply_template,  # применить шаблон (подставить переменные)
+            # --- webhooks ---
+            "register_webhook": self._webhook_manager.handle_register_webhook,  # зарегистрировать webhook для событий
+            "unregister_webhook": self._webhook_manager.handle_unregister_webhook,  # отменить регистрацию webhook
+            "list_webhooks": self._webhook_manager.handle_list_webhooks,  # список зарегистрированных webhook-ов
+            # --- speaker aliases ---
+            "set_speaker_alias": self._speaker_manager.handle_set_speaker_alias,  # назначить псевдоним для спикера
+            "get_speaker_aliases": self._speaker_manager.handle_get_speaker_aliases,  # список псевдонимов спикеров
+            "remove_speaker_alias": self._speaker_manager.handle_remove_speaker_alias,  # удалить псевдоним спикера
+            # --- plugins ---
+            "list_plugins": self._plugin_manager.handle_list_plugins,  # список обнаруженных плагинов
+            "get_plugin_info": self._plugin_manager.handle_get_plugin_info,  # информация о конкретном плагине
+            # --- feature flags ---
+            "get_feature_flags": self._feature_flags.handle_get_feature_flags,  # получить все feature-флаги с описаниями
+            "set_feature_flag": self._feature_flags.handle_set_feature_flag,  # установить значение feature-флага
+            # --- hotwords ---
+            "add_hotword": self._hotword_detector.handle_add_hotword,  # добавить горячее слово для отслеживания
+            "remove_hotword": self._hotword_detector.handle_remove_hotword,  # удалить горячее слово
+            "get_hotwords": self._hotword_detector.handle_get_hotwords,  # список горячих слов
+            "check_hotwords": self._hotword_detector.handle_check_hotwords,  # проверить текст на наличие горячих слов
+            # --- model cache ---
+            "list_cached_models": self._model_cache_manager.handle_list_cached_models,  # список кэшированных ML-моделей
+            "get_model_cache_info": self._model_cache_manager.handle_get_model_cache_info,  # информация о кэше конкретной модели
         }
 
         handler = handlers.get(method)
@@ -700,7 +745,7 @@ class BackendService:
         return {
             "status": "ok",
             "service": "krabear-backend",
-            "version": "1.0.0",
+            "version": APP_VERSION,
             "uptime_sec": round(time.monotonic() - self._start_time, 1),
             "is_recording": bool(getattr(self.recorder, "is_recording", False)),
             "history_count": history_count,

@@ -11,6 +11,8 @@ from typing import Optional
 
 from flask import request, Response
 
+from KrabEar.__version__ import __version__ as APP_VERSION
+
 
 class APIVersion(Enum):
     V1 = "v1"
@@ -111,11 +113,13 @@ def get_api_info() -> dict:
 
     Returns:
         A dict with keys:
-        - ``current_version``: default version string
+        - ``app_version``: Krab Ear application version string
+        - ``current_version``: default API version string
         - ``supported_versions``: list of all supported version strings
         - ``deprecated_versions``: list of dicts with ``version`` and ``sunset_date``
     """
     return {
+        "app_version": APP_VERSION,
         "current_version": DEFAULT_VERSION.value,
         "supported_versions": [v.value for v in SUPPORTED_VERSIONS],
         "deprecated_versions": [

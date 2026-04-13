@@ -21,6 +21,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from KrabEar.__version__ import __version__
+
 try:
     import readline as _readline
     _READLINE_AVAILABLE = True
@@ -498,6 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="krab-ear",
         description="Krab Ear CLI — command-line access to the voice assistant backend",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--socket",
