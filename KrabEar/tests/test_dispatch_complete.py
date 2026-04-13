@@ -241,7 +241,7 @@ class TestHistoryGroup(_DispatchBase):
             "translation_mode": "off",
             "translation_status": "not_requested",
         }, ok_required=True)
-        return resp["result"].get("id")
+        self.assertIn("id", resp.get("result", {}))
 
     def test_delete_history_item(self):
         # Несуществующий ID — метод должен вернуть dict
@@ -728,7 +728,7 @@ class TestCollectionsGroup(_DispatchBase):
         resp = self.assert_dispatch("create_collection", {
             "name": "test_collection",
         }, ok_required=True)
-        return resp["result"].get("id")
+        self.assertIsInstance(resp.get("result"), dict)
 
     def test_delete_collection(self):
         create = self.req("create_collection", {"name": "to_delete"})
