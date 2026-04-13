@@ -366,7 +366,8 @@ class TestDashboardGracefulDegradation(unittest.TestCase):
 
     def test_dashboard_ok_when_health_checker_raises(self):
         """При ошибке HealthChecker страница всё равно возвращает HTML."""
-        with patch("backend.rest_server.HealthChecker") as mock_hc:
+        # HealthChecker импортируется внутри _build_dashboard_html — патчим в его модуле
+        with patch("backend.health_checker.HealthChecker") as mock_hc:
             mock_hc.side_effect = Exception("health checker unavailable")
             resp, html = _get_dashboard(self.client)
         self.assertEqual(resp.status_code, 200)

@@ -45,6 +45,8 @@ class GracefulShutdownHandler:
         self._data_dir: Path | None = Path(data_dir) if data_dir else None
         self._service: Any = None
         self._lock = threading.Lock()
+        # _shutdown_started гарантирует, что только один поток выполняет shutdown()
+        self._shutdown_started = False
         self._shutdown_done = threading.Event()
 
         # Метаданные последнего завершения — сохраняются в файл
@@ -85,10 +87,13 @@ class GracefulShutdownHandler:
         """Выполняет последовательность корректного завершения.
 
         Идемпотентен — повторный вызов не производит действий.
+        Потокобезопасен: только один поток выполняет шаги; остальные ожидают окончания.
         """
         with self._lock:
-            if self._shutdown_done.is_set():
+            if self._shutdown_started:
+                # Другой поток уже выполняет или завершил shutdown
                 return
+            self._shutdown_started = True
             service = self._service
 
         shutdown_start = time.monotonic()

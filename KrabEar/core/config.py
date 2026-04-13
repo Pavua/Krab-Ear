@@ -202,4 +202,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "notify_on_import_complete": True,
     # Воспроизводить звук вместе с уведомлением.
     "notify_sound_enabled": True,
+    # Автоматическая дедупликация: пропускать дубликаты транскрипций.
+    "auto_dedup_enabled": False,
+    # Порог сходства для автодедупликации (0.0–1.0).
+    "auto_dedup_threshold": 0.9,
 }

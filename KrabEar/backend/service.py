@@ -109,6 +109,8 @@ from backend.recording_insights import RecordingInsightsGenerator
 from backend.metadata_enricher import MetadataEnricher
 from backend.auto_deduplication import AutoDeduplicator
 from backend.timeline_export import TimelineExporter
+from backend.timeline_view import TimelineViewGenerator
+from backend.search_history import SearchHistoryManager
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -248,7 +250,9 @@ class BackendService:
         self._smart_vocabulary = SmartVocabularyBuilder()
         self._metadata_enricher = MetadataEnricher()
         self._timeline_exporter = TimelineExporter()
+        self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
+        self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -541,6 +545,11 @@ class BackendService:
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
+            "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
+            "export_timeline": self._handle_export_timeline,  # экспорт временной шкалы записей в SVG, JSON или iCal
+            "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
+            "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
+            "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
         }
 
         handler = handlers.get(method)
@@ -1307,6 +1316,15 @@ class BackendService:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
         return self._health_checker.check_all()
 
+
+    def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус последнего graceful shutdown.
+
+        Returns:
+            dict с ключами: clean (bool|None), last_shutdown_time (str|None),
+            shutdown_in_progress (bool).
+        """
+        return self._shutdown_handler.get_shutdown_status()
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает результаты диагностики при старте бэкенда."""
         report = self._startup_diagnostics.run_all_checks()
@@ -2940,6 +2958,57 @@ class BackendService:
 
         return result
 
+    # ── Timeline export ──────────────────────────────────────────────────────
+
+    def _handle_export_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует временную шкалу записей в SVG, JSON или iCalendar.
+
+        Параметры:
+          - format: str — формат экспорта: "svg", "json", "ical" (по умолчанию "json").
+          - group_by: str — гранулярность блоков: "hour", "day", "week" (по умолчанию "day").
+          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
+          - svg_width: int — ширина SVG в пикселях (по умолчанию 1200, только для format=svg).
+          - svg_height: int — высота SVG в пикселях (по умолчанию 400, только для format=svg).
+
+        Ответ:
+          - content: str — экспортированный контент.
+          - format: str — фактический формат экспорта.
+          - total_blocks: int — количество блоков.
+          - mime_type: str — MIME-тип контента.
+        """
+        fmt = str(params.get("format", "json")).strip().lower()
+        if fmt not in ("svg", "json", "ical"):
+            raise ValueError(
+                f"Неизвестный формат экспорта: {fmt!r}. Допустимые: svg, json, ical"
+            )
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        raw_items = self.store._load_active_items_with_lock()[:limit]
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        blocks_dicts = [b.to_dict() for b in blocks]
+
+        if fmt == "svg":
+            svg_width = max(200, int(params.get("svg_width", 1200)))
+            svg_height = max(100, int(params.get("svg_height", 400)))
+            content = self._timeline_exporter.export_svg(
+                blocks_dicts, width=svg_width, height=svg_height
+            )
+            mime_type = "image/svg+xml"
+        elif fmt == "ical":
+            content = self._timeline_exporter.export_ical(blocks_dicts)
+            mime_type = "text/calendar"
+        else:
+            content = self._timeline_exporter.export_json(blocks_dicts)
+            mime_type = "application/json"
+
+        return {
+            "content": content,
+            "format": fmt,
+            "total_blocks": len(blocks_dicts),
+            "mime_type": mime_type,
+        }
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует автоматический заголовок для транскрибации.
@@ -3315,6 +3384,40 @@ class BackendService:
             top_k=top_k,
         )
         return {"suggestions": suggestions, "total": len(suggestions)}
+
+    def _handle_check_duplicate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Проверяет, является ли текст дубликатом существующей записи в истории.
+
+        Params:
+            text (str): текст транскрипции для проверки.
+            timestamp (str, optional): ISO-8601 метка времени (по умолчанию — сейчас).
+            threshold (float, optional): порог сходства [0..1], по умолчанию 0.9.
+
+        Returns:
+            dict: is_duplicate, duplicate_of, similarity, action_taken.
+        """
+        params["_store"] = self.store
+        return self._auto_deduplicator.handle_check_duplicate(params)
+
+    def _handle_run_deduplication(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сканирует всю историю и возвращает отчёт о дублирующихся транскрипциях.
+
+        Params:
+            threshold (float, optional): порог сходства [0..1], по умолчанию 0.9.
+
+        Returns:
+            dict: total_scanned, duplicate_groups, duplicates.
+        """
+        params["_store"] = self.store
+        return self._auto_deduplicator.handle_run_deduplication(params)
+
+    def _handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статистику дедупликатора за текущую сессию.
+
+        Returns:
+            dict: total_checked, duplicates_found, chars_saved, dedup_rate.
+        """
+        return self._auto_deduplicator.handle_get_dedup_stats(params)
 
 
 class IPCServer:
