@@ -459,7 +459,7 @@ class BackendService:
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
-            "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям
+            "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -2569,6 +2569,21 @@ class BackendService:
             speaker_manager=self._speaker_manager,
         )
 
+    def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует эвристические инсайты по записям за последние N дней."""
+        days = int(params.get("days", 7))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        insights = self._recording_insights.generate_insights(items, days=days)
+        return {
+            "insights": [i.to_dict() for i in insights],
+            "count": len(insights),
+            "days": days,
+        }
+
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
         days = int(params.get("days", 30))
@@ -3250,6 +3265,42 @@ class BackendService:
             "estimated_latency_ms": sel.estimated_latency_ms,
             "quality_tier": sel.quality_tier,
         }
+
+    def _handle_auto_update_vocabulary(self, params: dict) -> dict:
+        """IPC: auto_update_vocabulary — полный цикл умного авто-обновления словаря STT."""
+        min_frequency = max(1, int(params.get("min_frequency", 3) or 3))
+        scan_limit = max(10, min(int(params.get("scan_limit", 200) or 200), 500))
+        update = self._smart_vocabulary.auto_update(
+            store=self.store,
+            vocabulary_store=self.vocabulary,
+            min_frequency=min_frequency,
+            scan_limit=scan_limit,
+        )
+        return {
+            "new_words": update.new_words,
+            "removed_words": update.removed_words,
+            "total": update.total,
+            "sources": update.sources,
+        }
+
+    def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
+        """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
+        scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))
+        min_frequency = max(1, int(params.get("min_frequency", 2) or 2))
+        top_k = max(5, min(int(params.get("top_k", 30) or 30), 100))
+
+        items, _ = self.store.get_history_page(cursor=None, limit=scan_limit)
+        raw_items = [i.to_dict() if hasattr(i, "to_dict") else dict(i) for i in items]
+
+        existing = self.vocabulary.load()
+        suggestions = self._smart_vocabulary.get_vocabulary_suggestions(
+            items=raw_items,
+            existing=existing,
+            min_frequency=min_frequency,
+            top_k=top_k,
+        )
+        return {"suggestions": suggestions, "total": len(suggestions)}
+
 
 class IPCServer:
     """Unix socket сервер, который проксирует запросы в BackendService."""
