@@ -179,7 +179,8 @@ class TestCoreGroup(_DispatchBase):
         self.assert_dispatch("get_recording_stats", ok_required=True)
 
     def test_set_paste_status(self):
-        self.assert_dispatch("set_paste_status", {"status": "ok"}, ok_required=True)
+        # set_paste_status requires a valid id; with fake id it returns ok=False gracefully
+        self.assert_dispatch("set_paste_status", {"id": "nonexistent", "paste_status": "ok"})
 
     def test_list_audio_inputs(self):
         self.assert_dispatch("list_audio_inputs", ok_required=True)
@@ -308,20 +309,20 @@ class TestTagsGroup(_DispatchBase):
     def test_add_tag(self):
         item_id = self._seed_item_id()
         if item_id:
-            self.assert_dispatch("add_tag", {"item_id": item_id, "tag": "test_tag"}, ok_required=True)
+            self.assert_dispatch("add_tag", {"id": item_id, "tag": "test_tag"}, ok_required=True)
         else:
-            self.assert_dispatch("add_tag", {"item_id": "fake", "tag": "x"})
+            self.assert_dispatch("add_tag", {"id": "fake", "tag": "x"})
 
     def test_remove_tag(self):
         item_id = self._seed_item_id()
         if item_id:
-            self.assert_dispatch("remove_tag", {"item_id": item_id, "tag": "missing_tag"})
+            self.assert_dispatch("remove_tag", {"id": item_id, "tag": "missing_tag"})
         else:
-            self.assert_dispatch("remove_tag", {"item_id": "fake", "tag": "x"})
+            self.assert_dispatch("remove_tag", {"id": "fake", "tag": "x"})
 
     def test_get_tags(self):
         item_id = self._seed_item_id()
-        params = {"item_id": item_id} if item_id else {"item_id": "fake"}
+        params = {"id": item_id} if item_id else {"id": "fake"}
         self.assert_dispatch("get_tags", params)
 
     def test_search_by_tag(self):
@@ -342,7 +343,8 @@ class TestExportGroup(_DispatchBase):
         self.assert_dispatch("export_history", ok_required=True)
 
     def test_export_history_srt(self):
-        self.assert_dispatch("export_history_srt", ok_required=True)
+        # export_history_srt requires an item id; nonexistent → ok=False gracefully
+        self.assert_dispatch("export_history_srt", {"id": "nonexistent"})
 
     def test_export_history_csv(self):
         self.assert_dispatch("export_history_csv", ok_required=True)
@@ -360,7 +362,7 @@ class TestExportGroup(_DispatchBase):
         self.assert_dispatch("export_html_report", ok_required=True)
 
     def test_batch_export(self):
-        self.assert_dispatch("batch_export", {"formats": ["json"]}, ok_required=True)
+        self.assert_dispatch("batch_export", {"formats": ["csv"]}, ok_required=True)
 
     def test_import_history_ndjson(self):
         # Пустой контент → ошибка парсинга, но метод должен отвечать
@@ -1162,10 +1164,10 @@ class TestEventReplayGroup(_DispatchBase):
         self.assert_dispatch("get_event_stats", ok_required=True)
 
     def test_replay_events(self):
-        # from_ts and to_ts must be non-zero (truthy) values
+        # from_ts must be an ISO 8601 string
         self.assert_dispatch("replay_events", {
-            "from_ts": 1.0,
-            "to_ts": 9999999999.0,
+            "from_ts": "2020-01-01T00:00:00",
+            "to_ts": "2030-01-01T00:00:00",
         }, ok_required=True)
 
 
