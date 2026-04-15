@@ -33,7 +33,10 @@ public enum KrabEarTheme {
         public static let sectionSpacing: CGFloat = 16.0
         public static let itemSpacing: CGFloat = 8.0
         public static let cardPadding: CGFloat = 12.0
-        public static let cardCornerRadius: CGFloat = 10.0
+        public static let cardCornerRadius: CGFloat = 12.0
+        /// Концентрический радиус для внутренних элементов (scroll views, text views внутри карточек).
+        /// Apple's rule: inner radius = outer radius - padding/3.
+        public static let innerCornerRadius: CGFloat = 8.0
     }
     
     public static func applyTheme(to window: NSWindow) {
@@ -96,14 +99,18 @@ public class ThemeCardView: NSVisualEffectView {
     }
 
     private func setup() {
-        // Liquid Glass: frosted glass material
-        material = .hudWindow
-        blendingMode = .behindWindow
+        // Liquid Glass: frosted glass material.
+        // .popover + .withinWindow создаёт эффект «стекла над стеклом» —
+        // карточка блюрит контент окна под собой, а не рабочий стол.
+        // .hudWindow был слишком тёмным для светлых окон и убивал эффект.
+        material = .popover
+        blendingMode = .withinWindow
         state = .active
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
-        layer?.borderWidth = 0.5
-        layer?.borderColor = KrabEarTheme.Colors.separator.cgColor
+        layer?.borderWidth = 1.0
+        // Subtle white edge — подчёркивает «край стекла» (Apple Design Detail)
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.1).cgColor
         layer?.masksToBounds = true
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
@@ -309,5 +316,66 @@ public class CollapsibleSectionView: NSView {
         }
 
         UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
+    }
+}
+
+// MARK: - Unified Theme Extensions (Liquid Glass consistency)
+// Эти extensions унифицируют применение стилей к NSControl'ам.
+// Правило: после инициализации любой кнопки/текст-филда/scroll-вью
+// вызывать соответствующий applyTheme* метод для однородного Liquid Glass вида.
+
+@MainActor
+public extension NSButton {
+    /// Primary button: акцентный цвет, rounded bezel.
+    /// Для главных действий (Старт/Стоп, Submit, Применить).
+    func applyThemePrimary() {
+        self.bezelStyle = .rounded
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.bezelColor = KrabEarTheme.Colors.accent
+    }
+
+    /// Secondary button: стандартный вид, rounded bezel, без акцента.
+    /// Для вторичных действий (Копировать, Экспорт, Настройки).
+    func applyThemeSecondary() {
+        self.bezelStyle = .rounded
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.bezelColor = nil
+    }
+
+    /// Checkbox style: switch type, тематический шрифт.
+    func applyThemeCheckbox() {
+        self.setButtonType(.switch)
+        self.font = KrabEarTheme.Typography.controlLabel
+    }
+}
+
+@MainActor
+public extension NSTextField {
+    /// Input field style: rounded bezel, transparent background.
+    /// drawsBackground = false позволяет фону карточки просвечивать,
+    /// оставляя только рамку и focus ring — Liquid Glass-friendly.
+    func applyThemeInput() {
+        self.isBordered = true
+        self.bezelStyle = .roundedBezel
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.textColor = KrabEarTheme.Colors.textPrimary
+        self.drawsBackground = false
+    }
+}
+
+@MainActor
+public extension NSScrollView {
+    /// Inner scroll style: концентрический радиус (8pt) для scrolls внутри cards (12pt radius).
+    /// Apple's design rule: inner radius = outer radius - padding/3.
+    /// Transparent background чтобы не перекрывать frosted glass карточки.
+    func applyThemeInnerScroll() {
+        self.wantsLayer = true
+        self.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        self.layer?.masksToBounds = true
+        self.drawsBackground = false
+        self.borderType = .noBorder
     }
 }
