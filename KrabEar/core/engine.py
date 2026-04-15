@@ -24,26 +24,29 @@ import numpy as np
 import requests
 
 # Heavy optional dependencies — недоступны на Linux CI (mlx only Apple Silicon)
-# и/или требуют system libs (soundfile→libsndfile, torch→CUDA).
-# Оборачиваем в try/except чтобы test discovery проходил на Ubuntu.
+# и/или требуют system libs (soundfile→libsndfile, pyannote→ffmpeg via torchcodec).
+# Оборачиваем в try/except Exception чтобы test discovery проходил на Ubuntu:
+# - ImportError — module not installed
+# - OSError — native library missing (libavutil.so.60 от torchcodec на Ubuntu)
+# - Вообще любое исключение при module-level init
 try:
     import mlx_whisper  # type: ignore
-except ImportError:
+except Exception:
     mlx_whisper = None  # type: ignore[assignment]
 
 try:
     import soundfile as sf  # type: ignore
-except ImportError:
+except Exception:
     sf = None  # type: ignore[assignment]
 
 try:
     import torch  # type: ignore
-except ImportError:
+except Exception:
     torch = None  # type: ignore[assignment]
 
 try:
     from pyannote.audio import Pipeline  # type: ignore
-except ImportError:
+except Exception:
     Pipeline = None  # type: ignore[assignment,misc]
 
 from .config import settings
