@@ -11,6 +11,13 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+/// NSClipView с flipped coordinate system (y=0 сверху).
+/// Нужен чтобы короткий document view оставался вверху scroll area,
+/// а не проваливался вниз в non-flipped NSView (где y=0 внизу).
+final class FlippedClipView: NSClipView {
+    override var isFlipped: Bool { true }
+}
+
 /// Нативная панель истории с пагинацией, поиском, копированием и удалением.
 final class HistoryPanelController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSTabViewDelegate {
     enum PanelTab: String {
@@ -1211,6 +1218,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.spacing = 10
         dictationStack.alignment = .leading
         dictationStack.translatesAutoresizingMaskIntoConstraints = false
+        dictationStack.setHuggingPriority(.required, for: .vertical)
+        dictationStack.setContentCompressionResistancePriority(.required, for: .vertical)
         dictationStack.addArrangedSubview(dictationTitle)
         dictationStack.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(settingsBar)
@@ -1219,10 +1228,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
         dictationStack.addArrangedSubview(NSView())
         let dictationOuterScroll = NSScrollView()
+        let dictationClipView = FlippedClipView()
+        dictationClipView.drawsBackground = false
+        dictationOuterScroll.contentView = dictationClipView
         dictationOuterScroll.documentView = dictationStack
         dictationOuterScroll.hasVerticalScroller = true
         dictationOuterScroll.hasHorizontalScroller = false
         dictationOuterScroll.drawsBackground = false
+        dictationOuterScroll.automaticallyAdjustsContentInsets = false
+        dictationOuterScroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         dictationOuterScroll.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(dictationOuterScroll)
         NSLayoutConstraint.activate([
@@ -1258,6 +1272,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.spacing = 10
         liveStack.alignment = .leading
         liveStack.translatesAutoresizingMaskIntoConstraints = false
+        liveStack.setHuggingPriority(.required, for: .vertical)
+        liveStack.setContentCompressionResistancePriority(.required, for: .vertical)
         liveStack.addArrangedSubview(liveTitle)
         liveStack.addArrangedSubview(liveSettingsBar)
         liveStack.addArrangedSubview(toolsRow)
@@ -1269,10 +1285,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(realtimeScroll)
         let liveOuterScroll = NSScrollView()
+        let liveClipView = FlippedClipView()
+        liveClipView.drawsBackground = false
+        liveOuterScroll.contentView = liveClipView
         liveOuterScroll.documentView = liveStack
         liveOuterScroll.hasVerticalScroller = true
         liveOuterScroll.hasHorizontalScroller = false
         liveOuterScroll.drawsBackground = false
+        liveOuterScroll.automaticallyAdjustsContentInsets = false
+        liveOuterScroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         liveOuterScroll.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(liveOuterScroll)
         NSLayoutConstraint.activate([
@@ -1283,7 +1304,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             liveStack.topAnchor.constraint(equalTo: liveOuterScroll.contentView.topAnchor, constant: 12),
             liveStack.leadingAnchor.constraint(equalTo: liveOuterScroll.contentView.leadingAnchor, constant: 12),
             liveStack.trailingAnchor.constraint(equalTo: liveOuterScroll.contentView.trailingAnchor, constant: -12),
-            liveStack.bottomAnchor.constraint(lessThanOrEqualTo: liveOuterScroll.contentView.bottomAnchor, constant: -12),
             liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             toolsRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callAssistControlRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
@@ -1303,6 +1323,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.spacing = 8
         historyStack.alignment = .leading
         historyStack.translatesAutoresizingMaskIntoConstraints = false
+        historyStack.setHuggingPriority(.required, for: .vertical)
+        historyStack.setContentCompressionResistancePriority(.required, for: .vertical)
         historyStack.addArrangedSubview(topBar)
         historyStack.addArrangedSubview(filterRow1)
         historyStack.addArrangedSubview(filterRow2)
@@ -1340,10 +1362,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         ]
         // Wrap historyStack in a scroll view so the History tab scrolls on small windows
         let historyOuterScroll = NSScrollView()
+        let historyClipView = FlippedClipView()
+        historyClipView.drawsBackground = false
+        historyOuterScroll.contentView = historyClipView
         historyOuterScroll.documentView = historyStack
         historyOuterScroll.hasVerticalScroller = true
         historyOuterScroll.hasHorizontalScroller = false
         historyOuterScroll.drawsBackground = false
+        historyOuterScroll.automaticallyAdjustsContentInsets = false
+        historyOuterScroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         historyOuterScroll.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(historyOuterScroll)
         let historyScrollMinHeightConstraint = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
@@ -1357,7 +1384,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             historyStack.topAnchor.constraint(equalTo: historyOuterScroll.contentView.topAnchor, constant: 12),
             historyStack.leadingAnchor.constraint(equalTo: historyOuterScroll.contentView.leadingAnchor, constant: 12),
             historyStack.trailingAnchor.constraint(equalTo: historyOuterScroll.contentView.trailingAnchor, constant: -12),
-            historyStack.bottomAnchor.constraint(lessThanOrEqualTo: historyOuterScroll.contentView.bottomAnchor, constant: -12),
             dropZoneView.heightAnchor.constraint(equalToConstant: 42),
             historyPreviewScroll.heightAnchor.constraint(equalToConstant: 110),
         ])

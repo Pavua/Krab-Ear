@@ -111,12 +111,9 @@ extension HistoryPanelController {
     }
     
     public func setupAnalyticsSections() -> (CollapsibleSectionView, CollapsibleSectionView) {
+        // --- Analytics section ---
         let analyticsCard = ThemeCardView()
-        let analyticsContent = NSStackView()
-        analyticsContent.orientation = .vertical
-        analyticsContent.alignment = .leading
-        analyticsContent.spacing = 10
-        
+
         let usageStack = NSStackView(views: [todayLabel, weekLabel, totalLabel])
         usageStack.orientation = .horizontal
         usageStack.spacing = 8
@@ -124,43 +121,24 @@ extension HistoryPanelController {
         let usageRow = NSStackView(views: [usageStack, refreshButton])
         usageRow.orientation = .horizontal
         usageRow.spacing = 10
-        
+
         let errorsButton = NSButton(title: "Ошибки", target: self, action: #selector(fetchErrorStatsAction))
-        
+
         let scoreButton = NSButton(title: "Оценка", target: self, action: #selector(scoreTranscriptionAction))
         let scoreRow = NSStackView(views: [scoreButton, scoreLabel])
         scoreRow.orientation = .horizontal
         scoreRow.spacing = 10
-        
-        analyticsContent.addArrangedSubview(usageRow)
-        analyticsContent.addArrangedSubview(errorsButton)
-        analyticsContent.addArrangedSubview(scoreRow)
-        
-        analyticsCard.addSubview(analyticsContent)
-        analyticsContent.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            analyticsContent.leadingAnchor.constraint(equalTo: analyticsCard.leadingAnchor, constant: 10),
-            analyticsContent.trailingAnchor.constraint(equalTo: analyticsCard.trailingAnchor, constant: -10),
-            analyticsContent.topAnchor.constraint(equalTo: analyticsCard.topAnchor, constant: 10),
-            analyticsContent.bottomAnchor.constraint(equalTo: analyticsCard.bottomAnchor, constant: -10)
-        ])
-        
+
+        analyticsCard.contentStackView.addArrangedSubview(usageRow)
+        analyticsCard.contentStackView.addArrangedSubview(errorsButton)
+        analyticsCard.contentStackView.addArrangedSubview(scoreRow)
+
         let analyticsSection = CollapsibleSectionView(sectionId: "dictation_analytics", title: "Аналитика", isExpanded: false)
-        analyticsSection.addSubview(analyticsCard)
-        analyticsCard.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            analyticsCard.leadingAnchor.constraint(equalTo: analyticsSection.leadingAnchor),
-            analyticsCard.trailingAnchor.constraint(equalTo: analyticsSection.trailingAnchor),
-            analyticsCard.topAnchor.constraint(equalTo: analyticsSection.topAnchor, constant: 30),
-            analyticsCard.bottomAnchor.constraint(equalTo: analyticsSection.bottomAnchor)
-        ])
-        
+        analyticsSection.contentStackView.addArrangedSubview(analyticsCard)
+
+        // --- Health section ---
         let healthCard = ThemeCardView()
-        let healthContent = NSStackView()
-        healthContent.orientation = .vertical
-        healthContent.alignment = .leading
-        healthContent.spacing = 10
-        
+
         let checkButton = NSButton(title: "Проверить", target: self, action: #selector(runHealthCheckAction))
         let healthLabelsStack = NSStackView(views: [sttHealthLabel, llmHealthLabel, historyHealthLabel, translationHealthLabel])
         healthLabelsStack.orientation = .horizontal
@@ -168,38 +146,22 @@ extension HistoryPanelController {
         let healthRow = NSStackView(views: [checkButton, healthLabelsStack])
         healthRow.orientation = .horizontal
         healthRow.spacing = 10
-        
+
         let llmDiffButton = NSButton(title: "LLM diff", target: self, action: #selector(fetchLLMDiffAction))
-        
+
         let exportButton = NSButton(title: "Экспорт настроек", target: self, action: #selector(exportSettingsAction))
         let importButton = NSButton(title: "Импорт настроек", target: self, action: #selector(importSettingsAction))
         let settingsRow = NSStackView(views: [exportButton, importButton])
         settingsRow.orientation = .horizontal
         settingsRow.spacing = 10
-        
-        healthContent.addArrangedSubview(healthRow)
-        healthContent.addArrangedSubview(llmDiffButton)
-        healthContent.addArrangedSubview(settingsRow)
-        
-        healthCard.addSubview(healthContent)
-        healthContent.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            healthContent.leadingAnchor.constraint(equalTo: healthCard.leadingAnchor, constant: 10),
-            healthContent.trailingAnchor.constraint(equalTo: healthCard.trailingAnchor, constant: -10),
-            healthContent.topAnchor.constraint(equalTo: healthCard.topAnchor, constant: 10),
-            healthContent.bottomAnchor.constraint(equalTo: healthCard.bottomAnchor, constant: -10)
-        ])
-        
+
+        healthCard.contentStackView.addArrangedSubview(healthRow)
+        healthCard.contentStackView.addArrangedSubview(llmDiffButton)
+        healthCard.contentStackView.addArrangedSubview(settingsRow)
+
         let healthSection = CollapsibleSectionView(sectionId: "dictation_health", title: "Здоровье", isExpanded: false)
-        healthSection.addSubview(healthCard)
-        healthCard.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            healthCard.leadingAnchor.constraint(equalTo: healthSection.leadingAnchor),
-            healthCard.trailingAnchor.constraint(equalTo: healthSection.trailingAnchor),
-            healthCard.topAnchor.constraint(equalTo: healthSection.topAnchor, constant: 30),
-            healthCard.bottomAnchor.constraint(equalTo: healthSection.bottomAnchor)
-        ])
-        
+        healthSection.contentStackView.addArrangedSubview(healthCard)
+
         return (analyticsSection, healthSection)
     }
     
