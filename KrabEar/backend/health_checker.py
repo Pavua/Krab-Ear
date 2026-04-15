@@ -91,7 +91,8 @@ class HealthChecker:
                 try:
                     from core.config import settings
                     model_name = settings.MODEL_BALANCED
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Не удалось прочитать MODEL_BALANCED из config: %s", exc)
                     model_name = "unknown"
                 return {"status": "ok", "model": model_name, "cached": False}
 
@@ -170,8 +171,8 @@ class HealthChecker:
             try:
                 default_info = sd.query_devices(kind="input")
                 default_name = default_info.get("name") if isinstance(default_info, dict) else None
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Не удалось опросить default audio device: %s", exc)
 
             if count == 0:
                 return {"status": "warning", "count": 0, "default": None}
