@@ -29,6 +29,13 @@ final class PasteService {
     /// Delay between Cmd+V key-down and key-up events (µs)
     private let cmdVKeypressDelayUs: useconds_t = 30_000
     private let logger = AgentLogger.shared
+    /// Throttle для Accessibility prompt'ов: показываем dialog не чаще чем раз
+    /// в 10 минут per app launch. Без этого каждый paste при missing AX = новый
+    /// блокирующий dialog (ad-hoc codesigned apps теряют TCC permission после
+    /// каждого rebuild из-за смены cdhash). Текст остаётся в clipboard —
+    /// пользователь может вставить вручную Cmd+V.
+    private var lastAXPromptAt: Date?
+    private let axPromptCooldownSec: TimeInterval = 600
 
     private enum FocusState {
         case editable
@@ -274,9 +281,18 @@ final class PasteService {
     }
 
     private func requestAccessibilityPromptIfNeeded() {
+        // Throttle: не чаще раз в 10 минут per app session.
+        // Иначе каждый paste при missing AX = новый blocking dialog,
+        // что критично для ad-hoc signed apps (cdhash меняется каждый rebuild).
+        if let lastPrompt = lastAXPromptAt,
+           Date().timeIntervalSince(lastPrompt) < axPromptCooldownSec {
+            logger.info("Accessibility prompt пропущен (cooldown \(Int(axPromptCooldownSec))s)")
+            return
+        }
         let promptKey = "AXTrustedCheckOptionPrompt"
         let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+        lastAXPromptAt = Date()
     }
 
     private func waitForModifierRelease(timeoutMs: Int) -> Bool {
