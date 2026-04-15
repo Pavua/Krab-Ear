@@ -44,7 +44,7 @@ jobs:
           flake8 KrabEar/ \
             --max-line-length=150 \
             --extend-ignore=E501 \
-            --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear \
+            --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear,KrabEar/_legacy_tkinter_archive_2026-02-11 \
             --statistics
         continue-on-error: false
 
