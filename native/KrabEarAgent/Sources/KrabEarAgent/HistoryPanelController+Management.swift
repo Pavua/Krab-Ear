@@ -82,7 +82,7 @@ extension HistoryPanelController {
         textView.isEditable = false
         textView.isSelectable = true
         textView.textContainer?.widthTracksTextView = true
-        textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.font = KrabEarTheme.Typography.monospace
         textView.backgroundColor = .clear
         textView.drawsBackground = false
         

@@ -524,7 +524,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         topSearchRow.addArrangedSubview(clearFiltersButton)
         
         historyFiltersBadge.textColor = .secondaryLabelColor
-        historyFiltersBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        historyFiltersBadge.font = KrabEarTheme.Typography.captionMedium.tabular()
         historyFiltersBadge.isHidden = true
         topSearchRow.addArrangedSubview(historyFiltersBadge)
         
@@ -593,7 +593,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyFromDateField.target = self
         historyFromDateField.action = #selector(onHistoryFilterChanged)
         historyFromDateField.controlSize = .small
-        historyFromDateField.font = .systemFont(ofSize: 11)
+        historyFromDateField.font = KrabEarTheme.Typography.caption
         historyFromDateField.widthAnchor.constraint(equalToConstant: 96).isActive = true
         filterRow2.addArrangedSubview(historyFromDateField)
 
@@ -602,7 +602,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyToDateField.target = self
         historyToDateField.action = #selector(onHistoryFilterChanged)
         historyToDateField.controlSize = .small
-        historyToDateField.font = .systemFont(ofSize: 11)
+        historyToDateField.font = KrabEarTheme.Typography.caption
         historyToDateField.widthAnchor.constraint(equalToConstant: 96).isActive = true
         filterRow2.addArrangedSubview(historyToDateField)
         filterRow2.addArrangedSubview(NSView())
@@ -1059,7 +1059,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeScroll.layer?.borderWidth = 0.5
         realtimeScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         realtimeTextView.isEditable = false
-        realtimeTextView.font = .systemFont(ofSize: 13)
+        realtimeTextView.font = KrabEarTheme.Typography.body
         realtimeTextView.string = "Во время записи здесь появляется промежуточный текст."
         realtimeTextView.backgroundColor = .clear
         realtimeTextView.drawsBackground = false
@@ -1073,7 +1073,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewScroll.layer?.borderWidth = 0.5
         dictationHistoryPreviewScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         dictationHistoryPreviewView.isEditable = false
-        dictationHistoryPreviewView.font = .systemFont(ofSize: 12)
+        dictationHistoryPreviewView.font = KrabEarTheme.Typography.body
         dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
         dictationHistoryPreviewView.backgroundColor = .clear
         dictationHistoryPreviewView.drawsBackground = false
@@ -1087,7 +1087,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAssistOutputScroll.layer?.borderWidth = 0.5
         callAssistOutputScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         callAssistOutputView.isEditable = false
-        callAssistOutputView.font = .systemFont(ofSize: 12)
+        callAssistOutputView.font = KrabEarTheme.Typography.body
         callAssistOutputView.string = "Здесь появятся результаты быстрых фраз, summary и диагностики звонка."
         callAssistOutputView.backgroundColor = .clear
         callAssistOutputView.drawsBackground = false
@@ -1244,7 +1244,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     private func setupDictationTab(_ contentView: NSView) {
         let dictationTitle = NSTextField(labelWithString: "Быстрые действия диктовки")
-        dictationTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+        dictationTitle.font = KrabEarTheme.Typography.sectionTitle
         dictationHistoryHintLabel.lineBreakMode = .byTruncatingTail
         dictationHistoryHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -1253,7 +1253,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryHeaderRow.alignment = .centerY
         dictationHistoryHeaderRow.translatesAutoresizingMaskIntoConstraints = false
         let dictationHistoryTitle = NSTextField(labelWithString: "Последние транскрибации")
-        dictationHistoryTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        dictationHistoryTitle.font = KrabEarTheme.Typography.sectionTitle
         dictationHistoryHeaderRow.addArrangedSubview(dictationHistoryTitle)
         dictationHistoryHeaderRow.addArrangedSubview(NSView())
         dictationHistoryOpenButton.target = self
@@ -1304,7 +1304,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     private func setupLiveTranslationTab(_ contentView: NSView) {
         let liveTitle = NSTextField(labelWithString: "Настройки live-перевода")
-        liveTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+        liveTitle.font = KrabEarTheme.Typography.sectionTitle
 
         liveHeaderRow.orientation = .horizontal
         liveHeaderRow.spacing = 8
@@ -1378,10 +1378,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewContainer.orientation = .vertical
         historyPreviewContainer.spacing = 6
         historyPreviewContainer.translatesAutoresizingMaskIntoConstraints = false
-        historyPreviewHeader.font = .systemFont(ofSize: 13, weight: .semibold)
+        historyPreviewHeader.font = KrabEarTheme.Typography.sectionTitle
         historyPreviewHeader.textColor = .labelColor
         historyPreviewTextView.isEditable = false
-        historyPreviewTextView.font = .systemFont(ofSize: 12)
+        historyPreviewTextView.font = KrabEarTheme.Typography.body
         historyPreviewTextView.string = "История загружается..."
         historyPreviewTextView.backgroundColor = .clear
         historyPreviewTextView.drawsBackground = false
@@ -1583,7 +1583,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         diagnosticsOutputView.isEditable = false
         diagnosticsOutputView.isSelectable = true
-        diagnosticsOutputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        diagnosticsOutputView.font = KrabEarTheme.Typography.monospace
         diagnosticsOutputView.textColor = KrabEarTheme.Colors.textSecondary
         diagnosticsOutputView.backgroundColor = .clear
         diagnosticsOutputView.drawsBackground = false
@@ -1609,7 +1609,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         profileRow.alignment = .centerY
         profileRow.translatesAutoresizingMaskIntoConstraints = false
         let profileLabel = NSTextField(labelWithString: "Профиль:")
-        profileLabel.font = KrabEarTheme.Typography.controlLabel
+        profileLabel.font = KrabEarTheme.Typography.body
         profilePresetSelector.removeAllItems()
         profilePresetSelector.addItem(withTitle: "Загрузка...")
         applyProfileButton.target = self
@@ -1624,12 +1624,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         audioDeviceRow.alignment = .centerY
         audioDeviceRow.translatesAutoresizingMaskIntoConstraints = false
         let audioLabel = NSTextField(labelWithString: "Микрофон:")
-        audioLabel.font = KrabEarTheme.Typography.controlLabel
+        audioLabel.font = KrabEarTheme.Typography.body
         audioDeviceSelector.removeAllItems()
         audioDeviceSelector.addItem(withTitle: "По умолчанию")
         testMicButton.target = self
         testMicButton.action = #selector(onTestMicrophone)
-        micTestResultLabel.font = KrabEarTheme.Typography.smallCaption
+        micTestResultLabel.font = KrabEarTheme.Typography.caption
         micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
         audioDeviceRow.addArrangedSubview(audioLabel)
         audioDeviceRow.addArrangedSubview(audioDeviceSelector)
@@ -1721,6 +1721,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         let filtersSection = CollapsibleSectionView(sectionId: "history_filters", title: "Фильтры", isExpanded: false)
         let filtersCard = ThemeCardView()
+        // Отцепляем rows из предыдущего parent'а (applyVisualTheme вызывается повторно —
+        // rows хранятся как class properties и могут висеть в старой filtersCard).
+        filterRow1.removeFromSuperview()
+        filterRow2.removeFromSuperview()
+        historyQuickPresetRow.removeFromSuperview()
         filtersCard.contentStackView.addArrangedSubview(filterRow1)
         filtersCard.contentStackView.addArrangedSubview(filterRow2)
         filtersCard.contentStackView.addArrangedSubview(historyQuickPresetRow)

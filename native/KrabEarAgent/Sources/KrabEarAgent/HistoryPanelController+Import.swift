@@ -427,7 +427,7 @@ final class ImportDropZoneView: NSView {
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.alignment = .center
-        hintLabel.font = .systemFont(ofSize: 12)
+        hintLabel.font = KrabEarTheme.Typography.body
         hintLabel.textColor = .secondaryLabelColor
         hintLabel.maximumNumberOfLines = 2
         hintLabel.lineBreakMode = .byWordWrapping

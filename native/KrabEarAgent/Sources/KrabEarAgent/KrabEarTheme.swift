@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 @MainActor
 public enum KrabEarTheme {
@@ -22,12 +23,47 @@ public enum KrabEarTheme {
         public static var error: NSColor { .systemRed }
     }
     
+    /// Unified typography system designed by Gemini 3.1 Pro (2026-04-16).
+    /// 6 tokens покрывают все UI слои. См. docs/FONT_SYSTEM.md для migration notes.
     public enum Typography {
-        public static var sectionTitle: NSFont { .boldSystemFont(ofSize: 13) }
-        public static var controlLabel: NSFont { .systemFont(ofSize: 12) }
-        public static var smallCaption: NSFont { .systemFont(ofSize: 10) }
-        public static var monospaced: NSFont { .monospacedDigitSystemFont(ofSize: 12, weight: .regular) }
+        /// Primary RealtimeOverlay transcription text (17pt regular)
+        public static var display: NSFont { .systemFont(ofSize: 17, weight: .regular) }
+
+        /// Все headers — панели, секции, группы настроек (13pt semibold).
+        /// Изменение vs. legacy: bold → semibold (нативнее в macOS 13+).
+        public static var sectionTitle: NSFont { .systemFont(ofSize: 13, weight: .semibold) }
+
+        /// Body text, inputs, buttons, controls (13pt regular — macOS стандарт).
+        public static var body: NSFont { .systemFont(ofSize: 13, weight: .regular) }
+
+        /// Secondary captions, dates, filters (11pt regular).
+        public static var caption: NSFont { .systemFont(ofSize: 11, weight: .regular) }
+
+        /// Accented captions, badges, статусы (11pt medium).
+        public static var captionMedium: NSFont { .systemFont(ofSize: 11, weight: .medium) }
+
+        /// Logs, диагностика, raw data output (11pt monospaced).
+        /// Для бейджей с цифрами используй `captionMedium.tabular()` вместо отдельного токена.
+        public static var monospace: NSFont { .monospacedSystemFont(ofSize: 11, weight: .regular) }
     }
+}
+
+extension NSFont {
+    /// Tabular figures — не-прыгающие цифры для бейджей, счётчиков, monospace-digit контекстов.
+    /// Применяется к любому existing font: `Typography.captionMedium.tabular()`.
+    public func tabular() -> NSFont {
+        let descriptor = fontDescriptor.addingAttributes([
+            .featureSettings: [[
+                NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector
+            ]]
+        ])
+        return NSFont(descriptor: descriptor, size: pointSize) ?? self
+    }
+}
+
+@MainActor
+public extension KrabEarTheme {
     
     public enum Metrics {
         public static let sectionSpacing: CGFloat = 16.0
@@ -74,7 +110,7 @@ public enum KrabEarTheme {
     
     public static func styleCheckbox(_ checkbox: NSButton) {
         checkbox.setButtonType(.switch)
-        checkbox.font = Typography.controlLabel
+        checkbox.font = Typography.body
     }
 }
 
@@ -186,7 +222,7 @@ public class ThemePrimaryButton: NSButton {
         bezelStyle = .push
         isBordered = true
         bezelColor = KrabEarTheme.Colors.accent
-        font = KrabEarTheme.Typography.controlLabel
+        font = KrabEarTheme.Typography.body
     }
 }
 
@@ -206,7 +242,7 @@ public class ThemeSecondaryButton: NSButton {
     private func setup() {
         bezelStyle = .push
         isBordered = true
-        font = KrabEarTheme.Typography.controlLabel
+        font = KrabEarTheme.Typography.body
     }
 }
 
@@ -369,7 +405,7 @@ public extension NSButton {
     func applyThemePrimary() {
         self.bezelStyle = .rounded
         self.controlSize = .regular
-        self.font = KrabEarTheme.Typography.controlLabel
+        self.font = KrabEarTheme.Typography.body
         self.bezelColor = KrabEarTheme.Colors.accent
     }
 
@@ -378,14 +414,14 @@ public extension NSButton {
     func applyThemeSecondary() {
         self.bezelStyle = .rounded
         self.controlSize = .regular
-        self.font = KrabEarTheme.Typography.controlLabel
+        self.font = KrabEarTheme.Typography.body
         self.bezelColor = nil
     }
 
     /// Checkbox style: switch type, тематический шрифт.
     func applyThemeCheckbox() {
         self.setButtonType(.switch)
-        self.font = KrabEarTheme.Typography.controlLabel
+        self.font = KrabEarTheme.Typography.body
     }
 }
 
@@ -398,7 +434,7 @@ public extension NSTextField {
         self.isBordered = true
         self.bezelStyle = .roundedBezel
         self.controlSize = .regular
-        self.font = KrabEarTheme.Typography.controlLabel
+        self.font = KrabEarTheme.Typography.body
         self.textColor = KrabEarTheme.Colors.textPrimary
         self.drawsBackground = false
     }
