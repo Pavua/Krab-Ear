@@ -52,7 +52,11 @@ public enum KrabEarTheme {
             })
             if existingEffect == nil {
                 let bgEffect = NSVisualEffectView()
-                bgEffect.material = .sidebar
+                // .popover — тот же material что у карточек (ThemeCardView).
+                // Единая material для окна и карточек создаёт unified translucent
+                // look: карточки выглядят как часть окна, а не парящие сверху.
+                // .sidebar был слишком opaque — карточки выглядели чужеродно.
+                bgEffect.material = .popover
                 bgEffect.blendingMode = .behindWindow
                 bgEffect.state = .active
                 bgEffect.identifier = NSUserInterfaceItemIdentifier("krabEarWindowBg")
@@ -99,18 +103,32 @@ public class ThemeCardView: NSVisualEffectView {
     }
 
     private func setup() {
-        // Liquid Glass: frosted glass material.
-        // .popover + .withinWindow создаёт эффект «стекла над стеклом» —
-        // карточка блюрит контент окна под собой, а не рабочий стол.
-        // .hudWindow был слишком тёмным для светлых окон и убивал эффект.
+        // Liquid Glass: настоящий frosted glass эффект.
+        //
+        // .popover — средний вариант между .menu (слишком прозрачный
+        // = карточки выглядят чужеродно на .sidebar фоне окна) и
+        // .sidebar (сольётся с фоном = невидимая карточка).
+        // Даёт чистый frosted glass look ближе к window .sidebar фону.
+        //
+        // .behindWindow (а не .withinWindow!) — КЛЮЧЕВОЙ момент:
+        // окно уже имеет .sidebar + .behindWindow фон. Если карточка
+        // тоже использует .behindWindow — macOS умеет обрабатывать
+        // вложенные behindWindow: верхний слой «пробивает» нижний и
+        // блюрит рабочий стол напрямую со своим материалом, создавая
+        // эффект парящего стекла.
+        // .withinWindow бы блюрил УЖЕ заблюренный фон окна = мутный пластик.
         material = .popover
-        blendingMode = .withinWindow
+        blendingMode = .behindWindow
         state = .active
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
-        layer?.borderWidth = 1.0
-        // Subtle white edge — подчёркивает «край стекла» (Apple Design Detail)
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.1).cgColor
+        // cornerCurve = .continuous — Apple's «яблочные» плавные углы
+        // (squircle, а не простой rounded rect)
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 0.5
+        // Subtle edge — подчёркивает «край стекла», но не делает карточку
+        // чужеродной на том же material фоне. Очень subtle alpha 0.08.
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
         layer?.masksToBounds = true
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle

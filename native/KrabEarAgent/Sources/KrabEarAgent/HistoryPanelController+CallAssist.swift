@@ -209,19 +209,25 @@ extension HistoryPanelController {
 
     @objc func onEstimateCallCost() {
         let countryField = NSTextField(frame: NSRect(x: 0, y: 0, width: 90, height: 24))
+        countryField.applyThemeInput()
         countryField.stringValue = "ES"
         countryField.placeholderString = "ISO2"
 
         let inboundField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        inboundField.applyThemeInput()
         inboundField.stringValue = "200"
         let landlineField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        landlineField.applyThemeInput()
         landlineField.stringValue = "100"
         let mobileField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        mobileField.applyThemeInput()
         mobileField.stringValue = "100"
         let mediaField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        mediaField.applyThemeInput()
         mediaField.stringValue = "400"
 
         let livePricingButton = NSButton(checkboxWithTitle: "Live pricing (Twilio API)", target: nil, action: nil)
+        livePricingButton.applyThemeCheckbox()
         livePricingButton.state = .on
 
         let grid = NSGridView(views: [

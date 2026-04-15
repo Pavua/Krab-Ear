@@ -114,7 +114,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // D.10a: AI Settings Controls
     private let aiSectionLabel: NSTextField = {
         let label = NSTextField(labelWithString: "AI и обработка")
-        label.font = .boldSystemFont(ofSize: 13)
+        label.font = KrabEarTheme.Typography.sectionTitle
         return label
     }()
     let diarizationButton = NSButton(checkboxWithTitle: "Диаризация (определение говорящих)", target: nil, action: nil)
@@ -496,11 +496,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         let clearSearch = NSButton(title: "Сбросить", target: self, action: #selector(onClearSearch))
         clearSearch.controlSize = .small
+        clearSearch.applyThemeSecondary()
         clearSearch.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         clearSearch.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         topSearchRow.addArrangedSubview(clearSearch)
         let clearFiltersButton = NSButton(title: "Сбросить фильтры", target: self, action: #selector(onClearFilters))
         clearFiltersButton.controlSize = .small
+        clearFiltersButton.applyThemeSecondary()
         clearFiltersButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         clearFiltersButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         topSearchRow.addArrangedSubview(clearFiltersButton)
@@ -591,29 +593,37 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         historyQuickPresetRow.addArrangedSubview(NSTextField(labelWithString: "Быстрые фильтры:"))
         let historyTodayButton = NSButton(title: "Сегодня", target: self, action: #selector(onHistoryPresetToday))
+        historyTodayButton.applyThemeSecondary()
         historyTodayButton.toolTip = "Показывает записи только за сегодня"
         historyQuickPresetRow.addArrangedSubview(historyTodayButton)
         let historyWeekButton = NSButton(title: "7 дней", target: self, action: #selector(onHistoryPresetLast7Days))
+        historyWeekButton.applyThemeSecondary()
         historyWeekButton.toolTip = "Показывает записи за последние 7 дней"
         historyQuickPresetRow.addArrangedSubview(historyWeekButton)
         let historyErrorsButton = NSButton(title: "Ошибки перевода", target: self, action: #selector(onHistoryPresetTranslationErrors))
+        historyErrorsButton.applyThemeSecondary()
         historyErrorsButton.toolTip = "Фильтр по translation_status=translate_error"
         historyQuickPresetRow.addArrangedSubview(historyErrorsButton)
         let historyTranslatedButton = NSButton(title: "С переводом", target: self, action: #selector(onHistoryPresetTranslatedOnly))
+        historyTranslatedButton.applyThemeSecondary()
         historyTranslatedButton.toolTip = "Показывает записи с успешным переводом (translation_status=ok)"
         historyQuickPresetRow.addArrangedSubview(historyTranslatedButton)
         let historyNoTranslationButton = NSButton(title: "Без перевода", target: self, action: #selector(onHistoryPresetNoTranslation))
+        historyNoTranslationButton.applyThemeSecondary()
         historyNoTranslationButton.toolTip = "Показывает записи, где translation_mode=off"
         historyQuickPresetRow.addArrangedSubview(historyNoTranslationButton)
         let historyPasteErrorsButton = NSButton(title: "Ошибки вставки", target: self, action: #selector(onHistoryPresetPasteFailed))
+        historyPasteErrorsButton.applyThemeSecondary()
         historyPasteErrorsButton.toolTip = "Фильтр по paste_status=failed"
         historyQuickPresetRow.addArrangedSubview(historyPasteErrorsButton)
         let historyResetDatesButton = NSButton(title: "Сброс дат", target: self, action: #selector(onHistoryPresetResetDates))
+        historyResetDatesButton.applyThemeSecondary()
         historyResetDatesButton.toolTip = "Очищает поля дат и перезагружает историю"
         historyQuickPresetRow.addArrangedSubview(historyResetDatesButton)
         historyQuickPresetRow.addArrangedSubview(NSView())
 
         let importAudioButton = NSButton(title: "Импорт аудио", target: self, action: #selector(onImportAudio))
+        importAudioButton.applyThemeSecondary()
         importRow.addArrangedSubview(importAudioButton)
         cancelImportButton.target = self
         cancelImportButton.action = #selector(onCancelImport)
@@ -638,9 +648,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         toolsRow.addArrangedSubview(swapRuEsButton)
 
         let addGlossaryButton = NSButton(title: "Добавить термин", target: self, action: #selector(onAddGlossaryTerm))
+        addGlossaryButton.applyThemeSecondary()
         toolsRow.addArrangedSubview(addGlossaryButton)
 
         let removeGlossaryButton = NSButton(title: "Удалить термин", target: self, action: #selector(onRemoveGlossaryTerm))
+        removeGlossaryButton.applyThemeSecondary()
         toolsRow.addArrangedSubview(removeGlossaryButton)
 
         toolsRow.addArrangedSubview(glossaryStatusLabel)
@@ -1801,24 +1813,35 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }
 
         // --- BUTTON STYLING ---
-        // Only true primary action buttons get accent color
-        for button in [startStopButton, callAssistStartButton, callPhraseSendButton] {
-            button.bezelStyle = .push
-            button.isBordered = true
-            button.bezelColor = KrabEarTheme.Colors.accent
-            button.font = KrabEarTheme.Typography.controlLabel
-        }
+        // Primary action buttons
+        startStopButton.applyThemePrimary()
+        callAssistStartButton.applyThemePrimary()
+        callPhraseSendButton.applyThemePrimary()
 
         // Secondary buttons — standard appearance
         for button in [restartButton, stopButton, loadMoreButton, jumpToLatestButton,
-                       copyButton, pasteSelectedButton, deleteButton,
+                       loadAllButton, copyButton, pasteSelectedButton, copyOriginalButton,
+                       copyTranslationButton, retranslateButton, summarizeSelectedButton,
+                       exportButton, exportNdjsonButton, importNdjsonButton, deleteButton,
+                       compactButton, openTranscriptsButton, cancelImportButton, pauseImportButton,
+                       swapRuEsButton, openImportReportButton,
+                       callAssistStopButton, callPhraseLoadButton, callSummaryButton,
+                       callDiagnosticsButton, callCostButton, callTimelineButton,
+                       callTimelineExportButton, callTimelineToHistoryButton, callTimelineClearButton,
+                       helpButton, liveTranslatePresetButton, historyFocusModeButton,
+                       voiceGatewayCheckButton, dictationHistoryOpenButton,
                        diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
                        exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton] as [NSButton] {
-            button.bezelStyle = .push
-            button.isBordered = true
-            button.bezelColor = nil
-            button.font = KrabEarTheme.Typography.controlLabel
+            button.applyThemeSecondary()
+        }
+
+        // Checkbox buttons
+        for button in [audioDuckingButton, diarizationButton, llmRewriteButton,
+                       autoPasteButton, startSoundButton, realtimePreviewButton,
+                       translateAndPasteButton, callNotifyButton, callAutoSummaryButton,
+                       autoStartButton, dockIconButton] as [NSButton] {
+            button.applyThemeCheckbox()
         }
 
         // Style header labels

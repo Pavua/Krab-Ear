@@ -118,13 +118,16 @@ extension HistoryPanelController {
         usageStack.orientation = .horizontal
         usageStack.spacing = 8
         let refreshButton = NSButton(title: "Обновить", target: self, action: #selector(refreshUsageStatsAction))
+        refreshButton.applyThemeSecondary()
         let usageRow = NSStackView(views: [usageStack, refreshButton])
         usageRow.orientation = .horizontal
         usageRow.spacing = 10
 
         let errorsButton = NSButton(title: "Ошибки", target: self, action: #selector(fetchErrorStatsAction))
+        errorsButton.applyThemeSecondary()
 
         let scoreButton = NSButton(title: "Оценка", target: self, action: #selector(scoreTranscriptionAction))
+        scoreButton.applyThemeSecondary()
         let scoreRow = NSStackView(views: [scoreButton, scoreLabel])
         scoreRow.orientation = .horizontal
         scoreRow.spacing = 10
@@ -140,6 +143,7 @@ extension HistoryPanelController {
         let healthCard = ThemeCardView()
 
         let checkButton = NSButton(title: "Проверить", target: self, action: #selector(runHealthCheckAction))
+        checkButton.applyThemeSecondary()
         let healthLabelsStack = NSStackView(views: [sttHealthLabel, llmHealthLabel, historyHealthLabel, translationHealthLabel])
         healthLabelsStack.orientation = .horizontal
         healthLabelsStack.spacing = 8
@@ -148,9 +152,12 @@ extension HistoryPanelController {
         healthRow.spacing = 10
 
         let llmDiffButton = NSButton(title: "LLM diff", target: self, action: #selector(fetchLLMDiffAction))
+        llmDiffButton.applyThemeSecondary()
 
         let exportButton = NSButton(title: "Экспорт настроек", target: self, action: #selector(exportSettingsAction))
+        exportButton.applyThemeSecondary()
         let importButton = NSButton(title: "Импорт настроек", target: self, action: #selector(importSettingsAction))
+        importButton.applyThemeSecondary()
         let settingsRow = NSStackView(views: [exportButton, importButton])
         settingsRow.orientation = .horizontal
         settingsRow.spacing = 10

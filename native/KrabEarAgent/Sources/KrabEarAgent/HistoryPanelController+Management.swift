@@ -31,44 +31,45 @@ extension HistoryPanelController {
         let managementSection = CollapsibleSectionView(sectionId: "history_management", title: "Управление", isExpanded: false)
         
         let favButton = NSButton(title: "В избранное", target: self, action: #selector(handleToggleFavorite))
-        favButton.bezelStyle = .push
+        favButton.applyThemeSecondary()
         managementSection.contentStackView.addArrangedSubview(createRow(views: [favButton]))
-        
+
         let backupButton = NSButton(title: "Бэкап", target: self, action: #selector(handleBackupHistory))
-        backupButton.bezelStyle = .push
+        backupButton.applyThemeSecondary()
         managementSection.contentStackView.addArrangedSubview(createRow(views: [backupButton]))
-        
+
         let versionsButton = NSButton(title: "Версии", target: self, action: #selector(handleGetVersions))
-        versionsButton.bezelStyle = .push
+        versionsButton.applyThemeSecondary()
         managementSection.contentStackView.addArrangedSubview(createRow(views: [versionsButton]))
-        
+
         let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
         popUp.addItems(withTitles: ["Коллекция 1", "Коллекция 2", "Архив"])
         self.collectionPopUp = popUp
         let addCollectionButton = NSButton(title: "Добавить", target: self, action: #selector(handleAddCollection))
-        addCollectionButton.bezelStyle = .push
+        addCollectionButton.applyThemeSecondary()
         managementSection.contentStackView.addArrangedSubview(createRow(views: [popUp, addCollectionButton]))
-        
+
         let speakerField = NSTextField(string: "SPEAKER_00")
+        speakerField.applyThemeInput()
         speakerField.widthAnchor.constraint(equalToConstant: 100).isActive = true
         self.speakerTextField = speakerField
         let searchSpeakerButton = NSButton(title: "Найти", target: self, action: #selector(handleSearchSpeaker))
-        searchSpeakerButton.bezelStyle = .push
+        searchSpeakerButton.applyThemeSecondary()
         managementSection.contentStackView.addArrangedSubview(createRow(views: [speakerField, searchSpeakerButton]))
-        
+
         // --- Раздел 2: Статистика ---
         let statsSection = CollapsibleSectionView(sectionId: "history_stats", title: "Статистика", isExpanded: false)
-        
+
         let freqButton = NSButton(title: "Частотный анализ", target: self, action: #selector(handleWordFrequency))
-        freqButton.bezelStyle = .push
+        freqButton.applyThemeSecondary()
         statsSection.contentStackView.addArrangedSubview(createRow(views: [freqButton]))
-        
+
         let statsButton = NSButton(title: "Статистика", target: self, action: #selector(handleGetStatistics))
-        statsButton.bezelStyle = .push
+        statsButton.applyThemeSecondary()
         statsSection.contentStackView.addArrangedSubview(createRow(views: [statsButton]))
-        
+
         let topicsButton = NSButton(title: "Темы", target: self, action: #selector(handleGetTopics))
-        topicsButton.bezelStyle = .push
+        topicsButton.applyThemeSecondary()
         statsSection.contentStackView.addArrangedSubview(createRow(views: [topicsButton]))
         
         let scrollView = NSScrollView()
