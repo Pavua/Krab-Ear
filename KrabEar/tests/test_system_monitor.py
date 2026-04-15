@@ -163,10 +163,12 @@ class TestSysctlHelper(unittest.TestCase):
 class TestVmStatHelper(unittest.TestCase):
     """Тесты метода _vm_stat."""
 
+    @unittest.skipUnless(sys.platform == "darwin", "vm_stat is macOS-only")
     def test_vm_stat_returns_dict(self):
         result = SystemMonitor._vm_stat()
         self.assertIsInstance(result, dict)
 
+    @unittest.skipUnless(sys.platform == "darwin", "vm_stat is macOS-only")
     def test_vm_stat_contains_pages_free(self):
         result = SystemMonitor._vm_stat()
         # На macOS ключ "Pages free" должен присутствовать
