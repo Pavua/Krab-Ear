@@ -99,7 +99,7 @@ extension HistoryPanelController {
     private func createRow(views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
-        stack.spacing = 8
+        stack.spacing = KrabEarTheme.Metrics.standard
         stack.alignment = .centerY
         return stack
     }

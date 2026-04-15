@@ -116,12 +116,12 @@ extension HistoryPanelController {
 
         let usageStack = NSStackView(views: [todayLabel, weekLabel, totalLabel])
         usageStack.orientation = .horizontal
-        usageStack.spacing = 8
+        usageStack.spacing = KrabEarTheme.Metrics.standard
         let refreshButton = NSButton(title: "Обновить", target: self, action: #selector(refreshUsageStatsAction))
         refreshButton.applyThemeSecondary()
         let usageRow = NSStackView(views: [usageStack, refreshButton])
         usageRow.orientation = .horizontal
-        usageRow.spacing = 10
+        usageRow.spacing = KrabEarTheme.Metrics.standard
 
         let errorsButton = NSButton(title: "Ошибки", target: self, action: #selector(fetchErrorStatsAction))
         errorsButton.applyThemeSecondary()
@@ -130,7 +130,7 @@ extension HistoryPanelController {
         scoreButton.applyThemeSecondary()
         let scoreRow = NSStackView(views: [scoreButton, scoreLabel])
         scoreRow.orientation = .horizontal
-        scoreRow.spacing = 10
+        scoreRow.spacing = KrabEarTheme.Metrics.standard
 
         analyticsCard.contentStackView.addArrangedSubview(usageRow)
         analyticsCard.contentStackView.addArrangedSubview(errorsButton)
@@ -146,10 +146,10 @@ extension HistoryPanelController {
         checkButton.applyThemeSecondary()
         let healthLabelsStack = NSStackView(views: [sttHealthLabel, llmHealthLabel, historyHealthLabel, translationHealthLabel])
         healthLabelsStack.orientation = .horizontal
-        healthLabelsStack.spacing = 8
+        healthLabelsStack.spacing = KrabEarTheme.Metrics.standard
         let healthRow = NSStackView(views: [checkButton, healthLabelsStack])
         healthRow.orientation = .horizontal
-        healthRow.spacing = 10
+        healthRow.spacing = KrabEarTheme.Metrics.standard
 
         let llmDiffButton = NSButton(title: "LLM diff", target: self, action: #selector(fetchLLMDiffAction))
         llmDiffButton.applyThemeSecondary()
@@ -160,7 +160,7 @@ extension HistoryPanelController {
         importButton.applyThemeSecondary()
         let settingsRow = NSStackView(views: [exportButton, importButton])
         settingsRow.orientation = .horizontal
-        settingsRow.spacing = 10
+        settingsRow.spacing = KrabEarTheme.Metrics.standard
 
         healthCard.contentStackView.addArrangedSubview(healthRow)
         healthCard.contentStackView.addArrangedSubview(llmDiffButton)
