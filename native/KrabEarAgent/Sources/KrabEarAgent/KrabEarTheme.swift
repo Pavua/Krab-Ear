@@ -125,11 +125,15 @@ public class ThemeCardView: NSVisualEffectView {
         // cornerCurve = .continuous — Apple's «яблочные» плавные углы
         // (squircle, а не простой rounded rect)
         layer?.cornerCurve = .continuous
-        layer?.borderWidth = 0.5
-        // Subtle edge — подчёркивает «край стекла», но не делает карточку
-        // чужеродной на том же material фоне. Очень subtle alpha 0.08.
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        layer?.borderWidth = 1.0
+        // Чуть более заметный edge — карточка visible как distinct element
+        // на фоне window same material. Alpha 0.18 даёт subtle но чёткую
+        // границу (user feedback: карточки должны быть «более выделяющимися»).
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         layer?.masksToBounds = true
+        // Note: drop shadow не применён сознательно — при masksToBounds=true
+        // (нужно для rounded corners clipping) layer shadow не рендерится.
+        // Для shadow нужен wrapper container view — избыточно для subtle edge.
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
@@ -320,17 +324,33 @@ public class CollapsibleSectionView: NSView {
         self.isExpanded = expanded
         disclosureButton.state = expanded ? .on : .off
 
+        // Capture the enclosing scroll view PATH before layout changes —
+        // chain walks up to find parent NSScrollView (outer tab scroll).
+        // Needed чтобы scroll bar и document size пересчитались после expand/collapse.
+        let outerScrollView = self.enclosingScrollView
+
+        let applyChanges: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.headerSeparator.isHidden = !expanded
+            self.contentStackView.isHidden = !expanded
+            // Force full layout pass up to the window — without этого
+            // NSScrollView не знает что document height изменился,
+            // оставляя visual empty space или blocking scroll.
+            self.window?.layoutIfNeeded()
+            // Invalidate scroll tile — обновляет scrollbar и valid scroll range.
+            if let scroll = outerScrollView {
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+
         if animated {
-            NSAnimationContext.runAnimationGroup({ ctx in
+            NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.2
                 ctx.allowsImplicitAnimation = true
-                self.headerSeparator.isHidden = !expanded
-                self.contentStackView.isHidden = !expanded
-                self.contentStackView.superview?.layoutSubtreeIfNeeded()
-            })
+                applyChanges()
+            }
         } else {
-            headerSeparator.isHidden = !expanded
-            contentStackView.isHidden = !expanded
+            applyChanges()
         }
 
         UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
