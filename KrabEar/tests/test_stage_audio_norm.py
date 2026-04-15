@@ -1,6 +1,8 @@
 """Тесты для AudioNormalizationStage."""
 
 from __future__ import annotations
+from core.pipeline.stages.audio_normalization import AudioNormalizationStage
+from core.pipeline.context import PipelineContext
 
 import os
 import sys
@@ -12,9 +14,6 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.pipeline.context import PipelineContext
-from core.pipeline.stages.audio_normalization import AudioNormalizationStage
 
 
 def _make_ctx(audio_input) -> PipelineContext:

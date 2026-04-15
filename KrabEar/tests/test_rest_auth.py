@@ -306,7 +306,7 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
                 return "ok", 200
 
             with app.test_request_context("/metrics"):
-                result = view()
+                view()
             self.assertTrue(called)
         finally:
             settings.REST_API_KEY = orig
@@ -339,7 +339,7 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
                 return "ok", 200
 
             with app.test_request_context("/metrics", headers={"Authorization": "Bearer mykey"}):
-                result = view()
+                view()
             self.assertTrue(called)
         finally:
             settings.REST_API_KEY = orig

@@ -1,6 +1,8 @@
 """Тесты handle_export_history_csv — экспорт транскрипций в CSV."""
 
 from __future__ import annotations
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 import csv
 import io
@@ -12,9 +14,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
 
 
 class CsvExportBasicTestCase(unittest.TestCase):
@@ -123,7 +122,7 @@ class CsvExportBasicTestCase(unittest.TestCase):
 
     def test_translation_column_populated(self) -> None:
         """Колонка translation заполняется при наличии перевода."""
-        item = self.store.add_history_item(
+        _item = self.store.add_history_item(  # noqa: F841
             text="оригинальный текст",
             paste_status="ok",
             translated_text="translated text",

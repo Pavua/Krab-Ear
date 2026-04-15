@@ -1,18 +1,16 @@
 """Тесты для STTStage."""
 
+from core.pipeline.context import PipelineContext
+from core.pipeline.stages.stt import STTStage
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock
 import numpy as np
 
 # Настройка PYTHONPATH для standalone запуска
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.pipeline.stages.stt import STTStage
-from core.pipeline.context import PipelineContext
 
 
 def _make_ctx(**kwargs) -> PipelineContext:
@@ -41,6 +39,7 @@ def _ok_result(**overrides) -> dict:
 
 class FakeEngine:
     """Минимальный stub движка STT для тестов."""
+
     def __init__(self, result=None, side_effect=None):
         self._result = result or _ok_result()
         self._side_effect = side_effect

@@ -1,9 +1,9 @@
 """Тесты SpeakerStatisticsAnalyzer — per-speaker статистика диаризации Krab Ear."""
 
 from __future__ import annotations
+from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,8 +13,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +303,7 @@ class FakeStore:
     class _FakeLock:
         def __enter__(self):
             return self
+
         def __exit__(self, *_):
             pass
 

@@ -1,15 +1,13 @@
 """Tests for notification preferences management in SettingsService."""
 
+from core.config import DEFAULT_SETTINGS
+from backend.settings_service import SettingsService
 import sys
-import os
 import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
-
-from backend.settings_service import SettingsService
-from core.config import DEFAULT_SETTINGS
 
 
 class FakeStore:

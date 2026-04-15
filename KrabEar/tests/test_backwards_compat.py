@@ -14,6 +14,11 @@
 """
 
 from __future__ import annotations
+from core.utils import TextUtils
+from backend.data_migrator import DataMigrator
+from backend.history_service import HistoryService
+from backend.models import HistoryItem, DEFAULT_SETTINGS
+from backend.state_store import StateStore
 
 import json
 import sys
@@ -27,12 +32,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
-from backend.models import HistoryItem, DEFAULT_SETTINGS
-from backend.history_service import HistoryService
-from backend.data_migrator import DataMigrator, LATEST_VERSION
-from core.utils import TextUtils
 
 
 # ---------------------------------------------------------------------------

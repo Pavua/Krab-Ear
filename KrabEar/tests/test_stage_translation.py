@@ -1,17 +1,15 @@
 """Tests for TranslationStage."""
 
+from core.pipeline.stages.translation import TranslationStage
+from core.pipeline.context import PipelineContext
 import sys
 import os
 import unittest
 from dataclasses import dataclass
-from typing import Optional
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.pipeline.context import PipelineContext
-from core.pipeline.stages.translation import TranslationStage
 
 
 @dataclass
@@ -134,6 +132,7 @@ class TestTranslationStageProcess(unittest.TestCase):
 
     def test_settings_get_called_for_network_mode(self):
         called = {}
+
         def settings_get(k, d=None):
             called[k] = True
             return d

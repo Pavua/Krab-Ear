@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-import types
 import unittest
 from io import StringIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # Path bootstrap (mirrors other test files in this suite)

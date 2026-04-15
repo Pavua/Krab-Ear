@@ -5,19 +5,6 @@ All network/socket calls are mocked — no backend required.
 """
 
 from __future__ import annotations
-
-import io
-import json
-import sys
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from cli import (
     build_parser,
     cmd_export,
@@ -27,10 +14,22 @@ from cli import (
     cmd_status,
     cmd_transcribe,
     _resolve_socket,
-    _USE_COLOR,
 )
 
+import io
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
 
 def _ok(result: dict) -> dict:
     """Wrap result in a successful IPC response."""
@@ -228,12 +227,13 @@ class TestCmdHistory(unittest.TestCase):
         output = buf.getvalue()
         self.assertIn("...", output)
         # Line should be significantly shorter than 200 chars
-        lines = [l for l in output.splitlines() if "A" in l]
-        self.assertTrue(any(len(l) < 150 for l in lines))
+        lines = [ln for ln in output.splitlines() if "A" in ln]
+        self.assertTrue(any(len(ln) < 150 for ln in lines))
 
     @patch("cli._ipc_call")
     def test_history_passes_limit_to_ipc(self, mock_ipc):
         call_args_list = []
+
         def capturing_ipc(method, params=None, sock_path=None):
             call_args_list.append((method, params))
             return _ok({"items": []})
@@ -264,6 +264,7 @@ class TestCmdExport(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_export_srt_calls_correct_method(self, mock_ipc):
         called_with = []
+
         def side_effect(method, params=None, sock_path=None):
             called_with.append(method)
             return _ok({"content": "1\n00:00:00,000 --> 00:00:01,000\nHello\n"})
@@ -388,6 +389,7 @@ class TestCmdTranscribe(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_transcribe_calls_correct_ipc_method(self, mock_ipc):
         called = []
+
         def side_effect(method, params=None, sock_path=None):
             called.append((method, params))
             return _ok({"results": [{"text": "hello"}]})

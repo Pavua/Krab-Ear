@@ -1,8 +1,8 @@
 """Тесты для SessionTracker."""
+from backend.session_tracker import SessionTracker
 import json
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -12,8 +12,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.session_tracker import SessionTracker
 
 
 class TestSessionTrackerBasic(unittest.TestCase):

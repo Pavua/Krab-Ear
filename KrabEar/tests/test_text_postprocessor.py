@@ -4,14 +4,6 @@
     PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_text_postprocessor.py -v
 """
 
-import sys
-import os
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-import unittest
 from core.text_postprocessor import (
     TextPostProcessor,
     PostProcessResult,
@@ -23,6 +15,13 @@ from core.text_postprocessor import (
     NormalizeEntities,
     DEFAULT_CHAIN,
 )
+import unittest
+import sys
+import os
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 # ── Вспомогательный шаг для тестов ──────────────────────────────────────────
@@ -282,6 +281,7 @@ class TestTextPostProcessorRegisterStep(unittest.TestCase):
     def test_register_step_overwrites_existing(self):
         class AlwaysAStep:
             name: str = "to_upper"
+
             def process(self, text: str) -> str:
                 return "A"
 

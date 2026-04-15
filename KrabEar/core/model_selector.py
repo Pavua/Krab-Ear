@@ -15,9 +15,8 @@
 
 from __future__ import annotations
 
-import functools
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from core.config import settings

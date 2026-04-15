@@ -1,11 +1,11 @@
 """Тесты для RecordingScheduler."""
 
 from __future__ import annotations
+from backend.recording_scheduler import RecordingScheduler, STATUS_PENDING, STATUS_COMPLETED, STATUS_CANCELLED
 
 import json
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,8 +14,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
 if str(KRAB_EAR_ROOT) not in sys.path:
     sys.path.insert(0, str(KRAB_EAR_ROOT))
-
-from backend.recording_scheduler import RecordingScheduler, STATUS_PENDING, STATUS_COMPLETED, STATUS_CANCELLED
 
 
 def _future_iso(seconds: int = 3600) -> str:

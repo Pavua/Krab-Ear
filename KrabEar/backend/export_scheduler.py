@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -115,7 +114,7 @@ class ExportScheduler:
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-экспорт %s: %s", p, exc)
 
-        schedule["exports"] = valid_exports[max(0, len(valid_exports) - self.max_exports) :]
+        schedule["exports"] = valid_exports[max(0, len(valid_exports) - self.max_exports):]
         return schedule
 
     def _do_export(self, store: Any, fmt: str, output_dir: Path) -> dict:

@@ -1,5 +1,6 @@
 """Тесты для CostEstimator — оценка вычислительных затрат Krab Ear."""
 
+from backend.cost_estimator import CostEstimate, CostEstimator
 import sys
 import unittest
 from pathlib import Path
@@ -8,8 +9,6 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.cost_estimator import CostEstimate, CostEstimator
 
 
 class TestCostEstimateDataclass(unittest.TestCase):

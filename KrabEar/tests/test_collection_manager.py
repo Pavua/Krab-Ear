@@ -1,6 +1,7 @@
 """Unit-тесты для CollectionManager."""
 
 from __future__ import annotations
+from backend.collection_manager import CollectionManager
 
 import json
 import sys
@@ -12,8 +13,6 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.collection_manager import CollectionManager
 
 
 class FakeHistoryItem:
@@ -146,7 +145,7 @@ class CollectionManagerItemsTestCase(unittest.TestCase):
             self._mgr.remove_from_collection("НеТа", "id1")
 
     def test_get_collection_items_returns_history(self) -> None:
-        item = self._store.add_fake_item("id1", "привет мир")
+        self._store.add_fake_item("id1", "привет мир")
         self._mgr.add_to_collection("Тест", "id1")
         items = self._mgr.get_collection_items("Тест")
         self.assertEqual(len(items), 1)

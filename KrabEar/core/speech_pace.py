@@ -58,7 +58,7 @@ class PaceReport:
     words_per_minute: float           # слов в минуту
     chars_per_minute: float           # символов в минуту
     pace_category: str                # "slow" | "normal" | "fast" | "very_fast"
-    estimated_reading_time_sec: float # расчётное время чтения при 150 wpm
+    estimated_reading_time_sec: float  # расчётное время чтения при 150 wpm
     word_count: int                   # число слов
     char_count: int                   # число символов (без пробелов)
     duration_sec: float               # фактическая длительность записи

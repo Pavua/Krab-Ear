@@ -1,6 +1,15 @@
 """Тесты для PasteFormatter — умного форматирования текста под целевое приложение."""
 
 from __future__ import annotations
+from core.paste_formatter import (
+    PasteFormatter,
+    _fmt_telegram,
+    _fmt_notes,
+    _fmt_email,
+    _fmt_code_editor,
+    _fmt_default,
+    _apply_rules,
+)
 
 import json
 import sys
@@ -14,16 +23,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.paste_formatter import (
-    PasteFormatter,
-    _fmt_telegram,
-    _fmt_notes,
-    _fmt_email,
-    _fmt_code_editor,
-    _fmt_default,
-    _apply_rules,
-)
 
 
 class TestBuiltinFormatters(unittest.TestCase):
@@ -54,7 +53,6 @@ class TestBuiltinFormatters(unittest.TestCase):
     def test_notes_adds_timestamp_header(self):
         result = _fmt_notes("Мысль о проекте.")
         # Заголовок вида [YYYY-MM-DD HH:MM]
-        import re
         self.assertRegex(result, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
 
     def test_notes_bullet_single_sentence(self):
@@ -77,7 +75,7 @@ class TestBuiltinFormatters(unittest.TestCase):
         # Заглавная буква внутри блока текста
         lines = result.splitlines()
         # Найти строку с текстом (не пустую и не приветствие)
-        body_lines = [l for l in lines if l and not l.startswith("Здравствуйте") and not l.startswith("С уважением")]
+        body_lines = [ln for ln in lines if ln and not ln.startswith("Здравствуйте") and not ln.startswith("С уважением")]
         if body_lines:
             self.assertTrue(body_lines[0][0].isupper())
 
@@ -326,7 +324,6 @@ class TestPasteFormatterEdgeCases(unittest.TestCase):
         self.assertEqual(result, "42")
 
     def test_notes_timestamp_format(self):
-        import re
         result = self.formatter.format_for_app("Идея", "notes")
         self.assertRegex(result.splitlines()[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
 

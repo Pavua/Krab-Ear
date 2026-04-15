@@ -4,6 +4,7 @@
 тестируя напрямую helper-функцию _handle_ws_connection.
 """
 
+import backend.event_bus as _event_bus_mod
 import sys
 import json
 import queue
@@ -30,7 +31,6 @@ _fake_store.load_vocabulary.return_value = []
 _fake_metrics = MagicMock()
 _fake_metrics.get_summary.return_value = {}
 
-import backend.event_bus as _event_bus_mod
 
 Path("/tmp/krab_ear_test_ws/temp_uploads").mkdir(parents=True, exist_ok=True)
 
@@ -41,7 +41,7 @@ with patch.dict("sys.modules", {
     "backend.metrics_collector": MagicMock(metrics=_fake_metrics),
 }):
     with patch("core.config.settings") as _mock_settings, \
-         patch("backend.state_store.StateStore", return_value=_fake_store):
+            patch("backend.state_store.StateStore", return_value=_fake_store):
         _mock_settings.DATA_DIR = Path("/tmp/krab_ear_test_ws")
         _mock_settings.REST_API_KEY = ""
         import backend.rest_server as _rest_server_mod
@@ -83,7 +83,7 @@ class TestWsConnection(unittest.TestCase):
     def _run(self, ws, bus, type_filter=None):
         """Запускает _handle_ws_connection в фоновом потоке."""
         with patch.object(_rest_server_mod, "_WS_POLL_SEC", 0.05), \
-             patch.object(_rest_server_mod, "_WS_HEARTBEAT_SEC", 9999):
+                patch.object(_rest_server_mod, "_WS_HEARTBEAT_SEC", 9999):
             _handle(ws, bus, type_filter)
 
     # ------------------------------------------------------------------

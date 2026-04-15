@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 from typing import List, Dict
 
 

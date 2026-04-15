@@ -1,6 +1,8 @@
 """Тесты compare_periods — сравнение периодов использования Krab Ear."""
 
 from __future__ import annotations
+from backend.state_store import StateStore
+from backend.period_comparison import compare_periods, ComparisonReport, PeriodStats
 
 from datetime import date, timedelta
 from pathlib import Path
@@ -11,9 +13,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.period_comparison import compare_periods, ComparisonReport, PeriodStats
-from backend.state_store import StateStore
 
 
 class PeriodComparisonTestCase(unittest.TestCase):

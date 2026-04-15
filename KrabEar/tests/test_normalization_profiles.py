@@ -1,5 +1,10 @@
 """Тесты системы профилей нормализации текста."""
 
+from core.normalization_profiles import (
+    NormalizationProfileRegistry,
+    apply_profile,
+    list_profiles,
+)
 import sys
 import tempfile
 import unittest
@@ -10,14 +15,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.normalization_profiles import (
-    NormalizationProfile,
-    NormalizationProfileRegistry,
-    apply_profile,
-    list_profiles,
-    add_profile,
-)
 
 
 class TestBuiltinProfiles(unittest.TestCase):

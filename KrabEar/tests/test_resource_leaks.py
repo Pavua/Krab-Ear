@@ -5,28 +5,26 @@
 """
 
 from __future__ import annotations
+from core.pipeline.executor import PipelineExecutor
+from core.pipeline.context import PipelineContext
+from backend.playback_tracker import PlaybackTracker
+from backend.translation_cache import TranslationCache
+from backend.session_tracker import SessionTracker
+from backend.search_history import SearchHistoryManager, _MAX_ENTRIES as SEARCH_MAX
+from backend.event_replay import EventReplayManager, _MAX_BUFFER_SIZE as REPLAY_BUFFER_SIZE
+from backend.error_reporter import ErrorReporter, _BUFFER_SIZE as ERROR_BUFFER_SIZE
 
 import os
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.error_reporter import ErrorReporter, _BUFFER_SIZE as ERROR_BUFFER_SIZE
-from backend.event_replay import EventReplayManager, _MAX_BUFFER_SIZE as REPLAY_BUFFER_SIZE
-from backend.search_history import SearchHistoryManager, _MAX_ENTRIES as SEARCH_MAX
-from backend.session_tracker import SessionTracker
-from backend.translation_cache import TranslationCache
-from backend.playback_tracker import PlaybackTracker
-from core.pipeline.context import PipelineContext
-from core.pipeline.executor import PipelineExecutor
 
 
 # ---------------------------------------------------------------------------

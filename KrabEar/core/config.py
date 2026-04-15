@@ -25,33 +25,33 @@ class Settings(BaseSettings):
 
     # Директории
     DATA_DIR: Path = Path.home() / ".krab_ear_data"
-    
+
     # Модели STT
     MODEL_BALANCED: str = "mlx-community/whisper-large-v3-turbo"
     MODEL_MAX_CANDIDATES: str = "mlx-community/whisper-large-v3-mlx,mlx-community/whisper-large-v3-turbo"
-    
+
     # Промпты и язык
     TRANSCRIBE_PROMPT: str = "Ты транскрибируешь русскую речь. Сохраняй смысл, ставь корректную пунктуацию и заглавные буквы."
     TRANSCRIBE_LANGUAGE: str = "ru"
     HF_TOKEN: str = ""
     DIARIZATION_ENABLED: bool = True
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
-    
+
     # Сетевые настройки
     NETWORK_MODE: str = "offline_default"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
     STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
     AI_MODEL: str = "google/gemini-2.0-flash"
     STT_MODEL: str = "whisper-1"
-    
+
     # Лимиты
     MAX_AUDIO_MB: int = 50
     MAX_DURATION_SEC: int = 300
     TRANSCRIBE_TIMEOUT_SEC: int = 300
-    
+
     # TTS
     SAY_VOICE: str = ""
-    
+
     # Voice Gateway
     VOICE_GATEWAY_URL: str = "http://127.0.0.1:8090"
 
@@ -113,6 +113,7 @@ class Settings(BaseSettings):
         if self.MODEL_BALANCED not in parts:
             parts.append(self.MODEL_BALANCED)
         return parts
+
 
 # Singleton инстанс настроек
 settings = Settings()

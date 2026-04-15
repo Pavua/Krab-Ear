@@ -8,25 +8,23 @@ IPC-вызовы, операции с историей, поиск, экспор
 """
 
 from __future__ import annotations
+from core.pipeline.executor import PipelineExecutor
+from core.pipeline.context import PipelineContext
+from backend.auto_backup import AutoBackupManager
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
-import json
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
-from backend.auto_backup import AutoBackupManager
-from core.pipeline.context import PipelineContext
-from core.pipeline.executor import PipelineExecutor
 
 # ---------------------------------------------------------------------------
 # Вспомогательные константы
@@ -250,7 +248,7 @@ class ConcurrencyStressTestCase(unittest.TestCase):
         item = self.store.add_history_item(text="тегируемая запись", paste_status="ok")
 
         def tagger(thread_idx: int) -> None:
-            tags = [f"tag_{thread_idx}", f"shared_tag"]
+            tags = [f"tag_{thread_idx}", "shared_tag"]
             self.store.update_history_item_tags(item.id, tags)
 
         errors = _run_threads(tagger, [(i,) for i in range(NUM_THREADS)])

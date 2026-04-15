@@ -1,6 +1,14 @@
 """Тесты ActivityCalendar — GitHub-style contribution graph данные Krab Ear."""
 
 from __future__ import annotations
+from backend.activity_calendar import (
+    ActivityCalendar,
+    CalendarData,
+    _compute_level,
+    _compute_thresholds,
+    _count_words,
+    _parse_ts,
+)
 
 import sys
 import unittest
@@ -10,16 +18,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.activity_calendar import (
-    ActivityCalendar,
-    CalendarData,
-    DayActivity,
-    _compute_level,
-    _compute_thresholds,
-    _count_words,
-    _parse_ts,
-)
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ STT-модель, LLM, место на диске, хранилище истор
 """
 
 from __future__ import annotations
+from KrabEar.__version__ import __version__ as VERSION
 
 import shutil
 import time
@@ -18,7 +19,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.HealthChecker")
 
-from KrabEar.__version__ import __version__ as VERSION
 
 # Порог «мало места» — 2 ГБ
 DISK_WARN_GB = 2.0

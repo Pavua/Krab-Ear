@@ -1,6 +1,8 @@
 """Тесты handle_export_history_markdown — экспорт транскрипций в Markdown."""
 
 from __future__ import annotations
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 from pathlib import Path
 import sys
@@ -10,9 +12,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
 
 
 class MarkdownExportBasicTestCase(unittest.TestCase):

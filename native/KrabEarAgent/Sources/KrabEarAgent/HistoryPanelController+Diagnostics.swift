@@ -110,11 +110,12 @@ extension HistoryPanelController {
     @objc func onTestMicrophone() {
         micTestResultLabel.stringValue = "Тестирование..."
         micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            guard let response = try? self.ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
+            guard let response = try? ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
                   let result = response["result"] as? [String: Any] else {
                 DispatchQueue.main.async {
+                    guard let self = self else { return }
                     self.micTestResultLabel.stringValue = "Ошибка теста"
                     self.micTestResultLabel.textColor = KrabEarTheme.Colors.error
                 }
@@ -124,6 +125,7 @@ extension HistoryPanelController {
             let peak = result["peak"] as? Double ?? 0
             let status = rms > 0.01 ? "OK" : "Тихо"
             DispatchQueue.main.async {
+                guard let self = self else { return }
                 self.micTestResultLabel.stringValue = String(format: "RMS: %.3f | Peak: %.3f | %@", rms, peak, status)
                 self.micTestResultLabel.textColor = rms > 0.01 ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.warning
             }

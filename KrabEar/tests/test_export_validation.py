@@ -13,6 +13,10 @@
 """
 
 from __future__ import annotations
+from backend.rest_server import _build_prometheus_text
+from backend.timeline_export import TimelineExporter
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 import csv
 import io
@@ -26,11 +30,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
-from backend.timeline_export import TimelineExporter
-from backend.rest_server import _build_prometheus_text
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +268,7 @@ class SrtExportValidationTestCase(unittest.TestCase):
         content = result["content"]
         lines = content.strip().split("\n")
         # Первая непустая строка должна быть "1"
-        non_empty = [l for l in lines if l.strip()]
+        non_empty = [ln for ln in lines if ln.strip()]
         self.assertEqual(non_empty[0].strip(), "1")
 
     def test_srt_timestamps_format(self) -> None:
@@ -283,7 +282,7 @@ class SrtExportValidationTestCase(unittest.TestCase):
             r"^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$"
         )
         lines = content.strip().split("\n")
-        ts_lines = [l for l in lines if " --> " in l]
+        ts_lines = [ln for ln in lines if " --> " in ln]
         self.assertGreater(len(ts_lines), 0, "Не найдено ни одной строки с timestamp")
         for ts_line in ts_lines:
             self.assertRegex(
@@ -454,7 +453,7 @@ class ObsidianExportValidationTestCase(unittest.TestCase):
         )
         # Должно быть как минимум две строки --- (открывающая и закрывающая)
         lines = content.split("\n")
-        dashes_count = sum(1 for l in lines if l.strip() == "---")
+        dashes_count = sum(1 for ln in lines if ln.strip() == "---")
         self.assertGreaterEqual(dashes_count, 2)
 
     def test_obsidian_has_tags_in_frontmatter(self) -> None:

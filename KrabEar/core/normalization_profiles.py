@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import textwrap
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,7 @@ _BUILTIN_PROFILES: list[dict[str, Any]] = [
 ]
 
 # ── Движок правил ───────────────────────────────────────────────────────────
+
 
 def _apply_rule(text: str, rule: str) -> str:
     """Применяет одно именованное правило к тексту."""

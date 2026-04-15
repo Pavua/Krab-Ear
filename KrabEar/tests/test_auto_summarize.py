@@ -1,22 +1,19 @@
 """Тесты handle_auto_summarize_batch в HistoryService."""
 
 from __future__ import annotations
+from backend.llm_rewriter import LLMRewriteResult
+from backend.state_store import StateStore
+from backend.history_service import HistoryService
 
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.history_service import HistoryService
-from backend.state_store import StateStore
-from backend.llm_rewriter import LLMRewriteResult
 
 
 # ---------------------------------------------------------------------------

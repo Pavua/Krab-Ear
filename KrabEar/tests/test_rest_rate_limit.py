@@ -252,7 +252,7 @@ class TestRateLimitExceeded(unittest.TestCase):
         """429 должен возвращать JSON с error и retry_after."""
         # Тестируем обработчик ошибки напрямую
         with _app.test_request_context("/health"):
-            from flask import jsonify as flask_jsonify
+            pass
             # Тестируем сам обработчик ошибки
             mock_exc = MagicMock()
             mock_exc.description.retry_after.total_seconds.return_value = 45.3

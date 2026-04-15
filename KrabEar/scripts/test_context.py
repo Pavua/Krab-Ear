@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import requests
-import json
 import time
 
 URL_BASE = "http://127.0.0.1:5005"
 API_STT = f"{URL_BASE}/v1/stt/transcribe"
 API_VOCAB = f"{URL_BASE}/v1/vocabulary"
+
 
 def test_context():
     # 1. Добавляем слово в словарь
@@ -27,12 +27,13 @@ def test_context():
             "vocabulary": "Python, MLX"
         }
         res = requests.post(API_STT, files={"file": f}, data=data)
-    
+
     print(f"Status: {res.status_code}")
     if res.status_code == 200:
         print(f"Result: {res.json().get('text')}")
     else:
         print(f"Error: {res.text}")
+
 
 if __name__ == "__main__":
     test_context()

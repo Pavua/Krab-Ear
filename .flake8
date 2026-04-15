@@ -1,0 +1,18 @@
+[flake8]
+max-line-length = 150
+extend-ignore =
+    # E501: line too long — ignored project-wide
+    E501
+exclude =
+    KrabEar/.venv,
+    KrabEar/tests/__pycache__,
+    .venv_krab_ear,
+    # legacy Tkinter UI — устарело, не валидируется
+    KrabEar/_legacy_tkinter_archive_2026-02-11,
+    # build / cache
+    .git,
+    __pycache__,
+    *.egg-info
+per-file-ignores =
+    # Тесты требуют sys.path.insert перед импортами — E402 легитимен
+    KrabEar/tests/*.py: E402

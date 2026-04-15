@@ -19,6 +19,11 @@ Covers:
 """
 
 from __future__ import annotations
+from core.pipeline.stages.audio_normalization import AudioNormalizationStage
+from core.pipeline.bridge import transcribe_v2
+from core.pipeline.factory import create_default_pipeline
+from core.pipeline.context import PipelineContext
+import numpy as np
 
 import os
 import sys
@@ -31,19 +36,6 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import numpy as np
-
-from core.pipeline.context import PipelineContext, StageMetric
-from core.pipeline.executor import PipelineExecutor
-from core.pipeline.factory import create_default_pipeline
-from core.pipeline.bridge import transcribe_v2
-from core.pipeline.stages.audio_normalization import AudioNormalizationStage
-from core.pipeline.stages.stt import STTStage
-from core.pipeline.stages.diarization import DiarizationStage
-from core.pipeline.stages.text_cleanup import TextCleanupStage
-from core.pipeline.stages.llm_rewrite import LLMRewriteStage
-from core.pipeline.stages.translation import TranslationStage
 
 
 # ---------------------------------------------------------------------------

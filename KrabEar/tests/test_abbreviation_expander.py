@@ -4,6 +4,7 @@
     PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_abbreviation_expander.py -v
 """
 
+from core.abbreviation_expander import AbbreviationExpander
 import sys
 import os
 import json
@@ -14,8 +15,6 @@ from pathlib import Path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.abbreviation_expander import AbbreviationExpander
 
 
 class TestExpandRussianBuiltins(unittest.TestCase):
@@ -264,7 +263,7 @@ class TestCustomAbbreviations(unittest.TestCase):
         """Аббревиатуры с флагом no_after_digit не раскрываются после числа."""
         self.expander.add_abbreviation("кв.", "квадратный", language="ru", flags="no_after_digit")
         # После числа — не раскрывать
-        result = self.expander.expand("площадь 25 кв.", language="ru")
+        _result = self.expander.expand("площадь 25 кв.", language="ru")  # noqa: F841
         # Перед текстом — раскрывать
         result2 = self.expander.expand("купил кв. метров", language="ru")
         # Только второй случай должен быть расширен

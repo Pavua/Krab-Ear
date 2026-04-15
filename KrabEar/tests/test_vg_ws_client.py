@@ -1,17 +1,16 @@
 """Unit-тесты для VGWebSocketClient."""
+from backend.vg_ws_client import VGWebSocketClient, _RECONNECT_BASE_SEC
 import sys
 import os
 import asyncio
 import json
 import unittest
-from unittest.mock import patch, AsyncMock, MagicMock, call
+from unittest.mock import patch, AsyncMock, MagicMock
 from contextlib import asynccontextmanager
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from backend.vg_ws_client import VGWebSocketClient, _RECONNECT_BASE_SEC
 
 
 class TestVGWebSocketClient(unittest.TestCase):

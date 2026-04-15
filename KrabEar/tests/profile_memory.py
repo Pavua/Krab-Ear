@@ -1,6 +1,8 @@
 """Профилирование памяти Krab Ear — замер накладных расходов фреймворка без ML-моделей."""
 
 from __future__ import annotations
+from backend.translator import TranslationResult
+import numpy as np
 
 import sys
 import tempfile
@@ -16,10 +18,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 # Фейковые коллабораторы (без ML, без сети)
 # ---------------------------------------------------------------------------
-
-import numpy as np
-
-from backend.translator import TranslationResult
 
 
 class FakeRecorder:
@@ -156,10 +154,10 @@ def main() -> None:
         return f"{b / 1024 / 1024:.2f} MB"
 
     rows = [
-        ("baseline",                    baseline_current),
-        ("после импортов",              after_import_current),
-        ("после создания сервиса",      after_init_current),
-        ("после 1000 записей истории",  after_load_current),
+        ("baseline", baseline_current),
+        ("после импортов", after_import_current),
+        ("после создания сервиса", after_init_current),
+        ("после 1000 записей истории", after_load_current),
     ]
 
     for label, val in rows:

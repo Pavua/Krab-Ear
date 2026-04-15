@@ -14,6 +14,7 @@
 """
 
 from __future__ import annotations
+from backend.settings_service import SettingsService
 
 import json
 import sys
@@ -25,8 +26,6 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.settings_service import SettingsService
 
 
 def _make_store(settings: dict | None = None) -> MagicMock:
@@ -69,7 +68,7 @@ class TestExportSettings(unittest.TestCase):
         svc = self._svc()
         with tempfile.TemporaryDirectory() as tmp:
             out = str(Path(tmp) / "export.json")
-            result = svc.handle_export_settings({"file": out})
+            _result = svc.handle_export_settings({"file": out})  # noqa: F841
             with open(out) as f:
                 data = json.load(f)
 

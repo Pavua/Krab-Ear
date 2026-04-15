@@ -5,6 +5,14 @@
 """
 
 from __future__ import annotations
+from core.pipeline.stages.audio_normalization import AudioNormalizationStage
+from core.pipeline.context import PipelineContext
+from core.fuzzy_search import FuzzySearcher
+from core.confidence_calibrator import ConfidenceCalibrator
+from core.text_anonymizer import TextAnonymizer
+from core.search_index import SearchIndex
+from core.punctuation_fixer import PunctuationFixer
+from core.utils import TextUtils, _HALLUCINATION_PATTERNS
 
 import os
 import random
@@ -18,14 +26,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.utils import TextUtils, _HALLUCINATION_PATTERNS
-from core.punctuation_fixer import PunctuationFixer
-from core.search_index import SearchIndex
-from core.text_anonymizer import TextAnonymizer
-from core.confidence_calibrator import ConfidenceCalibrator
-from core.fuzzy_search import FuzzySearcher
-from core.pipeline.context import PipelineContext
-from core.pipeline.stages.audio_normalization import AudioNormalizationStage
 
 # ── Генераторы случайных данных ───────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ def _rand_sentence(min_words: int = 3, max_words: int = 12, *, rng: random.Rando
 
 def _rand_audio(length: int | None = None, *, rng: random.Random = RNG) -> np.ndarray:
     n = length or rng.randint(256, 8000)
-    data = rng.gauss(0, 0.3)
+    rng.gauss(0, 0.3)
     arr = np.array(
         [rng.gauss(0, 0.3) for _ in range(n)], dtype=np.float32
     )
@@ -101,7 +101,6 @@ class TestCleanupTranscriptProperties(unittest.TestCase):
 
     def test_no_hallucination_patterns_in_output(self):
         """After cleanup, none of the known hallucination patterns remain."""
-        import re
         for ending in HALLUCINATION_ENDINGS:
             for _ in range(10):
                 prefix = _rand_sentence(3, 8)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -134,8 +133,8 @@ class StatsReportGenerator:
 
         # Заголовок
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        sections.append(f"# Krab Ear — Статистический отчёт")
-        sections.append(f"")
+        sections.append("# Krab Ear — Статистический отчёт")
+        sections.append("")
         sections.append(f"**Период:** последние {days} дней  ")
         sections.append(f"**Сгенерирован:** {now_str}  ")
         sections.append(f"**Всего записей в истории:** {len(items)}")
@@ -233,8 +232,8 @@ class StatsReportGenerator:
         lines: list[str] = []
         lines.append("## 1. Обзор")
         lines.append("")
-        lines.append(f"| Метрика | Значение |")
-        lines.append(f"|---------|----------|")
+        lines.append("| Метрика | Значение |")
+        lines.append("|---------|----------|")
         lines.append(f"| Записей за период | **{total}** |")
         lines.append(f"| Всего слов | **{total_words:,}** |")
         lines.append(f"| Суммарно часов аудио | **{total_hours:.2f} ч** |")
@@ -452,10 +451,10 @@ class StatsReportGenerator:
 
         sorted_speakers = sorted(speaker_duration.items(), key=lambda x: -x[1])
         total_dur = sum(speaker_duration.values())
-        max_dur = sorted_speakers[0][1] if sorted_speakers else 1.0
+        sorted_speakers[0][1] if sorted_speakers else 1.0
 
-        lines.append(f"| Спикер | Время (мин) | Доля | Реплик |")
-        lines.append(f"|--------|-------------|------|--------|")
+        lines.append("| Спикер | Время (мин) | Доля | Реплик |")
+        lines.append("|--------|-------------|------|--------|")
         for speaker, dur_sec in sorted_speakers[:10]:
             dur_min = dur_sec / 60.0
             pct = dur_sec / total_dur * 100 if total_dur > 0 else 0
@@ -499,8 +498,8 @@ class StatsReportGenerator:
                 if colls:
                     lines.append("**Коллекции:**")
                     lines.append("")
-                    lines.append(f"| Название | Записей |")
-                    lines.append(f"|----------|---------|")
+                    lines.append("| Название | Записей |")
+                    lines.append("|----------|---------|")
                     for cname, cdata in colls.items():
                         item_count = len(cdata.get("item_ids", []))
                         lines.append(f"| {cname} | {item_count} |")
@@ -548,8 +547,8 @@ class StatsReportGenerator:
                 if f.is_file()
             ) if backups_dir.exists() else 0.0
 
-            lines.append(f"| Файл | Размер |")
-            lines.append(f"|------|--------|")
+            lines.append("| Файл | Размер |")
+            lines.append("|------|--------|")
             for label, size_kb in sorted(files_info, key=lambda x: -x[1])[:10]:
                 lines.append(f"| {label} | {size_kb:.1f} KB |")
             lines.append(f"| **Итого (основные файлы)** | **{total_kb:.1f} KB** |")
@@ -608,8 +607,8 @@ class StatsReportGenerator:
         high_quality = sum(1 for c in confidences if c >= 0.9)
         hq_rate = high_quality / len(confidences) * 100 if confidences else 0
 
-        lines.append(f"| Показатель | Значение |")
-        lines.append(f"|------------|----------|")
+        lines.append("| Показатель | Значение |")
+        lines.append("|------------|----------|")
         lines.append(f"| Успешных вставок | {pasted_ok}/{total} ({paste_rate:.0f}%) |")
         lines.append(f"| Обработано LLM | {llm_count}/{total} ({llm_rate:.0f}%) |")
         lines.append(f"| Среднее слов/запись | {avg_words:.0f} |")

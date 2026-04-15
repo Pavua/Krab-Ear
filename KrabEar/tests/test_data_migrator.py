@@ -1,6 +1,13 @@
 """Unit-тесты для DataMigrator Krab Ear."""
 
 from __future__ import annotations
+from backend.data_migrator import (
+    DataMigrator,
+    MigrationResult,
+    LATEST_VERSION,
+    _detect_version_from_items,
+    _read_ndjson,
+)
 
 import json
 import sys
@@ -11,14 +18,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.data_migrator import (
-    DataMigrator,
-    MigrationResult,
-    LATEST_VERSION,
-    _detect_version_from_items,
-    _read_ndjson,
-)
 
 
 def _write_ndjson(path: Path, items: list[dict]) -> None:
@@ -186,7 +185,7 @@ class TestMigrateV1ToV2(unittest.TestCase):
         history_path = self._tmpdir / "history.ndjson"
         _write_ndjson(history_path, [_make_v1_item("id1"), _make_v1_item("id2")])
 
-        result = self._migrator.migrate(self._tmpdir)
+        self._migrator.migrate(self._tmpdir)
 
         items = _read_ndjson(history_path)
         for item in items:

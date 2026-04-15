@@ -45,9 +45,9 @@ try:
     }
 
     with patch("core.engine.AudioEngine", return_value=_mock_engine), \
-         patch("backend.state_store.StateStore", return_value=_mock_store), \
-         patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
-         patch("backend.metrics_collector.metrics", _mock_metrics):
+            patch("backend.state_store.StateStore", return_value=_mock_store), \
+            patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
+            patch("backend.metrics_collector.metrics", _mock_metrics):
         from backend.rest_server import app, _format_uptime, _status_dot_color, _build_dashboard_html
 
     _REST_AVAILABLE = True
@@ -457,7 +457,7 @@ def _build_dashboard_html_with_data(health_data: dict) -> str:
 <meta http-equiv="refresh" content="30">
 <title>Krab Ear — Health Dashboard</title>
 </head><body>
-<div class="overall-badge">{health_data.get('status','unknown')}</div>
+<div class="overall-badge">{health_data.get('status', 'unknown')}</div>
 <h2>Health Checks</h2><table>{checks_html}</table>
 <h2>System Resources</h2>
 <h2>Recent Metrics</h2>

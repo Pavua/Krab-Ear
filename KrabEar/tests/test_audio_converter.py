@@ -5,6 +5,9 @@ ffmpeg-зависимые тесты пропускаются если бина�
 """
 
 from __future__ import annotations
+from core.audio_converter import AudioConverter, AudioInfo, SUPPORTED_FORMATS
+import soundfile as sf
+import numpy as np
 
 import os
 import sys
@@ -15,11 +18,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import numpy as np
-import soundfile as sf
-
-from core.audio_converter import AudioConverter, AudioInfo, SUPPORTED_FORMATS
 
 
 def _make_wav(path: str, duration: float = 1.0, sample_rate: int = 16000, channels: int = 1) -> str:

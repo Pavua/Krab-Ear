@@ -1,6 +1,7 @@
 """Тесты GainNormalizer — нормализация усиления аудио перед STT."""
 
 from __future__ import annotations
+from core.gain_normalizer import GainNormalizer, GainResult, _rms_db, _db_to_linear
 
 import math
 import sys
@@ -14,7 +15,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.gain_normalizer import GainNormalizer, GainResult, _rms_db, _db_to_linear
 
 SR = 16000  # стандартная частота для тестов
 

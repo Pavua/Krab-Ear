@@ -51,7 +51,7 @@ def create_default_pipeline(
             def settings_get(key: str, default: Any = None) -> Any:  # type: ignore[misc]
                 return getattr(_settings, key.upper(), default)
         except Exception:
-            settings_get = lambda k, d=None: d  # noqa: E731
+            def settings_get(k, d=None): return d  # noqa: E731
 
     # Автоматически подбираем diarization_fn из engine если не задана явно
     if diarization_fn is None and hasattr(engine, "run_diarization"):

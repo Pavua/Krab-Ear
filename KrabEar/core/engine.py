@@ -20,12 +20,31 @@ from pathlib import Path
 if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
 
-import mlx_whisper
 import numpy as np
 import requests
-import soundfile as sf
-import torch
-from pyannote.audio import Pipeline
+
+# Heavy optional dependencies — недоступны на Linux CI (mlx only Apple Silicon)
+# и/или требуют system libs (soundfile→libsndfile, torch→CUDA).
+# Оборачиваем в try/except чтобы test discovery проходил на Ubuntu.
+try:
+    import mlx_whisper  # type: ignore
+except ImportError:
+    mlx_whisper = None  # type: ignore[assignment]
+
+try:
+    import soundfile as sf  # type: ignore
+except ImportError:
+    sf = None  # type: ignore[assignment]
+
+try:
+    import torch  # type: ignore
+except ImportError:
+    torch = None  # type: ignore[assignment]
+
+try:
+    from pyannote.audio import Pipeline  # type: ignore
+except ImportError:
+    Pipeline = None  # type: ignore[assignment,misc]
 
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
@@ -68,6 +87,7 @@ def _get_available_memory_gb() -> float:
         return (free_pages + inactive_pages) * page_size / (1024 ** 3)
     except Exception:
         return -1.0
+
 
 class AudioEngine:
     """Сервисный слой для STT ( Speech-to-Text) и TTS (Text-to-Speech)."""
@@ -148,12 +168,12 @@ class AudioEngine:
         try:
             data, samplerate = sf.read(audio_path)
             if len(data.shape) > 1:
-                data = data.mean(axis=1) # Стерео в моно
-            
+                data = data.mean(axis=1)  # Стерео в моно
+
             rms = np.sqrt(np.mean(data**2))
             if rms < 1e-6:
-                return True # Тишина
-            
+                return True  # Тишина
+
             gain = 0.1 / rms
             normalized_data = np.clip(data * gain, -1.0, 1.0)
             sf.write(audio_path, normalized_data, samplerate)
@@ -721,7 +741,8 @@ class AudioEngine:
 
     def speak(self, text: str, rate: int = 185) -> None:
         """Озвучка текста через macOS `say`."""
-        if not text.strip(): return
+        if not text.strip():
+            return
         cmd = ["say", "-r", str(rate)]
         if settings.SAY_VOICE:
             import re as _re

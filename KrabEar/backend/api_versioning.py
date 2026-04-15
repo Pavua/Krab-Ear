@@ -7,7 +7,6 @@ response header injection, deprecation signalling, and version metadata.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from flask import request, Response
 

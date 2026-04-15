@@ -1,6 +1,8 @@
 """Тесты QualityTrendAnalyzer — анализ трендов качества Krab Ear."""
 
 from __future__ import annotations
+from backend.state_store import StateStore
+from backend.quality_trends import QualityTrendAnalyzer, TrendReport
 
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -11,9 +13,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.quality_trends import QualityTrendAnalyzer, TrendReport
-from backend.state_store import StateStore
 
 
 def _make_item(days_ago: int, confidence: float):

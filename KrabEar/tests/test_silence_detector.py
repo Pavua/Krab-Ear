@@ -4,6 +4,7 @@
 """
 
 from __future__ import annotations
+from core.silence_detector import SilenceDetector, SilenceRegion, _db_to_amplitude
 
 import sys
 import unittest
@@ -17,8 +18,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.silence_detector import SilenceDetector, SilenceRegion, _db_to_amplitude
 
 
 SAMPLE_RATE = 16000  # Гц

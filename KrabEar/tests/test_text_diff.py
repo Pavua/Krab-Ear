@@ -1,5 +1,6 @@
 """Tests for KrabEar/core/text_diff.py — TextDiffAnalyzer."""
 
+from core.text_diff import TextDiffAnalyzer, TextDiffResult, DiffChange
 import sys
 import os
 import unittest
@@ -8,8 +9,6 @@ import unittest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.text_diff import TextDiffAnalyzer, TextDiffResult, DiffChange
 
 
 class TestTextDiffAnalyzerIdentical(unittest.TestCase):

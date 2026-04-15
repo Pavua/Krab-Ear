@@ -16,29 +16,10 @@ All socket calls are mocked — no backend required.
 """
 
 from __future__ import annotations
-
-import importlib
-import io
-import json
-import os
-import socket
-import sys
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-import cli as cli_module
 from cli import (
-    _c,
     _ipc_call,
     _resolve_socket,
     _unwrap,
-    bold,
     build_parser,
     cmd_export,
     cmd_health,
@@ -46,12 +27,21 @@ from cli import (
     cmd_stats,
     cmd_status,
     cmd_transcribe,
-    cyan,
-    dim,
-    green,
-    red,
-    yellow,
 )
+import cli as cli_module
+
+import io
+import os
+import socket
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -268,7 +258,7 @@ class TestIpcCallErrors(unittest.TestCase):
         mock_sock.connect.side_effect = exc
 
         with patch("socket.socket", return_value=mock_sock), \
-             patch.object(cli_module, "_DEFAULT_SOCKET_PATHS", [Path("/tmp/fake.sock")]):
+                patch.object(cli_module, "_DEFAULT_SOCKET_PATHS", [Path("/tmp/fake.sock")]):
             buf = io.StringIO()
             with patch("sys.stderr", buf):
                 with self.assertRaises(SystemExit) as ctx:
@@ -297,7 +287,7 @@ class TestIpcCallErrors(unittest.TestCase):
         mock_sock.recv.side_effect = [b"not json\n", b""]
 
         with patch("socket.socket", return_value=mock_sock), \
-             patch.object(cli_module, "_DEFAULT_SOCKET_PATHS", [Path("/tmp/fake.sock")]):
+                patch.object(cli_module, "_DEFAULT_SOCKET_PATHS", [Path("/tmp/fake.sock")]):
             buf = io.StringIO()
             with patch("sys.stderr", buf):
                 with self.assertRaises(SystemExit):
@@ -501,6 +491,7 @@ class TestCmdHistory(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_limit_sent_to_ipc(self, mock_ipc):
         captured = []
+
         def cap(method, params=None, sock_path=None):
             captured.append((method, params))
             return _ok({"items": []})
@@ -515,7 +506,7 @@ class TestCmdHistory(unittest.TestCase):
         mock_ipc.side_effect = _dispatch(
             get_history_page={"items": [
                 {"text": "Alpha", "created_at": "2026-01-01T10:00:00"},
-                {"text": "Beta",  "created_at": "2026-01-01T10:01:00"},
+                {"text": "Beta", "created_at": "2026-01-01T10:01:00"},
                 {"text": "Gamma", "created_at": "2026-01-01T10:02:00"},
             ]}
         )
@@ -558,6 +549,7 @@ class TestCmdExport(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_srt_calls_correct_method(self, mock_ipc):
         called = []
+
         def cap(method, params=None, sock_path=None):
             called.append(method)
             return _ok({"content": "1\n00:00:00,000 --> 00:00:01,000\nHello\n"})
@@ -569,6 +561,7 @@ class TestCmdExport(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_obsidian_calls_correct_method(self, mock_ipc):
         called = []
+
         def cap(method, params=None, sock_path=None):
             called.append(method)
             return _ok({"content": "# Obsidian note"})
@@ -835,6 +828,7 @@ class TestCmdTranscribe(unittest.TestCase):
     @patch("cli._ipc_call")
     def test_transcribe_passes_resolved_path(self, mock_ipc):
         received = []
+
         def cap(method, params=None, sock_path=None):
             received.append((method, params))
             return _ok({"results": [{"text": "ok"}]})

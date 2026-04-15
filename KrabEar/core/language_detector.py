@@ -13,6 +13,7 @@ from dataclasses import dataclass
 # Публичные типы
 # ---------------------------------------------------------------------------
 
+
 @dataclass(slots=True)
 class LanguageResult:
     """Результат определения языка."""

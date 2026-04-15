@@ -14,21 +14,19 @@
 """
 
 from __future__ import annotations
+from core.pipeline.executor import PipelineExecutor
+from core.pipeline.context import PipelineContext
+from core.pipeline.stage_cache import StageCache
 
 import sys
 import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.pipeline.stage_cache import StageCache
-from core.pipeline.context import PipelineContext
-from core.pipeline.executor import PipelineExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +236,8 @@ class TestStageCacheStats(unittest.TestCase):
         self.cache.put("stt", "h1", {"raw_text": "ok"}, ttl_sec=300)
         self.cache.get("stt", "h1")   # hit
         self.cache.get("stt", "h1")   # hit
-        self.cache.get("stt", "h999") # miss
-        self.cache.get("other", "h1") # miss
+        self.cache.get("stt", "h999")  # miss
+        self.cache.get("other", "h1")  # miss
 
         stats = self.cache.get_stats()
         self.assertEqual(stats["hits"], 2)

@@ -52,7 +52,7 @@ def generate_test_wav(duration_sec: int = DURATION_SEC, sample_rate: int = SAMPL
         _wf.write(tmp_path, sample_rate, audio_int16)
     else:
         # Pure stdlib fallback — write minimal WAV header manually
-        import struct, wave
+        import wave
         with wave.open(tmp_path, "w") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)  # 16-bit
@@ -98,8 +98,8 @@ def benchmark_stt(iterations: int = 3) -> None:
     latencies_ms: list[float] = []
     results: list[dict] = []
 
-    print(f"{'#':>3}  {'Latency':>10}  {'Текст (обрезан до 60 симв.)' }")
-    print(f"{'─'*3}  {'─'*10}  {'─'*60}")
+    print(f"{'#':>3}  {'Latency':>10}  {'Текст (обрезан до 60 симв.)'}")
+    print(f"{'─' * 3}  {'─' * 10}  {'─' * 60}")
 
     try:
         for i in range(iterations):
@@ -116,11 +116,11 @@ def benchmark_stt(iterations: int = 3) -> None:
                 text = result.get("text", "").strip() if isinstance(result, dict) else str(result).strip()
                 tag = "COLD" if i == 0 else "WARM"
                 display_text = (text[:57] + "...") if len(text) > 60 else text or "(пусто)"
-                print(f"{i+1:>3}  [{tag}] {latency_ms:>7.0f} ms  {display_text}")
+                print(f"{i + 1:>3}  [{tag}] {latency_ms:>7.0f} ms  {display_text}")
             except Exception as exc:
                 latency_ms = (time.monotonic() - iter_start) * 1000
                 tag = "COLD" if i == 0 else "WARM"
-                print(f"{i+1:>3}  [{tag}] {latency_ms:>7.0f} ms  ERROR: {exc}")
+                print(f"{i + 1:>3}  [{tag}] {latency_ms:>7.0f} ms  ERROR: {exc}")
                 text = f"ERROR: {exc}"
 
             latencies_ms.append(latency_ms)
@@ -145,16 +145,16 @@ def benchmark_stt(iterations: int = 3) -> None:
     warm_latencies = latencies_ms[1:] if len(latencies_ms) > 1 else latencies_ms
     warm_avg_ms = sum(warm_latencies) / len(warm_latencies)
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("  РЕЗУЛЬТАТЫ")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
     print(f"  Cold (1-я итерация)  : {cold_ms:>8.0f} ms")
     print(f"  Warm avg (2+)        : {warm_avg_ms:>8.0f} ms")
     print(f"  Avg (все итерации)   : {avg_ms:>8.0f} ms")
     print(f"  p95                  : {p95_ms:>8.0f} ms")
     print(f"  Max                  : {max_ms:>8.0f} ms")
     print(f"  AudioEngine load     : {load_ms:>8} ms")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     # RTF (Real-Time Factor): latency / audio_duration — <1.0 is real-time capable
     audio_duration_ms = DURATION_SEC * 1000

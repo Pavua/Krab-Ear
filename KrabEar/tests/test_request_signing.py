@@ -19,6 +19,12 @@
 """
 
 from __future__ import annotations
+from backend.request_signing import (
+    MAX_NONCES,
+    TIMESTAMP_WINDOW_SEC,
+    RequestSigner,
+    SignedRequest,
+)
 
 import sys
 import time
@@ -28,13 +34,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.request_signing import (
-    MAX_NONCES,
-    TIMESTAMP_WINDOW_SEC,
-    RequestSigner,
-    SignedRequest,
-)
 
 
 class TestGenerateSecret(unittest.TestCase):

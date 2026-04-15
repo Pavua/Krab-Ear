@@ -5,7 +5,6 @@ import os
 import re
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------

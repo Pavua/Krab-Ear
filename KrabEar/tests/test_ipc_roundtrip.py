@@ -1,6 +1,10 @@
 """Интеграционные тесты IPC roundtrip: handle_request принимает JSON-RPC-подобные дикты и возвращает структурированные ответы."""
 
 from __future__ import annotations
+from KrabEar.__version__ import __version__ as APP_VERSION
+from backend.translator import TranslationResult
+from backend.state_store import StateStore
+from backend.service import BackendService
 
 import sys
 import tempfile
@@ -12,11 +16,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.service import BackendService
-from backend.state_store import StateStore
-from backend.translator import TranslationResult
-from KrabEar.__version__ import __version__ as APP_VERSION
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Тесты для InputSanitizer — санитизация IPC-параметров Krab Ear."""
 
+from backend.input_sanitizer import InputSanitizer
 import sys
-import os
 import unittest
 from pathlib import Path
 
@@ -9,8 +9,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
 if str(KRAB_EAR_ROOT) not in sys.path:
     sys.path.insert(0, str(KRAB_EAR_ROOT))
-
-from backend.input_sanitizer import InputSanitizer
 
 
 class TestSanitizeString(unittest.TestCase):

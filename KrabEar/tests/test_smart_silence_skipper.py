@@ -4,6 +4,7 @@
 """
 
 from __future__ import annotations
+from core.smart_silence_skipper import SmartSilenceSkipper, SkipResult
 
 import sys
 import unittest
@@ -18,7 +19,6 @@ for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from core.smart_silence_skipper import SmartSilenceSkipper, SkipResult
 
 SAMPLE_RATE = 16000  # Гц
 

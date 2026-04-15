@@ -196,12 +196,13 @@ extension HistoryPanelController {
     // MARK: - IPC Helper
 
     private func executeIPC(method: String, params: [String: Any] = [:], completion: @escaping @MainActor (String) -> Void) {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         let methodCopy = method
-        let paramsCopy = params
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        nonisolated(unsafe) let paramsCopy = params
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let response = try self?.ipcClient.call(method: methodCopy, params: paramsCopy)
-                let output = response?.description ?? ""
+                let response = try ipcClient.call(method: methodCopy, params: paramsCopy)
+                let output = response.description
                 DispatchQueue.main.async {
                     completion(output)
                 }

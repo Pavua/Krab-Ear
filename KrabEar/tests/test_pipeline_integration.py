@@ -7,31 +7,27 @@ Tests:
 """
 
 from __future__ import annotations
+from core.pipeline.stages.translation import TranslationStage
+from core.pipeline.stages.llm_rewrite import LLMRewriteStage
+from core.pipeline.stages.text_cleanup import TextCleanupStage
+from core.pipeline.stages.diarization import DiarizationStage
+from core.pipeline.stages.stt import STTStage
+from core.pipeline.stages.audio_normalization import AudioNormalizationStage
+from core.pipeline.bridge import transcribe_v2
+from core.pipeline.factory import create_default_pipeline
+from core.pipeline.executor import PipelineExecutor
+from core.pipeline.context import PipelineContext
+import numpy as np
 
 import sys
-import os
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 # --- path setup ---
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import numpy as np
-
-from core.pipeline.context import PipelineContext
-from core.pipeline.executor import PipelineExecutor
-from core.pipeline.factory import create_default_pipeline
-from core.pipeline.bridge import transcribe_v2
-from core.pipeline.stages.audio_normalization import AudioNormalizationStage
-from core.pipeline.stages.stt import STTStage
-from core.pipeline.stages.diarization import DiarizationStage
-from core.pipeline.stages.text_cleanup import TextCleanupStage
-from core.pipeline.stages.llm_rewrite import LLMRewriteStage
-from core.pipeline.stages.translation import TranslationStage
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +116,7 @@ class TestCreateDefaultPipeline(unittest.TestCase):
 
     def test_custom_diarization_fn_injected(self):
         engine = _make_engine()
-        custom_fn = lambda path: []  # noqa: E731
+        def custom_fn(path): return []  # noqa: E731
         pipeline = create_default_pipeline(engine, diarization_fn=custom_fn)
         diar_stage: DiarizationStage = pipeline._stages[2]
         self.assertIs(diar_stage._diarization_fn, custom_fn)

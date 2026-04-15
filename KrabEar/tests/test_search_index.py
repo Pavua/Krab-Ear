@@ -1,5 +1,6 @@
 """Тесты для SearchIndex (KrabEar/core/search_index.py)."""
 
+from core.search_index import SearchIndex, SearchResult, _stem_ru, _tokenize
 import sys
 import os
 import unittest
@@ -8,8 +9,6 @@ import unittest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.search_index import SearchIndex, SearchResult, _stem_ru, _tokenize
 
 
 def _make_item(item_id: str, text: str, translated: str = "", source: str = "") -> dict:

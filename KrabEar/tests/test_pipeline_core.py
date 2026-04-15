@@ -1,5 +1,8 @@
 """Tests for PipelineContext, PipelineStage protocol, and PipelineExecutor."""
 
+from core.pipeline.executor import PipelineExecutor
+from core.pipeline.base import PipelineStage
+from core.pipeline.context import PipelineContext, StageMetric
 import sys
 import os
 import unittest
@@ -9,10 +12,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.pipeline.context import PipelineContext, StageMetric
-from core.pipeline.base import PipelineStage
-from core.pipeline.executor import PipelineExecutor
-
 
 # ---------------------------------------------------------------------------
 # Helpers / fake stages
@@ -20,6 +19,7 @@ from core.pipeline.executor import PipelineExecutor
 
 class AppendStage:
     """Appends a word to raw_text."""
+
     def __init__(self, name: str, word: str):
         self._name = name
         self._word = word
@@ -107,6 +107,7 @@ class SetRewrittenStage:
 
 class TempPathStage:
     """Sets _temp_path to a temp file."""
+
     def __init__(self, path: str):
         self._path = path
 
@@ -274,6 +275,7 @@ class TestPipelineStageProtocol(unittest.TestCase):
         class BadStage:
             def should_run(self, ctx):
                 return True
+
             def process(self, ctx):
                 return ctx
         # Missing 'name' property — not a PipelineStage
@@ -284,6 +286,7 @@ class TestPipelineStageProtocol(unittest.TestCase):
             @property
             def name(self):
                 return "bad"
+
             def should_run(self, ctx):
                 return True
         self.assertNotIsInstance(BadStage(), PipelineStage)
@@ -478,7 +481,7 @@ class TestPipelineExecutorCleanup(unittest.TestCase):
         ctx = PipelineContext(audio_input=None)
         # Set temp path first, then explode
         stages = [TempPathStage(tmp), ExplodingStage()]
-        result = PipelineExecutor(stages).run(ctx)
+        PipelineExecutor(stages).run(ctx)
         self.assertFalse(os.path.exists(tmp))
 
 

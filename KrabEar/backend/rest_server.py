@@ -13,14 +13,13 @@ import uuid
 import logging
 import functools
 from datetime import datetime, timezone
-from pathlib import Path
 from flask import Flask, Response, request, jsonify, stream_with_context, g
 from flask_smorest import Api, Blueprint
 from flask_sock import Sock
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_cors import CORS
-from marshmallow import Schema, fields as ma_fields, validate
+from marshmallow import Schema, fields as ma_fields
 from werkzeug.utils import secure_filename
 
 from core.config import settings
@@ -58,6 +57,7 @@ app.after_request(api_version_header())
 # Список origins берётся из KRAB_EAR_CORS_ORIGINS (по умолчанию "*").
 # ---------------------------------------------------------------------------
 
+
 def _parse_cors_origins(raw: str):
     """Парсит строку origins: "*" → "*", иначе список через запятую."""
     if raw.strip() == "*":
@@ -78,6 +78,7 @@ CORS(
 # Rate limiting — flask-limiter с in-memory хранилищем.
 # Отключается через KRAB_EAR_RATE_LIMIT_ENABLED=false (тесты/dev).
 # ---------------------------------------------------------------------------
+
 
 def _rate_limit_exceeded_handler(e):
     """Возвращает 429 JSON с retry_after вместо стандартного HTML."""
@@ -141,6 +142,7 @@ VALID_DOMAIN = {"casual", "finance", "code", "conversational", "medical"}
 # ---------------------------------------------------------------------------
 # Marshmallow schemas
 # ---------------------------------------------------------------------------
+
 
 class HealthResponseSchema(Schema):
     status = ma_fields.String(metadata={"description": "Always 'ok' when alive"})

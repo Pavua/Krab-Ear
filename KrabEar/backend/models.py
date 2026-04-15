@@ -124,4 +124,5 @@ class HistoryItem:
         )
 
 
-from core.config import DEFAULT_SETTINGS
+# Re-export для backwards compat (tests импортируют DEFAULT_SETTINGS из backend.models)
+from core.config import DEFAULT_SETTINGS  # noqa: E402,F401

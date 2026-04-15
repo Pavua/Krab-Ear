@@ -120,7 +120,6 @@ class TimelineExporter:
         # Строим rect элементы
         rects: list[str] = []
         labels: list[str] = []
-        tooltips: list[str] = []
         x_cursor = pad_x
 
         for idx, block in enumerate(blocks):
@@ -294,7 +293,7 @@ class TimelineExporter:
 
             # DESCRIPTION
             langs = item.get("languages") or []
-            lang_str = ", ".join(str(l) for l in langs) if langs else ""
+            lang_str = ", ".join(str(ln) for ln in langs) if langs else ""
             count = item.get("items_count", "")
             desc_parts = []
             if lang_str:

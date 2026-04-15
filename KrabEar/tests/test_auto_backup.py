@@ -1,8 +1,8 @@
 """Тесты AutoBackupManager."""
 
 from __future__ import annotations
+from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 
-import json
 import sys
 import tempfile
 import threading
@@ -10,7 +10,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Путь для импорта
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -18,8 +18,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 
 
 def _make_store(data_dir: Path) -> MagicMock:

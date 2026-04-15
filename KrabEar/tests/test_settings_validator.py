@@ -1,5 +1,6 @@
 """Тесты для SettingsValidator."""
 
+from backend.settings_validator import SettingsValidator, ValidationResult, CURRENT_SCHEMA_VERSION
 import sys
 import os
 import unittest
@@ -8,8 +9,6 @@ import unittest
 _PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..")
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-
-from backend.settings_validator import SettingsValidator, ValidationResult, CURRENT_SCHEMA_VERSION
 
 
 class TestValidationResult(unittest.TestCase):

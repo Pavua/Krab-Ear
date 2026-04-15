@@ -13,7 +13,6 @@ from typing import Any, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.translator import Translator
-    from backend.transcriber import Transcriber
     from backend.vocabulary_store import VocabularyStore
 
 

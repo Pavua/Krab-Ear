@@ -46,7 +46,14 @@ class StateStore:
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.history_path, self.tombstones_path, self.status_path, self.tags_path, self.favorites_path, self.annotations_path, self.vocabulary_path):
+        for path in (
+                self.history_path,
+                self.tombstones_path,
+                self.status_path,
+                self.tags_path,
+                self.favorites_path,
+                self.annotations_path,
+                self.vocabulary_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
@@ -368,7 +375,7 @@ class StateStore:
         if signature == self._recent_search_index_signature:
             return self._recent_search_index
 
-        window = active[-self._recent_search_index_limit :]
+        window = active[-self._recent_search_index_limit:]
         index: list[tuple[HistoryItem, str]] = []
         for item in reversed(window):
             haystack = "\n".join(
@@ -847,6 +854,7 @@ class StateStore:
                     continue
                 if isinstance(payload, dict):
                     yield payload
+
     def update_history_item_tags(self, item_id: str, tags: list[str]) -> bool:
         """Записывает теги для записи в отдельный журнал (last-write-wins по id)."""
         clean_id = item_id.strip()
@@ -883,17 +891,17 @@ class StateStore:
 
     def is_idempotent(self, chat_id: str | int | None, message_id: str | int | None) -> bool:
         """Проверяет, было ли уже успешно обработано сообщение с такими ID.
-        
+
         Использует внутренний индекс для быстрого поиска по последним записям.
         """
         if chat_id is None or message_id is None:
             return False
-            
+
         cid = str(chat_id).strip()
         mid = str(message_id).strip()
         if not cid or not mid:
             return False
-            
+
         with self._lock():
             active = self._load_active_items_unlocked()
             # Проверяем последние 1000 записей

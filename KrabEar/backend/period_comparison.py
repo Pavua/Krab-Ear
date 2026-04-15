@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Optional
+from datetime import date, datetime, timedelta
+from typing import Any
 
 _SENTINEL = object()
 

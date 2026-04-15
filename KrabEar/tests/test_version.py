@@ -44,7 +44,7 @@ class TestApiVersioning(unittest.TestCase):
 
     def test_get_api_info_has_app_version(self):
         # api_versioning imports flask; we only need APP_VERSION, not Flask context
-        from backend.api_versioning import get_api_info, APP_VERSION
+        from backend.api_versioning import get_api_info
         info = get_api_info()
         self.assertIn("app_version", info)
         self.assertEqual(info["app_version"], EXPECTED_VERSION)
@@ -66,7 +66,7 @@ class TestStartupDiagnostics(unittest.TestCase):
     """StartupReport.to_dict() includes 'version' field."""
 
     def test_to_dict_has_version(self):
-        from backend.startup_diagnostics import APP_VERSION, StartupReport, CheckResult
+        from backend.startup_diagnostics import StartupReport
         report = StartupReport(
             status="ready",
             checks=[],
@@ -95,7 +95,7 @@ class TestCLIVersion(unittest.TestCase):
         import io
         from cli import build_parser
         parser = build_parser()
-        buf = io.StringIO()
+        io.StringIO()
         with self.assertRaises(SystemExit) as ctx:
             # argparse --version raises SystemExit(0)
             parser.parse_args(["--version"])

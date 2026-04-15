@@ -1,6 +1,8 @@
 """Тесты TextComparator — сравнение двух транскрипций Krab Ear."""
 
 from __future__ import annotations
+from backend.state_store import StateStore
+from core.text_comparator import TextComparator, ComparisonResult
 
 from pathlib import Path
 import sys
@@ -10,9 +12,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.text_comparator import TextComparator, ComparisonResult
-from backend.state_store import StateStore
 
 
 class TextComparatorTestCase(unittest.TestCase):

@@ -1,6 +1,14 @@
 """Тесты AutoDeduplicator — автоматическое обнаружение дубликатов транскрипций Krab Ear."""
 
 from __future__ import annotations
+from backend.auto_deduplication import (
+    AutoDeduplicator,
+    DedupResult,
+    DEFAULT_DEDUP_THRESHOLD,
+    MERGE_THRESHOLD,
+    AUTO_DEDUP_ENABLED,
+)
+from backend.state_store import StateStore
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,15 +25,6 @@ if str(PROJECT_ROOT) not in sys.path:
 def _now_iso() -> str:
     """Возвращает текущий timestamp в ISO-8601 формате."""
     return datetime.now(tz=timezone.utc).isoformat()
-
-from backend.auto_deduplication import (
-    AutoDeduplicator,
-    DedupResult,
-    DEFAULT_DEDUP_THRESHOLD,
-    MERGE_THRESHOLD,
-    AUTO_DEDUP_ENABLED,
-)
-from backend.state_store import StateStore
 
 
 def _make_store(tmp_dir: Path) -> StateStore:
@@ -262,7 +261,7 @@ class GetDedupStatsTestCase(unittest.TestCase):
     def test_reset_stats_clears_all_counters(self) -> None:
         """reset_stats() обнуляет все накопленные счётчики."""
         tmp = tempfile.TemporaryDirectory()
-        store = _make_store(Path(tmp.name))
+        _make_store(Path(tmp.name))
         tmp.cleanup()
 
         # Просто вызываем check_duplicate с пустым store чтобы поднять счётчики

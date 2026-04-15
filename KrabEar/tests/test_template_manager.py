@@ -1,6 +1,7 @@
 """Тесты для TemplateManager — управление текстовыми шаблонами быстрой вставки."""
 
 from __future__ import annotations
+from backend.template_manager import TemplateManager
 
 import json
 import sys
@@ -14,8 +15,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.template_manager import TemplateManager
 
 
 class TestTemplateManagerBuiltins(unittest.TestCase):
@@ -209,7 +208,7 @@ class TestTemplateManagerPersistence(unittest.TestCase):
 
     def test_builtins_not_written_to_file(self):
         """Встроенные шаблоны не должны дублироваться в файле."""
-        tm = TemplateManager(data_dir=self.tmpdir)
+        TemplateManager(data_dir=self.tmpdir)
         # Просто читаем — файл не создаётся без явного add
         filepath = Path(self.tmpdir) / "templates.json"
         self.assertFalse(filepath.exists())

@@ -125,7 +125,7 @@ class SilenceDetector:
         Returns:
             Аудио с обрезанной ведущей/завершающей тишиной.
         """
-        original_shape = audio.shape
+        audio.shape
         mono = self._to_mono(audio)
 
         if len(mono) == 0 or sample_rate <= 0:

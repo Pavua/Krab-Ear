@@ -15,7 +15,6 @@ import types
 import logging
 import unittest
 from io import StringIO
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -227,7 +226,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Import app under test (with patched filesystem ops)
 # ---------------------------------------------------------------------------
-from core.config import settings  # noqa: E402
+from core.config import settings  # noqa: E402,F401
 
 with patch("pathlib.Path.mkdir"):
     import backend.rest_server as rest_mod  # noqa: E402
@@ -258,7 +257,7 @@ class TestRestLoggingJSON(unittest.TestCase):
 
     def _last_json_log(self):
         self.handler.flush()
-        lines = [l for l in self.log_stream.getvalue().splitlines() if l.strip()]
+        lines = [ln for ln in self.log_stream.getvalue().splitlines() if ln.strip()]
         for line in reversed(lines):
             try:
                 return json.loads(line)
@@ -328,7 +327,7 @@ class TestRestLoggingText(unittest.TestCase):
         """In text mode, log lines are plain text, not JSON objects."""
         self.client.get("/health")
         self.handler.flush()
-        lines = [l for l in self.log_stream.getvalue().splitlines() if l.strip()]
+        lines = [ln for ln in self.log_stream.getvalue().splitlines() if ln.strip()]
         self.assertTrue(len(lines) > 0, "No log lines emitted")
         last = lines[-1]
         try:
@@ -349,7 +348,6 @@ class TestRestLoggingText(unittest.TestCase):
         self.handler.flush()
         output = self.log_stream.getvalue()
         # Request ID is in UUID format — detect by hyphen pattern
-        import re
         self.assertRegex(output, r"[0-9a-f]{8}-[0-9a-f]{4}")
 
 
@@ -372,7 +370,6 @@ class TestRestRequestID(unittest.TestCase):
 
     def test_request_id_is_uuid_format(self):
         """X-Request-ID matches UUID v4 format."""
-        import re
         resp = self.client.get("/health")
         rid = resp.headers.get("X-Request-ID", "")
         self.assertRegex(
@@ -393,7 +390,7 @@ class TestRestRequestID(unittest.TestCase):
         try:
             resp = self.client.get("/health")
             handler.flush()
-            lines = [l for l in log_stream.getvalue().splitlines() if l.strip()]
+            lines = [ln for ln in log_stream.getvalue().splitlines() if ln.strip()]
             record = None
             for line in reversed(lines):
                 try:

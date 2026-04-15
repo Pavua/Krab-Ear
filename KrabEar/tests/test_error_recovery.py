@@ -14,15 +14,12 @@
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import numpy as np
 
@@ -30,11 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
-from backend.models import DEFAULT_SETTINGS
-from backend.service import BackendService
-from backend.translator import TranslationResult
+from backend.state_store import StateStore  # noqa: E402
+from backend.history_service import HistoryService  # noqa: E402
+from backend.models import DEFAULT_SETTINGS  # noqa: E402
+from backend.service import BackendService  # noqa: E402
+from backend.translator import TranslationResult  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +181,11 @@ class MissingDataDirectoryTestCase(unittest.TestCase):
         """Несуществующая директория data_dir автоматически создаётся."""
         nested = Path(self.tmp.name) / "a" / "b" / "c" / "data"
         self.assertFalse(nested.exists())
-        store = StateStore(nested)
+        StateStore(nested)
         self.assertTrue(nested.exists())
 
     def test_service_starts_without_existing_dir(self) -> None:
         """BackendService стартует даже если data_dir ещё не существует."""
-        nested = Path(self.tmp.name) / "new_data"
         svc, store = _make_service(str(Path(self.tmp.name)))
         self.assertIsNotNone(svc)
         self.assertTrue(store.data_dir.exists())
@@ -247,7 +243,6 @@ class DiskFullSimulationTestCase(unittest.TestCase):
     def test_save_settings_oserror_propagates_cleanly(self) -> None:
         """OSError при записи настроек не ломает state store навсегда."""
         store = StateStore(self.data_dir)
-        original_write_text = Path.write_text
 
         with patch.object(Path, "write_text", side_effect=OSError("No space left on device")):
             with self.assertRaises(OSError):

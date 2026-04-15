@@ -1,6 +1,7 @@
 """Unit-тесты для SentimentTrendAnalyzer."""
 
 from __future__ import annotations
+from backend.sentiment_trends import SentimentTrendAnalyzer, SentimentTrendReport
 
 import sys
 import unittest
@@ -10,8 +11,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.sentiment_trends import SentimentTrendAnalyzer, SentimentTrendReport
 
 
 def _make_item(text: str, days_ago: float = 1.0, language: str = "ru") -> dict:

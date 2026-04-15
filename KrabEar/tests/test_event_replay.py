@@ -1,12 +1,13 @@
 """Тесты для EventReplayManager (KrabEar/backend/event_replay.py)."""
 
 from __future__ import annotations
+from backend.event_replay import EventReplayManager, _parse_ts
+import unittest
 
 import json
 import sys
 import tempfile
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,10 +17,6 @@ KRABEAR_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PROJECT_ROOT), str(KRABEAR_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-import unittest
-
-from backend.event_replay import EventReplayManager, _parse_ts
 
 
 def _ts(offset_sec: int = 0) -> str:

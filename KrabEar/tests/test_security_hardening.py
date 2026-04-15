@@ -15,6 +15,11 @@ Verifies that the security measures built into the system actually work:
 """
 
 from __future__ import annotations
+from backend.webhook_manager import WebhookManager
+from backend.audit_logger import AuditLogger
+from backend.ipc_throttle import IPCThrottle
+from backend.request_signing import RequestSigner, TIMESTAMP_WINDOW_SEC
+from backend.input_sanitizer import InputSanitizer
 
 import hashlib
 import hmac
@@ -24,7 +29,6 @@ import socket
 import stat
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -33,12 +37,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
 if str(KRAB_EAR_ROOT) not in sys.path:
     sys.path.insert(0, str(KRAB_EAR_ROOT))
-
-from backend.input_sanitizer import InputSanitizer
-from backend.request_signing import RequestSigner, TIMESTAMP_WINDOW_SEC
-from backend.ipc_throttle import IPCThrottle, HEAVY_METHODS
-from backend.audit_logger import AuditLogger, _SENSITIVE_METHODS
-from backend.webhook_manager import WebhookManager
 
 
 # ---------------------------------------------------------------------------

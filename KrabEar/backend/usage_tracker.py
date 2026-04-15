@@ -12,7 +12,7 @@ import logging
 import threading
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger("KrabEar.Backend.UsageTracker")
 

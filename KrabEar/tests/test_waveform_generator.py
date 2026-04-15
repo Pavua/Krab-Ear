@@ -8,12 +8,12 @@
 """
 
 from __future__ import annotations
+from core.waveform_generator import WaveformData, WaveformGenerator
 
 import sys
 import tempfile
 import unittest
 import wave
-import struct
 from pathlib import Path
 
 import numpy as np
@@ -24,8 +24,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.waveform_generator import WaveformData, WaveformGenerator
 
 
 # ── Вспомогательные функции ─────────────────────────────────────────────────

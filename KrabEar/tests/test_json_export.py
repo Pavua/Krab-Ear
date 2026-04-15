@@ -12,6 +12,8 @@
 """
 
 from __future__ import annotations
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 import json
 import sys
@@ -22,9 +24,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
 
 
 def _make_store(tmp_dir: Path) -> StateStore:
@@ -74,12 +73,11 @@ class TestExportHistoryJsonStructure(unittest.TestCase):
 
     def _get_payload(self) -> dict:
         """Вспомогательный метод: возвращает распарсенный payload."""
-        result = self.svc.handle_export_history_json({"pretty": False})
+        _result = self.svc.handle_export_history_json({"pretty": False})  # noqa: F841
         # We need the raw json content — re-generate via direct call
-        import io, json as _json
-        import subprocess
+        import json as _json
         # Re-use internal method flow: call handle and inspect via save_to_file
-        tmp_dir = Path(self._tmp.name)
+        Path(self._tmp.name)
         result2 = self.svc.handle_export_history_json({"save_to_file": True, "pretty": True})
         if result2["path"]:
             return _json.loads(Path(result2["path"]).read_text())
@@ -206,7 +204,7 @@ class TestExportHistoryJsonEntries(unittest.TestCase):
                 it.diarization = diar_data
                 break
         # Добавляем новую запись с диаризацией
-        item2 = self.store.add_history_item(text="Встреча")
+        _item2 = self.store.add_history_item(text="Встреча")  # noqa: F841
         # Проверяем формат diarization_block с mock-данными через прямой вызов
         # (StateStore хранит diarization при сохранении через add_history_item с diarization param)
         # Используем обходной путь: создадим запись через метод _append_ndjson напрямую

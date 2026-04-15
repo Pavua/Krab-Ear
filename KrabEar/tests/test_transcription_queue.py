@@ -1,17 +1,6 @@
 """Unit-тесты для TranscriptionQueue."""
 
 from __future__ import annotations
-
-import sys
-import threading
-import time
-import unittest
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from backend.transcription_queue import (
     TranscriptionQueue,
     STATUS_PENDING,
@@ -23,6 +12,15 @@ from backend.transcription_queue import (
     PRIORITY_MIN,
     PRIORITY_MAX,
 )
+
+import sys
+import threading
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class EnqueueTestCase(unittest.TestCase):
@@ -226,7 +224,7 @@ class GetQueueStatsTestCase(unittest.TestCase):
     def test_stats_total_equals_sum(self) -> None:
         id1 = self.q.enqueue("/tmp/a.wav")
         id2 = self.q.enqueue("/tmp/b.wav")
-        id3 = self.q.enqueue("/tmp/c.wav")
+        self.q.enqueue("/tmp/c.wav")
         self.q.process_next()
         self.q.cancel(id2)
         self.q.mark_completed(id1)
@@ -265,8 +263,8 @@ class ProcessNextTestCase(unittest.TestCase):
         self.assertIsNotNone(result["started_at"])
 
     def test_process_next_skips_processing_jobs(self) -> None:
-        id1 = self.q.enqueue("/tmp/a.wav")
-        id2 = self.q.enqueue("/tmp/b.wav")
+        self.q.enqueue("/tmp/a.wav")
+        self.q.enqueue("/tmp/b.wav")
         first = self.q.process_next()
         second = self.q.process_next()
         # Both should be different jobs
@@ -281,7 +279,7 @@ class ProcessNextTestCase(unittest.TestCase):
 
     def test_process_next_fifo_same_priority(self) -> None:
         id1 = self.q.enqueue("/tmp/first.wav", priority=5)
-        id2 = self.q.enqueue("/tmp/second.wav", priority=5)
+        _id2 = self.q.enqueue("/tmp/second.wav", priority=5)  # noqa: F841
         first = self.q.process_next()
         self.assertEqual(first["job_id"], id1)
 

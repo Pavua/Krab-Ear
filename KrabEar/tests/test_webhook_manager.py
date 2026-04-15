@@ -5,24 +5,21 @@ HMAC-подпись, retry-логику, статистику доставки.
 """
 
 from __future__ import annotations
+from backend.webhook_manager import WebhookManager, _MAX_RETRIES
 
 import hashlib
 import hmac
-import json
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.webhook_manager import WebhookManager, _MAX_RETRIES
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +141,11 @@ class WebhookManagerFilterTestCase(unittest.TestCase):
         self._mgr.register_webhook("https://example.com/hook", events=events_filter)
         delivered: list[Any] = []
 
-        original_deliver = self._mgr._deliver_with_retry
+        self._mgr._deliver_with_retry
 
         def capture(*args, **kwargs):
             delivered.append(args)
             # Не делаем реальный HTTP
-            pass
 
         with patch.object(self._mgr, "_deliver_with_retry", side_effect=capture):
             self._mgr.fire_webhook(fire_event, {"text": "hello"})
@@ -182,8 +178,8 @@ class WebhookManagerFilterTestCase(unittest.TestCase):
 
     # 15 — два webhook-а с разными фильтрами: каждый получает только своё
     def test_two_webhooks_independent_filters(self) -> None:
-        wid1 = self._mgr.register_webhook("https://one.com/hook", events=["stt.final"])
-        wid2 = self._mgr.register_webhook("https://two.com/hook", events=["stt.failed"])
+        _wid1 = self._mgr.register_webhook("https://one.com/hook", events=["stt.final"])  # noqa: F841
+        _wid2 = self._mgr.register_webhook("https://two.com/hook", events=["stt.failed"])  # noqa: F841
         calls_log: list[str] = []
 
         def capture(webhook_id, url, secret, body, event_type):

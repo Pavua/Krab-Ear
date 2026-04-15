@@ -1,5 +1,8 @@
 """Тесты для LLMRewriteStage."""
 
+from backend.llm_rewriter import LLMRewriteResult
+from core.pipeline.stages.llm_rewrite import LLMRewriteStage
+from core.pipeline.context import PipelineContext
 import sys
 import os
 import unittest
@@ -8,10 +11,6 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.pipeline.context import PipelineContext
-from core.pipeline.stages.llm_rewrite import LLMRewriteStage
-from backend.llm_rewriter import LLMRewriteResult
 
 
 def _make_ctx(cleaned_text="Привет мир", raw_text=""):

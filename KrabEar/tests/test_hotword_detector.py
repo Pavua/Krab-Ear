@@ -1,8 +1,8 @@
 """Тесты для HotwordDetector."""
 
 from __future__ import annotations
+from backend.hotword_detector import HotwordDetector
 
-import json
 import sys
 import tempfile
 import unittest
@@ -12,8 +12,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
-
-from backend.hotword_detector import HotwordDetector, HotwordMatch
 
 
 class TestHotwordDetectorBasic(unittest.TestCase):

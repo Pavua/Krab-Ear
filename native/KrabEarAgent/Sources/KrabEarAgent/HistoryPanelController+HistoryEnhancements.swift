@@ -94,15 +94,16 @@ extension HistoryPanelController {
 
         showDiagnosticsOutput("Авто-саммари: обрабатываю \(targetIDs.count) записей…")
 
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let idsCopy = targetIDs
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            guard let response = try? self.ipcClient.call(
+            guard let response = try? ipcClient.call(
                 method: "auto_summarize_batch",
-                params: ["ids": targetIDs]
+                params: ["ids": idsCopy]
             ),
             let result = response["result"] as? [String: Any] else {
                 DispatchQueue.main.async {
-                    self.showDiagnosticsOutput("Ошибка: авто-саммари не выполнено.")
+                    self?.showDiagnosticsOutput("Ошибка: авто-саммари не выполнено.")
                 }
                 return
             }
@@ -122,7 +123,7 @@ extension HistoryPanelController {
 
             let output = lines.joined(separator: "\n")
             DispatchQueue.main.async {
-                self.showDiagnosticsOutput(output)
+                self?.showDiagnosticsOutput(output)
             }
         }
     }

@@ -1,4 +1,5 @@
 """Тесты для core.stop_words.StopWords."""
+from core.stop_words import StopWords
 import sys
 import os
 import unittest
@@ -6,8 +7,6 @@ import unittest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.stop_words import StopWords
 
 
 class TestGetStopWords(unittest.TestCase):

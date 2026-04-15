@@ -1,6 +1,7 @@
 """Тесты ExportScheduler — планировщик авто-экспорта истории Krab Ear."""
 
 from __future__ import annotations
+from backend.export_scheduler import ExportScheduler, SUPPORTED_FORMATS, MAX_EXPORTS_DEFAULT
 
 import json
 import sys
@@ -17,8 +18,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.export_scheduler import ExportScheduler, SUPPORTED_FORMATS, MAX_EXPORTS_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -422,14 +421,14 @@ class TestIpcIntegration(unittest.TestCase):
         """Создаёт BackendService с фейковыми зависимостями."""
         from backend.state_store import StateStore
         from backend.service import BackendService
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         store = StateStore(data_dir=self.data_dir)
 
         with patch("backend.service.AudioRecorder"), \
-             patch("backend.service.Transcriber"), \
-             patch("backend.service.Translator"), \
-             patch("backend.service.settings") as mock_settings:
+                patch("backend.service.Transcriber"), \
+                patch("backend.service.Translator"), \
+                patch("backend.service.settings") as mock_settings:
             mock_settings.LLM_ENABLED = False
             mock_settings.AUTO_BACKUP_ENABLED = False
             mock_settings.AUTO_EXPORT_ENABLED = False

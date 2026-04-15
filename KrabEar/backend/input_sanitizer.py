@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-import unicodedata
 from pathlib import Path
 from typing import Any
 

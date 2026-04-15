@@ -1,6 +1,7 @@
 """Тесты PlaybackTracker — отслеживание воспроизведения записей Krab Ear."""
 
 from __future__ import annotations
+from backend.playback_tracker import PlaybackTracker
 
 import json
 import sys
@@ -8,7 +9,6 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
 
 # Настройка путей для standalone-запуска
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -16,8 +16,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.playback_tracker import PlaybackTracker
 
 
 # ---------------------------------------------------------------------------

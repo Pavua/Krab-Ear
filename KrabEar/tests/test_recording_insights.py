@@ -1,13 +1,12 @@
 """Тесты RecordingInsightsGenerator."""
 
 from __future__ import annotations
+from backend.recording_insights import Insight, RecordingInsightsGenerator
 
 import sys
 import unittest
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
 
 # Настройка путей для standalone-запуска
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,8 +14,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.recording_insights import Insight, RecordingInsightsGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +198,7 @@ class RecordingStreakTestCase(unittest.TestCase):
         items = [_make_item(ts_offset_days=0), _make_item(ts_offset_days=0.01),
                  _make_item(ts_offset_days=0.02)]
         insights = self.gen.generate_insights(items, days=7)
-        types = [ins.type for ins in insights]
+        [ins.type for ins in insights]
         # Может не быть streak если всё в один день
         # Проверяем что если streak есть - streak_days >= 2
         for ins in insights:

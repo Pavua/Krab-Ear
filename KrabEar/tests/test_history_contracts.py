@@ -1,6 +1,8 @@
 """Тесты контрактов событий истории Krab Ear."""
 
 from __future__ import annotations
+from contracts.registry import EVENT_SCHEMA_MAP, EventType
+from contracts.history_events import AutoSummaryEvent, MarkdownExportEvent
 
 import json
 import sys
@@ -10,9 +12,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from contracts.history_events import AutoSummaryEvent, MarkdownExportEvent
-from contracts.registry import EVENT_SCHEMA_MAP, EventType
 
 
 class TestMarkdownExportEvent(unittest.TestCase):

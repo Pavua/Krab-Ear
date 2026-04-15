@@ -1,12 +1,12 @@
 """Тесты SearchHistoryManager — история поисковых запросов Krab Ear."""
 
 from __future__ import annotations
+from backend.search_history import SearchHistoryManager
 
 import json
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
@@ -16,8 +16,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.search_history import SearchHistoryManager
 
 
 class TestSearchHistoryBasic(unittest.TestCase):

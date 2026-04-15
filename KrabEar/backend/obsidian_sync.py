@@ -132,7 +132,7 @@ class ObsidianSyncManager:
         for item in items:
             try:
                 item_ts = self._get_item_ts(item)
-                item_id = self._get_item_attr(item, "id", "")
+                self._get_item_attr(item, "id", "")
 
                 # Инкрементальная синхронизация: пропускаем старые записи
                 if not force and last_sync_ts is not None:

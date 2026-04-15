@@ -1,19 +1,16 @@
 """Unit-тесты для CallAssistService и VoiceGatewayClient."""
 
 from __future__ import annotations
+from backend.call_assist_service import CallAssistService, VoiceGatewayClient
 
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.call_assist_service import CallAssistService, VoiceGatewayClient
-from backend.state_store import StateStore
 
 
 class FakeStore:

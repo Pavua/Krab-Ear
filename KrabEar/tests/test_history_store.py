@@ -1,6 +1,7 @@
 """Тесты безлимитного NDJSON-хранилища истории Krab Ear."""
 
 from __future__ import annotations
+from backend.state_store import StateStore
 
 from pathlib import Path
 import json
@@ -12,8 +13,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.state_store import StateStore
 
 
 class HistoryStoreTestCase(unittest.TestCase):
@@ -313,7 +312,6 @@ class HistoryStoreTestCase(unittest.TestCase):
         self.assertEqual(overview["diarization_count"], 0)
         self.assertEqual(overview["source_langs"], [])
         self.assertEqual(overview["target_langs"], [])
-
 
     def test_date_filter_early_termination(self) -> None:
         """Проверяет, что фильтрация по дате с from_ts корректно возвращает результаты.

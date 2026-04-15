@@ -173,10 +173,11 @@ extension HistoryPanelController {
     }
     
     @objc private func refreshUsageStatsAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "get_usage_stats", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "get_usage_stats", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self?.todayLabel.stringValue = "Сегодня: \(result["today"] ?? "0")"
                     self?.weekLabel.stringValue = "Неделя: \(result["week"] ?? "0")"
@@ -189,12 +190,13 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func fetchErrorStatsAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "get_error_stats", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "get_error_stats", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     let text = result.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
                     self?.showDiagnosticsOutput("Статистика ошибок:\n\(text)")
@@ -206,15 +208,15 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func scoreTranscriptionAction() {
         let selectedRow = self.tableView.selectedRow
         let textToScore = selectedRow >= 0 && selectedRow < items.count ? items[selectedRow].text : items.first?.text ?? ""
-        
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "score_transcription", params: ["text": textToScore])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "score_transcription", params: ["text": textToScore])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self?.scoreLabel.stringValue = "Оценка: \(result["score"] ?? "—")"
                 }
@@ -225,12 +227,13 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func runHealthCheckAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "health_check", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "health_check", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.sttHealthLabel.textColor = (result["stt"] as? Bool == true) ? NSColor.systemGreen : NSColor.systemRed
@@ -245,12 +248,13 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func fetchLLMDiffAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "get_last_llm_diff", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "get_last_llm_diff", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self?.showDiagnosticsOutput("LLM diff:\n\(result["diff"] ?? "Нет данных")")
                 }
@@ -261,12 +265,13 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func exportSettingsAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "export_settings", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "export_settings", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self?.showDiagnosticsOutput("Настройки экспортированы: \(result["path"] ?? "Успешно")")
                 }
@@ -277,12 +282,13 @@ extension HistoryPanelController {
             }
         }
     }
-    
+
     @objc private func importSettingsAction() {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let r = try self?.ipcClient.call(method: "import_settings", params: [:])
-                let result = r?["result"] as? [String: Any] ?? [:]
+                let r = try ipcClient.call(method: "import_settings", params: [:])
+                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self?.showDiagnosticsOutput("Настройки импортированы: \(result["status"] ?? "Успешно")")
                 }

@@ -1,9 +1,9 @@
 """Unit-тесты для RecordingMerger."""
 
 from __future__ import annotations
+from backend.recording_merger import RecordingMerger
 
 import sys
-import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,8 +13,6 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.recording_merger import RecordingMerger
 
 
 # ---------------------------------------------------------------------------

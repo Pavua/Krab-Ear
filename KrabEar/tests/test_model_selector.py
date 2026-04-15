@@ -12,16 +12,7 @@
 """
 
 from __future__ import annotations
-
-import sys
-import time
-import unittest
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
+from core.config import settings
 from core.model_selector import (
     SmartModelSelector,
     ModelSelection,
@@ -30,11 +21,17 @@ from core.model_selector import (
     _LONG_MIN_SEC,
     _HIGH_LOAD_THRESHOLD,
     _RTF_BALANCED,
-    _RTF_MAX,
     _LATENCY_OVERHEAD_MS,
     _MODELS_CACHE_TTL,
 )
-from core.config import settings
+
+import sys
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestSmartModelSelectorPreviewMode(unittest.TestCase):

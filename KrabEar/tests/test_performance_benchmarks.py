@@ -5,6 +5,12 @@
 """
 
 from __future__ import annotations
+from core.pipeline.context import PipelineContext
+from core.utils import TextUtils
+from core.fuzzy_search import FuzzySearcher
+from core.search_index import SearchIndex
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 import sys
 import os
@@ -17,13 +23,6 @@ from pathlib import Path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
-from core.search_index import SearchIndex
-from core.fuzzy_search import FuzzySearcher
-from core.utils import TextUtils
-from core.pipeline.context import PipelineContext
 
 
 def _unique_text(i: int) -> str:

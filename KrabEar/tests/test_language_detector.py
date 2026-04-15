@@ -1,7 +1,7 @@
 """Тесты для LanguageDetector (core/language_detector.py)."""
 
+from core.language_detector import LanguageDetector, LanguageResult
 import sys
-import os
 import unittest
 from pathlib import Path
 
@@ -11,8 +11,6 @@ KRAB_EAR_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(KRAB_EAR_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.language_detector import LanguageDetector, LanguageResult
 
 
 class TestLanguageDetectorRussian(unittest.TestCase):

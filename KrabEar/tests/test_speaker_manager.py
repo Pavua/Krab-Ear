@@ -1,6 +1,7 @@
 """Тесты SpeakerManager — псевдонимы спикеров диаризации."""
 
 from __future__ import annotations
+from backend.speaker_manager import SpeakerManager
 
 import json
 import sys
@@ -14,8 +15,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.speaker_manager import SpeakerManager
 
 
 class TestSpeakerManagerCRUD(unittest.TestCase):

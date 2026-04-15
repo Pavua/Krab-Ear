@@ -209,8 +209,8 @@ class TranscriptVersionManager:
             tofile=f"v{v2}",
         ))
 
-        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+        added = sum(1 for ln in diff_lines if ln.startswith("+") and not ln.startswith("+++"))
+        removed = sum(1 for ln in diff_lines if ln.startswith("-") and not ln.startswith("---"))
 
         return {
             "item_id": item_id,

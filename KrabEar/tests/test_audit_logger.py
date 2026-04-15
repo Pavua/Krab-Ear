@@ -1,22 +1,19 @@
 """Тесты для AuditLogger."""
 
 from __future__ import annotations
+from backend.audit_logger import AuditLogger, _SENSITIVE_METHODS, _KEEP_DAYS
 
 import json
 import sys
 import tempfile
-import time
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "KrabEar") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
-
-from backend.audit_logger import AuditLogger, _SENSITIVE_METHODS, _KEEP_DAYS
 
 
 class TestAuditLoggerBasic(unittest.TestCase):
@@ -132,7 +129,7 @@ class TestAuditLoggerBasic(unittest.TestCase):
         """Файлы старше 7 дней удаляются."""
         # Создаём 10 файлов с разными датами
         for i in range(10):
-            fake_date = f"2020-01-{i+1:02d}"
+            fake_date = f"2020-01-{i + 1:02d}"
             path = Path(self.tmpdir) / f"audit_{fake_date}.ndjson"
             path.write_text('{"ts":"2020","method":"x","params_keys":[],"success":true,"duration_ms":1}\n')
         # Один реальный лог — триггерит cleanup

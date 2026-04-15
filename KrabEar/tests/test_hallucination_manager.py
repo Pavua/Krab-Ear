@@ -1,6 +1,7 @@
 """Тесты HallucinationManager — управление паттернами галлюцинаций."""
 
 from __future__ import annotations
+from core.hallucination_manager import HallucinationManager, HallucinationMatch
 
 import json
 import sys
@@ -14,8 +15,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.hallucination_manager import HallucinationManager, HallucinationMatch
 
 
 class TestBuiltinPatterns(unittest.TestCase):

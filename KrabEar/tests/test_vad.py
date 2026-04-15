@@ -1,6 +1,7 @@
 """Тесты для VoiceActivityDetector (core/vad.py)."""
 
 from __future__ import annotations
+from core.vad import VoiceActivityDetector, VADResult, SpeechSegment, _rms_to_db
 
 import sys
 import math
@@ -15,8 +16,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from core.vad import VoiceActivityDetector, VADResult, SpeechSegment, _rms_to_db
 
 
 SR = 16000  # частота дискретизации для тестов

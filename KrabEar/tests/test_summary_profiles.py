@@ -1,6 +1,10 @@
 """Тесты SummaryProfileManager и IPC-методов для профилей резюмирования."""
 
 from __future__ import annotations
+from backend.llm_rewriter import LLMRewriteResult
+from backend.state_store import StateStore
+from backend.history_service import HistoryService
+from backend.summary_profiles import SummaryProfile, SummaryProfileManager
 
 import json
 import sys
@@ -12,11 +16,6 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.summary_profiles import SummaryProfile, SummaryProfileManager, _BUILTIN_MAP
-from backend.history_service import HistoryService
-from backend.state_store import StateStore
-from backend.llm_rewriter import LLMRewriteResult
 
 
 # ---------------------------------------------------------------------------

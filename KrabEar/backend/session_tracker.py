@@ -9,12 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("KrabEar.Backend.SessionTracker")
 

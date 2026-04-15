@@ -1,21 +1,18 @@
 """Unit-тесты для HealthChecker."""
 
 from __future__ import annotations
+from backend.health_checker import HealthChecker
 
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.health_checker import HealthChecker, DISK_WARN_GB, DISK_CRIT_GB
-from backend.state_store import StateStore
 
 
 class FakeStore:

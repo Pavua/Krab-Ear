@@ -1,9 +1,9 @@
 """Тесты AudioQualityAnalyzer — pre-flight анализ качества аудио."""
 
 from __future__ import annotations
+from core.audio_quality import AudioQualityAnalyzer, AudioQualityReport
 
 import sys
-import os
 import unittest
 import math
 from pathlib import Path
@@ -14,8 +14,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.audio_quality import AudioQualityAnalyzer, AudioQualityReport
 
 
 SR = 16000  # стандартная частота для тестов

@@ -1,17 +1,15 @@
 """Tests for DiarizationStage."""
 
+from core.pipeline.context import PipelineContext
+from core.pipeline.stages.diarization import DiarizationStage
 import sys
-import os
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Path setup
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
-
-from core.pipeline.stages.diarization import DiarizationStage
-from core.pipeline.context import PipelineContext
 
 
 def _ctx(**kwargs) -> PipelineContext:
@@ -142,7 +140,6 @@ class TestDiarizationStageProcess(unittest.TestCase):
         self.assertIn("normalized", called_with[0])
 
     def test_process_no_audio_path_appends_error(self):
-        import numpy as np
         stage = DiarizationStage(diarization_fn=_fake_diarization([]))
         ctx = _ctx(audio_input=None, normalized_audio=None)
         result = stage.process(ctx)

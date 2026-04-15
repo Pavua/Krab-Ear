@@ -1,6 +1,9 @@
 """Тесты TermExtractor — интеллектуальное извлечение терминов Krab Ear."""
 
 from __future__ import annotations
+import tempfile
+from backend.state_store import StateStore
+from core.term_extractor import TermExtractor, ExtractedTerm
 
 from pathlib import Path
 import sys
@@ -9,10 +12,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.term_extractor import TermExtractor, ExtractedTerm
-from backend.state_store import StateStore
-import tempfile
 
 
 class TermExtractorTestCase(unittest.TestCase):

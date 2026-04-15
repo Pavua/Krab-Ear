@@ -2,6 +2,9 @@
 test_confidence_calibrator.py — Unit-тесты для ConfidenceCalibrator.
 """
 
+from core.confidence_calibrator import (
+    ConfidenceCalibrator,
+)
 import sys
 import os
 import unittest
@@ -9,12 +12,6 @@ import unittest
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from core.confidence_calibrator import (
-    ConfidenceCalibrator,
-    CalibratedScore,
-    PRIMARY_LANGUAGES,
-)
 
 
 class TestCalibratorShortRecording(unittest.TestCase):
@@ -190,6 +187,7 @@ class TestCalibratorEdgeCases(unittest.TestCase):
     def test_thread_safety(self):
         import threading
         results = []
+
         def worker():
             for _ in range(50):
                 results.append(self.cal.calibrate(0.75, 1.0, "en", "balanced"))

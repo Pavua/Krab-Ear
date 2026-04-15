@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import List, Dict
 
 
 # ── Стоп-слова и приветствия ─────────────────────────────────────────────────

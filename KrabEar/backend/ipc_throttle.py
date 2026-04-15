@@ -26,7 +26,7 @@ from typing import Dict, Set
 # start/stop_recording не включаем — это обычные пользовательские действия.
 HEAVY_METHODS: Set[str] = {
     "transcribe_paths",         # импорт и транскрибация файлов
-    "preview_transcribe_paths", # предпросмотр транскрибации
+    "preview_transcribe_paths",  # предпросмотр транскрибации
     "summarize_text",           # LLM суммаризация текста
     "summarize_item",           # LLM суммаризация элемента истории
     "auto_summarize_batch",     # пакетная LLM суммаризация
@@ -69,7 +69,7 @@ MEDIUM_METHODS: Set[str] = {
     "extract_terms",            # извлечение терминов
     "compare_texts",            # сравнение текстов
     "translate_text",           # перевод текста
-    "get_glossary_suggestions", # предложения для глоссария
+    "get_glossary_suggestions",  # предложения для глоссария
     "get_vocabulary_suggestions",
     "get_event_log",            # лог событий
     "get_event_stats",          # статистика событий

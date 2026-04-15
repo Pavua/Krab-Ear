@@ -1,6 +1,7 @@
 """Тесты NoiseProfiler — профилирование фонового шума в аудиозаписях."""
 
 from __future__ import annotations
+from core.noise_profiler import NoiseProfiler, NoiseProfile
 
 import sys
 import math
@@ -14,7 +15,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.noise_profiler import NoiseProfiler, NoiseProfile
 
 SR = 16000  # стандартная частота дискретизации
 
@@ -305,7 +305,6 @@ class TestEdgeCases(unittest.TestCase):
 
     def test_different_sample_rates_supported(self):
         for sr in [8000, 22050, 44100, 48000]:
-            n = sr  # 1 секунда
             audio = _sine(440, 1.0, 0.3, sr)
             result = NoiseProfiler().profile(audio, sr)
             self.assertIsInstance(result, NoiseProfile,

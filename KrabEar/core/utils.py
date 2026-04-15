@@ -132,11 +132,11 @@ class TextUtils:
         clean = TextUtils._strip_hallucinations(clean)
         # Нормализация брендов/имён и времени — всегда, чтобы диктовка не требовала ручной правки.
         clean = TextUtils.normalize_entities(clean)
-        
+
         # Строгая очистка
         if profile.lower() == "strict":
             clean = TextUtils._cleanup_strict(clean)
-            
+
         return clean.strip()
 
     @staticmethod

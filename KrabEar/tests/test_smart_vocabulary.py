@@ -1,6 +1,8 @@
 """Unit-тесты для SmartVocabularyBuilder."""
 
 from __future__ import annotations
+from backend.vocabulary_store import VocabularyStore
+from backend.smart_vocabulary import SmartVocabularyBuilder, VocabularyUpdate
 
 import sys
 import tempfile
@@ -11,9 +13,6 @@ from typing import Any, List, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.smart_vocabulary import SmartVocabularyBuilder, VocabularyUpdate
-from backend.vocabulary_store import VocabularyStore
 
 
 # ── Helpers / Fakes ────────────────────────────────────────────────────────────

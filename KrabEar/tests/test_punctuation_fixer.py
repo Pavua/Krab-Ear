@@ -4,15 +4,14 @@
     PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_punctuation_fixer.py -v
 """
 
+from core.punctuation_fixer import PunctuationFixer
+import unittest
 import sys
 import os
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-import unittest
-from core.punctuation_fixer import PunctuationFixer
 
 
 class TestPunctuationFixerRussian(unittest.TestCase):

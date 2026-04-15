@@ -1,18 +1,16 @@
 """Unit-тесты для TranscriptVersionManager."""
 
 from __future__ import annotations
+from backend.transcript_versioning import TranscriptVersionManager, VALID_SOURCES
 
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.transcript_versioning import TranscriptVersionManager, VALID_SOURCES
 
 
 class TranscriptVersioningBasicTestCase(unittest.TestCase):
@@ -263,13 +261,13 @@ class TranscriptVersioningEdgeCasesTestCase(unittest.TestCase):
 
     def test_multiline_text_preserved(self) -> None:
         text = "Line 1\nLine 2\nLine 3"
-        result = self._mgr.save_version("item_ml", text, source="import")
+        _result = self._mgr.save_version("item_ml", text, source="import")  # noqa: F841
         retrieved = self._mgr.get_version("item_ml", 1)
         self.assertEqual(retrieved["text"], text)
 
     def test_unicode_text_preserved(self) -> None:
         text = "Привет мир! Это транскрипция на русском языке."
-        result = self._mgr.save_version("item_uni", text, source="stt_cleaned")
+        _result = self._mgr.save_version("item_uni", text, source="stt_cleaned")  # noqa: F841
         retrieved = self._mgr.get_version("item_uni", 1)
         self.assertEqual(retrieved["text"], text)
 
@@ -281,7 +279,7 @@ class TranscriptVersioningEdgeCasesTestCase(unittest.TestCase):
 
     def test_many_versions_ordering(self) -> None:
         for i in range(10):
-            self._mgr.save_version("item_many", f"version {i+1}", source="manual")
+            self._mgr.save_version("item_many", f"version {i + 1}", source="manual")
         versions = self._mgr.get_versions("item_many")
         nums = [v["version_num"] for v in versions]
         self.assertEqual(nums, list(range(10, 0, -1)))

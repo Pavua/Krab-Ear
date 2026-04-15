@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+from core.audio_chunker import AudioChunk, AudioChunker
 
 import sys
 import unittest
@@ -19,7 +20,6 @@ for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from core.audio_chunker import AudioChunk, AudioChunker
 
 SAMPLE_RATE = 16000  # Гц
 
@@ -193,7 +193,7 @@ class TestChunkSmartSplit(unittest.TestCase):
             # Конец чанка i <= начало чанка i+1
             self.assertLessEqual(
                 chunks[i].end_sec, chunks[i + 1].start_sec + 0.01,
-                msg=f"Чанк {i} и {i+1} перекрываются",
+                msg=f"Чанк {i} и {i + 1} перекрываются",
             )
 
     def test_split_near_silence_not_mid_speech(self):

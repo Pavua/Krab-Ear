@@ -1,26 +1,24 @@
 """Тесты AnalyticsDashboard — комплексный дашборд аналитики Krab Ear."""
 
 from __future__ import annotations
-
-import sys
-import tempfile
-import time
-import unittest
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
+from backend.state_store import StateStore
 from backend.analytics_dashboard import (
     AnalyticsDashboard,
     _calc_streak,
     _calc_trend,
     _parse_ts,
 )
-from backend.state_store import StateStore
+
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -399,15 +397,15 @@ class TestCalcTrendHelper(unittest.TestCase):
         self.assertEqual(_calc_trend(pts), "stable")
 
     def test_rising_values_improving(self):
-        pts = [{"date": f"2025-01-{i+1:02d}", "val": 0.5 + i * 0.05} for i in range(10)]
+        pts = [{"date": f"2025-01-{i + 1:02d}", "val": 0.5 + i * 0.05} for i in range(10)]
         self.assertEqual(_calc_trend(pts), "improving")
 
     def test_falling_values_declining(self):
-        pts = [{"date": f"2025-01-{i+1:02d}", "val": 0.9 - i * 0.05} for i in range(10)]
+        pts = [{"date": f"2025-01-{i + 1:02d}", "val": 0.9 - i * 0.05} for i in range(10)]
         self.assertEqual(_calc_trend(pts), "declining")
 
     def test_flat_values_stable(self):
-        pts = [{"date": f"2025-01-{i+1:02d}", "val": 0.75} for i in range(5)]
+        pts = [{"date": f"2025-01-{i + 1:02d}", "val": 0.75} for i in range(5)]
         self.assertEqual(_calc_trend(pts), "stable")
 
 

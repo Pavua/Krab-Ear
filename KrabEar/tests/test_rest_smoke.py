@@ -37,9 +37,9 @@ try:
     }
 
     with patch("core.engine.AudioEngine", return_value=_mock_engine), \
-         patch("backend.state_store.StateStore", return_value=_mock_store), \
-         patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
-         patch("backend.metrics_collector.metrics", _mock_metrics):
+            patch("backend.state_store.StateStore", return_value=_mock_store), \
+            patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
+            patch("backend.metrics_collector.metrics", _mock_metrics):
         from backend.rest_server import app
     _REST_AVAILABLE = True
 except Exception:

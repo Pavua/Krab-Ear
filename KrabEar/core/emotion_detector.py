@@ -52,6 +52,7 @@ _POSITIVE_WORDS: dict[str, list[str]] = {
 
 # ── Dataclass результата ──────────────────────────────────────────────────────
 
+
 @dataclass
 class EmotionResult:
     """Результат эмоционального анализа текста."""

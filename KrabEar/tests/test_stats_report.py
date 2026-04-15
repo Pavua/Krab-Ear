@@ -8,23 +8,20 @@
 """
 
 from __future__ import annotations
+from backend.stats_report import StatsReportGenerator, _ascii_bar, _tokenize
 
 import contextlib
 import fcntl
 import json
 import sys
 import tempfile
-import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.stats_report import StatsReportGenerator, _ascii_bar, _tokenize
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +253,7 @@ class TestGenerateMiniReport(unittest.TestCase):
 
     def test_mini_report_has_5_lines(self) -> None:
         result = self._gen.generate_mini_report(self._store)
-        lines = [l for l in result.strip().split("\n") if l.strip()]
+        lines = [ln for ln in result.strip().split("\n") if ln.strip()]
         self.assertEqual(len(lines), 5)
 
     def test_mini_report_contains_recordings(self) -> None:
@@ -284,7 +281,7 @@ class TestGenerateMiniReport(unittest.TestCase):
         empty_store = FakeStore(Path(self._tmp.name) / "empty")
         result = self._gen.generate_mini_report(empty_store)
         self.assertIsInstance(result, str)
-        lines = [l for l in result.strip().split("\n") if l.strip()]
+        lines = [ln for ln in result.strip().split("\n") if ln.strip()]
         self.assertEqual(len(lines), 5)
 
 
@@ -399,7 +396,7 @@ class TestNoneStore(unittest.TestCase):
     def test_generate_mini_report_none_store(self) -> None:
         result = self._gen.generate_mini_report(None)
         self.assertIsInstance(result, str)
-        lines = [l for l in result.strip().split("\n") if l.strip()]
+        lines = [ln for ln in result.strip().split("\n") if ln.strip()]
         self.assertEqual(len(lines), 5)
 
 

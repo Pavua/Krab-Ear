@@ -1,18 +1,16 @@
 """Тесты для TranscriptWriter."""
 from __future__ import annotations
+from backend.transcript_writer import TranscriptWriter
 
 import sys
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KRABEAR_ROOT = PROJECT_ROOT / "KrabEar"
 if str(KRABEAR_ROOT) not in sys.path:
     sys.path.insert(0, str(KRABEAR_ROOT))
-
-from backend.transcript_writer import TranscriptWriter
 
 
 class TestTranscriptWriterBuildContent(unittest.TestCase):

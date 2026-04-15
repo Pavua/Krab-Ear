@@ -315,7 +315,6 @@ class HistoryService:
 
         raise RuntimeError(f"Запись {item_id} не найдена")
 
-
     # ------------------------------------------------------------------
     # Теги (tagging / labelling)
     # ------------------------------------------------------------------
@@ -771,8 +770,6 @@ class HistoryService:
         export_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # Собираем статистику для сводки
-        total_confidence = 0.0
-        confidence_count = 0
         languages_used: set[str] = set()
 
         # Заголовок документа
@@ -1095,7 +1092,7 @@ class HistoryService:
         output = io.StringIO()
         writer = csv.writer(output, delimiter=delimiter)
         columns = ["timestamp", "text", "translation", "language", "confidence",
-                    "duration_sec", "paste_status", "speakers"]
+                   "duration_sec", "paste_status", "speakers"]
         if include_header:
             writer.writerow(columns)
 
@@ -1345,7 +1342,6 @@ class HistoryService:
         if not texts:
             raise RuntimeError("Все выбранные записи имеют пустой текст")
 
-        combined = "\n\n".join(texts)
         total_words = sum(len(t.split()) for t in texts)
 
         # --- LLM-резюме ---
@@ -2008,7 +2004,6 @@ class HistoryService:
 
         Вспомогательный метод — используется в handle_export_obsidian и тестах.
         """
-        from backend.models import HistoryItem as _HI
 
         ts_list = [it.ts for it in items if it.ts]
         last_ts = ts_list[0] if ts_list else None

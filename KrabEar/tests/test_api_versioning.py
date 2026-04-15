@@ -1,15 +1,5 @@
 """Tests for KrabEar/backend/api_versioning.py."""
 
-import sys
-import os
-import unittest
-
-# Ensure project root is on sys.path so ``backend.*`` imports resolve.
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from flask import Flask
 from backend.api_versioning import (
     APIVersion,
     DEFAULT_VERSION,
@@ -20,6 +10,15 @@ from backend.api_versioning import (
     deprecation_warning,
     get_api_info,
 )
+from flask import Flask
+import sys
+import os
+import unittest
+
+# Ensure project root is on sys.path so ``backend.*`` imports resolve.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 def _make_app() -> Flask:
@@ -148,7 +147,6 @@ class TestDeprecationWarning(unittest.TestCase):
 
     def test_adds_deprecation_header(self):
         with self.app.test_request_context("/"):
-            from flask import make_response
             with self.app.app_context():
                 resp = self.app.response_class(status=200)
                 resp = deprecation_warning(resp, "v1", "2027-01-01")

@@ -1,20 +1,17 @@
 """Тесты для UsageTracker — ежедневная статистика использования Krab Ear."""
 
-import json
+from backend.usage_tracker import UsageTracker
 import sys
 import tempfile
 import threading
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 # Настройка путей для импорта
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.usage_tracker import UsageTracker
 
 
 class TestUsageTrackerBasic(unittest.TestCase):

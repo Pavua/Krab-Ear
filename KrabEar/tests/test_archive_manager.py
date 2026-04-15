@@ -1,6 +1,7 @@
 """Unit-тесты для ArchiveManager."""
 
 from __future__ import annotations
+from backend.archive_manager import ArchiveManager, ArchiveResult
 
 import json
 import sys
@@ -12,8 +13,6 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.archive_manager import ArchiveManager, ArchiveResult
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +153,7 @@ class ArchiveManagerBasicTestCase(unittest.TestCase):
         self._store.add_fake_item("write-1", "Запись для файла")
         self._mgr.archive_items(item_ids=["write-1"])
         archive_file = Path(self._tmpdir) / "archive" / "archive.ndjson"
-        lines = [l for l in archive_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln for ln in archive_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         self.assertEqual(len(lines), 1)
         obj = json.loads(lines[0])
         self.assertEqual(obj["id"], "write-1")

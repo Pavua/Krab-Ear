@@ -9,6 +9,9 @@
 """
 
 from __future__ import annotations
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
+from core.duplicate_detector import DuplicateDetector
 
 import sys
 import tempfile
@@ -19,10 +22,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.duplicate_detector import DuplicateDetector, DuplicateGroup
-from backend.state_store import StateStore
-from backend.history_service import HistoryService
 
 
 def _make_item(text: str, ts: float | None = None) -> dict:

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from core.silence_detector import SilenceDetector, _FRAME_SIZE, _db_to_amplitude
+from core.silence_detector import SilenceDetector
 
 logger = logging.getLogger("KrabEar.SmartSilenceSkipper")
 

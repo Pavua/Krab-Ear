@@ -5,6 +5,7 @@ generate_activity_heatmap и граничные случаи.
 """
 
 from __future__ import annotations
+from backend.timeline_view import TimelineViewGenerator
 
 import sys
 import unittest
@@ -18,8 +19,6 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.timeline_view import TimelineBlock, TimelineViewGenerator
 
 
 # ---------------------------------------------------------------------------

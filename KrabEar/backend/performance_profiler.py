@@ -11,8 +11,7 @@ import threading
 import functools
 import logging
 from collections import deque
-from contextlib import contextmanager
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict
 
 import numpy as np
 

@@ -1,6 +1,7 @@
 """Тесты ReadabilityScorer — оценка читабельности транскрибаций Krab Ear."""
 
 from __future__ import annotations
+from core.readability_scorer import ReadabilityScorer, ReadabilityReport
 
 import tempfile
 from pathlib import Path
@@ -10,8 +11,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.readability_scorer import ReadabilityScorer, ReadabilityReport
 
 
 class ReadabilityScorerBasicTestCase(unittest.TestCase):

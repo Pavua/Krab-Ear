@@ -1,6 +1,12 @@
 """Unit-тесты для StartupDiagnostics."""
 
 from __future__ import annotations
+from backend.startup_diagnostics import (
+    CheckResult,
+    StartupDiagnostics,
+    StartupReport,
+    DISK_MIN_FREE_GB,
+)
 
 import sys
 import tempfile
@@ -11,15 +17,6 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.startup_diagnostics import (
-    CheckResult,
-    StartupDiagnostics,
-    StartupReport,
-    DISK_MIN_FREE_GB,
-    MIN_PYTHON_VERSION,
-    REQUIRED_PACKAGES,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +245,6 @@ class TestCheckHuggingFaceToken(unittest.TestCase):
                 with patch("backend.startup_diagnostics.importlib") as _:
                     pass
         # Прямой путь: мокируем settings внутри метода
-        import importlib as _importlib
         import os
         orig_env = dict(os.environ)
         os.environ["HF_TOKEN"] = "hf_test_token"
@@ -381,7 +377,6 @@ class TestCheckLmStudio(unittest.TestCase):
         self.assertFalse(result.details["enabled"])
 
     def test_enabled_and_reachable_returns_ok(self) -> None:
-        import socket as sock_mod
         mock_settings = MagicMock()
         mock_settings.LLM_ENABLED = True
         mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"

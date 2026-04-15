@@ -1,9 +1,9 @@
 """Тесты ModelCacheManager — менеджера кэша ML-моделей HuggingFace Hub."""
 
 from __future__ import annotations
+from backend.model_cache_manager import ModelCacheManager, ModelInfo
 
 import sys
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +14,6 @@ PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
 for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-from backend.model_cache_manager import ModelCacheManager, ModelInfo
 
 
 def _make_model_dir(cache_dir: Path, model_name: str, size_bytes: int = 1024) -> Path:

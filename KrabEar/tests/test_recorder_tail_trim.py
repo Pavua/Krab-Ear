@@ -34,4 +34,3 @@ def test_stop_trim_tail_keeps_prefix() -> None:
     audio, _ = rec.stop(trim_tail_ms=100)
     # 3200 - 1600 = 1600 samples
     assert audio.size == 1600
-

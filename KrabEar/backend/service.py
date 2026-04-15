@@ -8,9 +8,95 @@
 """
 
 from __future__ import annotations
+from KrabEar.__version__ import __version__ as APP_VERSION
+from backend.model_cache_manager import ModelCacheManager
+from backend.hotword_detector import HotwordDetector
+from backend.plugin_system import PluginManager
+from backend.feature_flags import FeatureFlags
+from backend.template_manager import TemplateManager
+from backend.search_history import SearchHistoryManager
+from backend.archive_manager import ArchiveManager
+from backend.timeline_view import TimelineViewGenerator
+from backend.timeline_export import TimelineExporter
+from backend.auto_deduplication import AutoDeduplicator
+from backend.metadata_enricher import MetadataEnricher
+from backend.recording_insights import RecordingInsightsGenerator
+from backend.smart_vocabulary import SmartVocabularyBuilder
+from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
+from backend.playback_tracker import PlaybackTracker
+from backend.speaker_statistics import SpeakerStatisticsAnalyzer
+from backend.obsidian_sync import ObsidianSyncManager
+from backend.sentiment_trends import SentimentTrendAnalyzer
+from backend.transcription_queue import TranscriptionQueue
+from core.emotion_detector import EmotionDetector
+from core.transcription_scorer import TranscriptionScorer
+from core.topic_tracker import TopicTracker
+from core.text_postprocessor import TextPostProcessor
+from core.text_anonymizer import TextAnonymizer
+from backend.data_migrator import DataMigrator
+from backend.config_presets_library import ConfigPresetsLibrary
+from core.paste_formatter import PasteFormatter
+from backend.language_learning import LanguageLearningManager
+from core.auto_title import AutoTitleGenerator
+from core.context_memory import ContextMemory
+from backend.transcript_versioning import TranscriptVersionManager
+from backend.sharing_manager import SharingManager
+from core.word_timing import WordTimingAnalyzer
+from core.speech_pace import SpeechPaceAnalyzer
+from core.readability_scorer import ReadabilityScorer
+from core.abbreviation_expander import AbbreviationExpander
+from core.audio_fingerprint import AudioFingerprinter
+from core.hallucination_manager import HallucinationManager
+from core.normalization_profiles import NormalizationProfileRegistry
+from backend.webhook_manager import WebhookManager
+from backend.stats_report import StatsReportGenerator
+from backend.activity_calendar import ActivityCalendar
+from backend.integrity_checker import IntegrityChecker
+from backend.period_comparison import compare_periods as _compare_periods_fn
+from backend.keyword_cloud import KeywordCloudGenerator
+from backend.quality_trends import QualityTrendAnalyzer
+from backend.daily_digest import DailyDigestGenerator
+from backend.analytics_dashboard import AnalyticsDashboard
+from core.utils import TextUtils
+from core.term_extractor import TermExtractor
+from core.text_comparator import TextComparator
+from core.language_detector import LanguageDetector
+from core.config import settings
+from core.audio_converter import AudioConverter
+from backend.translator import Translator
+from backend.vocabulary_store import VocabularyStore
+from backend.transcriber import Transcriber
+from backend.state_store import StateStore
+from backend.recorder import AudioRecorder
+from contracts.translation_events import TranslationCompleted, TranslationFailed
+from contracts.registry import EventType
+from contracts.stt_events import SttFailed, SttFinal, SttPartial
+from backend.models import DEFAULT_SETTINGS
+from backend.event_replay import EventReplayManager
+from backend.event_bus import bus as event_bus
+from backend.system_monitor import SystemMonitor
+from backend.translation_service import TranslationService
+from backend.settings_service import SettingsService
+from backend.transcript_writer import TranscriptWriter
+from backend.cost_estimator import CostEstimator
+from backend.usage_tracker import UsageTracker
+from backend.session_tracker import SessionTracker
+from backend.speaker_manager import SpeakerManager
+from backend.history_service import HistoryService
+from backend.error_reporter import ErrorReporter
+from backend.recording_scheduler import RecordingScheduler
+from backend.recording_merger import RecordingMerger
+from backend.recording_chain import RecordingChainManager
+from backend.collection_manager import CollectionManager
+from backend.call_assist_service import CallAssistService
+from backend.request_signing import RequestSigner
+from backend.ipc_throttle import IPCThrottle
+from backend.export_scheduler import ExportScheduler
+from backend.shutdown_handler import GracefulShutdownHandler
+from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
 import tempfile
 import logging
@@ -35,92 +121,6 @@ if str(PACKAGE_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
-from backend.shutdown_handler import GracefulShutdownHandler
-from backend.export_scheduler import ExportScheduler
-from backend.ipc_throttle import IPCThrottle
-from backend.request_signing import RequestSigner
-from backend.call_assist_service import CallAssistService
-from backend.collection_manager import CollectionManager
-from backend.recording_chain import RecordingChainManager
-from backend.recording_merger import RecordingMerger
-from backend.recording_scheduler import RecordingScheduler
-from backend.error_reporter import ErrorReporter
-from backend.history_service import HistoryService
-from backend.speaker_manager import SpeakerManager
-from backend.session_tracker import SessionTracker
-from backend.usage_tracker import UsageTracker
-from backend.cost_estimator import CostEstimator
-from backend.transcript_writer import TranscriptWriter
-from backend.settings_service import SettingsService
-from backend.translation_service import TranslationService
-from backend.system_monitor import SystemMonitor
-from backend.event_bus import bus as event_bus
-from backend.event_replay import EventReplayManager
-from backend.models import DEFAULT_SETTINGS
-from contracts.stt_events import SttFailed, SttFinal, SttPartial
-from contracts.registry import EventType
-from contracts.translation_events import TranslationCompleted, TranslationFailed
-from backend.recorder import AudioRecorder
-from backend.state_store import StateStore
-from backend.transcriber import Transcriber
-from backend.vocabulary_store import VocabularyStore
-from backend.translator import Translator
-from core.audio_converter import AudioConverter
-from core.config import settings
-from core.language_detector import LanguageDetector
-from core.text_comparator import TextComparator
-from core.term_extractor import TermExtractor
-from core.utils import TextUtils
-from backend.analytics_dashboard import AnalyticsDashboard
-from backend.daily_digest import DailyDigestGenerator
-from backend.quality_trends import QualityTrendAnalyzer
-from backend.keyword_cloud import KeywordCloudGenerator
-from backend.period_comparison import compare_periods as _compare_periods_fn
-from backend.integrity_checker import IntegrityChecker
-from backend.activity_calendar import ActivityCalendar
-from backend.stats_report import StatsReportGenerator
-from backend.webhook_manager import WebhookManager
-from core.normalization_profiles import NormalizationProfileRegistry
-from core.hallucination_manager import HallucinationManager
-from core.audio_fingerprint import AudioFingerprinter
-from core.abbreviation_expander import AbbreviationExpander
-from core.readability_scorer import ReadabilityScorer
-from core.speech_pace import SpeechPaceAnalyzer
-from core.word_timing import WordTimingAnalyzer
-from backend.sharing_manager import SharingManager
-from backend.transcript_versioning import TranscriptVersionManager
-from core.context_memory import ContextMemory
-from core.auto_title import AutoTitleGenerator
-from backend.language_learning import LanguageLearningManager
-from core.paste_formatter import PasteFormatter
-from backend.config_presets_library import ConfigPresetsLibrary
-from backend.data_migrator import DataMigrator
-from core.text_anonymizer import TextAnonymizer
-from core.text_postprocessor import TextPostProcessor
-from core.topic_tracker import TopicTracker
-from core.transcription_scorer import TranscriptionScorer
-from core.emotion_detector import EmotionDetector
-from backend.transcription_queue import TranscriptionQueue
-from backend.sentiment_trends import SentimentTrendAnalyzer
-from backend.obsidian_sync import ObsidianSyncManager
-from backend.speaker_statistics import SpeakerStatisticsAnalyzer
-from backend.playback_tracker import PlaybackTracker
-from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
-from backend.smart_vocabulary import SmartVocabularyBuilder
-from backend.recording_insights import RecordingInsightsGenerator
-from backend.metadata_enricher import MetadataEnricher
-from backend.auto_deduplication import AutoDeduplicator
-from backend.timeline_export import TimelineExporter
-from backend.timeline_view import TimelineViewGenerator
-from backend.archive_manager import ArchiveManager
-from backend.search_history import SearchHistoryManager
-from backend.template_manager import TemplateManager
-from backend.feature_flags import FeatureFlags
-from backend.plugin_system import PluginManager
-from backend.hotword_detector import HotwordDetector
-from backend.model_cache_manager import ModelCacheManager
-from KrabEar.__version__ import __version__ as APP_VERSION
 
 logger = logging.getLogger("KrabEar.Backend.Service")
 
@@ -402,7 +402,8 @@ class BackendService:
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._translation.handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
-            "remove_translation_glossary_item": self._translation.handle_remove_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
+            # VERIFIED: called from Swift (HistoryPanel)
+            "remove_translation_glossary_item": self._translation.handle_remove_translation_glossary_item,
             "get_glossary_suggestions": self._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
             "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
@@ -521,7 +522,8 @@ class BackendService:
             "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: WPM, CPM, категория темпа
             "analyze_word_timing": self._handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
-            "format_for_paste": self._paste_formatter.handle_format_for_paste,  # форматирование текста под целевое приложение (telegram, notes, email и др.)
+            # форматирование текста под целевое приложение (telegram, notes, email и др.)
+            "format_for_paste": self._paste_formatter.handle_format_for_paste,
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
@@ -552,17 +554,21 @@ class BackendService:
             "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
             "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
             "get_obsidian_sync_status": self._obsidian_sync.handle_get_status,  # статус синхронизации с Obsidian vault
-            "record_playback": self._playback_tracker.handle_record_playback,  # зарегистрировать воспроизведение записи (item_id, duration_listened_sec)
-            "get_playback_stats": self._playback_tracker.handle_get_playback_stats,  # статистика воспроизведения одной записи: play_count, total_listened_sec, last_played
+            # зарегистрировать воспроизведение записи (item_id, duration_listened_sec)
+            "record_playback": self._playback_tracker.handle_record_playback,
+            # статистика воспроизведения одной записи: play_count, total_listened_sec, last_played
+            "get_playback_stats": self._playback_tracker.handle_get_playback_stats,
             "get_most_replayed": self._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
-            "post_process_text": self._handle_post_process_text,  # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
+            # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
+            "post_process_text": self._handle_post_process_text,
             "list_post_process_steps": self._handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
             "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
             "auto_update_vocabulary": self._handle_auto_update_vocabulary,  # умный авто-апдейт словаря STT из истории транскрибаций
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
-            "enrich_recording": self._metadata_enricher.handle_enrich_recording,  # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
+            # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
+            "enrich_recording": self._metadata_enricher.handle_enrich_recording,
             "get_shutdown_status": self._handle_get_shutdown_status,  # статус последнего graceful shutdown: clean, last_shutdown_time
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
@@ -655,7 +661,6 @@ class BackendService:
             logger.exception("Ошибка метода %s", method)
             return self._error(request_id, "internal_error", str(exc))
 
-
     _BATCH_MAX_REQUESTS = 50
 
     def _handle_batch(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -712,7 +717,6 @@ class BackendService:
             "succeeded": succeeded,
             "failed": failed,
         }
-
 
     def _handle_configure_auto_export(self, params: dict[str, Any]) -> dict[str, Any]:
         """Настраивает расписание авто-экспорта.
@@ -1188,7 +1192,6 @@ class BackendService:
             raise RuntimeError("Не удалось обновить paste_status")
         return {"updated": True, "id": item_id, "paste_status": paste_status}
 
-
     # ------------------------------------------------------------------
     # Audio converter IPC handlers
     # ------------------------------------------------------------------
@@ -1377,7 +1380,6 @@ class BackendService:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
         return self._health_checker.check_all()
 
-
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
 
@@ -1386,6 +1388,7 @@ class BackendService:
             shutdown_in_progress (bool).
         """
         return self._shutdown_handler.get_shutdown_status()
+
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает результаты диагностики при старте бэкенда."""
         report = self._startup_diagnostics.run_all_checks()
@@ -1494,7 +1497,6 @@ class BackendService:
         out["duration_sec"] = round(len(audio) / sr, 4)
         return out
 
-
     def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
 
@@ -1521,7 +1523,6 @@ class BackendService:
             "peak_amplitude": wf.peak_amplitude,
             "rms_amplitude": wf.rms_amplitude,
         }
-
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -1677,7 +1678,7 @@ class BackendService:
         else:
             # Короткий summary: первая смысловая фраза + маркеры.
             head = chunks[0]
-            bullets = chunks[1 : 1 + max_points]
+            bullets = chunks[1: 1 + max_points]
             if not bullets:
                 bullets = chunks[:max_points]
             summary = head
@@ -2422,11 +2423,11 @@ class BackendService:
         for chunk_size in range(2, max_chunk + 1):
             start = 0
             while start + (chunk_size * min_repeats) <= total:
-                chunk = words[start : start + chunk_size]
+                chunk = words[start: start + chunk_size]
                 repeats = 1
                 while start + (chunk_size * (repeats + 1)) <= total:
                     next_chunk = words[
-                        start + (chunk_size * repeats) : start + (chunk_size * (repeats + 1))
+                        start + (chunk_size * repeats): start + (chunk_size * (repeats + 1))
                     ]
                     if next_chunk != chunk:
                         break
@@ -2501,7 +2502,7 @@ class BackendService:
 
         first_alpha_idx = next((idx for idx, char in enumerate(clean) if char.isalpha()), -1)
         if first_alpha_idx >= 0:
-            clean = clean[:first_alpha_idx] + clean[first_alpha_idx].upper() + clean[first_alpha_idx + 1 :]
+            clean = clean[:first_alpha_idx] + clean[first_alpha_idx].upper() + clean[first_alpha_idx + 1:]
 
         if not re.search(r"[.!?…]$", clean):
             if len(words) >= 4:
@@ -2616,29 +2617,9 @@ class BackendService:
                 return str(error).strip()
         return ""
 
-
     # ------------------------------------------------------------------
     # Handlers: ActivityCalendar
     # ------------------------------------------------------------------
-
-    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_activity_calendar — GitHub-style activity calendar данные.
-
-        Params:
-            months (int): количество последних месяцев (по умолчанию 12, макс. 24).
-
-        Returns:
-            CalendarData в виде словаря: {days, weeks, total_active_days,
-            longest_streak, current_streak}
-        """
-        months = max(1, min(int(params.get("months", 12)), 24))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cal_data = self._activity_calendar.generate_calendar(items, months=months)
-        return cal_data.to_dict()
 
     # ------------------------------------------------------------------
     # Handlers: DailyDigest, QualityTrends, PeriodComparison, IntegrityChecker,
@@ -2771,7 +2752,6 @@ class BackendService:
             period2_start=p2_start,
             period2_end=p2_end,
         )
-        from dataclasses import asdict
         return {
             "period1": {
                 "recordings": report.period1.recordings,
@@ -2921,7 +2901,6 @@ class BackendService:
             "shortest_sentence": report.shortest_sentence,
         }
 
-
     def _handle_score_transcription(self, params: dict[str, Any]) -> dict[str, Any]:
         """Оценивает качество транскрибации и возвращает балл 0–100 с оценкой A–F.
 
@@ -3055,7 +3034,6 @@ class BackendService:
         patterns = self._hallucination_manager.list_patterns()
         return {"patterns": patterns, "total": len(patterns)}
 
-
     # ── Timeline view ────────────────────────────────────────────────────────
 
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3178,7 +3156,6 @@ class BackendService:
 
         return {"title": title}
 
-
     def _handle_extract_learning_vocabulary(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: extract_learning_vocabulary — извлечение словаря из двуязычных транскрипций."""
         params_with_store = dict(params)
@@ -3208,8 +3185,6 @@ class BackendService:
         """
         days = max(1, min(int(params.get("days", 30) or 30), 365))
         return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
-
-
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
@@ -3277,7 +3252,6 @@ class BackendService:
             ],
         }
 
-
     def _handle_detect_emotion(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: detect_emotion — эвристическое определение эмоции в тексте транскрипции.
 
@@ -3300,7 +3274,6 @@ class BackendService:
             "question_count": result.question_count,
             "caps_ratio": result.caps_ratio,
         }
-
 
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
@@ -3435,7 +3408,6 @@ class BackendService:
             steps — список имён доступных шагов.
         """
         return {"steps": self._text_postprocessor.list_steps()}
-
 
     def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: select_model — умный выбор STT-модели на основе условий.
