@@ -74,7 +74,9 @@ extension HistoryPanelController {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+
         let textView = NSTextView()
         textView.isEditable = false
         textView.isSelectable = true
@@ -189,12 +191,14 @@ extension HistoryPanelController {
     }
     
     // MARK: - IPC Helper
-    
+
     private func executeIPC(method: String, params: [String: Any] = [:], completion: @escaping @MainActor (String) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        let methodCopy = method
+        let paramsCopy = params
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let response = try self.ipcClient.call(method: method, params: params)
-                let output = response.description
+                let response = try self?.ipcClient.call(method: methodCopy, params: paramsCopy)
+                let output = response?.description ?? ""
                 DispatchQueue.main.async {
                     completion(output)
                 }
