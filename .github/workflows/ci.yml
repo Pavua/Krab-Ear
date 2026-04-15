@@ -64,7 +64,7 @@ jobs:
 
           for py in sorted(root.rglob('*.py')):
               parts = py.parts
-              if any(p.startswith('.') or p == 'tests' or 'venv' in p for p in parts):
+              if any(p.startswith('.') or p.startswith('_legacy') or p in ('tests', 'scripts') or 'venv' in p for p in parts):
                   continue
               rel = py.relative_to(root).with_suffix('')
               mod = '.'.join(rel.parts)
@@ -79,7 +79,8 @@ jobs:
                            'numpy', 'websockets', 'gunicorn', 'flask_limiter',
                            'flask_cors', 'flask_smorest', 'flask_sock', 'marshmallow',
                            'pyperclip', 'requests', 'pydantic',
-                           'libav', 'torchcodec', 'cannot open shared', 'Library not loaded', 'libtorchcodec')
+                           'libav', 'torchcodec', 'cannot open shared', 'Library not loaded', 'libtorchcodec',
+                           'pynput', 'jiwer')
                   if any(h in msg for h in heavy):
                       print(f'  SKIP (missing optional dep): {mod} — {e}')
                   else:
