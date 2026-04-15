@@ -386,6 +386,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.tabViewType = .noTabsNoBorder
         mainTabView.delegate = self
         mainTabView.translatesAutoresizingMaskIntoConstraints = false
+        // Layer-backed + .onSetNeedsDisplay redraw policy уменьшает мерцание
+        // NSVisualEffectView при переключении табов (AppKit bug workaround).
+        mainTabView.wantsLayer = true
+        mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
         tabSelector.selectedSegment = 0
@@ -419,11 +423,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         let dictationContentView = NSView()
         dictationContentView.translatesAutoresizingMaskIntoConstraints = false
+        dictationContentView.wantsLayer = true
+        dictationContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
         let liveContentView = NSView()
         liveContentView.translatesAutoresizingMaskIntoConstraints = false
+        liveContentView.wantsLayer = true
+        liveContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
         // Note: liveSettingsBar is now a class property (promoted for applyVisualTheme)
         let historyContentView = NSView()
         historyContentView.translatesAutoresizingMaskIntoConstraints = false
+        historyContentView.wantsLayer = true
+        historyContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+
+        // Pre-warm all tabs: make all tab views layer-backed и attached to the view
+        // hierarchy before user sees them. Это предотвращает мерцание при первом
+        // переключении на таб — NSVisualEffectView уже rendered и активен.
+        // Без этого вложенные NSVisualEffectView карточки перерисовываются
+        // при первом показе таба, вызывая visual «flash».
 
         let dictationTab = NSTabViewItem(identifier: PanelTab.dictation.rawValue)
         dictationTab.label = "Диктовка"
@@ -1011,6 +1027,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
+        // Liquid Glass: table scroll view должен быть прозрачным,
+        // чтобы видно было frosted glass tableCard background.
+        scrollView.drawsBackground = false
+        scrollView.backgroundColor = .clear
 
         let realtimeTitle = NSTextField(labelWithString: "Realtime preview")
         realtimeTitle.translatesAutoresizingMaskIntoConstraints = false
@@ -1041,6 +1061,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeTextView.isEditable = false
         realtimeTextView.font = .systemFont(ofSize: 13)
         realtimeTextView.string = "Во время записи здесь появляется промежуточный текст."
+        realtimeTextView.backgroundColor = .clear
+        realtimeTextView.drawsBackground = false
         realtimeScroll.documentView = realtimeTextView
 
         dictationHistoryPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1053,6 +1075,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewView.isEditable = false
         dictationHistoryPreviewView.font = .systemFont(ofSize: 12)
         dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
+        dictationHistoryPreviewView.backgroundColor = .clear
+        dictationHistoryPreviewView.drawsBackground = false
         dictationHistoryPreviewScroll.documentView = dictationHistoryPreviewView
 
         callAssistOutputScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1065,6 +1089,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAssistOutputView.isEditable = false
         callAssistOutputView.font = .systemFont(ofSize: 12)
         callAssistOutputView.string = "Здесь появятся результаты быстрых фраз, summary и диагностики звонка."
+        callAssistOutputView.backgroundColor = .clear
+        callAssistOutputView.drawsBackground = false
         callAssistOutputScroll.documentView = callAssistOutputView
 
         let tsColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("ts"))
@@ -1087,12 +1113,20 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tableView.addTableColumn(statusColumn)
         tableView.addTableColumn(textColumn)
         tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.usesAlternatingRowBackgroundColors = false
         tableView.delegate = self
         tableView.dataSource = self
         tableView.rowHeight = 28
         tableView.target = self
         tableView.doubleAction = #selector(onTableViewDoubleClick)
+        tableView.backgroundColor = .clear
+        tableView.usesAlternatingRowBackgroundColors = false
+        tableView.gridColor = NSColor.separatorColor.withAlphaComponent(0.3)
+        // Header row прозрачный
+        tableView.headerView?.wantsLayer = true
+        tableView.headerView?.layer?.backgroundColor = NSColor.clear.cgColor
+        tableView.selectionHighlightStyle = .regular
+        tableView.style = .plain
 
         scrollView.documentView = tableView
 
@@ -1349,6 +1383,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewTextView.isEditable = false
         historyPreviewTextView.font = .systemFont(ofSize: 12)
         historyPreviewTextView.string = "История загружается..."
+        historyPreviewTextView.backgroundColor = .clear
+        historyPreviewTextView.drawsBackground = false
         historyPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
         historyPreviewScroll.hasVerticalScroller = true
         historyPreviewScroll.borderType = .noBorder
@@ -1550,6 +1586,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         diagnosticsOutputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         diagnosticsOutputView.textColor = KrabEarTheme.Colors.textSecondary
         diagnosticsOutputView.backgroundColor = .clear
+        diagnosticsOutputView.drawsBackground = false
         diagnosticsOutputScroll.documentView = diagnosticsOutputView
         diagnosticsOutputScroll.hasVerticalScroller = true
         diagnosticsOutputScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1722,12 +1759,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         secondaryActionsRow.addArrangedSubview(copyTranslationButton)
         secondaryActionsRow.addArrangedSubview(retranslateButton)
         secondaryActionsRow.addArrangedSubview(summarizeSelectedButton)
-        secondaryActionsRow.addArrangedSubview(exportButton)
-        secondaryActionsRow.addArrangedSubview(exportNdjsonButton)
-        secondaryActionsRow.addArrangedSubview(importNdjsonButton)
-        secondaryActionsRow.addArrangedSubview(compactButton)
         secondaryActionsRow.addArrangedSubview(NSView()) // Spacer
         advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow)
+
+        // Second row for overflow buttons
+        let secondaryActionsRow2 = NSStackView()
+        secondaryActionsRow2.orientation = .horizontal
+        secondaryActionsRow2.spacing = 8
+        secondaryActionsRow2.alignment = .centerY
+        secondaryActionsRow2.distribution = .fill
+        secondaryActionsRow2.setHuggingPriority(.defaultLow, for: .horizontal)
+        secondaryActionsRow2.setClippingResistancePriority(.required, for: .horizontal)
+        secondaryActionsRow2.addArrangedSubview(exportButton)
+        secondaryActionsRow2.addArrangedSubview(exportNdjsonButton)
+        secondaryActionsRow2.addArrangedSubview(importNdjsonButton)
+        secondaryActionsRow2.addArrangedSubview(compactButton)
+        secondaryActionsRow2.addArrangedSubview(NSView()) // Spacer
+        advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow2)
 
         // History enhancements row
         historyEnhancementsRow.orientation = .horizontal

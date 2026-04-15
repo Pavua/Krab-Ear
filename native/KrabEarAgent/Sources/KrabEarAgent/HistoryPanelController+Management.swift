@@ -83,6 +83,8 @@ extension HistoryPanelController {
         textView.isSelectable = true
         textView.textContainer?.widthTracksTextView = true
         textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
         
         scrollView.documentView = textView
         scrollView.heightAnchor.constraint(equalToConstant: 100).isActive = true
