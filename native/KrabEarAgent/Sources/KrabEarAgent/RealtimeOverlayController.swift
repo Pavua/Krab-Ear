@@ -259,23 +259,23 @@ public final class RealtimeOverlayController {
     }
 
     private func setupUI() {
-        statusLabel.font      = roundedFont(size: 11, weight: .medium)
+        statusLabel.font      = KrabEarTheme.Typography.captionMedium
         statusLabel.textColor = .tertiaryLabelColor
         statusLabel.alignment = .right
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        modeLabel.font      = roundedFont(size: 11, weight: .medium)
+        modeLabel.font      = KrabEarTheme.Typography.captionMedium
         modeLabel.textColor = .tertiaryLabelColor
         modeLabel.alignment = .left
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        stageLabel.font      = roundedFont(size: 10, weight: .medium)
+        stageLabel.font      = KrabEarTheme.Typography.captionMedium
         stageLabel.textColor = .secondaryLabelColor
         stageLabel.alignment = .left
         stageLabel.isHidden  = true
         stageLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        primaryLabel.font            = NSFont.systemFont(ofSize: 17, weight: .regular)
+        primaryLabel.font            = KrabEarTheme.Typography.display
         primaryLabel.textColor       = .labelColor
         primaryLabel.alignment       = .left
         primaryLabel.maximumNumberOfLines = 0
@@ -454,7 +454,7 @@ public final class RealtimeOverlayController {
         let padding: CGFloat = 10 + 8 + 2 + 12
         let textWidth = width - insets
 
-        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? NSFont.systemFont(ofSize: 17), width: textWidth)
+        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
         let total = topRowH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
@@ -472,18 +472,12 @@ public final class RealtimeOverlayController {
         let stageLabelH: CGFloat = stageLabel.isHidden ? 0 : 18
         let padding: CGFloat = 10 + 8 + 2 + 12
         let textWidth = width - insets
-        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? NSFont.systemFont(ofSize: 17), width: textWidth)
+        let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
         let total = topRowH + stageLabelH + padding + textH
         return clamp(value: total, min: minHeight, max: maxHeight)
     }
 
     // MARK: - Helpers
-
-    private func roundedFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: weight)
-        let descriptor = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
-        return NSFont(descriptor: descriptor, size: size) ?? base
-    }
 
     private func heightForString(_ string: String, font: NSFont, width: CGFloat) -> CGFloat {
         guard !string.isEmpty, width > 0 else { return 22 }

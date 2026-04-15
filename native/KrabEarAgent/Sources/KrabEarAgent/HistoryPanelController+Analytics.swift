@@ -105,7 +105,7 @@ extension HistoryPanelController {
     
     private func createLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = NSFont.systemFont(ofSize: 12)
+        label.font = KrabEarTheme.Typography.body
         label.textColor = NSColor.textColor
         return label
     }
