@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import QuartzCore
 
 @MainActor
 public enum KrabEarTheme {
@@ -73,6 +74,94 @@ public enum KrabEarTheme {
         /// Logs, диагностика, raw data output (11pt monospaced).
         /// Для бейджей с цифрами используй `captionMedium.tabular()` вместо отдельного токена.
         public static var monospace: NSFont { .monospacedSystemFont(ofSize: 11, weight: .regular) }
+    }
+
+    // MARK: - Interaction States (Gemini 3.1 Pro 2026-04-16 v3)
+
+    /// Interaction state tokens для Liquid Glass. Alpha-композитинг поверх base
+    /// колора сохраняет матовый эффект (vs. hardcoded HEX которые убили бы glass).
+    public enum Interaction {
+        /// Hover highlight — белый с 10% поверх фона (dark mode)
+        public static let hoverOverlayAlpha: CGFloat = 0.10
+        /// Pressed scale — микро-уменьшение 2% (0.98x)
+        public static let pressedScale: CGFloat = 0.98
+        /// Pressed overlay — чёрный 15% поверх фона
+        public static let pressedOverlayAlpha: CGFloat = 0.15
+        /// Disabled — общая прозрачность элемента 40%
+        public static let disabledOpacity: CGFloat = 0.40
+        /// Transparent buttons (headerClickButton) — едва заметный белый 5% на hover
+        public static let transparentHoverAlpha: CGFloat = 0.05
+    }
+
+    // MARK: - Motion (Gemini 3.1 Pro v3 — unified from scattered 0.2/0.25/0.3/0.7 durations)
+
+    /// Motion tokens: durations + easing curves + centralized animate() wrapper с
+    /// automatic Reduce Motion support.
+    public enum Motion {
+        public enum Duration {
+            /// Hover, press, checkbox toggle (0.15s)
+            public static let micro: TimeInterval = 0.15
+            /// Expand/collapse, tab switch (0.25s)
+            public static let short: TimeInterval = 0.25
+            /// Overlay show, modals (0.40s)
+            public static let standard: TimeInterval = 0.40
+            /// Pulse, attention loops (0.70s)
+            public static let long: TimeInterval = 0.70
+        }
+
+        public enum Easing {
+            public static var easeOut: CAMediaTimingFunction { CAMediaTimingFunction(name: .easeOut) }
+            public static var easeIn: CAMediaTimingFunction { CAMediaTimingFunction(name: .easeIn) }
+            public static var easeInOut: CAMediaTimingFunction { CAMediaTimingFunction(name: .easeInEaseOut) }
+            public static var linear: CAMediaTimingFunction { CAMediaTimingFunction(name: .linear) }
+        }
+
+        /// Centralized animation wrapper с automatic Reduce Motion support.
+        /// Если пользователь enabled "Reduce Motion" в System Settings → duration = 0.
+        public static func animate(
+            duration: TimeInterval,
+            easing: CAMediaTimingFunction,
+            animations: @escaping () -> Void
+        ) {
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let actualDuration = reduceMotion ? 0.0 : duration
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = actualDuration
+                context.timingFunction = easing
+                context.allowsImplicitAnimation = true
+                animations()
+            }
+        }
+    }
+
+    // MARK: - Elevation (shadow hierarchy — Gemini 3.1 Pro v3)
+
+    /// Elevation helpers — apply shadow spec на CALayer.
+    /// Note: parent layer must NOT have `masksToBounds = true` (blocks shadows).
+    public enum Elevation {
+        /// Card-level shadow (subtle).
+        public static func applyCard(to layer: CALayer) {
+            layer.shadowColor = NSColor.black.cgColor
+            layer.shadowOpacity = 0.15
+            layer.shadowOffset = CGSize(width: 0, height: -2)
+            layer.shadowRadius = 6
+        }
+
+        /// Popup/dropdown shadow.
+        public static func applyPopup(to layer: CALayer) {
+            layer.shadowColor = NSColor.black.cgColor
+            layer.shadowOpacity = 0.20
+            layer.shadowOffset = CGSize(width: 0, height: -6)
+            layer.shadowRadius = 16
+        }
+
+        /// Main overlay (RealtimeOverlay panel) — отрыв от всех окон.
+        public static func applyOverlay(to layer: CALayer) {
+            layer.shadowColor = NSColor.black.cgColor
+            layer.shadowOpacity = 0.30
+            layer.shadowOffset = CGSize(width: 0, height: -12)
+            layer.shadowRadius = 32
+        }
     }
 }
 
