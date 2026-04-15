@@ -24,6 +24,8 @@ jobs:
           pip install numpy
 
       - name: Run backend/unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
         run: |
           python -m unittest discover -s KrabEar/tests -v
 
