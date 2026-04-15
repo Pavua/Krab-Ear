@@ -233,13 +233,13 @@ public final class RealtimeOverlayController {
         panel.contentView?.wantsLayer = true
         if let rootLayer = panel.contentView?.layer {
             rootLayer.masksToBounds   = false
-            rootLayer.shadowColor     = NSColor.black.cgColor
+            rootLayer.shadowColor     = KrabEarTheme.Colors.overlayShadow.cgColor
             rootLayer.shadowOpacity   = 0.25
             rootLayer.shadowRadius    = 28
             rootLayer.shadowOffset    = CGSize(width: 0, height: -4)
         }
 
-        borderLayer.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        borderLayer.borderColor = KrabEarTheme.Colors.border.cgColor
         borderLayer.borderWidth = 1.0
         borderLayer.cornerRadius = cornerRadius
         borderLayer.frame = effectView.bounds

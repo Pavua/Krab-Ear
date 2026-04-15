@@ -421,7 +421,7 @@ final class ImportDropZoneView: NSView {
         layer?.cornerRadius = 8
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
+        layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.withAlphaComponent(0.25).cgColor
 
         registerForDraggedTypes([.fileURL])
 
@@ -477,11 +477,11 @@ final class ImportDropZoneView: NSView {
         guard isHighlighted != value else { return }
         isHighlighted = value
         layer?.borderColor = value
-            ? NSColor.systemBlue.withAlphaComponent(0.95).cgColor
+            ? KrabEarTheme.Colors.accent.cgColor
             : NSColor.separatorColor.cgColor
         layer?.backgroundColor = value
-            ? NSColor.systemBlue.withAlphaComponent(0.16).cgColor
-            : NSColor.controlBackgroundColor.withAlphaComponent(0.35).cgColor
-        hintLabel.textColor = value ? NSColor.systemBlue : NSColor.secondaryLabelColor
+            ? KrabEarTheme.Colors.accent.withAlphaComponent(0.15).cgColor
+            : KrabEarTheme.Colors.cardBackground.withAlphaComponent(0.25).cgColor
+        hintLabel.textColor = value ? KrabEarTheme.Colors.accent : NSColor.secondaryLabelColor
     }
 }

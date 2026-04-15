@@ -236,10 +236,10 @@ extension HistoryPanelController {
                 nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     guard let self = self else { return }
-                    self.sttHealthLabel.textColor = (result["stt"] as? Bool == true) ? NSColor.systemGreen : NSColor.systemRed
-                    self.llmHealthLabel.textColor = (result["llm"] as? Bool == true) ? NSColor.systemGreen : NSColor.systemRed
-                    self.historyHealthLabel.textColor = (result["history"] as? Bool == true) ? NSColor.systemGreen : NSColor.systemRed
-                    self.translationHealthLabel.textColor = (result["translation"] as? Bool == true) ? NSColor.systemGreen : NSColor.systemRed
+                    self.sttHealthLabel.textColor = (result["stt"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
+                    self.llmHealthLabel.textColor = (result["llm"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
+                    self.historyHealthLabel.textColor = (result["history"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
+                    self.translationHealthLabel.textColor = (result["translation"] as? Bool == true) ? KrabEarTheme.Colors.success : KrabEarTheme.Colors.error
                 }
             } catch {
                 DispatchQueue.main.async {

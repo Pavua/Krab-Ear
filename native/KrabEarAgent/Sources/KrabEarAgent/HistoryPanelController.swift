@@ -1057,7 +1057,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeScroll.wantsLayer = true
         realtimeScroll.layer?.cornerRadius = 8
         realtimeScroll.layer?.borderWidth = 0.5
-        realtimeScroll.layer?.borderColor = NSColor.separatorColor.cgColor
+        realtimeScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         realtimeTextView.isEditable = false
         realtimeTextView.font = KrabEarTheme.Typography.body
         realtimeTextView.string = "Во время записи здесь появляется промежуточный текст."
@@ -1071,7 +1071,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewScroll.wantsLayer = true
         dictationHistoryPreviewScroll.layer?.cornerRadius = 8
         dictationHistoryPreviewScroll.layer?.borderWidth = 0.5
-        dictationHistoryPreviewScroll.layer?.borderColor = NSColor.separatorColor.cgColor
+        dictationHistoryPreviewScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         dictationHistoryPreviewView.isEditable = false
         dictationHistoryPreviewView.font = KrabEarTheme.Typography.body
         dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
@@ -1085,7 +1085,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAssistOutputScroll.wantsLayer = true
         callAssistOutputScroll.layer?.cornerRadius = 8
         callAssistOutputScroll.layer?.borderWidth = 0.5
-        callAssistOutputScroll.layer?.borderColor = NSColor.separatorColor.cgColor
+        callAssistOutputScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         callAssistOutputView.isEditable = false
         callAssistOutputView.font = KrabEarTheme.Typography.body
         callAssistOutputView.string = "Здесь появятся результаты быстрых фраз, summary и диагностики звонка."
@@ -1121,7 +1121,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tableView.doubleAction = #selector(onTableViewDoubleClick)
         tableView.backgroundColor = .clear
         tableView.usesAlternatingRowBackgroundColors = false
-        tableView.gridColor = NSColor.separatorColor.withAlphaComponent(0.3)
+        tableView.gridColor = KrabEarTheme.Colors.border
         // Header row прозрачный
         tableView.headerView?.wantsLayer = true
         tableView.headerView?.layer?.backgroundColor = NSColor.clear.cgColor
@@ -1391,7 +1391,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewScroll.wantsLayer = true
         historyPreviewScroll.layer?.cornerRadius = 8
         historyPreviewScroll.layer?.borderWidth = 0.5
-        historyPreviewScroll.layer?.borderColor = NSColor.separatorColor.cgColor
+        historyPreviewScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         historyPreviewScroll.documentView = historyPreviewTextView
         historyPreviewContainer.addArrangedSubview(historyPreviewHeader)
         historyPreviewContainer.addArrangedSubview(historyPreviewScroll)
