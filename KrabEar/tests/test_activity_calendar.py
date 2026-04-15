@@ -26,7 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def _make_item(days_ago: int, text: str = "hello world", duration_sec: float = 60.0):
     """Создаёт fake-элемент истории в виде dict."""
-    ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).strftime(
+    # Use date.today() (local) to match _build_calendar() — avoids timezone mismatch
+    ts = (datetime.combine(date.today(), datetime.min.time()) - timedelta(days=days_ago)).strftime(
         "%Y-%m-%dT%H:%M:%S"
     )
     return {
@@ -38,7 +39,8 @@ def _make_item(days_ago: int, text: str = "hello world", duration_sec: float = 6
 
 def _make_item_obj(days_ago: int, text: str = "hello world", duration_sec: float = 60.0):
     """Создаёт fake-элемент истории в виде объекта с атрибутами."""
-    ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).strftime(
+    # Use date.today() (local) to match _build_calendar() — avoids timezone mismatch
+    ts = (datetime.combine(date.today(), datetime.min.time()) - timedelta(days=days_ago)).strftime(
         "%Y-%m-%dT%H:%M:%S"
     )
 
