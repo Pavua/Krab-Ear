@@ -76,7 +76,7 @@ public final class RealtimeOverlayController {
     private let maxWidth:   CGFloat = 640
     private let minHeight:  CGFloat = 80
     private let maxHeight:  CGFloat = 180
-    private let cornerRadius: CGFloat = 16
+    private let cornerRadius: CGFloat = KrabEarTheme.Metrics.cardCornerRadius
 
     // MARK: Init
 
@@ -290,16 +290,16 @@ public final class RealtimeOverlayController {
 
         NSLayoutConstraint.activate([
             modeLabel.topAnchor.constraint(equalTo: effectView.topAnchor, constant: 10),
-            modeLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
+            modeLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
 
             statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
 
             stageLabel.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
-            stageLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
+            stageLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
 
             primaryLabel.topAnchor.constraint(equalTo: stageLabel.bottomAnchor, constant: 2),
-            primaryLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 14),
+            primaryLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
             primaryLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
             primaryLabel.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -12),
         ])

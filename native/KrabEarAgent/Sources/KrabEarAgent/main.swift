@@ -2179,7 +2179,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         
         let stack = NSStackView()
         stack.orientation = .vertical
-        stack.spacing = 16
+        stack.spacing = KrabEarTheme.Metrics.spacious
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
         stack.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(stack)
@@ -2248,7 +2248,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         
         let buttonsRow = NSStackView()
         buttonsRow.orientation = .horizontal
-        buttonsRow.spacing = 12
+        buttonsRow.spacing = KrabEarTheme.Metrics.comfortable
         stack.addArrangedSubview(buttonsRow)
         
         let openPanelBtn = NSButton(title: "Открыть историю", target: self, action: #selector(onOpenHistory))

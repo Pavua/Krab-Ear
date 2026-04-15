@@ -418,7 +418,7 @@ final class ImportDropZoneView: NSView {
 
     private func setup() {
         wantsLayer = true
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.cgColor
         layer?.backgroundColor = KrabEarTheme.Colors.cardBackground.withAlphaComponent(0.25).cgColor

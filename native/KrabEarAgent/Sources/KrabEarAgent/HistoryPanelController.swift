@@ -412,7 +412,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Configure new history stack views
         for stack in [primaryActionsRow, secondaryActionsRow, statusRow] {
             stack.orientation = .horizontal
-            stack.spacing = 8
+            stack.spacing = KrabEarTheme.Metrics.standard
             stack.alignment = .centerY
             stack.translatesAutoresizingMaskIntoConstraints = false
             stack.distribution = .fill
@@ -455,48 +455,48 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.addTabViewItem(historyTab)
 
         topBar.orientation = .vertical
-        topBar.spacing = 6
+        topBar.spacing = KrabEarTheme.Metrics.tight
         topBar.alignment = .leading
         topBar.translatesAutoresizingMaskIntoConstraints = false
 
         topSearchRow.orientation = .horizontal
-        topSearchRow.spacing = 8
+        topSearchRow.spacing = KrabEarTheme.Metrics.standard
         topSearchRow.alignment = .centerY
         topSearchRow.distribution = .fill
         topSearchRow.translatesAutoresizingMaskIntoConstraints = false
 
         topActionsRow.orientation = .horizontal
-        topActionsRow.spacing = 8
+        topActionsRow.spacing = KrabEarTheme.Metrics.standard
         topActionsRow.alignment = .centerY
         topActionsRow.translatesAutoresizingMaskIntoConstraints = false
 
         filterRow1.orientation = .horizontal
-        filterRow1.spacing = 8
+        filterRow1.spacing = KrabEarTheme.Metrics.standard
         filterRow1.alignment = .centerY
         filterRow1.translatesAutoresizingMaskIntoConstraints = false
 
         filterRow2.orientation = .horizontal
-        filterRow2.spacing = 8
+        filterRow2.spacing = KrabEarTheme.Metrics.standard
         filterRow2.alignment = .centerY
         filterRow2.translatesAutoresizingMaskIntoConstraints = false
 
         historyQuickPresetRow.orientation = .horizontal
-        historyQuickPresetRow.spacing = 8
+        historyQuickPresetRow.spacing = KrabEarTheme.Metrics.standard
         historyQuickPresetRow.alignment = .centerY
         historyQuickPresetRow.translatesAutoresizingMaskIntoConstraints = false
 
         importRow.orientation = .horizontal
-        importRow.spacing = 8
+        importRow.spacing = KrabEarTheme.Metrics.standard
         importRow.alignment = .centerY
         importRow.translatesAutoresizingMaskIntoConstraints = false
 
         toolsRow.orientation = .horizontal
-        toolsRow.spacing = 8
+        toolsRow.spacing = KrabEarTheme.Metrics.standard
         toolsRow.alignment = .centerY
         toolsRow.translatesAutoresizingMaskIntoConstraints = false
 
         controlRow.orientation = .horizontal
-        controlRow.spacing = 8
+        controlRow.spacing = KrabEarTheme.Metrics.standard
         controlRow.alignment = .centerY
         controlRow.translatesAutoresizingMaskIntoConstraints = false
         controlRow.distribution = .fill
@@ -688,76 +688,76 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         controlRow.addArrangedSubview(NSView())
 
         settingsBar.orientation = .vertical
-        settingsBar.spacing = 6
+        settingsBar.spacing = KrabEarTheme.Metrics.tight
         settingsBar.alignment = .leading
         settingsBar.translatesAutoresizingMaskIntoConstraints = false
         liveSettingsBar.orientation = .vertical
-        liveSettingsBar.spacing = 6
+        liveSettingsBar.spacing = KrabEarTheme.Metrics.tight
         liveSettingsBar.alignment = .leading
         liveSettingsBar.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow1.orientation = .horizontal
-        settingsRow1.spacing = 10
+        settingsRow1.spacing = KrabEarTheme.Metrics.standard
         settingsRow1.alignment = .centerY
         settingsRow1.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow2.orientation = .horizontal
-        settingsRow2.spacing = 10
+        settingsRow2.spacing = KrabEarTheme.Metrics.standard
         settingsRow2.alignment = .centerY
         settingsRow2.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow3.orientation = .horizontal
-        settingsRow3.spacing = 10
+        settingsRow3.spacing = KrabEarTheme.Metrics.standard
         settingsRow3.alignment = .centerY
         settingsRow3.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow4.orientation = .horizontal
-        settingsRow4.spacing = 10
+        settingsRow4.spacing = KrabEarTheme.Metrics.standard
         settingsRow4.alignment = .centerY
         settingsRow4.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow5.orientation = .horizontal
-        settingsRow5.spacing = 10
+        settingsRow5.spacing = KrabEarTheme.Metrics.standard
         settingsRow5.alignment = .centerY
         settingsRow5.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow6.orientation = .horizontal
-        settingsRow6.spacing = 10
+        settingsRow6.spacing = KrabEarTheme.Metrics.standard
         settingsRow6.alignment = .centerY
         settingsRow6.translatesAutoresizingMaskIntoConstraints = false
 
         settingsRow7.orientation = .horizontal
-        settingsRow7.spacing = 10
+        settingsRow7.spacing = KrabEarTheme.Metrics.standard
         settingsRow7.alignment = .centerY
         settingsRow7.translatesAutoresizingMaskIntoConstraints = false
 
         callAssistConfigRow.orientation = .horizontal
-        callAssistConfigRow.spacing = 10
+        callAssistConfigRow.spacing = KrabEarTheme.Metrics.standard
         callAssistConfigRow.alignment = .centerY
         callAssistConfigRow.translatesAutoresizingMaskIntoConstraints = false
 
         callAssistControlRow.orientation = .horizontal
-        callAssistControlRow.spacing = 8
+        callAssistControlRow.spacing = KrabEarTheme.Metrics.standard
         callAssistControlRow.alignment = .centerY
         callAssistControlRow.translatesAutoresizingMaskIntoConstraints = false
 
         voiceGatewayRow.orientation = .horizontal
-        voiceGatewayRow.spacing = 8
+        voiceGatewayRow.spacing = KrabEarTheme.Metrics.standard
         voiceGatewayRow.alignment = .centerY
         voiceGatewayRow.translatesAutoresizingMaskIntoConstraints = false
 
         callPhrasePresetRow.orientation = .horizontal
-        callPhrasePresetRow.spacing = 8
+        callPhrasePresetRow.spacing = KrabEarTheme.Metrics.standard
         callPhrasePresetRow.alignment = .centerY
         callPhrasePresetRow.translatesAutoresizingMaskIntoConstraints = false
 
         callPhraseActionRow.orientation = .horizontal
-        callPhraseActionRow.spacing = 8
+        callPhraseActionRow.spacing = KrabEarTheme.Metrics.standard
         callPhraseActionRow.alignment = .centerY
         callPhraseActionRow.translatesAutoresizingMaskIntoConstraints = false
 
         callTimelineRow.orientation = .horizontal
-        callTimelineRow.spacing = 8
+        callTimelineRow.spacing = KrabEarTheme.Metrics.standard
         callTimelineRow.alignment = .centerY
         callTimelineRow.translatesAutoresizingMaskIntoConstraints = false
 
@@ -884,7 +884,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         aiSettingsRow2.addArrangedSubview(llmRewriteButton)
         aiSettingsRow2.addArrangedSubview(llmModelSelector)
         aiSettingsRow2.orientation = .horizontal
-        aiSettingsRow2.spacing = 10
+        aiSettingsRow2.spacing = KrabEarTheme.Metrics.standard
         aiSettingsRow2.alignment = .centerY
 
         settingsRow7.addArrangedSubview(NSTextField(labelWithString: "Прозрачность оверлея:"))
@@ -1055,7 +1055,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeScroll.hasVerticalScroller = true
         realtimeScroll.borderType = .noBorder
         realtimeScroll.wantsLayer = true
-        realtimeScroll.layer?.cornerRadius = 8
+        realtimeScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         realtimeScroll.layer?.borderWidth = 0.5
         realtimeScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         realtimeTextView.isEditable = false
@@ -1069,7 +1069,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewScroll.hasVerticalScroller = true
         dictationHistoryPreviewScroll.borderType = .noBorder
         dictationHistoryPreviewScroll.wantsLayer = true
-        dictationHistoryPreviewScroll.layer?.cornerRadius = 8
+        dictationHistoryPreviewScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         dictationHistoryPreviewScroll.layer?.borderWidth = 0.5
         dictationHistoryPreviewScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         dictationHistoryPreviewView.isEditable = false
@@ -1083,7 +1083,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAssistOutputScroll.hasVerticalScroller = true
         callAssistOutputScroll.borderType = .noBorder
         callAssistOutputScroll.wantsLayer = true
-        callAssistOutputScroll.layer?.cornerRadius = 8
+        callAssistOutputScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         callAssistOutputScroll.layer?.borderWidth = 0.5
         callAssistOutputScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         callAssistOutputView.isEditable = false
@@ -1131,12 +1131,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         scrollView.documentView = tableView
 
         bottomBar1.orientation = .horizontal
-        bottomBar1.spacing = 8
+        bottomBar1.spacing = KrabEarTheme.Metrics.standard
         bottomBar1.alignment = .centerY
         bottomBar1.translatesAutoresizingMaskIntoConstraints = false
 
         bottomBar2.orientation = .horizontal
-        bottomBar2.spacing = 8
+        bottomBar2.spacing = KrabEarTheme.Metrics.standard
         bottomBar2.alignment = .centerY
         bottomBar2.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1249,7 +1249,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         dictationHistoryHeaderRow.orientation = .horizontal
-        dictationHistoryHeaderRow.spacing = 8
+        dictationHistoryHeaderRow.spacing = KrabEarTheme.Metrics.standard
         dictationHistoryHeaderRow.alignment = .centerY
         dictationHistoryHeaderRow.translatesAutoresizingMaskIntoConstraints = false
         let dictationHistoryTitle = NSTextField(labelWithString: "Последние транскрибации")
@@ -1261,7 +1261,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryHeaderRow.addArrangedSubview(dictationHistoryOpenButton)
 
         dictationStack.orientation = .vertical
-        dictationStack.spacing = 10
+        dictationStack.spacing = KrabEarTheme.Metrics.standard
         dictationStack.alignment = .leading
         dictationStack.translatesAutoresizingMaskIntoConstraints = false
         dictationStack.setHuggingPriority(.required, for: .vertical)
@@ -1307,7 +1307,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveTitle.font = KrabEarTheme.Typography.sectionTitle
 
         liveHeaderRow.orientation = .horizontal
-        liveHeaderRow.spacing = 8
+        liveHeaderRow.spacing = KrabEarTheme.Metrics.standard
         liveHeaderRow.alignment = .centerY
         liveHeaderRow.translatesAutoresizingMaskIntoConstraints = false
         liveHeaderRow.addArrangedSubview(NSTextField(labelWithString: "Realtime preview"))
@@ -1315,7 +1315,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         liveHeaderRow.addArrangedSubview(realtimeStatusLabel)
 
         liveStack.orientation = .vertical
-        liveStack.spacing = 10
+        liveStack.spacing = KrabEarTheme.Metrics.standard
         liveStack.alignment = .leading
         liveStack.translatesAutoresizingMaskIntoConstraints = false
         liveStack.setHuggingPriority(.required, for: .vertical)
@@ -1366,7 +1366,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     private func setupHistoryTab(_ contentView: NSView) {
         historyStack.orientation = .vertical
-        historyStack.spacing = 8
+        historyStack.spacing = KrabEarTheme.Metrics.standard
         historyStack.alignment = .leading
         historyStack.translatesAutoresizingMaskIntoConstraints = false
         historyStack.setHuggingPriority(.required, for: .vertical)
@@ -1376,7 +1376,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(filterRow2)
         historyStack.addArrangedSubview(historyQuickPresetRow)
         historyPreviewContainer.orientation = .vertical
-        historyPreviewContainer.spacing = 6
+        historyPreviewContainer.spacing = KrabEarTheme.Metrics.tight
         historyPreviewContainer.translatesAutoresizingMaskIntoConstraints = false
         historyPreviewHeader.font = KrabEarTheme.Typography.sectionTitle
         historyPreviewHeader.textColor = .labelColor
@@ -1389,7 +1389,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewScroll.hasVerticalScroller = true
         historyPreviewScroll.borderType = .noBorder
         historyPreviewScroll.wantsLayer = true
-        historyPreviewScroll.layer?.cornerRadius = 8
+        historyPreviewScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
         historyPreviewScroll.layer?.borderWidth = 0.5
         historyPreviewScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         historyPreviewScroll.documentView = historyPreviewTextView
@@ -1564,7 +1564,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
         let diagCard = ThemeCardView()
         diagnosticsRow.orientation = .horizontal
-        diagnosticsRow.spacing = 8
+        diagnosticsRow.spacing = KrabEarTheme.Metrics.standard
         diagnosticsRow.alignment = .centerY
         diagnosticsRow.translatesAutoresizingMaskIntoConstraints = false
         diagnosticsButton.target = self
@@ -1605,7 +1605,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let profAudioSection = CollapsibleSectionView(sectionId: "dictation_profile_audio", title: "Профили и устройства", isExpanded: false)
         let profAudioCard = ThemeCardView()
         profileRow.orientation = .horizontal
-        profileRow.spacing = 8
+        profileRow.spacing = KrabEarTheme.Metrics.standard
         profileRow.alignment = .centerY
         profileRow.translatesAutoresizingMaskIntoConstraints = false
         let profileLabel = NSTextField(labelWithString: "Профиль:")
@@ -1620,7 +1620,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         profAudioCard.contentStackView.addArrangedSubview(profileRow)
 
         audioDeviceRow.orientation = .horizontal
-        audioDeviceRow.spacing = 8
+        audioDeviceRow.spacing = KrabEarTheme.Metrics.standard
         audioDeviceRow.alignment = .centerY
         audioDeviceRow.translatesAutoresizingMaskIntoConstraints = false
         let audioLabel = NSTextField(labelWithString: "Микрофон:")
@@ -1645,7 +1645,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let clipSection = CollapsibleSectionView(sectionId: "dictation_clipboard", title: "Буфер обмена", isExpanded: false)
         let clipCard = ThemeCardView()
         clipboardRow.orientation = .horizontal
-        clipboardRow.spacing = 8
+        clipboardRow.spacing = KrabEarTheme.Metrics.standard
         clipboardRow.alignment = .centerY
         clipboardRow.translatesAutoresizingMaskIntoConstraints = false
         clipboardHistoryButton.target = self
@@ -1745,7 +1745,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Move rarely-used buttons from toolbar into advanced section
         let advancedToolbarRow = NSStackView()
         advancedToolbarRow.orientation = .horizontal
-        advancedToolbarRow.spacing = 8
+        advancedToolbarRow.spacing = KrabEarTheme.Metrics.standard
         advancedToolbarRow.alignment = .centerY
         advancedToolbarRow.distribution = .fill
         advancedToolbarRow.setHuggingPriority(.defaultLow, for: .horizontal)
@@ -1770,7 +1770,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Second row for overflow buttons
         let secondaryActionsRow2 = NSStackView()
         secondaryActionsRow2.orientation = .horizontal
-        secondaryActionsRow2.spacing = 8
+        secondaryActionsRow2.spacing = KrabEarTheme.Metrics.standard
         secondaryActionsRow2.alignment = .centerY
         secondaryActionsRow2.distribution = .fill
         secondaryActionsRow2.setHuggingPriority(.defaultLow, for: .horizontal)
@@ -1784,7 +1784,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // History enhancements row
         historyEnhancementsRow.orientation = .horizontal
-        historyEnhancementsRow.spacing = 8
+        historyEnhancementsRow.spacing = KrabEarTheme.Metrics.standard
         historyEnhancementsRow.alignment = .centerY
         historyEnhancementsRow.translatesAutoresizingMaskIntoConstraints = false
         historyEnhancementsRow.distribution = .fill
@@ -2075,7 +2075,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             targetField,
         ])
         stack.orientation = .vertical
-        stack.spacing = 8
+        stack.spacing = KrabEarTheme.Metrics.standard
 
         let alert = NSAlert()
         alert.messageText = "Добавить термин в глоссарий"
