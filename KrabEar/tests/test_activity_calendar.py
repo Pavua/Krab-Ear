@@ -12,7 +12,7 @@ from backend.activity_calendar import (
 
 import sys
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

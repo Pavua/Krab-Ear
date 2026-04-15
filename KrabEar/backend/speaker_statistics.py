@@ -169,7 +169,7 @@ class SpeakerStatisticsAnalyzer:
                 try:
                     alias = speaker_manager.get_alias(speaker_id)
                 except Exception as exc:
-                    logger.debug("Не удалось получить alias для %s: %s", speaker_id, exc)
+                    _log.debug("Не удалось получить alias для %s: %s", speaker_id, exc)
 
             speakers_out[speaker_id] = {
                 "alias": alias,
