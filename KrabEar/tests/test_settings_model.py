@@ -9,6 +9,7 @@
 """
 
 from __future__ import annotations
+from core.config import DEFAULT_SETTINGS, Settings
 
 import json
 import sys
@@ -18,8 +19,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.config import DEFAULT_SETTINGS, Settings
 
 
 class TestDefaultSettingsSerializable(unittest.TestCase):
@@ -89,7 +88,7 @@ class TestSettingsUnknownKeysIgnored(unittest.TestCase):
         # DEFAULT_SETTINGS не используется напрямую в Settings,
         # но убедимся, что можно создать Settings с произвольными kwargs
         try:
-            s = Settings(**{k.upper(): v for k, v in data.items() if isinstance(k, str)})
+            _s = Settings(**{k.upper(): v for k, v in data.items() if isinstance(k, str)})  # noqa: F841
         except Exception:
             # Pydantic может отклонить некоторые значения из DEFAULT_SETTINGS
             # из-за несовпадения типов — это нормально, тест проверяет только

@@ -7,25 +7,117 @@ on:
     branches: [codex/krab-ear-v2]
 
 jobs:
-  test:
+  python:
+    name: Python ${{ matrix.python-version }}
     runs-on: macos-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.python-version }}-${{ hashFiles('KrabEar/requirements.txt') }}
+          restore-keys: |
+            pip-${{ matrix.python-version }}-
 
       - name: Install Python dependencies
-        run: pip install -r KrabEar/requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r KrabEar/requirements.txt
+          pip install pytest pytest-cov flake8
+
+      - name: Lint (flake8)
+        run: |
+          flake8 KrabEar/ \
+            --max-line-length=150 \
+            --extend-ignore=E501 \
+            --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear,KrabEar/_legacy_tkinter_archive_2026-02-11 \
+            --statistics
+        continue-on-error: false
+
+      - name: Import check
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
+        run: |
+          python - << 'PYEOF'
+          import sys, importlib, pathlib
+
+          root = pathlib.Path('KrabEar')
+          errors = []
+
+          skip = {
+              'rest_server',       # requires running Flask app context
+          }
+
+          for py in sorted(root.rglob('*.py')):
+              parts = py.parts
+              if any(p.startswith('.') or p.startswith('_legacy') or p in ('tests', 'scripts') or 'venv' in p for p in parts):
+                  continue
+              rel = py.relative_to(root).with_suffix('')
+              mod = '.'.join(rel.parts)
+              if mod in skip or mod.startswith('__'):
+                  continue
+              try:
+                  importlib.import_module(mod)
+              except (ImportError, OSError) as e:
+                  msg = str(e)
+                  heavy = ('mlx', 'pyannote', 'torch', 'sounddevice', 'soundfile',
+                           'pyobjc', 'AppKit', 'Foundation', 'Cocoa', 'Vision',
+                           'numpy', 'websockets', 'gunicorn', 'flask_limiter',
+                           'flask_cors', 'flask_smorest', 'flask_sock', 'marshmallow',
+                           'pyperclip', 'requests', 'pydantic',
+                           'libav', 'torchcodec', 'cannot open shared', 'Library not loaded', 'libtorchcodec',
+                           'pynput', 'jiwer')
+                  if any(h in msg for h in heavy):
+                      print(f'  SKIP (missing optional dep): {mod} — {e}')
+                  else:
+                      errors.append(f'{mod}: {e}')
+                      print(f'  FAIL: {mod} — {e}')
+              except Exception as e:
+                  errors.append(f'{mod}: {e}')
+                  print(f'  FAIL: {mod} — {e}')
+
+          if errors:
+              print(f'\n{len(errors)} import error(s) found:')
+              for err in errors:
+                  print(f'  - {err}')
+              sys.exit(1)
+          else:
+              print('All modules imported cleanly (or skipped optional deps).')
+          PYEOF
 
       - name: Run Python tests
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        run: python -m unittest discover -s KrabEar/tests -p "test_*.py"
+        timeout-minutes: 10
+        run: |
+          python -m pytest KrabEar/tests/ \
+            -v \
+            --tb=short \
+            --cov=KrabEar \
+            --cov-report=term-missing \
+            -p no:cacheprovider
+
+  swift:
+    name: Swift agent build
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build Swift agent
         run: cd native/KrabEarAgent && swift build -c release

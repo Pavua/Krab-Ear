@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~1969 lines. The `handle_request` method dispatches JSON-RPC methods, delegating to 4 extracted services.
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches 195 JSON-RPC methods via a handler lookup table, delegating to extracted services.
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -48,6 +48,92 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/rest_server.py`** — Flask REST API (port 5005) for HTTP-based transcription and metrics. Separate from the IPC service.
 - **`backend/event_bus.py`** — In-process pub/sub EventBus with SSE streaming. Supports both untyped `emit(str, dict)` and typed `emit_typed(EventType, BaseModel)`.
 - **`backend/metrics_collector.py`** — Thread-safe sliding-window metrics (latency percentiles, confidence).
+- **`backend/obsidian_sync.py`** — `ObsidianSyncManager`: sync transcriptions to an Obsidian vault as .md files with YAML frontmatter; incremental (timestamp-based) and forced modes; state persisted in `obsidian_sync.json`.
+- **`backend/sentiment_trends.py`** — `SentimentTrendAnalyzer`: daily sentiment aggregation over history items using `EmotionDetector`; linear-regression mood trend (`improving`/`stable`/`declining`).
+- **`backend/collection_manager.py`** — `CollectionManager`: named collections of history items; CRUD + bulk operations.
+- **`backend/daily_digest.py`** — `DailyDigestGenerator`: daily summary digest of transcription activity.
+- **`backend/integrity_checker.py`** — `IntegrityChecker`: NDJSON integrity validation and repair for history store.
+- **`backend/period_comparison.py`** — `PeriodComparator`: compare transcription statistics across arbitrary time periods.
+- **`backend/quality_trends.py`** — `QualityTrendAnalyzer`: track confidence/quality trends over time.
+- **`backend/speaker_manager.py`** — `SpeakerManager`: persistent speaker profiles and rename/merge for diarization output.
+- **`core/punctuation_fixer.py`** — `PunctuationFixer`: rule-based Russian/Spanish punctuation correction.
+- **`core/term_extractor.py`** — `TermExtractor`: keyword/term extraction from transcripts for vocabulary and glossary suggestions.
+- **`core/text_comparator.py`** — `TextComparator`: structural diff/similarity scoring between two transcript texts.
+- **`backend/analytics_dashboard.py`** — `AnalyticsDashboard`: aggregate all analytics metrics into a single dashboard snapshot.
+- **`backend/audit_logger.py`** — `AuditLogger`: structured audit trail for IPC operations.
+- **`backend/auto_backup.py`** — `AutoBackupManager`: scheduled background backups with configurable interval and copy limit.
+- **`backend/config_presets_library.py`** — `ConfigPresetsLibrary`: built-in + custom config presets for quick settings switching.
+- **`backend/cost_estimator.py`** — `CostEstimator`: compute cost estimation (CPU time, memory, disk) per recording.
+- **`backend/data_migrator.py`** — `DataMigrator`: versioned data migration between schema versions.
+- **`backend/error_reporter.py`** — `ErrorReporter`: ring-buffer error aggregation with per-component/type counts.
+- **`backend/event_replay.py`** — `EventReplayManager`: persist and replay event log entries; supports time-range replay.
+- **`backend/export_scheduler.py`** — `ExportScheduler`: scheduled auto-export to file on configurable interval.
+- **`backend/feature_flags.py`** — `FeatureFlags`: runtime on/off flags for experimental features.
+- **`backend/hotword_detector.py`** — `HotwordDetector`: scan transcripts for trigger words.
+- **`backend/html_report.py`** — `HtmlReportGenerator`: standalone HTML analytics report.
+- **`backend/input_sanitizer.py`** — `InputSanitizer`: validate and sanitize IPC params.
+- **`backend/ipc_throttle.py`** — `IPCThrottle`: per-method rate limiting (token bucket) for heavy IPC calls.
+- **`backend/keyword_cloud.py`** — `KeywordCloudGenerator`: word-cloud data (count, weight, font_size) from history.
+- **`backend/language_learning.py`** — `LanguageLearningManager`: bilingual vocabulary extraction and flashcard generation.
+- **`backend/model_cache_manager.py`** — `ModelCacheManager`: HuggingFace model cache management.
+- **`backend/performance_profiler.py`** — `PerformanceProfiler`: elapsed-time profiling for backend operations.
+- **`backend/period_comparison.py`** — `PeriodComparator`: compare transcription statistics across arbitrary time periods. *(listed above)*
+- **`backend/playback_tracker.py`** — `PlaybackTracker`: persistent playback event tracking (play count, total listened).
+- **`backend/plugin_system.py`** — `PluginSystem`: simple plugin loader for extensibility.
+- **`backend/recording_chain.py`** — `RecordingChainManager`: link related recordings into ordered chains.
+- **`backend/recording_comparison.py`** — `RecordingComparison`: side-by-side multi-recording comparison (similarity matrix, shared words).
+- **`backend/recording_insights.py`** — `RecordingInsightsGenerator`: heuristic insight generation from recording patterns.
+- **`backend/recording_merger.py`** — `RecordingMerger`: merge multiple history items into a single item.
+- **`backend/recording_scheduler.py`** — `RecordingScheduler`: schedule future recordings with start time and duration.
+- **`backend/request_signing.py`** — `RequestSigner`: HMAC-SHA256 request authentication for IPC.
+- **`backend/sentiment_trends.py`** — `SentimentTrendAnalyzer`: daily sentiment aggregation with linear-regression mood trend. *(listed above)*
+- **`backend/sharing_manager.py`** — `SharingManager`: create and retrieve shareable transcript packages.
+- **`backend/smart_vocabulary.py`** — `SmartVocabularyBuilder`: pattern-based vocabulary suggestions and auto-update from history.
+- **`backend/speaker_statistics.py`** — `SpeakerStatisticsAnalyzer`: per-speaker word count, duration, confidence from diarized history.
+- **`backend/startup_diagnostics.py`** — `StartupDiagnostics`: run all readiness checks at startup; report status.
+- **`backend/summary_profiles.py`** — `SummaryProfileManager`: custom summarization profiles for LLM batch summaries.
+- **`backend/system_monitor.py`** — `SystemMonitor`: real-time CPU, RAM, disk, GPU monitoring.
+- **`backend/template_manager.py`** — `TemplateManager`: user-defined text output templates.
+- **`backend/timeline_view.py`** — `TimelineViewGenerator`: topic-shift timeline from history items.
+- **`backend/transcript_versioning.py`** — `TranscriptVersionManager`: full version history for individual transcript texts.
+- **`backend/transcription_queue.py`** — `TranscriptionQueue`: priority queue for batch audio file transcription jobs.
+- **`backend/translation_cache.py`** — `TranslationCache`: persistent on-disk translation result cache.
+- **`backend/usage_tracker.py`** — `UsageTracker`: daily usage statistics (recordings, duration, words).
+- **`backend/vocabulary_store.py`** — `VocabularyStore`: persist user-defined STT vocabulary words to disk.
+- **`backend/webhook_manager.py`** — `WebhookManager`: register and fire HTTP webhooks on IPC events.
+- **`core/abbreviation_expander.py`** — `AbbreviationExpander`: expand RU/ES/EN abbreviations in transcript text.
+- **`core/audio_chunker.py`** — `AudioChunker`: split long audio by silence for chunked transcription.
+- **`core/audio_converter.py`** — `AudioConverter`: ffmpeg-backed audio conversion and metadata extraction.
+- **`core/audio_fingerprint.py`** — `AudioFingerprinter`: content-based audio fingerprint for duplicate detection.
+- **`core/audio_quality.py`** — `AudioQualityAnalyzer`: RMS, peak, SNR, clipping ratio, silence ratio analysis.
+- **`core/auto_title.py`** — `AutoTitleGenerator`: heuristic auto-title generation from transcript text.
+- **`core/confidence_calibrator.py`** — `ConfidenceCalibrator`: calibrate raw Whisper confidence to 0–1 scale.
+- **`core/context_memory.py`** — `ContextMemory`: sliding-window context of recent words/topics for STT hints.
+- **`core/duplicate_detector.py`** — `DuplicateDetector`: text similarity-based duplicate detection across history.
+- **`core/emotion_detector.py`** — `EmotionDetector`: heuristic emotion detection (neutral/positive/negative/etc.).
+- **`core/fuzzy_search.py`** — `FuzzySearcher`: approximate string matching for history search.
+- **`core/hallucination_manager.py`** — `HallucinationManager`: user-managed custom hallucination patterns.
+- **`core/language_detector.py`** — `LanguageDetector`: heuristic script/language detection (RU/ES/EN).
+- **`core/model_selector.py`** — `SmartModelSelector`: rule-based STT model selection by duration/load.
+- **`core/noise_profiler.py`** — `NoiseProfiler`: background noise type, level, SNR estimation.
+- **`core/normalization_profiles.py`** — `NormalizationProfileRegistry`: named text normalization profiles.
+- **`core/paste_formatter.py`** — `PasteFormatter`: format transcripts for target apps (Telegram, Notes, Email, etc.).
+- **`core/pipeline/`** — Phase 4 deterministic pipeline stages (audio norm, STT, text cleanup, diarization, translation, LLM rewrite, cache).
+- **`core/readability_scorer.py`** — `ReadabilityScorer`: Flesch score and sentence/vocabulary complexity.
+- **`core/retry_strategy.py`** — `RetryStrategy`: configurable exponential backoff for flaky calls.
+- **`core/search_highlighter.py`** — `SearchHighlighter`: highlight query matches in search results.
+- **`core/search_index.py`** — `SearchIndex`: in-memory inverted index for fast history search.
+- **`core/silence_detector.py`** — `SilenceDetector`: detect silence/speech regions in PCM audio.
+- **`core/smart_silence_skipper.py`** — `SmartSilenceSkipper`: skip long silence intervals during recording.
+- **`core/speech_pace.py`** — `SpeechPaceAnalyzer`: WPM, CPM, pace category estimation.
+- **`core/stop_words.py`** — Stop-word lists for RU/ES/EN used by keyword extraction.
+- **`core/text_anonymizer.py`** — `TextAnonymizer`: rule-based PII redaction (phone, email, credit card, etc.).
+- **`core/text_diff.py`** — `TextDiff`: word-level diff between two text versions.
+- **`core/text_postprocessor.py`** — `TextPostProcessor`: configurable post-processing pipeline (whitespace, punctuation, entities, abbreviations, anonymization).
+- **`core/topic_tracker.py`** — `TopicTracker`: track topic shifts across recent transcriptions.
+- **`core/transcription_scorer.py`** — `TranscriptionScorer`: composite quality score 0–100 (A–F) from confidence, duration, diarization, LLM flags.
+- **`core/vad.py`** — `VoiceActivityDetector`: energy-threshold VAD over audio arrays.
+- **`core/waveform_generator.py`** — `WaveformGenerator`: downsample PCM for GUI waveform visualization.
 - **`contracts/`** — Pydantic models for event payloads (STT, Translation). `EventType` enum + `EVENT_SCHEMA_MAP` for runtime dispatch. JSON Schema export via `python -m contracts.export`.
 
 ### Native agent (`native/KrabEarAgent/`):
@@ -117,7 +203,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 411 tests.
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 4482 passed across 178 test files.
 
 ### Swift agent
 

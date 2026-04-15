@@ -8,7 +8,6 @@
     python KrabEar/tests/benchmark_llm_models.py
 """
 
-import json
 import os
 import time
 import requests
@@ -107,7 +106,8 @@ def test_model(model_id: str) -> dict:
 
         if resp.status_code != 200:
             results["errors"].append(f"phrase {i}: HTTP {resp.status_code}")
-            results["phrases"].append({"input": phrase["input"], "output": f"HTTP {resp.status_code}", "latency_ms": latency_ms, "desc": phrase["desc"]})
+            results["phrases"].append({"input": phrase["input"], "output": f"HTTP {resp.status_code}",
+                                      "latency_ms": latency_ms, "desc": phrase["desc"]})
             continue
 
         try:
@@ -130,8 +130,8 @@ def test_model(model_id: str) -> dict:
         }
 
         # Quality checks
-        input_words = set(phrase["input"].lower().split())
-        output_words = set(content.lower().split()) if content else set()
+        set(phrase["input"].lower().split())
+        set(content.lower().split()) if content else set()
         # Check if output is drastically different (paraphrase detection)
         if content and len(content) > len(phrase["input"]) * 2:
             result_entry["quality"] = "CHATBOT (too long)"
@@ -153,10 +153,10 @@ def test_model(model_id: str) -> dict:
 
 
 def print_results(results: dict):
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  MODEL: {results['model']}")
     print(f"  Cold: {results.get('cold_ms', '?')}ms | Warm avg: {results.get('warm_avg_ms', '?')}ms | Max: {results.get('max_ms', '?')}ms")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     for p in results["phrases"]:
         tag = "COLD" if p.get("is_cold") else "WARM"
@@ -184,11 +184,11 @@ def main():
         all_results.append(results)
 
     # Final comparison
-    print(f"\n\n{'='*70}")
+    print(f"\n\n{'=' * 70}")
     print("  FINAL COMPARISON")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'Model':<55} {'Cold':>6} {'Warm':>6} {'Max':>6}")
-    print(f"  {'-'*55} {'-'*6} {'-'*6} {'-'*6}")
+    print(f"  {'-' * 55} {'-' * 6} {'-' * 6} {'-' * 6}")
     for r in all_results:
         name = r["model"][:55]
         cold = f"{r.get('cold_ms', '?')}ms"

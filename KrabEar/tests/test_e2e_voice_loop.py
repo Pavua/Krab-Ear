@@ -47,7 +47,8 @@ class TestE2EVoiceLoop(unittest.TestCase):
             self.assertEqual(resp.status_code, 200)
             self.assertEqual(resp.json()["status"], "ok")
         else:
-            import urllib.request, json
+            import urllib.request
+            import json
             resp = urllib.request.urlopen(f"{VG_URL}/health", timeout=5)
             data = json.loads(resp.read())
             self.assertEqual(data["status"], "ok")

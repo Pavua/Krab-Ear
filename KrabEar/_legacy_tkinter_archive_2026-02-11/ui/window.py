@@ -264,7 +264,7 @@ class App:
                         self.logger.warning("Переполнение аудиобуфера во время записи")
                     audio_chunks.append(data.copy())
                     self.latest_level = float(abs(data).mean())
-        except Exception as exc:
+        except Exception:
             self.root.after(0, lambda: self._finish_recording_error(str(exc)))
             return
 

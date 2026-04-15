@@ -181,7 +181,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         )
 
     // PermissionWizard удален, используем QuickStartWindowController
-
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
             settingsProvider: { [weak self] in
@@ -2208,6 +2207,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         let micRow = NSStackView()
         micRow.orientation = .horizontal
         let checkMicBtn = NSButton(title: "Проверить микрофон", target: self, action: #selector(onCheckMic))
+        checkMicBtn.applyThemeSecondary()
         micRow.addArrangedSubview(checkMicBtn)
         micRow.addArrangedSubview(microphoneStatusLabel)
         stack.addArrangedSubview(micRow)
@@ -2216,6 +2216,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         let axRow = NSStackView()
         axRow.orientation = .horizontal
         let checkAxBtn = NSButton(title: "Проверить Accessibility", target: self, action: #selector(onCheckAx))
+        checkAxBtn.applyThemeSecondary()
         axRow.addArrangedSubview(checkAxBtn)
         axRow.addArrangedSubview(accessibilityStatusLabel)
         stack.addArrangedSubview(axRow)
@@ -2238,6 +2239,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(separator3)
         separator3.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         
+        autostartCheckbox.applyThemeCheckbox()
         stack.addArrangedSubview(autostartCheckbox)
         // Set initial state
         autostartCheckbox.state = launchAgentManager.isAutostartEnabled() ? .on : .off
@@ -2250,12 +2252,13 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(buttonsRow)
         
         let openPanelBtn = NSButton(title: "Открыть историю", target: self, action: #selector(onOpenHistory))
+        openPanelBtn.applyThemeSecondary()
         buttonsRow.addArrangedSubview(openPanelBtn)
         
         buttonsRow.addArrangedSubview(NSView()) // spacer
         
         let completeBtn = NSButton(title: "Готово", target: self, action: #selector(onFinish))
-        completeBtn.bezelStyle = .rounded
+        completeBtn.applyThemePrimary()
         completeBtn.keyEquivalent = "\r"
         buttonsRow.addArrangedSubview(completeBtn)
     }

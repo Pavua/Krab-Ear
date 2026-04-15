@@ -33,7 +33,10 @@ public enum KrabEarTheme {
         public static let sectionSpacing: CGFloat = 16.0
         public static let itemSpacing: CGFloat = 8.0
         public static let cardPadding: CGFloat = 12.0
-        public static let cardCornerRadius: CGFloat = 10.0
+        public static let cardCornerRadius: CGFloat = 12.0
+        /// Концентрический радиус для внутренних элементов (scroll views, text views внутри карточек).
+        /// Apple's rule: inner radius = outer radius - padding/3.
+        public static let innerCornerRadius: CGFloat = 8.0
     }
     
     public static func applyTheme(to window: NSWindow) {
@@ -49,7 +52,11 @@ public enum KrabEarTheme {
             })
             if existingEffect == nil {
                 let bgEffect = NSVisualEffectView()
-                bgEffect.material = .sidebar
+                // .popover — тот же material что у карточек (ThemeCardView).
+                // Единая material для окна и карточек создаёт unified translucent
+                // look: карточки выглядят как часть окна, а не парящие сверху.
+                // .sidebar был слишком opaque — карточки выглядели чужеродно.
+                bgEffect.material = .popover
                 bgEffect.blendingMode = .behindWindow
                 bgEffect.state = .active
                 bgEffect.identifier = NSUserInterfaceItemIdentifier("krabEarWindowBg")
@@ -96,15 +103,37 @@ public class ThemeCardView: NSVisualEffectView {
     }
 
     private func setup() {
-        // Liquid Glass: frosted glass material
-        material = .hudWindow
+        // Liquid Glass: настоящий frosted glass эффект.
+        //
+        // .popover — средний вариант между .menu (слишком прозрачный
+        // = карточки выглядят чужеродно на .sidebar фоне окна) и
+        // .sidebar (сольётся с фоном = невидимая карточка).
+        // Даёт чистый frosted glass look ближе к window .sidebar фону.
+        //
+        // .behindWindow (а не .withinWindow!) — КЛЮЧЕВОЙ момент:
+        // окно уже имеет .sidebar + .behindWindow фон. Если карточка
+        // тоже использует .behindWindow — macOS умеет обрабатывать
+        // вложенные behindWindow: верхний слой «пробивает» нижний и
+        // блюрит рабочий стол напрямую со своим материалом, создавая
+        // эффект парящего стекла.
+        // .withinWindow бы блюрил УЖЕ заблюренный фон окна = мутный пластик.
+        material = .popover
         blendingMode = .behindWindow
         state = .active
         wantsLayer = true
         layer?.cornerRadius = KrabEarTheme.Metrics.cardCornerRadius
-        layer?.borderWidth = 0.5
-        layer?.borderColor = KrabEarTheme.Colors.separator.cgColor
+        // cornerCurve = .continuous — Apple's «яблочные» плавные углы
+        // (squircle, а не простой rounded rect)
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1.0
+        // Чуть более заметный edge — карточка visible как distinct element
+        // на фоне window same material. Alpha 0.18 даёт subtle но чёткую
+        // границу (user feedback: карточки должны быть «более выделяющимися»).
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         layer?.masksToBounds = true
+        // Note: drop shadow не применён сознательно — при masksToBounds=true
+        // (нужно для rounded corners clipping) layer shadow не рендерится.
+        // Для shadow нужен wrapper container view — избыточно для subtle edge.
 
         titleLabel.font = KrabEarTheme.Typography.sectionTitle
         titleLabel.textColor = KrabEarTheme.Colors.textPrimary
@@ -295,19 +324,96 @@ public class CollapsibleSectionView: NSView {
         self.isExpanded = expanded
         disclosureButton.state = expanded ? .on : .off
 
+        // Capture the enclosing scroll view PATH before layout changes —
+        // chain walks up to find parent NSScrollView (outer tab scroll).
+        // Needed чтобы scroll bar и document size пересчитались после expand/collapse.
+        let outerScrollView = self.enclosingScrollView
+
+        let applyChanges: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.headerSeparator.isHidden = !expanded
+            self.contentStackView.isHidden = !expanded
+            // Force full layout pass up to the window — without этого
+            // NSScrollView не знает что document height изменился,
+            // оставляя visual empty space или blocking scroll.
+            self.window?.layoutIfNeeded()
+            // Invalidate scroll tile — обновляет scrollbar и valid scroll range.
+            if let scroll = outerScrollView {
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
+
         if animated {
-            NSAnimationContext.runAnimationGroup({ ctx in
+            NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.2
                 ctx.allowsImplicitAnimation = true
-                self.headerSeparator.isHidden = !expanded
-                self.contentStackView.isHidden = !expanded
-                self.contentStackView.superview?.layoutSubtreeIfNeeded()
-            })
+                applyChanges()
+            }
         } else {
-            headerSeparator.isHidden = !expanded
-            contentStackView.isHidden = !expanded
+            applyChanges()
         }
 
         UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
+    }
+}
+
+// MARK: - Unified Theme Extensions (Liquid Glass consistency)
+// Эти extensions унифицируют применение стилей к NSControl'ам.
+// Правило: после инициализации любой кнопки/текст-филда/scroll-вью
+// вызывать соответствующий applyTheme* метод для однородного Liquid Glass вида.
+
+@MainActor
+public extension NSButton {
+    /// Primary button: акцентный цвет, rounded bezel.
+    /// Для главных действий (Старт/Стоп, Submit, Применить).
+    func applyThemePrimary() {
+        self.bezelStyle = .rounded
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.bezelColor = KrabEarTheme.Colors.accent
+    }
+
+    /// Secondary button: стандартный вид, rounded bezel, без акцента.
+    /// Для вторичных действий (Копировать, Экспорт, Настройки).
+    func applyThemeSecondary() {
+        self.bezelStyle = .rounded
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.bezelColor = nil
+    }
+
+    /// Checkbox style: switch type, тематический шрифт.
+    func applyThemeCheckbox() {
+        self.setButtonType(.switch)
+        self.font = KrabEarTheme.Typography.controlLabel
+    }
+}
+
+@MainActor
+public extension NSTextField {
+    /// Input field style: rounded bezel, transparent background.
+    /// drawsBackground = false позволяет фону карточки просвечивать,
+    /// оставляя только рамку и focus ring — Liquid Glass-friendly.
+    func applyThemeInput() {
+        self.isBordered = true
+        self.bezelStyle = .roundedBezel
+        self.controlSize = .regular
+        self.font = KrabEarTheme.Typography.controlLabel
+        self.textColor = KrabEarTheme.Colors.textPrimary
+        self.drawsBackground = false
+    }
+}
+
+@MainActor
+public extension NSScrollView {
+    /// Inner scroll style: концентрический радиус (8pt) для scrolls внутри cards (12pt radius).
+    /// Apple's design rule: inner radius = outer radius - padding/3.
+    /// Transparent background чтобы не перекрывать frosted glass карточки.
+    func applyThemeInnerScroll() {
+        self.wantsLayer = true
+        self.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
+        self.layer?.masksToBounds = true
+        self.drawsBackground = false
+        self.borderType = .noBorder
     }
 }

@@ -25,7 +25,14 @@ extension HistoryPanelController {
     @objc func onTabSelectorChanged() {
         let index = tabSelector.selectedSegment
         guard index >= 0, index < mainTabView.numberOfTabViewItems else { return }
-        mainTabView.selectTabViewItem(at: index)
+        // Disable implicit animation при переключении табов —
+        // уменьшает мерцание NSVisualEffectView (Liquid Glass) карточек,
+        // которые иначе re-render во время анимации.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            ctx.allowsImplicitAnimation = false
+            mainTabView.selectTabViewItem(at: index)
+        }
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {

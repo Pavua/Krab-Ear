@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .models import DEFAULT_SETTINGS, HistoryItem
+from core.search_index import SearchIndex
 
 logger = logging.getLogger("KrabEar.Backend.Store")
 
@@ -38,18 +39,31 @@ class StateStore:
         self.history_path = self.data_dir / "history.ndjson"
         self.tombstones_path = self.data_dir / "history_tombstones.ndjson"
         self.status_path = self.data_dir / "history_status.ndjson"
+        self.tags_path = self.data_dir / "history_tags.ndjson"
+        self.favorites_path = self.data_dir / "history_favorites.ndjson"
+        self.annotations_path = self.data_dir / "history_annotations.ndjson"
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.history_path, self.tombstones_path, self.status_path, self.vocabulary_path):
+        for path in (
+                self.history_path,
+                self.tombstones_path,
+                self.status_path,
+                self.tags_path,
+                self.favorites_path,
+                self.annotations_path,
+                self.vocabulary_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
         # Важно: это только read-through оптимизация, источник истины остаётся NDJSON.
-        self._recent_search_index_signature: tuple[int, int, int, int, int, int, int] | None = None
+        self._recent_search_index_signature: tuple[int, ...] | None = None
         self._recent_search_index: list[tuple[HistoryItem, str]] = []
         self._recent_search_index_limit = 4000
+
+        # Инвертированный индекс для быстрого полнотекстового поиска.
+        self._search_index: SearchIndex = SearchIndex()
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -252,6 +266,29 @@ class StateStore:
             active = self._load_active_items_unlocked()
             recent_index = self._get_recent_search_index_unlocked(active)
 
+        # Быстрый путь через инвертированный индекс (без фильтров по дате/статусу).
+        no_extra_filters = (
+            filter_paste is None
+            and filter_mode is None
+            and filter_translation_status is None
+            and filter_from_ts is None
+            and filter_to_ts is None
+        )
+        if needle and no_extra_filters:
+            self._search_index.build_index([item.to_dict() for item in active])
+            idx_results = self._search_index.search(needle, limit=safe_cursor + safe_limit)
+            if idx_results is not None:
+                # idx_results — неупорядоченные по времени; восстанавливаем порядок.
+                matched_ids = {r.item_id for r in idx_results}
+                filtered_by_index = [
+                    item for item in reversed(active) if item.id in matched_ids
+                ]
+                start = safe_cursor
+                end = safe_cursor + safe_limit
+                page = filtered_by_index[start:end]
+                next_cursor = str(end) if end < len(filtered_by_index) else None
+                return [item.to_dict() for item in page], next_cursor
+
         # Быстрый путь: проверяем сначала последние N записей.
         # Если найденных результатов достаточно для текущей страницы,
         # возвращаем их без полного прохода по всей истории.
@@ -316,15 +353,17 @@ class StateStore:
         next_cursor = str(end) if end < len(filtered) else None
         return [item.to_dict() for item in page], next_cursor
 
-    def _history_signature_unlocked(self) -> tuple[int, int, int, int, int, int]:
+    def _history_signature_unlocked(self) -> tuple[int, ...]:
         """Возвращает сигнатуру журналов для валидации кэша поиска."""
         return (
             self._safe_file_size(self.history_path),
             self._safe_file_size(self.tombstones_path),
             self._safe_file_size(self.status_path),
+            self._safe_file_size(self.tags_path),
             self._safe_mtime_ns(self.history_path),
             self._safe_mtime_ns(self.tombstones_path),
             self._safe_mtime_ns(self.status_path),
+            self._safe_mtime_ns(self.tags_path),
         )
 
     def _get_recent_search_index_unlocked(
@@ -336,7 +375,7 @@ class StateStore:
         if signature == self._recent_search_index_signature:
             return self._recent_search_index
 
-        window = active[-self._recent_search_index_limit :]
+        window = active[-self._recent_search_index_limit:]
         index: list[tuple[HistoryItem, str]] = []
         for item in reversed(window):
             haystack = "\n".join(
@@ -605,6 +644,8 @@ class StateStore:
         tmp_history.replace(self.history_path)
         self.tombstones_path.write_text("", encoding="utf-8")
         self.status_path.write_text("", encoding="utf-8")
+        self.tags_path.write_text("", encoding="utf-8")
+        self.favorites_path.write_text("", encoding="utf-8")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -627,9 +668,11 @@ class StateStore:
         }
 
     def _load_active_items_unlocked(self) -> list[HistoryItem]:
-        """Читает активные записи с применением tombstone и status-override."""
+        """Читает активные записи с применением tombstone, status-override, tags-override и favorites-override."""
         deleted = self._load_deleted_ids_unlocked()
         statuses = self._load_status_overrides_unlocked()
+        tags_overrides = self._load_tags_overrides_unlocked()
+        favorites_overrides = self._load_favorites_overrides_unlocked()
 
         items: list[HistoryItem] = []
         for item in self._iter_history_items_unlocked():
@@ -637,8 +680,91 @@ class StateStore:
                 continue
             if item.id in statuses:
                 item.paste_status = statuses[item.id]
+            if item.id in tags_overrides:
+                item.tags = tags_overrides[item.id]
+            if item.id in favorites_overrides:
+                item.favorite = favorites_overrides[item.id]
             items.append(item)
         return items
+
+    def _load_tags_overrides_unlocked(self) -> dict[str, list[str]]:
+        """Собирает последние значения tags по id из журнала тегов."""
+        result: dict[str, list[str]] = {}
+        for payload in self._read_ndjson_unlocked(self.tags_path):
+            item_id = str(payload.get("id", "")).strip()
+            tags = payload.get("tags")
+            if item_id and isinstance(tags, list):
+                result[item_id] = [str(t) for t in tags]
+        return result
+
+    def _load_favorites_overrides_unlocked(self) -> dict[str, bool]:
+        """Собирает последние значения favorite по id из журнала избранного."""
+        result: dict[str, bool] = {}
+        for payload in self._read_ndjson_unlocked(self.favorites_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id and "favorite" in payload:
+                result[item_id] = bool(payload["favorite"])
+        return result
+
+    def set_annotation(self, item_id: str, note: str) -> bool:
+        """Сохраняет пользовательскую заметку для записи (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.annotations_path, {"id": clean_id, "note": str(note)})
+        return True
+
+    def get_annotation(self, item_id: str) -> str | None:
+        """Возвращает заметку для записи или None, если заметки нет."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return None
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return None
+            overrides = self._load_annotation_overrides_unlocked()
+        return overrides.get(clean_id)
+
+    def delete_annotation(self, item_id: str) -> bool:
+        """Удаляет заметку записи (записывает пустую строку — tombstone)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.annotations_path, {"id": clean_id, "note": ""})
+        return True
+
+    def search_annotations(self, query: str) -> list[dict[str, Any]]:
+        """Полнотекстовый поиск по заметкам. Возвращает список {id, note}."""
+        needle = query.strip().lower()
+        with self._lock():
+            overrides = self._load_annotation_overrides_unlocked()
+        if not needle:
+            return [{"id": k, "note": v} for k, v in overrides.items() if v]
+        return [
+            {"id": k, "note": v}
+            for k, v in overrides.items()
+            if v and needle in v.lower()
+        ]
+
+    def _load_annotation_overrides_unlocked(self) -> dict[str, str]:
+        """Собирает последние заметки по id из журнала аннотаций (last-write-wins)."""
+        result: dict[str, str] = {}
+        for payload in self._read_ndjson_unlocked(self.annotations_path):
+            item_id = str(payload.get("id", "")).strip()
+            note = payload.get("note")
+            if item_id and note is not None:
+                result[item_id] = str(note)
+        # Отфильтровываем пустые (удалённые) заметки из результата
+        return {k: v for k, v in result.items() if v}
 
     def _load_deleted_ids_unlocked(self) -> set[str]:
         """Собирает множество удаленных идентификаторов."""
@@ -728,19 +854,54 @@ class StateStore:
                     continue
                 if isinstance(payload, dict):
                     yield payload
+
+    def update_history_item_tags(self, item_id: str, tags: list[str]) -> bool:
+        """Записывает теги для записи в отдельный журнал (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.tags_path, {"id": clean_id, "tags": list(tags)})
+        return True
+
+    def update_history_item_favorite(self, item_id: str, favorite: bool) -> bool:
+        """Записывает флаг избранного для записи в отдельный журнал (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(self.favorites_path, {"id": clean_id, "favorite": bool(favorite)})
+        return True
+
+    def get_history_item_by_id(self, item_id: str) -> "HistoryItem | None":
+        """Возвращает активную запись по ID или None."""
+        clean_id = item_id.strip()
+        with self._lock():
+            active = self._load_active_items_unlocked()
+        for item in active:
+            if item.id == clean_id:
+                return item
+        return None
+
     def is_idempotent(self, chat_id: str | int | None, message_id: str | int | None) -> bool:
         """Проверяет, было ли уже успешно обработано сообщение с такими ID.
-        
+
         Использует внутренний индекс для быстрого поиска по последним записям.
         """
         if chat_id is None or message_id is None:
             return False
-            
+
         cid = str(chat_id).strip()
         mid = str(message_id).strip()
         if not cid or not mid:
             return False
-            
+
         with self._lock():
             active = self._load_active_items_unlocked()
             # Проверяем последние 1000 записей

@@ -20,14 +20,38 @@ from pathlib import Path
 if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
 
-import mlx_whisper
 import numpy as np
 import requests
-import soundfile as sf
-import torch
-from pyannote.audio import Pipeline
+
+# Heavy optional dependencies — недоступны на Linux CI (mlx only Apple Silicon)
+# и/или требуют system libs (soundfile→libsndfile, pyannote→ffmpeg via torchcodec).
+# Оборачиваем в try/except Exception чтобы test discovery проходил на Ubuntu:
+# - ImportError — module not installed
+# - OSError — native library missing (libavutil.so.60 от torchcodec на Ubuntu)
+# - Вообще любое исключение при module-level init
+try:
+    import mlx_whisper  # type: ignore
+except Exception:
+    mlx_whisper = None  # type: ignore[assignment]
+
+try:
+    import soundfile as sf  # type: ignore
+except Exception:
+    sf = None  # type: ignore[assignment]
+
+try:
+    import torch  # type: ignore
+except Exception:
+    torch = None  # type: ignore[assignment]
+
+try:
+    from pyannote.audio import Pipeline  # type: ignore
+except Exception:
+    Pipeline = None  # type: ignore[assignment,misc]
 
 from .config import settings
+from .confidence_calibrator import ConfidenceCalibrator
+from .text_diff import TextDiffAnalyzer
 from .utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Engine")
@@ -67,6 +91,7 @@ def _get_available_memory_gb() -> float:
     except Exception:
         return -1.0
 
+
 class AudioEngine:
     """Сервисный слой для STT ( Speech-to-Text) и TTS (Text-to-Speech)."""
 
@@ -99,7 +124,9 @@ class AudioEngine:
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
+        self._last_llm_diff = None
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._confidence_calibrator = ConfidenceCalibrator()
 
         logger.info(
             "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d, LLM=%s",
@@ -144,12 +171,12 @@ class AudioEngine:
         try:
             data, samplerate = sf.read(audio_path)
             if len(data.shape) > 1:
-                data = data.mean(axis=1) # Стерео в моно
-            
+                data = data.mean(axis=1)  # Стерео в моно
+
             rms = np.sqrt(np.mean(data**2))
             if rms < 1e-6:
-                return True # Тишина
-            
+                return True  # Тишина
+
             gain = 0.1 / rms
             normalized_data = np.clip(data * gain, -1.0, 1.0)
             sf.write(audio_path, normalized_data, samplerate)
@@ -285,6 +312,7 @@ class AudioEngine:
 
             # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
             llm_result = None
+            llm_diff = None
             if self._llm_rewrite_allowed():
                 llm_result = self._llm_rewriter.rewrite(cleaned_text)
                 if llm_result.ok:
@@ -292,6 +320,8 @@ class AudioEngine:
                         "LLM rewrite: %d chars -> %d chars, %d ms",
                         len(cleaned_text), len(llm_result.text), llm_result.latency_ms,
                     )
+                    llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, llm_result.text)
+                    self._last_llm_diff = llm_diff
                     text = llm_result.text
                 else:
                     logger.debug(
@@ -306,7 +336,23 @@ class AudioEngine:
                 confidence = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
 
             duration = time.time() - start_time
-            logger.info("STT готово: %.2fs, уверенность: %.2f, язык: %s", duration, confidence, resolved_lang or "auto")
+
+            # 5a. Калибровка уверенности
+            audio_duration_sec = result.get("audio_duration_sec", duration)
+            calibrated_score = self._confidence_calibrator.calibrate_detailed(
+                raw_confidence=confidence,
+                duration_sec=audio_duration_sec,
+                language=result.get("language", resolved_lang) or "",
+                model=result.get("model_used", self.current_model) or "",
+            )
+
+            logger.info(
+                "STT готово: %.2fs, уверенность: raw=%.2f calibrated=%.2f, язык: %s",
+                duration,
+                confidence,
+                calibrated_score.calibrated,
+                resolved_lang or "auto",
+            )
 
             return {
                 "text": text,
@@ -319,7 +365,20 @@ class AudioEngine:
                     if (llm_result is not None and not llm_result.ok)
                     else None
                 ),
-                "confidence": round(confidence, 3),
+                "llm_diff": (
+                    {
+                        "similarity_ratio": llm_diff.similarity_ratio,
+                        "words_added": llm_diff.words_added,
+                        "words_removed": llm_diff.words_removed,
+                        "words_unchanged": llm_diff.words_unchanged,
+                        "summary": llm_diff.summary,
+                    }
+                    if llm_diff is not None
+                    else None
+                ),
+                "confidence": round(calibrated_score.calibrated, 3),
+                "raw_confidence": round(confidence, 3),
+                "confidence_adjustments": calibrated_score.adjustments,
                 "duration_ms": int(duration * 1000),
                 "engine": result.get("engine", "mlx-whisper"),
                 "model": result.get("model_used", self.current_model),
@@ -685,7 +744,8 @@ class AudioEngine:
 
     def speak(self, text: str, rate: int = 185) -> None:
         """Озвучка текста через macOS `say`."""
-        if not text.strip(): return
+        if not text.strip():
+            return
         cmd = ["say", "-r", str(rate)]
         if settings.SAY_VOICE:
             import re as _re

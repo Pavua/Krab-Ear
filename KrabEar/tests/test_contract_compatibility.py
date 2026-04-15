@@ -15,11 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from contracts.stt_events import SttFinal, SttFailed, SttPartial
-from contracts.translation_events import TranslationCompleted, TranslationFailed
-from contracts.envelope import KrabEventEnvelope, parse_and_validate
-from contracts.registry import EventType, EVENT_SCHEMA_MAP
-from backend.event_bus import EventBus
+from contracts.stt_events import SttFinal, SttFailed  # noqa: E402
+from contracts.envelope import KrabEventEnvelope, parse_and_validate  # noqa: E402
+from contracts.registry import EventType, EVENT_SCHEMA_MAP  # noqa: E402
+from backend.event_bus import EventBus  # noqa: E402
 
 
 class SttFinalContractTest(unittest.TestCase):

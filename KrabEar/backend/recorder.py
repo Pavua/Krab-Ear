@@ -9,10 +9,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any
 
 import numpy as np
-import sounddevice as sd
+
+# sounddevice требует PortAudio native lib (libportaudio2 на Linux).
+# На Ubuntu CI отсутствует → оборачиваем для test discovery.
+try:
+    import sounddevice as sd  # type: ignore
+except Exception:
+    sd = None  # type: ignore[assignment]
 
 logger = logging.getLogger("KrabEar.Backend.Recorder")
 

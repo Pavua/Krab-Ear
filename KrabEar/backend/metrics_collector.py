@@ -13,6 +13,7 @@ import numpy as np
 
 logger = logging.getLogger("KrabEar.Backend.Metrics")
 
+
 class MetricsCollector:
     """Потокобезопасный сборщик метрик со скользящим окном."""
 
@@ -41,7 +42,7 @@ class MetricsCollector:
             # Копируем данные для стабильности расчета
             lats = np.array(list(self.latencies))
             confs = np.array(list(self.confidences))
-            
+
             if len(lats) == 0:
                 return {
                     "total_requests": self.total_requests,
@@ -69,6 +70,7 @@ class MetricsCollector:
                 }
             }
             return summary
+
 
 # Глобальный инстанс (Singleton) для использования во всем приложении
 metrics = MetricsCollector()

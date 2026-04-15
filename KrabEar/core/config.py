@@ -25,33 +25,33 @@ class Settings(BaseSettings):
 
     # Директории
     DATA_DIR: Path = Path.home() / ".krab_ear_data"
-    
+
     # Модели STT
     MODEL_BALANCED: str = "mlx-community/whisper-large-v3-turbo"
     MODEL_MAX_CANDIDATES: str = "mlx-community/whisper-large-v3-mlx,mlx-community/whisper-large-v3-turbo"
-    
+
     # Промпты и язык
     TRANSCRIBE_PROMPT: str = "Ты транскрибируешь русскую речь. Сохраняй смысл, ставь корректную пунктуацию и заглавные буквы."
     TRANSCRIBE_LANGUAGE: str = "ru"
     HF_TOKEN: str = ""
     DIARIZATION_ENABLED: bool = True
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
-    
+
     # Сетевые настройки
     NETWORK_MODE: str = "offline_default"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
     STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
     AI_MODEL: str = "google/gemini-2.0-flash"
     STT_MODEL: str = "whisper-1"
-    
+
     # Лимиты
     MAX_AUDIO_MB: int = 50
     MAX_DURATION_SEC: int = 300
     TRANSCRIBE_TIMEOUT_SEC: int = 300
-    
+
     # TTS
     SAY_VOICE: str = ""
-    
+
     # Voice Gateway
     VOICE_GATEWAY_URL: str = "http://127.0.0.1:8090"
 
@@ -65,8 +65,46 @@ class Settings(BaseSettings):
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
 
+    # Авто-резервное копирование
+    AUTO_BACKUP_ENABLED: bool = True
+
+    # Авто-экспорт истории по расписанию
+    AUTO_EXPORT_ENABLED: bool = False
+
     # Формат логов: "text" (стандартный) или "json" (структурированный JSON)
     LOG_FORMAT: str = "text"
+
+    # REST API: опциональный ключ аутентификации для защищённых эндпоинтов.
+    # Пустая строка = аутентификация отключена (обратная совместимость).
+    # Если задан, защищённые эндпоинты требуют заголовок: Authorization: Bearer <key>
+    REST_API_KEY: str = ""
+
+    # Rate limiting для REST API (flask-limiter).
+    # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
+    RATE_LIMIT_ENABLED: bool = True
+
+    # CORS: список разрешённых Origins через запятую. "*" — разрешить всё (локальная разработка).
+    # Пример: "http://localhost:3000,https://app.example.com"
+    CORS_ORIGINS: str = "*"
+
+    # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
+    SMART_SILENCE_SKIP_ENABLED: bool = False
+
+    # Pipeline v2 feature flag.
+    # True = BackendService использует transcribe_v2() (pipeline-based path).
+    # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).
+    PIPELINE_V2: bool = False
+
+    # IPC throttle: защита от злоупотребления тяжёлыми IPC-методами.
+    # False = throttling полностью отключён (удобно для тестов и локальной разработки).
+    IPC_THROTTLE_ENABLED: bool = True
+
+    # IPC request signing: HMAC-SHA256 верификация входящих запросов.
+    # False = подпись отключена (обратная совместимость, дефолт для локальной разработки).
+    # True = все входящие IPC-запросы должны содержать поля signature, timestamp, nonce.
+    # Секрет задаётся через KRAB_EAR_IPC_SIGNING_SECRET или .secrets файл.
+    IPC_SIGNING_ENABLED: bool = False
+    IPC_SIGNING_SECRET: str = ""
 
     @property
     def model_max_list(self) -> List[str]:
@@ -75,6 +113,7 @@ class Settings(BaseSettings):
         if self.MODEL_BALANCED not in parts:
             parts.append(self.MODEL_BALANCED)
         return parts
+
 
 # Singleton инстанс настроек
 settings = Settings()
@@ -147,4 +186,25 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # D.10a runtime toggle: юзер может включать/выключать LLM rewriter через
     # IPC update_settings без рестарта. Дефолт False — safety.
     "llm_rewrite_enabled": False,
+    # Автосохранение каждой транскрибации в .md файл в transcripts/.
+    "auto_save_transcripts": False,
+    # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
+    "smart_silence_skip_enabled": False,
+    # --- Настройки уведомлений ---
+    # Мастер-переключатель уведомлений.
+    "notifications_enabled": True,
+    # Предупреждать, когда уверенность STT ниже порога.
+    "notify_on_low_confidence": True,
+    # Порог уверенности для уведомления (0.0–1.0).
+    "notify_confidence_threshold": 0.5,
+    # Уведомлять, когда LLM circuit breaker открывается.
+    "notify_on_llm_failure": True,
+    # Уведомлять по завершении импорта аудиофайла.
+    "notify_on_import_complete": True,
+    # Воспроизводить звук вместе с уведомлением.
+    "notify_sound_enabled": True,
+    # Автоматическая дедупликация: пропускать дубликаты транскрипций.
+    "auto_dedup_enabled": False,
+    # Порог сходства для автодедупликации (0.0–1.0).
+    "auto_dedup_threshold": 0.9,
 }

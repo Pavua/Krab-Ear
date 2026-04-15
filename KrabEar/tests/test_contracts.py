@@ -1,6 +1,13 @@
 """Тесты контрактных моделей событий Krab Ear."""
 
 from __future__ import annotations
+from pydantic import ValidationError
+from contracts.envelope import KrabEventEnvelope, parse_event, parse_and_validate, UnknownEventType
+from contracts.registry import EventType, EVENT_SCHEMA_MAP
+from contracts.translation_events import TranslationCompleted, TranslationFailed
+from contracts.stt_events import SttPartial, SttFinal, SttFailed
+from backend.event_bus import EventBus
+from datetime import datetime, timezone
 
 import json
 import tempfile
@@ -11,15 +18,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from datetime import datetime, timezone
-
-from backend.event_bus import EventBus
-from contracts.stt_events import SttPartial, SttFinal, SttFailed
-from contracts.translation_events import TranslationCompleted, TranslationFailed
-from contracts.registry import EventType, EVENT_SCHEMA_MAP
-from contracts.envelope import KrabEventEnvelope, parse_event, parse_and_validate, UnknownEventType
-from pydantic import ValidationError
 
 
 class SttPartialTest(unittest.TestCase):

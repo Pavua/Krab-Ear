@@ -140,6 +140,10 @@ extension HistoryPanelController {
         isImportRunning = true
         currentImportJob = importQueue.removeFirst()
         currentImportJobStartedAt = Date()
+        importProgressBar.isHidden = false
+        importProgressBar.doubleValue = importJobsPlanned > 0
+            ? (Double(importJobsCompleted) / Double(importJobsPlanned)) * 100.0
+            : 0.0
         startImportElapsedTimer()
         updateImportStatusLabel()
 
@@ -219,6 +223,8 @@ extension HistoryPanelController {
         pauseImportButton.isEnabled = false
         pauseImportButton.title = "Пауза импорта"
         isImportPaused = false
+        importProgressBar.doubleValue = 100.0
+        importProgressBar.isHidden = true
         let totalSec = max(0, Int(importDurationTotalSec.rounded()))
         let summary = "Импорт завершён: файлов \(importProcessedTotal)/\(importFilesPlanned), ошибок \(importErrorsTotal), задач \(importJobsCompleted), время \(totalSec)с."
         importStatusLabel.stringValue = summary
@@ -271,9 +277,18 @@ extension HistoryPanelController {
             let currentFolders = currentImportJob?.folderCount ?? 0
             let elapsed = currentImportJobStartedAt.map { Int(Date().timeIntervalSince($0).rounded()) } ?? 0
             let folderSuffix = currentFolders > 1 ? " (\(currentFolders) папок)" : ""
-            importStatusLabel.stringValue = "Импорт: задача \(current)/\(importJobsPlanned), файлов \(currentFiles)\(folderSuffix), \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
+            importStatusLabel.stringValue = "Импорт: \(importJobsCompleted + 1)/\(importJobsPlanned) задач" +
+                (importFilesPlanned > 0 ? ", файлов \(importProcessedTotal + 1)/\(importFilesPlanned)" : ", файлов \(currentFiles)\(folderSuffix)") +
+                ", \(elapsed)с" + (eta > 0 ? ", ETA ~\(eta)с" : "")
+            // Update progress bar: progress by jobs completed (file-level is approximated per-job)
+            let progress = importJobsPlanned > 0
+                ? (Double(importJobsCompleted) / Double(importJobsPlanned)) * 100.0
+                : 0.0
+            importProgressBar.isHidden = false
+            importProgressBar.doubleValue = progress
             return
         }
+        importProgressBar.isHidden = true
         if isImportPaused {
             importStatusLabel.stringValue = "Импорт: пауза, в очереди \(importQueue.count), обработано \(importProcessedTotal)/\(importFilesPlanned)"
             return

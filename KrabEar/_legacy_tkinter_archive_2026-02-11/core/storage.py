@@ -76,12 +76,12 @@ class AppStorage:
                 timestamp = str(row.get("timestamp", "")).strip() or self._now_iso()
                 history_items.append(HistoryItem(timestamp=timestamp, text=text))
 
-        history_items = history_items[-self.max_history :]
+        history_items = history_items[-self.max_history:]
         return AppState(settings=settings, history=history_items)
 
     def save(self, state: AppState) -> None:
         """Сохраняет состояние атомарно через временный файл."""
-        normalized_history = state.history[-self.max_history :]
+        normalized_history = state.history[-self.max_history:]
         payload = {
             "settings": state.settings,
             "history": [
@@ -105,7 +105,7 @@ class AppStorage:
 
         next_history = list(state.history)
         next_history.append(HistoryItem(timestamp=self._now_iso(), text=clean_text))
-        state.history = next_history[-self.max_history :]
+        state.history = next_history[-self.max_history:]
         return state
 
     @staticmethod

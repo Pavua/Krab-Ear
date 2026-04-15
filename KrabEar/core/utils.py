@@ -132,11 +132,11 @@ class TextUtils:
         clean = TextUtils._strip_hallucinations(clean)
         # Нормализация брендов/имён и времени — всегда, чтобы диктовка не требовала ручной правки.
         clean = TextUtils.normalize_entities(clean)
-        
+
         # Строгая очистка
         if profile.lower() == "strict":
             clean = TextUtils._cleanup_strict(clean)
-            
+
         return clean.strip()
 
     @staticmethod
@@ -211,6 +211,15 @@ class TextUtils:
             result = compiled_re.sub(replacement, result)
         result = TIME_NORMALIZE_RE.sub(r"\1:\2", result)
         return result
+
+    @staticmethod
+    def fix_punctuation(text: str, language: str = "ru") -> str:
+        """Опциональный этап коррекции пунктуации через PunctuationFixer.
+
+        Импортируется лениво, чтобы избежать циклических зависимостей.
+        """
+        from core.punctuation_fixer import PunctuationFixer  # lazy import
+        return PunctuationFixer().fix(text, language=language)
 
     @staticmethod
     def _strip_hallucinations(clean: str) -> str:

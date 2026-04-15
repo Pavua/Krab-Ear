@@ -1,0 +1,345 @@
+"""Тесты WaveformGenerator — генерация waveform-данных для визуализации.
+
+Покрывает:
+- generate_waveform: базовая генерация, нормализация, пустой буфер
+- WaveformData: структура и поля
+- generate_from_file: несуществующий файл, корректный WAV
+- IPC: метод get_waveform через BackendService
+"""
+
+from __future__ import annotations
+from core.waveform_generator import WaveformData, WaveformGenerator
+
+import sys
+import tempfile
+import unittest
+import wave
+from pathlib import Path
+
+import numpy as np
+
+# Настройка путей для standalone-запуска
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = PROJECT_ROOT / "KrabEar"
+for p in (str(PACKAGE_ROOT), str(PROJECT_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+# ── Вспомогательные функции ─────────────────────────────────────────────────
+
+
+def _make_sine(sample_rate: int = 16000, duration_sec: float = 1.0, freq: float = 440.0) -> np.ndarray:
+    """Генерирует синусоиду в диапазоне [-1, 1]."""
+    t = np.linspace(0, duration_sec, int(sample_rate * duration_sec), endpoint=False)
+    return np.sin(2 * np.pi * freq * t).astype(np.float32)
+
+
+def _write_wav(path: Path, audio: np.ndarray, sample_rate: int = 16000) -> None:
+    """Сохраняет float32 аудио в 16-bit PCM WAV."""
+    pcm = (audio * 32767).astype(np.int16)
+    with wave.open(str(path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+
+# ── Тест 1: базовая генерация синусоиды ────────────────────────────────────
+
+
+class TestGenerateWaveformBasic(unittest.TestCase):
+    """Базовые свойства WaveformData после generate_waveform."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+        self.sr = 16000
+        self.audio = _make_sine(self.sr, duration_sec=1.0)
+
+    def test_returns_waveform_data_instance(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertIsInstance(result, WaveformData)
+
+    def test_points_count_matches_num_points(self):
+        result = self.gen.generate_waveform(self.audio, self.sr, num_points=100)
+        self.assertEqual(len(result.points), 100)
+
+    def test_default_num_points_is_200(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertEqual(len(result.points), 200)
+
+    def test_points_normalized_between_0_and_1(self):
+        result = self.gen.generate_waveform(self.audio, self.sr, num_points=50)
+        for p in result.points:
+            self.assertGreaterEqual(p, 0.0, f"Точка {p} < 0")
+            self.assertLessEqual(p, 1.0, f"Точка {p} > 1")
+
+    def test_duration_sec_correct(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertAlmostEqual(result.duration_sec, 1.0, places=2)
+
+    def test_sample_rate_preserved(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertEqual(result.sample_rate, self.sr)
+
+    def test_peak_amplitude_positive(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertGreater(result.peak_amplitude, 0.0)
+
+    def test_rms_amplitude_positive(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertGreater(result.rms_amplitude, 0.0)
+
+    def test_peak_ge_rms(self):
+        result = self.gen.generate_waveform(self.audio, self.sr)
+        self.assertGreaterEqual(result.peak_amplitude, result.rms_amplitude)
+
+
+# ── Тест 2: пустой аудиобуфер ─────────────────────────────────────────────
+
+
+class TestGenerateWaveformEmpty(unittest.TestCase):
+    """Поведение при пустом буфере."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_empty_array_returns_zeros(self):
+        result = self.gen.generate_waveform(np.array([], dtype=np.float32), 16000)
+        self.assertEqual(len(result.points), 200)
+        self.assertTrue(all(p == 0.0 for p in result.points))
+
+    def test_empty_array_duration_zero(self):
+        result = self.gen.generate_waveform(np.array([], dtype=np.float32), 16000)
+        self.assertEqual(result.duration_sec, 0.0)
+
+    def test_empty_array_peak_zero(self):
+        result = self.gen.generate_waveform(np.array([], dtype=np.float32), 16000)
+        self.assertEqual(result.peak_amplitude, 0.0)
+
+
+# ── Тест 3: нормализация — максимальная точка всегда == 1.0 ───────────────
+
+
+class TestNormalization(unittest.TestCase):
+    """Пик waveform должен быть равен 1.0 для ненулевого сигнала."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_max_point_equals_one_for_sine(self):
+        audio = _make_sine(16000, 1.0)
+        result = self.gen.generate_waveform(audio, 16000, num_points=100)
+        self.assertAlmostEqual(max(result.points), 1.0, places=5)
+
+    def test_max_point_equals_one_for_constant(self):
+        audio = np.full(16000, 0.5, dtype=np.float32)
+        result = self.gen.generate_waveform(audio, 16000, num_points=50)
+        self.assertAlmostEqual(max(result.points), 1.0, places=5)
+
+    def test_scaled_audio_same_shape(self):
+        """Масштабирование сигнала не меняет форму нормализованного waveform."""
+        audio = _make_sine(16000, 1.0)
+        r1 = self.gen.generate_waveform(audio * 0.1, 16000, num_points=50)
+        r2 = self.gen.generate_waveform(audio * 0.9, 16000, num_points=50)
+        for p1, p2 in zip(r1.points, r2.points):
+            self.assertAlmostEqual(p1, p2, places=4)
+
+
+# ── Тест 4: многоканальное аудио ──────────────────────────────────────────
+
+
+class TestMultichannelAudio(unittest.TestCase):
+    """2D аудио (samples, channels) должно усредняться до моно."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_stereo_audio_returns_correct_length(self):
+        # (N, 2) — стерео
+        stereo = np.random.uniform(-1, 1, (8000, 2)).astype(np.float32)
+        result = self.gen.generate_waveform(stereo, 16000, num_points=80)
+        self.assertEqual(len(result.points), 80)
+
+    def test_stereo_points_in_range(self):
+        stereo = np.random.uniform(-1, 1, (8000, 2)).astype(np.float32)
+        result = self.gen.generate_waveform(stereo, 16000, num_points=80)
+        for p in result.points:
+            self.assertGreaterEqual(p, 0.0)
+            self.assertLessEqual(p, 1.0)
+
+
+# ── Тест 5: параметр num_points ───────────────────────────────────────────
+
+
+class TestNumPoints(unittest.TestCase):
+    """num_points с разными значениями."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+        self.audio = _make_sine(16000, 1.0)
+
+    def test_num_points_1(self):
+        result = self.gen.generate_waveform(self.audio, 16000, num_points=1)
+        self.assertEqual(len(result.points), 1)
+        self.assertAlmostEqual(result.points[0], 1.0, places=4)
+
+    def test_num_points_500(self):
+        result = self.gen.generate_waveform(self.audio, 16000, num_points=500)
+        self.assertEqual(len(result.points), 500)
+
+    def test_num_points_larger_than_samples(self):
+        """Если точек больше чем семплов, должен работать корректно."""
+        short_audio = _make_sine(16000, 0.01)  # ~160 семплов
+        result = self.gen.generate_waveform(short_audio, 16000, num_points=200)
+        self.assertEqual(len(result.points), 200)
+        for p in result.points:
+            self.assertGreaterEqual(p, 0.0)
+            self.assertLessEqual(p, 1.0)
+
+    def test_invalid_num_points_raises(self):
+        with self.assertRaises(ValueError):
+            self.gen.generate_waveform(self.audio, 16000, num_points=0)
+
+    def test_invalid_sample_rate_raises(self):
+        with self.assertRaises(ValueError):
+            self.gen.generate_waveform(self.audio, -1)
+
+
+# ── Тест 6: generate_from_file ────────────────────────────────────────────
+
+
+class TestGenerateFromFile(unittest.TestCase):
+    """Чтение waveform из файла."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_file_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            self.gen.generate_from_file("/nonexistent/path/audio.wav")
+
+    def test_wav_file_returns_correct_num_points(self):
+        audio = _make_sine(16000, 1.0)
+        wav_path = self.tmp_dir / "test.wav"
+        _write_wav(wav_path, audio)
+        result = self.gen.generate_from_file(str(wav_path), num_points=100)
+        self.assertEqual(len(result.points), 100)
+
+    def test_wav_file_duration_correct(self):
+        audio = _make_sine(16000, 2.0)
+        wav_path = self.tmp_dir / "test2s.wav"
+        _write_wav(wav_path, audio)
+        result = self.gen.generate_from_file(str(wav_path))
+        self.assertAlmostEqual(result.duration_sec, 2.0, delta=0.05)
+
+    def test_wav_file_sample_rate_correct(self):
+        audio = _make_sine(22050, 1.0, freq=440.0)
+        wav_path = self.tmp_dir / "test22k.wav"
+        _write_wav(wav_path, audio, sample_rate=22050)
+        result = self.gen.generate_from_file(str(wav_path))
+        self.assertEqual(result.sample_rate, 22050)
+
+    def test_wav_file_points_in_range(self):
+        audio = _make_sine(16000, 0.5)
+        wav_path = self.tmp_dir / "test_range.wav"
+        _write_wav(wav_path, audio)
+        result = self.gen.generate_from_file(str(wav_path), num_points=50)
+        for p in result.points:
+            self.assertGreaterEqual(p, 0.0)
+            self.assertLessEqual(p, 1.0)
+
+    def test_wav_file_peak_positive(self):
+        audio = _make_sine(16000, 1.0)
+        wav_path = self.tmp_dir / "test_peak.wav"
+        _write_wav(wav_path, audio)
+        result = self.gen.generate_from_file(str(wav_path))
+        self.assertGreater(result.peak_amplitude, 0.0)
+
+
+# ── Тест 7: IPC-метод get_waveform ────────────────────────────────────────
+
+
+class TestGetWaveformIPC(unittest.TestCase):
+    """Тест IPC-метода get_waveform через BackendService."""
+
+    def setUp(self):
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp_path = Path(self._tmp.name)
+        self.store = StateStore(data_dir=tmp_path)
+
+        # Создаём BackendService с минимальными зависимостями
+        self.service = BackendService(store=self.store)
+
+        # Тестовый WAV файл
+        audio = _make_sine(16000, 1.0)
+        self.wav_path = tmp_path / "ipc_test.wav"
+        _write_wav(self.wav_path, audio)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_get_waveform_returns_ok(self):
+        response = self.service.handle_request({
+            "id": "t1",
+            "method": "get_waveform",
+            "params": {"file_path": str(self.wav_path)},
+        })
+        self.assertTrue(response.get("ok"), f"Ответ не ok: {response}")
+
+    def test_get_waveform_result_has_points(self):
+        response = self.service.handle_request({
+            "id": "t2",
+            "method": "get_waveform",
+            "params": {"file_path": str(self.wav_path)},
+        })
+        result = response.get("result", {})
+        self.assertIn("points", result)
+        self.assertEqual(len(result["points"]), 200)
+
+    def test_get_waveform_custom_num_points(self):
+        response = self.service.handle_request({
+            "id": "t3",
+            "method": "get_waveform",
+            "params": {"file_path": str(self.wav_path), "num_points": 50},
+        })
+        result = response.get("result", {})
+        self.assertEqual(len(result["points"]), 50)
+
+    def test_get_waveform_result_has_required_fields(self):
+        response = self.service.handle_request({
+            "id": "t4",
+            "method": "get_waveform",
+            "params": {"file_path": str(self.wav_path)},
+        })
+        result = response.get("result", {})
+        for field in ("points", "duration_sec", "sample_rate", "peak_amplitude", "rms_amplitude"):
+            self.assertIn(field, result, f"Поле '{field}' отсутствует в ответе")
+
+    def test_get_waveform_missing_file_path_returns_error(self):
+        response = self.service.handle_request({
+            "id": "t5",
+            "method": "get_waveform",
+            "params": {},
+        })
+        self.assertFalse(response.get("ok", True))
+
+    def test_get_waveform_nonexistent_file_returns_error(self):
+        response = self.service.handle_request({
+            "id": "t6",
+            "method": "get_waveform",
+            "params": {"file_path": "/no/such/file.wav"},
+        })
+        self.assertFalse(response.get("ok", True))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

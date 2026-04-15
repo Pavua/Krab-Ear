@@ -9,10 +9,17 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
+from backend.settings_validator import SettingsValidator
+
+_log = logging.getLogger(__name__)
 
 
 class SettingsService:
@@ -62,6 +69,7 @@ class SettingsService:
         self._cache: dict[str, Any] | None = None
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 5.0
+        self._validator = SettingsValidator()
 
     # ------------------------------------------------------------------
     # Кэш
@@ -72,7 +80,13 @@ class SettingsService:
         now = time.monotonic()
         if self._cache is not None and (now - self._cache_ts) < self._cache_ttl:
             return dict(self._cache)
-        self._cache = self.store.load_settings()
+        raw = self.store.load_settings()
+        # Validate and auto-fix on load — warnings only, no hard errors
+        result_v = self._validator.validate(raw)
+        if result_v.warnings:
+            for w in result_v.warnings:
+                _log.debug("settings load: %s", w)
+        self._cache = result_v.fixed
         self._cache_ts = now
         return dict(self._cache)
 
@@ -231,6 +245,15 @@ class SettingsService:
             overlay_percent = 45
         settings["overlay_opacity_percent"] = max(15, min(overlay_percent, 90))
 
+        # Final validation pass before persisting — raises on hard errors
+        vr = self._validator.validate(settings)
+        if not vr.valid:
+            raise ValueError(f"Настройки содержат ошибки: {'; '.join(vr.errors)}")
+        if vr.warnings:
+            for w in vr.warnings:
+                _log.warning("settings save: %s", w)
+        settings = vr.fixed
+
         result = self.store.save_settings(settings)
         self.invalidate_cache()
         return result
@@ -248,6 +271,134 @@ class SettingsService:
         result = self.store.save_settings(settings)
         self.invalidate_cache()
         return result
+
+    def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущие настройки уведомлений из хранилища настроек."""
+        settings = self.cached_settings()
+        return {
+            "notifications_enabled": bool(settings.get("notifications_enabled", True)),
+            "notify_on_low_confidence": bool(settings.get("notify_on_low_confidence", True)),
+            "notify_confidence_threshold": float(settings.get("notify_confidence_threshold", 0.5)),
+            "notify_on_llm_failure": bool(settings.get("notify_on_llm_failure", True)),
+            "notify_on_import_complete": bool(settings.get("notify_on_import_complete", True)),
+            "notify_sound_enabled": bool(settings.get("notify_sound_enabled", True)),
+        }
+
+    def handle_set_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обновляет настройки уведомлений. Принимает любое подмножество полей."""
+        settings = self.cached_settings()
+
+        _BOOL_FIELDS = (
+            "notifications_enabled",
+            "notify_on_low_confidence",
+            "notify_on_llm_failure",
+            "notify_on_import_complete",
+            "notify_sound_enabled",
+        )
+        for field in _BOOL_FIELDS:
+            if field in params:
+                settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
+
+        if "notify_confidence_threshold" in params:
+            settings["notify_confidence_threshold"] = self._coerce_bounded(
+                value=params["notify_confidence_threshold"],
+                default=0.5,
+                min_value=0.0,
+                max_value=1.0,
+            )
+
+        result = self.store.save_settings(settings)
+        self.invalidate_cache()
+        return result
+
+    # Sensitive fields — никогда не экспортируются
+    _SENSITIVE_FIELDS: frozenset[str] = frozenset({
+        "voice_gateway_api_key",
+        "hf_token",
+        "rest_api_key",
+        "lm_studio_api_key",
+    })
+
+    def handle_export_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля.
+
+        Params:
+            file (str, optional): путь к файлу. По умолчанию ~/krabear_settings_<ts>.json.
+
+        Returns:
+            {"file": path, "settings_count": N}
+        """
+        settings = self.cached_settings()
+        safe = {k: v for k, v in settings.items() if k not in self._SENSITIVE_FIELDS}
+
+        if params.get("file"):
+            out_path = Path(str(params["file"])).expanduser().resolve()
+        else:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_path = Path.home() / f"krabear_settings_{ts}.json"
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8") as fh:
+            json.dump(safe, fh, ensure_ascii=False, indent=2)
+
+        _log.info("export_settings: %d settings → %s", len(safe), out_path)
+        return {"file": str(out_path), "settings_count": len(safe)}
+
+    def handle_import_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Импортирует настройки из JSON-файла.
+
+        Params:
+            file (str): путь к JSON-файлу с настройками.
+
+        Validates each key via SettingsValidator (run against merged dict).
+        Never overwrites sensitive fields — they are silently skipped.
+        Returns {"imported": N, "skipped": N, "errors": [...]}
+        """
+        file_path = params.get("file")
+        if not file_path:
+            raise ValueError("Параметр 'file' обязателен для import_settings")
+
+        src = Path(str(file_path)).expanduser().resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"Файл настроек не найден: {src}")
+
+        try:
+            with src.open("r", encoding="utf-8") as fh:
+                incoming: dict[str, Any] = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Невалидный JSON в файле настроек: {exc}") from exc
+
+        if not isinstance(incoming, dict):
+            raise ValueError("Файл настроек должен содержать JSON-объект")
+
+        errors: list[str] = []
+        skipped = 0
+        merged = self.cached_settings()
+
+        for key, value in incoming.items():
+            if key in self._SENSITIVE_FIELDS:
+                skipped += 1
+                _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
+                continue
+            merged[key] = value
+
+        # Validate the merged result
+        vr = self._validator.validate(merged)
+        if not vr.valid:
+            errors.extend(vr.errors)
+        if vr.warnings:
+            for w in vr.warnings:
+                _log.warning("import_settings: %s", w)
+            errors.extend(vr.warnings)
+        merged = vr.fixed
+
+        imported = len(incoming) - skipped
+        self.store.save_settings(merged)
+        self.invalidate_cache()
+
+        _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
+                  imported, skipped, len(errors), src)
+        return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных пресетов профилей с описаниями и значениями."""

@@ -1,6 +1,10 @@
 """Интеграционные тесты команд backend-сервиса Krab Ear."""
 
 from __future__ import annotations
+from KrabEar.__version__ import __version__ as APP_VERSION
+from backend.translator import TranslationResult
+from backend.state_store import StateStore
+from backend.service import BackendService
 
 from pathlib import Path
 import json
@@ -14,10 +18,6 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.service import BackendService
-from backend.state_store import StateStore
-from backend.translator import TranslationResult
 
 
 class FakeRecorder:
@@ -214,7 +214,7 @@ class BackendServiceTestCase(unittest.TestCase):
         result = ping["result"]
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["service"], "krabear-backend")
-        self.assertEqual(result["version"], "1.0.0")
+        self.assertEqual(result["version"], APP_VERSION)
         self.assertGreaterEqual(result["uptime_sec"], 0)
         self.assertIn("is_recording", result)
         self.assertFalse(result["is_recording"])
@@ -800,12 +800,16 @@ class BackendServiceTestCase(unittest.TestCase):
         class _MockGW:
             def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-1"}
+
             def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
+
             def get(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
+
             def post(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
+
             def delete(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
         self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
@@ -856,10 +860,13 @@ class BackendServiceTestCase(unittest.TestCase):
         class _MockGW:
             def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-summary-1"}
+
             def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
+
             def get(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
+
             def post(self, **kwargs):  # type: ignore[no-untyped-def]
                 path = str(kwargs.get("path", ""))
                 payload = kwargs.get("payload", {})
@@ -874,6 +881,7 @@ class BackendServiceTestCase(unittest.TestCase):
                         },
                     }
                 return {"ok": True, "payload": {"ok": True}}
+
             def delete(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
 
@@ -904,8 +912,10 @@ class BackendServiceTestCase(unittest.TestCase):
         class _MockGW:
             def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-77"}
+
             def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
+
             def get(self, **kwargs):  # type: ignore[no-untyped-def]
                 path = str(kwargs.get("path", ""))
                 get_paths.append(path)
@@ -951,10 +961,12 @@ class BackendServiceTestCase(unittest.TestCase):
                 if "/timeline" in path:
                     return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"kind": "stt.partial", "text": "x"}]}}
                 return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"source_text": "x"}]}}
+
             def post(self, **kwargs):  # type: ignore[no-untyped-def]
                 path = str(kwargs.get("path", ""))
                 post_paths.append(path)
                 return {"ok": True, "payload": {"ok": True, "summary": "sum", "tasks": [], "translated_text": "hola"}}
+
             def delete(self, **kwargs):  # type: ignore[no-untyped-def]
                 path = str(kwargs.get("path", ""))
                 delete_paths.append(path)
@@ -1342,7 +1354,7 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
         """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance."""
         from unittest.mock import patch
         with patch("backend.service.settings") as mock_settings, \
-             patch("backend.llm_rewriter.requests.get") as mock_get:
+                patch("backend.llm_rewriter.requests.get") as mock_get:
             mock_settings.LLM_ENABLED = True
             mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
             mock_settings.LLM_API_KEY = "sk-test"
@@ -1443,8 +1455,8 @@ class VocabularySuggestionsTestCase(unittest.TestCase):
         self.assertNotIn("потом", words)
 
     def test_suggestions_exclude_existing_vocabulary(self) -> None:
-        """Слова уже в vocabulary.txt не попадают в suggestions."""
-        self.store.save_vocabulary(["Telegram"])
+        """Слова уже в vocabulary.json не попадают в suggestions."""
+        self.service.vocabulary.save(["Telegram"])
         for _ in range(5):
             self.store.add_history_item(
                 text="Telegram Python Claude",
@@ -1508,8 +1520,8 @@ class VocabularyPassthroughTestCase(unittest.TestCase):
         )
 
     def test_stop_recording_passes_vocabulary(self) -> None:
-        """stop_recording передаёт vocabulary из store в transcriber."""
-        self.store.save_vocabulary(["Telegram", "Claude", "Hammerspoon"])
+        """stop_recording передаёт vocabulary из VocabularyStore в transcriber."""
+        self.service.vocabulary.save(["Telegram", "Claude", "Hammerspoon"])
 
         self.request("start_recording")
         resp = self.request("stop_recording")

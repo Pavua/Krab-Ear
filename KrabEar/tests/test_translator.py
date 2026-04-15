@@ -1,6 +1,7 @@
 """Unit-тесты offline-first переводчика Krab Ear."""
 
 from __future__ import annotations
+from backend.translator import Translator
 
 from pathlib import Path
 import sys
@@ -9,8 +10,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.translator import Translator
 
 
 class TranslatorTestCase(unittest.TestCase):
