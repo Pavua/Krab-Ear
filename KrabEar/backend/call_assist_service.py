@@ -21,6 +21,10 @@ logger = logging.getLogger("KrabEar.Backend.CallAssist")
 class VoiceGatewayClient:
     """HTTP-клиент для взаимодействия с Voice Gateway."""
 
+    # Class-level timeout constants (PR #9 — extracted from scattered literals)
+    SESSION_LIFECYCLE_TIMEOUT = 3.5  # start/stop session — короткий чтобы UI не висел
+    HTTP_TIMEOUT = 4.0  # general REST calls (get/post/delete)
+
     @staticmethod
     def start_session(
         voice_gateway_url: str,
@@ -35,7 +39,7 @@ class VoiceGatewayClient:
             request.add_header("Content-Type", "application/json")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=3.5) as response:
+            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.SESSION_LIFECYCLE_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 session_id = str(payload.get("id", "")).strip()
@@ -66,7 +70,7 @@ class VoiceGatewayClient:
             request = urllib_request.Request(url=url, method="GET")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=4.0) as response:
+            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.HTTP_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return {"ok": True, "payload": payload}
@@ -96,7 +100,7 @@ class VoiceGatewayClient:
             request.add_header("Content-Type", "application/json")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=4.0) as response:
+            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.HTTP_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return {"ok": True, "payload": payload}
@@ -123,7 +127,7 @@ class VoiceGatewayClient:
             request = urllib_request.Request(url=url, method="DELETE")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=4.0) as response:
+            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.HTTP_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return {"ok": True, "payload": payload}
@@ -148,7 +152,7 @@ class VoiceGatewayClient:
             request = urllib_request.Request(url=url, method="DELETE")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=3.5):
+            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.SESSION_LIFECYCLE_TIMEOUT):
                 return {"ok": True}
         except urllib_error.HTTPError as exc:
             return {"ok": False, "error": f"http_{exc.code}"}
