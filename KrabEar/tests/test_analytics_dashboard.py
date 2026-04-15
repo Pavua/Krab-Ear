@@ -36,8 +36,13 @@ def _make_item(
     translation_status: str = "not_requested",
     llm_applied: bool = False,
 ):
-    """Создаёт fake-элемент истории с заданными параметрами."""
-    dt = datetime.now(tz=timezone.utc) - timedelta(days=days_ago)
+    """Создаёт fake-элемент истории с заданными параметрами.
+
+    Использует локальное время (date.today()) для консистентности с _build_dashboard().
+    """
+    # Use date.today() + timedelta to stay in local timezone (matches _build_dashboard)
+    base_date = date.today() - timedelta(days=days_ago)
+    dt = datetime.combine(base_date, datetime.min.time(), tzinfo=timezone.utc)
     dt = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
 
     class FakeItem:

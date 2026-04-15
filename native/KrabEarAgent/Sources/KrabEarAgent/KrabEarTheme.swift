@@ -4,23 +4,51 @@ import CoreText
 @MainActor
 public enum KrabEarTheme {
     
+    /// Unified color system designed by Gemini 3.1 Pro (2026-04-16 v2).
+    /// 9 semantic tokens. Migration from legacy hardcoded alphas to dynamic border + consistent cardBackground.
     public enum Colors {
-        public static var windowBackground: NSColor { .windowBackgroundColor }
-        /// Liquid Glass: semi-transparent card background with vibrancy
+        // MARK: - Backgrounds
+        /// Window root (clear поверх NSVisualEffectView)
+        public static var windowBackground: NSColor { .clear }
+
+        /// Liquid Glass card: 0.5 alpha (было 0.65 — Gemini снизил для better vibrancy)
         public static var cardBackground: NSColor {
-            NSColor.controlBackgroundColor.withAlphaComponent(0.65)
+            NSColor.controlBackgroundColor.withAlphaComponent(0.5)
         }
+        // MARK: - Interactive
         public static var accent: NSColor { .controlAccentColor }
-        
+
+        // MARK: - Typography colors
         public static var textPrimary: NSColor { .labelColor }
         public static var textSecondary: NSColor { .secondaryLabelColor }
-        public static var textTertiary: NSColor { .tertiaryLabelColor }
-        
-        public static var separator: NSColor { .separatorColor }
-        
+        /// Disabled / muted text (replaces legacy textTertiary)
+        public static var textDisabled: NSColor { .tertiaryLabelColor }
+
+        // MARK: - Borders & Dividers
+        /// Dynamic border: white 0.15 в dark mode, black 0.10 в light mode.
+        /// Unifies legacy alphas 0.18 (card), 0.12 (overlay), 0.3 (grid) в один semantic token.
+        public static var border: NSColor {
+            NSColor(name: nil) { appearance in
+                appearance.name == .darkAqua
+                    ? NSColor.white.withAlphaComponent(0.15)
+                    : NSColor.black.withAlphaComponent(0.10)
+            }
+        }
+        /// Keep separator alias for backward-compat в нескольких local call sites.
+        public static var separator: NSColor { border }
+
+        // MARK: - Status (Diagnostics)
         public static var success: NSColor { .systemGreen }
-        public static var warning: NSColor { .systemOrange }
         public static var error: NSColor { .systemRed }
+
+        // MARK: - Overlays
+        public static var overlayShadow: NSColor { NSColor.black.withAlphaComponent(0.25) }
+
+        // MARK: - Legacy aliases (will be purged after full migration)
+        /// @deprecated Use textDisabled
+        public static var textTertiary: NSColor { textDisabled }
+        /// @deprecated Warning not used; if нужен — вернуть .systemOrange
+        public static var warning: NSColor { .systemOrange }
     }
     
     /// Unified typography system designed by Gemini 3.1 Pro (2026-04-16).
@@ -65,14 +93,33 @@ extension NSFont {
 @MainActor
 public extension KrabEarTheme {
     
+    /// Unified spacing & sizing system designed by Gemini 3.1 Pro (2026-04-16 v2).
+    /// 4-pt grid aligned; 10pt/6pt legacy values migrate к standard/tight.
     public enum Metrics {
-        public static let sectionSpacing: CGFloat = 16.0
-        public static let itemSpacing: CGFloat = 8.0
-        public static let cardPadding: CGFloat = 12.0
+        // MARK: - Spacing (4-pt grid)
+        /// Minor offsets, disclosure padding (4pt).
+        public static let tight: CGFloat = 4.0
+        /// Item/inner padding — dominant default (8pt, bывший itemSpacing).
+        public static let standard: CGFloat = 8.0
+        /// Card padding, mid-level inset (12pt, бывший cardPadding).
+        public static let comfortable: CGFloat = 12.0
+        /// Window root padding, external margins (24pt, был sectionSpacing=16 — shifted к 24pt Gemini recommendation).
+        public static let spacious: CGFloat = 24.0
+
+        // MARK: - Radii
         public static let cardCornerRadius: CGFloat = 12.0
         /// Концентрический радиус для внутренних элементов (scroll views, text views внутри карточек).
         /// Apple's rule: inner radius = outer radius - padding/3.
         public static let innerCornerRadius: CGFloat = 8.0
+
+        // MARK: - Sizing
+        /// Standard NSControl.ControlSize.regular height (24pt, hardcoded 9x до migration).
+        public static let controlHeight: CGFloat = 24.0
+
+        // MARK: - Legacy aliases (will be purged after full migration)
+        public static let sectionSpacing: CGFloat = spacious
+        public static let itemSpacing: CGFloat = standard
+        public static let cardPadding: CGFloat = comfortable
     }
     
     public static func applyTheme(to window: NSWindow) {
@@ -305,9 +352,12 @@ public class CollapsibleSectionView: NSView {
         disclosureButton.controlSize = .regular
 
         headerStack.orientation = .horizontal
-        headerStack.spacing = 4
+        headerStack.spacing = KrabEarTheme.Metrics.tight
         headerStack.alignment = .centerY
-        headerStack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
+        // Explicit .fill — spacer (line ниже) relies on .fill чтобы titleLabel остался слева.
+        // Если .distribution defaults ever change in AppKit — spacer layout сломается без этой строки.
+        headerStack.distribution = .fill
+        headerStack.edgeInsets = NSEdgeInsets(top: 0, left: KrabEarTheme.Metrics.tight, bottom: 0, right: 0)
         headerStack.addArrangedSubview(disclosureButton)
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(NSView()) // spacer — makes full width clickable
