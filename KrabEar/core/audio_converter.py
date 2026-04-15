@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import soundfile as sf
+# soundfile требует libsndfile system library.
+# На Ubuntu CI pip wheel обычно содержит его, но для безопасности обёртываем.
+try:
+    import soundfile as sf  # type: ignore
+except Exception:
+    sf = None  # type: ignore[assignment]
 
 SUPPORTED_FORMATS = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
 _FFMPEG_CANDIDATES = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]

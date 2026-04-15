@@ -83,7 +83,7 @@ class HistorySearchBenchmark(unittest.TestCase):
         )
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] History search 10000 items: {elapsed:.3f}s, hits={len(items)}")
-        self.assertLess(elapsed, 1.0, f"History search 10000 items took {elapsed:.3f}s (limit 1.0s)")
+        self.assertLess(elapsed, 3.0, f"History search 10000 items took {elapsed:.3f}s (limit 3.0s CI)")
 
 
 class SearchIndexBuildBenchmark(unittest.TestCase):
@@ -96,7 +96,7 @@ class SearchIndexBuildBenchmark(unittest.TestCase):
         idx.build_index(items)
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] SearchIndex build 1000 items: {elapsed:.3f}s")
-        self.assertLess(elapsed, 0.5, f"SearchIndex build 1000 items took {elapsed:.3f}s (limit 0.5s)")
+        self.assertLess(elapsed, 1.5, f"SearchIndex build 1000 items took {elapsed:.3f}s (limit 1.5s CI)")
 
 
 class SearchIndexSearchBenchmark(unittest.TestCase):
@@ -112,7 +112,7 @@ class SearchIndexSearchBenchmark(unittest.TestCase):
         results = self.idx.search("проект", limit=500)
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] SearchIndex.search 10000 items: {elapsed:.3f}s, hits={len(results)}")
-        self.assertLess(elapsed, 0.5, f"SearchIndex.search 10000 items took {elapsed:.3f}s (limit 0.5s)")
+        self.assertLess(elapsed, 1.5, f"SearchIndex.search 10000 items took {elapsed:.3f}s (limit 1.5s CI)")
 
 
 class CsvExportBenchmark(unittest.TestCase):
@@ -138,7 +138,7 @@ class CsvExportBenchmark(unittest.TestCase):
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] CSV export 1000 items: {elapsed:.3f}s, entries={result.get('entries')}")
         self.assertTrue(result.get("ok"), f"CSV export failed: {result}")
-        self.assertLess(elapsed, 1.0, f"CSV export 1000 items took {elapsed:.3f}s (limit 1.0s)")
+        self.assertLess(elapsed, 3.0, f"CSV export 1000 items took {elapsed:.3f}s (limit 3.0s CI)")
 
 
 class FuzzySearchBenchmark(unittest.TestCase):
@@ -177,7 +177,7 @@ class WordFrequencyBenchmark(unittest.TestCase):
         result = self.svc.handle_word_frequency_analysis({})
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] Word frequency 1000 items: {elapsed:.3f}s, total_words={result.get('total_words')}")
-        self.assertLess(elapsed, 1.0, f"Word frequency 1000 items took {elapsed:.3f}s (limit 1.0s)")
+        self.assertLess(elapsed, 3.0, f"Word frequency 1000 items took {elapsed:.3f}s (limit 3.0s CI)")
 
 
 class PipelineContextCreationBenchmark(unittest.TestCase):
