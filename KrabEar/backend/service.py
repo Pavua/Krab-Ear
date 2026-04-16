@@ -8,7 +8,7 @@
 """
 
 from __future__ import annotations
-from KrabEar.__version__ import __version__ as APP_VERSION
+from __version__ import __version__ as APP_VERSION  # noqa: E402
 from backend.model_cache_manager import ModelCacheManager
 from backend.hotword_detector import HotwordDetector
 from backend.plugin_system import PluginManager

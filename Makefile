@@ -27,7 +27,7 @@ reset-tcc:
 sign: build
 	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent native/runtime/KrabEarAgent
 	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent "Krab Ear.app/Contents/MacOS/KrabEarAgent"
-	codesign -s - -f native/runtime/KrabEarAgent
+	codesign -s - -f --identifier $(BUNDLE_ID) native/runtime/KrabEarAgent
 	codesign -s - -f "Krab Ear.app"
 	@echo ""
 	@echo "⚠  Note: после каждого rebuild cdhash меняется. Если Accessibility снова"
