@@ -190,7 +190,7 @@ if [ "$NEED_RUNTIME_SYNC" -eq 1 ]; then
   # На Apple Silicon исполняемый бинарь должен быть подписан.
   # Подписываем только при реальном обновлении бинаря, чтобы не провоцировать
   # лишние изменения записи в TCC/Accessibility.
-  codesign --force --sign - --timestamp=none --identifier com.krabear.agent "$AGENT_RUNTIME_BIN" >/dev/null 2>&1 || true
+  codesign --force --sign - --timestamp=none --identifier com.antigravity.krab-ear "$AGENT_RUNTIME_BIN" >/dev/null 2>&1 || true
 fi
 
 # Backend launchd job: bootstrap, если plist установлен но не загружен в launchd.
