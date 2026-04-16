@@ -10,13 +10,18 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from core.fuzzy_search import FuzzySearcher
 from core.search_highlighter import SearchHighlighter
 
 from core.duplicate_detector import DuplicateDetector
 from backend.summary_profiles import SummaryProfileManager
+
+# Typed imports — only loaded during static analysis, avoid runtime circular imports
+if TYPE_CHECKING:
+    from backend.state_store import StateStore
+    from backend.llm_rewriter import LLMRewriter
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
@@ -26,9 +31,9 @@ class HistoryService:
 
     def __init__(
         self,
-        store: Any,
+        store: "StateStore",
         clipboard_history: list[dict] | None = None,
-        llm_rewriter: Any = None,
+        llm_rewriter: "LLMRewriter | None" = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
