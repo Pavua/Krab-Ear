@@ -384,17 +384,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         guard let windowContentView = window?.contentView else { return }
         // Tab view setup
         mainTabView.tabViewType = .noTabsNoBorder
+        mainTabView.drawsBackground = false  // Liquid Glass: прозрачный фон, чтобы cardBackground просвечивал
         mainTabView.delegate = self
         mainTabView.translatesAutoresizingMaskIntoConstraints = false
         // Layer-backed + .onSetNeedsDisplay redraw policy уменьшает мерцание
         // NSVisualEffectView при переключении табов (AppKit bug workaround).
         mainTabView.wantsLayer = true
+        mainTabView.layer?.backgroundColor = NSColor.clear.cgColor
         mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
         tabSelector.selectedSegment = 0
         tabSelector.translatesAutoresizingMaskIntoConstraints = false
         tabSelector.segmentStyle = .rounded
+        // Liquid Glass: let cardBackground show through (NSSegmentedControl draws
+        // opaque white by default; кnown workaround — wrap в wantsLayer + clear).
+        tabSelector.wantsLayer = true
+        tabSelector.layer?.backgroundColor = NSColor.clear.cgColor
         tabSelector.controlSize = .regular
         self.tabSelector = tabSelector
 
@@ -1052,6 +1058,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }
 
         realtimeScroll.translatesAutoresizingMaskIntoConstraints = false
+        realtimeScroll.drawsBackground = false
         realtimeScroll.hasVerticalScroller = true
         realtimeScroll.borderType = .noBorder
         realtimeScroll.wantsLayer = true
@@ -1066,6 +1073,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeScroll.documentView = realtimeTextView
 
         dictationHistoryPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
+        dictationHistoryPreviewScroll.drawsBackground = false
         dictationHistoryPreviewScroll.hasVerticalScroller = true
         dictationHistoryPreviewScroll.borderType = .noBorder
         dictationHistoryPreviewScroll.wantsLayer = true
@@ -1080,6 +1088,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHistoryPreviewScroll.documentView = dictationHistoryPreviewView
 
         callAssistOutputScroll.translatesAutoresizingMaskIntoConstraints = false
+        callAssistOutputScroll.drawsBackground = false
         callAssistOutputScroll.hasVerticalScroller = true
         callAssistOutputScroll.borderType = .noBorder
         callAssistOutputScroll.wantsLayer = true
@@ -1386,6 +1395,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyPreviewTextView.backgroundColor = .clear
         historyPreviewTextView.drawsBackground = false
         historyPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
+        historyPreviewScroll.drawsBackground = false
         historyPreviewScroll.hasVerticalScroller = true
         historyPreviewScroll.borderType = .noBorder
         historyPreviewScroll.wantsLayer = true
@@ -1588,6 +1598,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         diagnosticsOutputView.backgroundColor = .clear
         diagnosticsOutputView.drawsBackground = false
         diagnosticsOutputScroll.documentView = diagnosticsOutputView
+        diagnosticsOutputScroll.drawsBackground = false
         diagnosticsOutputScroll.hasVerticalScroller = true
         diagnosticsOutputScroll.translatesAutoresizingMaskIntoConstraints = false
         diagnosticsOutputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
