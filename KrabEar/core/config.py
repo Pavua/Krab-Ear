@@ -113,6 +113,20 @@ class Settings(BaseSettings):
     IPC_SIGNING_ENABLED: bool = False
     IPC_SIGNING_SECRET: str = ""
 
+    # --- SenseVoice adapter (Phase 4 quick win) ---
+    # Alibaba SenseVoice (FunASR) — альтернативный STT движок, поддерживает 50+ языков
+    # (вкл. RU) и эмоцию (happy/sad/angry/neutral/fearful/disgusted/surprised).
+    # Opt-in: по умолчанию выключено — существующий whisper chain не меняется.
+    # При SENSEVOICE_ENABLED=True адаптер добавляется в fallback chain МЕЖДУ balanced
+    # и max (то есть пробуется до whisper-large-v3). Требует `pip install funasr`.
+    # Если funasr не установлен — адаптер мягко возвращает ошибку и fallback
+    # продолжает по whisper-кандидатам.
+    SENSEVOICE_ENABLED: bool = False
+    SENSEVOICE_MODEL: str = "iic/SenseVoiceSmall"
+    # При True результат эмоции (happy/neutral/angry/...) пробрасывается в
+    # HistoryItem.emotion и далее в NDJSON. Для аналитики настроений.
+    SENSEVOICE_EMOTION_TO_HISTORY: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

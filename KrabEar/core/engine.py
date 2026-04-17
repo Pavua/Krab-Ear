@@ -49,6 +49,14 @@ try:
 except Exception:
     Pipeline = None  # type: ignore[assignment,misc]
 
+# SenseVoice (FunASR) — опциональный альтернативный STT движок (Alibaba).
+# Поддерживает 50+ языков (вкл. RU) и эмоцию. Lazy: если funasr не установлен,
+# адаптер возвращает ошибку, и fallback chain продолжит работу на whisper'е.
+try:
+    from funasr import AutoModel as _SenseVoiceAutoModel  # type: ignore
+except Exception:
+    _SenseVoiceAutoModel = None  # type: ignore[assignment]
+
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
@@ -148,6 +156,12 @@ class AudioEngine:
         self._unavailable_models: set[str] = set()
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
+
+        # SenseVoice adapter state (lazy-loaded FunASR pipeline).
+        # Если funasr не установлен или модель не грузится — адаптер навсегда
+        # отключается через _sensevoice_load_error, whisper chain продолжает жить.
+        self._sensevoice_model = None  # type: ignore[var-annotated]
+        self._sensevoice_load_error: str | None = None
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -431,6 +445,13 @@ class AudioEngine:
                 "language": result.get("language", resolved_lang),
                 "segments": segments if not is_preview else [],
                 "diarization": diarization,
+                # Phase 4: SenseVoice эмоция (happy/neutral/angry/...) — None для whisper.
+                # Surfaced только если SENSEVOICE_EMOTION_TO_HISTORY=True и adapter сработал.
+                "emotion": (
+                    result.get("emotion")
+                    if settings.SENSEVOICE_EMOTION_TO_HISTORY
+                    else None
+                ),
             }
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
@@ -452,6 +473,8 @@ class AudioEngine:
         with _profiler.start_span("stt_with_fallback"):
             return self._transcribe_with_fallback_impl(audio_data, prompt, language)
 
+    _SENSEVOICE_MARKER: str = "sensevoice:adapter"
+
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
         чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики."""
@@ -461,7 +484,30 @@ class AudioEngine:
 
         balanced_model = settings.MODEL_BALANCED
 
+        # --- SenseVoice adapter: additive попытка между balanced и max candidates ---
+        # Вставляем маркер в цепочку кандидатов сразу после первой попытки (balanced
+        # или первого из max_list). Гейт по settings.SENSEVOICE_ENABLED. При сбое
+        # маркер помечается как недоступный, и chain продолжается на whisper'ах.
+        if settings.SENSEVOICE_ENABLED and self._SENSEVOICE_MARKER not in self._unavailable_models:
+            if len(candidates) >= 1:
+                # После первой (balanced/turbo) попытки, перед whisper-large-v3
+                candidates = [candidates[0], self._SENSEVOICE_MARKER] + candidates[1:]
+            else:
+                candidates = [self._SENSEVOICE_MARKER]
+
         for model_name in candidates:
+            # SenseVoice adapter — отдельная ветка (не whisper).
+            if model_name == self._SENSEVOICE_MARKER:
+                try:
+                    span_name = f"stt_sensevoice_{_short_model_name(settings.SENSEVOICE_MODEL)}"
+                    with _profiler.start_span(span_name):
+                        sv_result = self._transcribe_sensevoice(audio_data, language=language)
+                    sv_result["model_used"] = settings.SENSEVOICE_MODEL
+                    return sv_result
+                except Exception as exc:
+                    logger.warning("SenseVoice adapter не сработал: %s — продолжаю whisper chain", exc)
+                    self._unavailable_models.add(self._SENSEVOICE_MARKER)
+                    continue
             if model_name in self._unavailable_models:
                 continue
 
@@ -538,6 +584,142 @@ class AudioEngine:
             except TypeError as e:
                 last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
+
+    # --- SenseVoice adapter (Alibaba FunASR, Phase 4 quick win) ---
+    # SenseVoice-Small — мультиязычная STT модель (50+ языков, вкл. RU) c встроенной
+    # эмоцией (happy/neutral/angry/sad/fearful/disgusted/surprised) и language ID.
+    # Размер модели: ~900 MB на диске, ~1.5 GB RAM при загрузке (float32 весы).
+    # Приоритет перед whisper-large: быстрее (NFA inference) и даёт эмоцию бесплатно.
+
+    # Маппинг эмоциональных спецтокенов SenseVoice → короткие метки для истории.
+    # SenseVoice вставляет токены прямо в текст: "<|HAPPY|><|ru|>привет мир".
+    _SENSEVOICE_EMOTION_MAP: dict[str, str] = {
+        "HAPPY": "happy",
+        "SAD": "sad",
+        "ANGRY": "angry",
+        "NEUTRAL": "neutral",
+        "FEARFUL": "fearful",
+        "DISGUSTED": "disgusted",
+        "SURPRISED": "surprised",
+        "EMO_UNKNOWN": "unknown",
+    }
+
+    _SENSEVOICE_LANG_MAP: dict[str, str] = {
+        "zh": "zh",
+        "en": "en",
+        "ja": "ja",
+        "ko": "ko",
+        "ru": "ru",
+        "es": "es",
+        "yue": "yue",
+        "nospeech": "",
+        "auto": "",
+    }
+
+    def _load_sensevoice_model(self) -> Any:
+        """Ленивая загрузка SenseVoice pipeline. Raises если funasr недоступен."""
+        if self._sensevoice_model is not None:
+            return self._sensevoice_model
+        if self._sensevoice_load_error:
+            raise RuntimeError(self._sensevoice_load_error)
+        if _SenseVoiceAutoModel is None:
+            self._sensevoice_load_error = (
+                "funasr не установлен — SenseVoice adapter недоступен "
+                "(установите: pip install funasr)"
+            )
+            raise RuntimeError(self._sensevoice_load_error)
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
+            try:
+                # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
+                # default. Pytorch сам выберет MPS если модель будет это поддерживать.
+                self._sensevoice_model = _SenseVoiceAutoModel(
+                    model=settings.SENSEVOICE_MODEL,
+                    trust_remote_code=True,
+                    disable_update=True,
+                )
+            except Exception as exc:
+                self._sensevoice_load_error = f"Не удалось загрузить SenseVoice: {exc}"
+                raise RuntimeError(self._sensevoice_load_error)
+            logger.info("SenseVoice модель загружена: %s", settings.SENSEVOICE_MODEL)
+            return self._sensevoice_model
+
+    @staticmethod
+    def _parse_sensevoice_output(raw_text: str) -> tuple[str, str | None, str | None]:
+        """Парсит SenseVoice output: выделяет эмоцию, язык, чистый текст.
+
+        SenseVoice формат: "<|ru|><|HAPPY|><|Speech|><|woitn|>привет мир"
+        - lang tag: <|ru|>, <|en|>, etc.
+        - emotion tag: <|HAPPY|>, <|NEUTRAL|>, etc.
+        - event/itn теги игнорируем.
+        Returns (clean_text, emotion_label|None, language|None).
+        """
+        if not raw_text:
+            return "", None, None
+        import re as _re
+        tokens = _re.findall(r"<\|([^|]+)\|>", raw_text)
+        emotion: str | None = None
+        language: str | None = None
+        for tok in tokens:
+            if tok in AudioEngine._SENSEVOICE_EMOTION_MAP:
+                emotion = AudioEngine._SENSEVOICE_EMOTION_MAP[tok]
+            elif tok.lower() in AudioEngine._SENSEVOICE_LANG_MAP:
+                mapped = AudioEngine._SENSEVOICE_LANG_MAP[tok.lower()]
+                if mapped:
+                    language = mapped
+        # Убираем все <|...|> токены и лишние пробелы
+        clean = _re.sub(r"<\|[^|]+\|>", "", raw_text).strip()
+        return clean, emotion, language
+
+    def _transcribe_sensevoice(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+        """Транскрибация через SenseVoice (FunASR) с эмоцией.
+
+        Args:
+            audio_data: путь к wav-файлу (str/Path) или numpy.ndarray (16kHz mono).
+            language: ISO 639-1 код языка ("ru", "es", "en") или None для авто.
+
+        Returns:
+            dict с ключами:
+              - text: транскрипт без спецтокенов
+              - engine: "sensevoice"
+              - emotion: "happy"|"neutral"|... или None
+              - language: детектированный язык (ISO 639-1) или None
+              - segments: [] (SenseVoice не даёт segment-level avg_logprob)
+        """
+        model = self._load_sensevoice_model()
+        # FunASR language param: короткий код "ru"/"en"/... или "auto"
+        lang_param = language if language else "auto"
+        # FunASR принимает путь к файлу или numpy float32 @ 16kHz
+        input_audio: Any = audio_data
+        if isinstance(audio_data, Path):
+            input_audio = str(audio_data)
+        # FunASR generate API возвращает list[dict] с ключом "text"
+        outputs = model.generate(
+            input=input_audio,
+            language=lang_param,
+            use_itn=True,
+            batch_size_s=60,
+        )
+        if not outputs:
+            raise RuntimeError("SenseVoice вернул пустой результат")
+        raw_text = ""
+        if isinstance(outputs, list) and outputs:
+            first = outputs[0]
+            if isinstance(first, dict):
+                raw_text = str(first.get("text", ""))
+            else:
+                raw_text = str(first)
+        clean_text, emotion, detected_lang = self._parse_sensevoice_output(raw_text)
+        logger.info(
+            "SenseVoice готово: %d chars, emotion=%s, lang=%s",
+            len(clean_text), emotion or "—", detected_lang or "—",
+        )
+        return {
+            "text": clean_text,
+            "engine": "sensevoice",
+            "emotion": emotion,
+            "language": detected_lang,
+            "segments": [],
+        }
 
     def _maybe_run_diarization(
         self,
