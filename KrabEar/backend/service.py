@@ -94,6 +94,7 @@ from backend.ipc_throttle import IPCThrottle
 from backend.export_scheduler import ExportScheduler
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
+from backend.job_tracker import JobTracker
 
 import argparse
 from datetime import datetime, timedelta
@@ -272,6 +273,8 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
+        # Реестр асинхронных задач транскрибации (transcribe_paths_async).
+        self._job_tracker = JobTracker()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -398,6 +401,9 @@ class BackendService:
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
+            "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
+            "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
@@ -1808,6 +1814,34 @@ class BackendService:
             }
 
     def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Синхронная транскрибация списка файлов (CLI/legacy путь).
+
+        Делегирует в `_transcribe_paths_core` без progress/cancel коллбеков.
+        """
+        return self._transcribe_paths_core(params)
+
+    def _transcribe_paths_core(
+        self,
+        params: dict[str, Any],
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        on_file_start: Callable[[int, str], None] | None = None,
+        on_file_done: Callable[[int, dict[str, Any] | None, str | None], None] | None = None,
+    ) -> dict[str, Any]:
+        """Общее ядро синхронной и асинхронной транскрибации.
+
+        Args:
+            params: параметры IPC (paths, quality_profile, ...).
+            progress_callback: вызывается движком STT с именем стадии
+                (audio_load/normalize/stt/cleanup/diarize/...). Передаётся в
+                `AudioEngine.transcribe(progress_callback=...)`.
+            cancel_check: предикат — если возвращает True между файлами, цикл
+                прекращается (мид-файл не прерываем, чтобы не оставить STT
+                в неопределённом состоянии).
+            on_file_start: вызывается перед обработкой файла index (0-based) с путём.
+            on_file_done: вызывается после файла — (index, item_dict|None, err|None).
+        """
         raw_paths = params.get("paths", [])
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
@@ -1844,7 +1878,15 @@ class BackendService:
 
         items: list[dict[str, Any]] = []
         errors: list[str] = []
-        for audio_path in audio_paths:
+        for file_index, audio_path in enumerate(audio_paths):
+            # Cancel-between-files: если запрошена отмена, ровно прерываем цикл.
+            if cancel_check is not None and cancel_check():
+                break
+            if on_file_start is not None:
+                try:
+                    on_file_start(file_index, audio_path)
+                except Exception:
+                    logger.exception("on_file_start callback упал для %s", audio_path)
             started_at = time.monotonic()
             try:
                 # Determine audio file duration before transcription
@@ -1858,21 +1900,41 @@ class BackendService:
 
                 # For file imports, default to auto-detect if no explicit hint
                 import_lang_hint = lang_hint if lang_hint else "auto"
-                transcribe_payload = self.transcriber.transcribe(
-                    audio_path,
-                    quality_profile=quality_profile,
-                    cleanup_profile=cleanup_profile,
-                    lang_hint=import_lang_hint,
-                    extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                )
+                # Если есть progress_callback — идём напрямую через engine, чтобы
+                # передать kwarg. Иначе используем стабильный путь через Transcriber.
+                if progress_callback is not None:
+                    self.transcriber.engine.set_quality_profile(quality_profile)
+                    transcribe_payload = self.transcriber.engine.transcribe(
+                        audio_path,
+                        cleanup_profile=cleanup_profile,
+                        is_preview=False,
+                        domain="casual",
+                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                        lang_hint=import_lang_hint,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    transcribe_payload = self.transcriber.transcribe(
+                        audio_path,
+                        quality_profile=quality_profile,
+                        cleanup_profile=cleanup_profile,
+                        lang_hint=import_lang_hint,
+                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                    )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
                     err = self._extract_transcribed_error(transcribe_payload)
                     if err:
-                        errors.append(f"{audio_path}: {err}")
+                        err_line = f"{audio_path}: {err}"
                     else:
-                        errors.append(f"{audio_path}: пустой результат")
+                        err_line = f"{audio_path}: пустой результат"
+                    errors.append(err_line)
+                    if on_file_done is not None:
+                        try:
+                            on_file_done(file_index, None, err_line)
+                        except Exception:
+                            logger.exception("on_file_done callback упал для %s", audio_path)
                     continue
                 diarization_data = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
                 detected_lang = transcribe_payload.get("language", "?") if isinstance(transcribe_payload, dict) else "?"
@@ -1962,6 +2024,11 @@ class BackendService:
                 if summary:
                     item_result["summary"] = summary
                 items.append(item_result)
+                if on_file_done is not None:
+                    try:
+                        on_file_done(file_index, item_result, None)
+                    except Exception:
+                        logger.exception("on_file_done callback упал для %s", audio_path)
             except Exception as exc:
                 err_msg = str(exc)
                 file_name = Path(audio_path).name
@@ -1984,12 +2051,180 @@ class BackendService:
                 else:
                     err_msg = f"{file_name}: {err_msg}"
                 errors.append(err_msg)
+                if on_file_done is not None:
+                    try:
+                        on_file_done(file_index, None, err_msg)
+                    except Exception:
+                        logger.exception("on_file_done callback упал для %s", audio_path)
 
         return {
             "items": items,
             "processed": len(items),
             "errors": errors,
         }
+
+    def _handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу.
+
+        Запускает фоновый worker-поток, прогресс доступен через
+        `get_transcribe_progress(job_id)`. Отмена — `cancel_transcribe_job`.
+        Полный контракт — см. /tmp/krab-ear-async/API_CONTRACT.md.
+        """
+        raw_paths = params.get("paths", [])
+        if not isinstance(raw_paths, list):
+            raise RuntimeError("Параметр paths должен быть массивом")
+        # Валидируем/предсчитываем список аудио-путей заранее, чтобы
+        # total_files в прогрессе соответствовал реально обрабатываемым файлам.
+        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
+        allowed_roots = [
+            r.resolve()
+            for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
+        ]
+        selected: list[str] = []
+        for p in selected_raw:
+            resolved = Path(p).expanduser().resolve()
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+                selected.append(str(resolved))
+        try:
+            audio_paths = self._collect_audio_paths(selected) if selected else []
+        except Exception:
+            audio_paths = []
+        total_files = len(audio_paths)
+
+        job_id = self._job_tracker.create_job(total_files=total_files)
+
+        # Копия параметров (params mutable — защищаемся от побочных мутаций).
+        job_params = dict(params)
+
+        def _on_file_start(index: int, audio_path: str) -> None:
+            self._job_tracker.update(
+                job_id,
+                status="running",
+                current_file=Path(audio_path).name,
+                current_stage="idle",
+                file_index=index + 1,
+            )
+
+        def _on_file_done(
+            index: int,
+            item: dict[str, Any] | None,
+            err: str | None,
+        ) -> None:
+            state = self._job_tracker.get(job_id) or {}
+            new_items = list(state.get("items") or [])
+            new_errors = list(state.get("errors") or [])
+            if item is not None:
+                new_items.append(item)
+            if err is not None:
+                new_errors.append(err)
+            self._job_tracker.update(
+                job_id,
+                items=new_items,
+                errors=new_errors,
+                processed=len(new_items),
+            )
+
+        def _progress_callback(stage: str) -> None:
+            self._job_tracker.update(job_id, current_stage=str(stage))
+
+        def _cancel_check() -> bool:
+            state = self._job_tracker.get(job_id)
+            return bool(state and state.get("cancel_requested"))
+
+        def _worker() -> None:
+            try:
+                self._job_tracker.update(job_id, status="running")
+                result = self._transcribe_paths_core(
+                    job_params,
+                    progress_callback=_progress_callback,
+                    cancel_check=_cancel_check,
+                    on_file_start=_on_file_start,
+                    on_file_done=_on_file_done,
+                )
+                # Финальное состояние: cancelled | done.
+                state = self._job_tracker.get(job_id) or {}
+                if state.get("cancel_requested"):
+                    self._job_tracker.update(
+                        job_id,
+                        status="cancelled",
+                        items=list(result.get("items") or []),
+                        errors=list(result.get("errors") or []),
+                        processed=len(result.get("items") or []),
+                        current_stage="idle",
+                        finished_at=time.monotonic(),
+                    )
+                else:
+                    self._job_tracker.mark_done(
+                        job_id,
+                        items=list(result.get("items") or []),
+                        errors=list(result.get("errors") or []),
+                    )
+            except Exception as exc:
+                logger.exception("Async transcribe job %s упал", job_id)
+                self._job_tracker.mark_failed(job_id, str(exc))
+
+        thread = threading.Thread(
+            target=_worker,
+            name=f"transcribe-{job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return {"job_id": job_id}
+
+    def _handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущее состояние async-job'а.
+
+        См. схему ответа в API_CONTRACT.md. Поле `items` заполнено только
+        после `status == "done"`, но private-накопление ведётся по мере обработки.
+        """
+        job_id = str(params.get("job_id") or "").strip()
+        if not job_id:
+            raise RuntimeError("Параметр job_id обязателен")
+        state = self._job_tracker.get(job_id)
+        if state is None:
+            raise RuntimeError(f"Неизвестный job_id: {job_id}")
+
+        status = str(state.get("status") or "queued")
+        items_raw = list(state.get("items") or [])
+        # Контракт: items отдаём только когда job завершён.
+        items_out = items_raw if status in ("done", "failed", "cancelled") else []
+
+        # ETA: грубая оценка при наличии audio_duration_sec у последнего item'а
+        # (при отсутствии движковой метрики). 10× реалтайм для max-профиля.
+        elapsed_sec = float(state.get("elapsed_sec") or 0.0)
+        eta_sec: float | None = None
+        total_audio = 0.0
+        for it in items_raw:
+            dur = it.get("audio_duration_sec") if isinstance(it, dict) else None
+            if isinstance(dur, (int, float)):
+                total_audio += float(dur)
+        if total_audio > 0:
+            eta_sec = max(0.0, total_audio * 10.0 - elapsed_sec)
+
+        return {
+            "status": status,
+            "current_file": str(state.get("current_file") or ""),
+            "current_stage": str(state.get("current_stage") or "idle"),
+            "file_index": int(state.get("file_index") or 0),
+            "total_files": int(state.get("total_files") or 0),
+            "elapsed_sec": round(elapsed_sec, 3),
+            "eta_sec": round(eta_sec, 3) if eta_sec is not None else None,
+            "processed": int(state.get("processed") or 0),
+            "errors": list(state.get("errors") or []),
+            "items": items_out,
+        }
+
+    def _handle_cancel_transcribe_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сигнализирует воркеру об отмене job'а.
+
+        Статус реально меняется на 'cancelled' после завершения текущего файла —
+        мид-файл прерываний не делаем, чтобы STT не оставался в inconsistent state.
+        """
+        job_id = str(params.get("job_id") or "").strip()
+        if not job_id:
+            raise RuntimeError("Параметр job_id обязателен")
+        cancelled = self._job_tracker.cancel(job_id)
+        return {"cancelled": bool(cancelled)}
 
     def _handle_preview_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
         """Быстрый предпросмотр импорта: считает аудиофайлы без транскрибации."""
@@ -3560,8 +3795,15 @@ class IPCServer:
                         break
                     raise
 
-                with conn:
-                    self._handle_connection(conn)
+                # PR #14: thread-per-connection. Без этого длинный STT-запрос
+                # блокирует accept-loop и другие IPC-клиенты не могут опрашивать
+                # прогресс. daemon=True — потоки умирают вместе с процессом.
+                threading.Thread(
+                    target=self._handle_connection,
+                    args=(conn,),
+                    name="ipc-conn",
+                    daemon=True,
+                ).start()
         finally:
             server.close()
             if self.socket_path.exists():
@@ -3569,26 +3811,45 @@ class IPCServer:
             logger.info("IPC сервер остановлен")
 
     def _handle_connection(self, conn: socket.socket) -> None:
-        """Чтение одной JSON-команды и возврат JSON-ответа."""
-        try:
-            raw = conn.recv(1024 * 1024)
-            if not raw:
-                return
-            text = raw.decode("utf-8").strip()
-            payload = json.loads(text)
-            if not isinstance(payload, dict):
-                raise ValueError("payload должен быть JSON-объектом")
-        except Exception as exc:
-            response = {
-                "id": None,
-                "ok": False,
-                "error": {"code": "invalid_json", "message": str(exc)},
-            }
-            conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-            return
+        """Чтение одной JSON-команды и возврат JSON-ответа.
 
-        response = self.service.handle_request(payload)
-        conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+        Выполняется в отдельном потоке на коннект. Socket закрываем здесь же
+        через `with conn:` — вызывающая сторона (accept-loop) не trackает.
+        """
+        with conn:
+            try:
+                raw = conn.recv(1024 * 1024)
+                if not raw:
+                    return
+                text = raw.decode("utf-8").strip()
+                payload = json.loads(text)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload должен быть JSON-объектом")
+            except Exception as exc:
+                response = {
+                    "id": None,
+                    "ok": False,
+                    "error": {"code": "invalid_json", "message": str(exc)},
+                }
+                try:
+                    conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                except Exception:
+                    logger.exception("Ошибка отправки invalid_json-ответа")
+                return
+
+            try:
+                response = self.service.handle_request(payload)
+            except Exception as exc:
+                logger.exception("Непойманная ошибка в handle_request")
+                response = {
+                    "id": payload.get("id"),
+                    "ok": False,
+                    "error": {"code": "internal_error", "message": str(exc)},
+                }
+            try:
+                conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            except Exception:
+                logger.exception("Ошибка отправки ответа клиенту")
 
 
 def default_data_dir() -> Path:
