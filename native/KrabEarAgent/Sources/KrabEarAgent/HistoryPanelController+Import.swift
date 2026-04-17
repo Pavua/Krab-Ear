@@ -177,38 +177,53 @@ extension HistoryPanelController {
         // get_transcribe_progress каждую секунду, показывая этап, file_index/total_files,
         // elapsed + ETA. Снимает блокировку IPC сокета на весь STT.
         transcribeProgressFailCount = 0
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, endpoint, jobPaths, qualityProfile, cleanupProfile, translationMode, translationStyle, translateAndPaste] in
-            let backgroundClient = IPCClient(socketPath: endpoint)
-            let response = try? backgroundClient.call(
-                method: "transcribe_paths_async",
-                params: [
-                    "paths": jobPaths,
-                    "quality_profile": qualityProfile,
-                    "cleanup_profile": cleanupProfile,
-                    "translation_mode": translationMode,
-                    "translation_style": translationStyle,
-                    "translate_and_paste": translateAndPaste,
-                ]
-            )
-            let result = response?["result"] as? [String: Any]
-            let jobID = result?["job_id"] as? String
+        let params: [String: Any] = [
+            "paths": jobPaths,
+            "quality_profile": qualityProfile,
+            "cleanup_profile": cleanupProfile,
+            "translation_mode": translationMode,
+            "translation_style": translationStyle,
+            "translate_and_paste": translateAndPaste,
+        ]
+        dispatchAsyncTranscribeStart(
+            endpoint: endpoint,
+            params: params,
+            signature: signature,
+            startedAt: startedAt
+        )
+    }
 
+    /// Разбивка на 2 функции + explicit types уменьшает работу type-checker — Swift 6
+    /// крашился SIGSEGV при объединённом closure из-за optional chaining + nested async.
+    ///
+    /// Swift 6 Sendable: `[String: Any]` не Sendable, поэтому сериализуем params в JSON Data
+    /// (Sendable) до отправки в background thread, а в background десериализуем обратно.
+    private func dispatchAsyncTranscribeStart(
+        endpoint: String,
+        params: [String: Any],
+        signature: String,
+        startedAt: Date
+    ) {
+        // Сериализуем params в Data на main thread — Data является Sendable, и это
+        // снимает варнинг capture of non-Sendable type в @Sendable closure.
+        let paramsData: Data
+        do {
+            paramsData = try JSONSerialization.data(withJSONObject: params)
+        } catch {
+            handleAsyncTranscribeStarted(
+                jobID: nil,
+                endpoint: endpoint,
+                signature: signature,
+                startedAt: startedAt
+            )
+            return
+        }
+
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        queue.async { [weak self] in
+            let jobID: String? = Self.requestAsyncJobID(endpoint: endpoint, paramsData: paramsData)
             DispatchQueue.main.async {
-                guard let self else { return }
-                guard let jobID, !jobID.isEmpty else {
-                    // Backend не смог создать job — считаем задачу упавшей с 1 ошибкой.
-                    self.importErrorMessages.append("Не удалось запустить асинхронную транскрибацию")
-                    self.completeImportJob(
-                        signature: signature,
-                        processed: 0,
-                        errors: 1,
-                        failed: true,
-                        startedAt: startedAt
-                    )
-                    return
-                }
-                self.currentTranscribeJobID = jobID
-                self.startTranscribeProgressTimer(
+                self?.handleAsyncTranscribeStarted(
                     jobID: jobID,
                     endpoint: endpoint,
                     signature: signature,
@@ -216,6 +231,49 @@ extension HistoryPanelController {
                 )
             }
         }
+    }
+
+    /// Синхронный (в рамках background thread) IPC-вызов transcribe_paths_async.
+    ///
+    /// `nonisolated` — функция вызывается из background thread, без main-actor context.
+    /// Принимает JSON-сериализованные params (Sendable), десериализует локально.
+    nonisolated private static func requestAsyncJobID(endpoint: String, paramsData: Data) -> String? {
+        guard let params = (try? JSONSerialization.jsonObject(with: paramsData)) as? [String: Any] else {
+            return nil
+        }
+        let client = IPCClient(socketPath: endpoint)
+        guard let response = try? client.call(method: "transcribe_paths_async", params: params) else {
+            return nil
+        }
+        let result = response["result"] as? [String: Any]
+        return result?["job_id"] as? String
+    }
+
+    /// Обработка ответа transcribe_paths_async на main thread.
+    private func handleAsyncTranscribeStarted(
+        jobID: String?,
+        endpoint: String,
+        signature: String,
+        startedAt: Date
+    ) {
+        guard let jobID, !jobID.isEmpty else {
+            importErrorMessages.append("Не удалось запустить асинхронную транскрибацию")
+            completeImportJob(
+                signature: signature,
+                processed: 0,
+                errors: 1,
+                failed: true,
+                startedAt: startedAt
+            )
+            return
+        }
+        currentTranscribeJobID = jobID
+        startTranscribeProgressTimer(
+            jobID: jobID,
+            endpoint: endpoint,
+            signature: signature,
+            startedAt: startedAt
+        )
     }
 
     // MARK: - Async transcribe polling (PR #14)

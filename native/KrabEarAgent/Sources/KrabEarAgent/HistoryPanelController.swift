@@ -92,7 +92,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var transcribeProgressTimer: Timer?
     var currentJobAudioDurationSec: Double = 0
     var transcribeProgressFailCount: Int = 0
-    var importErrorMessages: [String] = []
     var isSyncingTabs = false
     var previewPollTick = 0
     var isRecoveringHistoryFromFilters = false
