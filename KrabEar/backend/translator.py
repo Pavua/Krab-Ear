@@ -21,6 +21,23 @@ import logging
 import re
 from typing import Any
 
+# Profiler singleton — защищаемся от ImportError чтобы translator оставался standalone.
+try:
+    from backend.performance_profiler import profiler as _profiler
+except Exception:  # pragma: no cover — defensive
+    class _NoOpSpan:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _NoOpProfiler:
+        def start_span(self, name: str):
+            return _NoOpSpan()
+
+    _profiler = _NoOpProfiler()  # type: ignore[assignment]
+
 logger = logging.getLogger("KrabEar.Backend.Translator")
 
 
@@ -66,8 +83,29 @@ class Translator:
         glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         """Переводит текст согласно режиму и сетевой политике."""
-        clean_text = text.strip()
+        # Профилируем весь translate()-pipeline по режиму. Имя span'а нормализуется
+        # до входа чтобы даже mode=""/неизвестный mode попадали в согласованную метку.
         normalized_mode = self._normalize_mode(mode)
+        with _profiler.start_span(f"translate_{normalized_mode}"):
+            return self._translate_impl(
+                text=text,
+                normalized_mode=normalized_mode,
+                network_mode=network_mode,
+                translation_style=translation_style,
+                glossary=glossary,
+            )
+
+    def _translate_impl(
+        self,
+        text: str,
+        normalized_mode: str,
+        network_mode: str,
+        translation_style: str = "neutral",
+        glossary: dict[str, str] | None = None,
+    ) -> TranslationResult:
+        """Внутренняя реализация translate(). Вынесена чтобы обернуть span'ом только
+        наблюдаемую часть без дублирования normalize/cache логики."""
+        clean_text = text.strip()
         normalized_style = self._normalize_style(translation_style)
         normalized_network_mode = self._normalize_network_mode(network_mode)
         safe_glossary = self._normalize_glossary(glossary)
