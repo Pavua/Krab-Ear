@@ -6,7 +6,7 @@
 
 **Architecture:** Three-tier system — Krab Ear UI (tier 1) → Voice Gateway orchestration (tier 2) → Krab agent brain + LLM (tier 3). Lazy-loaded conversation engines (Moshi for EN, SeamlessM4T for RU/ES) stream audio bidirectionally via WebSocket. LLM brain (qwen3-30b-a3b-2507) via Krab agent proxy. Lazy-loading + LRU eviction keeps idle RAM at ~100 MB.
 
-**Tech Stack:** Voice Gateway: Python 3.12, FastAPI, `moshi-mlx`, `seamless-streaming`, `transformers`, `torch+MPS`. Krab Ear: Swift (URLSessionWebSocketTask), AVAudioEngine, Silero wakeword. Krab agent: OpenClaw proxy, Qwen3 LM Studio, MCP tools. All repos use pytest/unittest for tests.
+**Tech Stack:** Voice Gateway: Python 3.12, FastAPI, `moshi-mlx`, `seamless-streaming`, `transformers`, `torch+MPS`. Krab Ear: Swift (URLSessionWebSocketTask), AVAudioEngine, Porcupine wakeword. Krab agent: OpenClaw proxy, Qwen3 LM Studio, MCP tools. All repos use pytest/unittest for tests.
 
 ---
 
@@ -219,6 +219,14 @@ Add new "Разговор с AI" tab to Krab Ear `.app`. Implement WebSocket cli
   - Playback: decode Opus frames, feed to AVAudioEngine output.
   - Waveform visualization: downsample received frames, update `waveformView`.
 
+- [ ] **AVAudioEngine implementation notes**
+  - Raw PCM for MVP: defer Opus encoding post-launch; local WebSocket bandwidth < latency savings.
+  - AVAudioConverter for 16 ↔ 24/48 kHz conversion: query device native sample rate via `AVAudioSession.sampleRate`, tap at native rate, convert down/up in callback.
+  - Latency optimization: set `engine.preferredIOBufferDuration = 0.005` (5 ms) for low-latency slices.
+  - Interruption detection: energy-threshold VAD on inputNode tap (RMS calculation) → trigger interrupt WS control event when user speaks during AI playback.
+  - Device change handling: listen to `AVAudioSession.routeChangeNotification` → restart engine on headset plug/unplug.
+  - Underrun prevention: maintain 3–5 frame ringbuffer before scheduling buffers to playerNode to avoid playback starvation.
+
 - [ ] **Implement event decoding** (ConversationEvents.swift)
   - Pydantic-like Codable struct `ConversationEvent`:
     - `type: String` (stt.partial, engine.loaded, tool.invoked, summary.ready, error).
@@ -305,11 +313,11 @@ Add voice channel coordinator to Krab agent. Implement brain proxy (HTTP client 
 
 ---
 
-## PR 1.5: Triggers — GUI Button + Right Option Double-Tap + Silero Wake Word
+## PR 1.5: Triggers — GUI Button + Right Option Double-Tap + Porcupine Wake Word
 
 **Effort:** S (1-2 days) | **Depends on:** PR 1.3
 
-Add three conversation triggers. Integrate into existing HotkeyManager. Add Silero wake word listener.
+Add three conversation triggers. Integrate into existing HotkeyManager. Add Porcupine wake word detector for "Краб".
 
 ### Files to create
 
@@ -317,7 +325,6 @@ Add three conversation triggers. Integrate into existing HotkeyManager. Add Sile
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent/WakeWordListener.swift
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent/HotkeyDoubleTapDetector.swift
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Tests/KrabEarAgentTests/WakeWordListenerTests.swift
-/Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Resources/silero_wakeword_kr.mlmodelc/
 ```
 
 ### Files to modify
@@ -326,16 +333,19 @@ Add three conversation triggers. Integrate into existing HotkeyManager. Add Sile
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent/HotkeyManager.swift
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+Settings.swift
 /Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Sources/KrabEarAgent/Models.swift
+/Users/pablito/Antigravity_AGENTS/Krab Ear/native/KrabEarAgent/Package.swift
 ```
 
 ### Tasks
 
 - [ ] **Implement wake word listener** (WakeWordListener.swift)
-  - Load Silero CoreML model (silero_wakeword_kr.mlmodelc) at app launch.
-  - Maintain rolling 5 s audio buffer.
-  - Run inference every 100 ms → detect "Краб" trigger phrase.
-  - If detected → call callback `onWakeWordDetected()`.
+  - Use Porcupine (Picovoice) iOS SDK via CocoaPods: `pod 'Porcupine-iOS'`.
+  - Load pre-trained Russian model + custom "Краб" phrase model (registered via Picovoice Console, free tier).
+  - Maintain rolling audio buffer, tap into AVAudioEngine at 16 kHz.
+  - Run inference every 80 ms window → detect "Краб" trigger phrase (<50 ms latency per detection).
+  - If detected (confidence > 0.5) → call callback `onWakeWordDetected()`.
   - Toggle in Settings: "Wake Word Detection" (off by default for privacy).
+  - CPU impact: <1% continuous, ~15 MB resident memory.
 
 - [ ] **Implement hotkey double-tap detector** (HotkeyDoubleTapDetector.swift)
   - Monitor Right Option key presses via `NSEvent.addLocalMonitorForEvents(matching: .flagsChanged)`.
@@ -553,4 +563,16 @@ Per `/tmp/krab-ear-research/_phase1_file_structure.md`:
 **Krab agent repo:** `/Users/pablito/Antigravity_AGENTS/Краб`
 
 All file paths in task bullets use these absolute roots.
+
+---
+
+## Research Appendix
+
+Supporting research conducted 2026-04-17:
+
+1. `/tmp/krab-ear-research/moshi_mlx_state.md` — Moshi model benchmarks, MLX integration, 5-min buffer cap.
+2. `/tmp/krab-ear-research/seamless_mlx_state.md` — SeamlessM4T streaming, PyTorch+MPS only, latency profiles.
+3. `/tmp/krab-ear-research/qwen3_30b_state.md` — Qwen3-30B-Instruct-2507 MLX-4bit, token rates, TTFT.
+4. `/tmp/krab-ear-research/wakeword_options.md` — **Porcupine (RECOMMENDED)** for "Краб" detection, <50 ms, free tier, alternatives (OpenWakeWord, CoreML Keyword Spotting).
+5. `/tmp/krab-ear-research/avaudioengine_patterns.md` — AVAudioEngine best practices for full-duplex, device handling, latency optimization, interruption detection.
 
