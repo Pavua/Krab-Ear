@@ -178,7 +178,8 @@ extension HistoryPanelController {
             )
             let result = response?["result"] as? [String: Any]
             let processed = (result?["processed"] as? Int) ?? 0
-            let errors = ((result?["errors"] as? [String]) ?? []).count
+            let errorStrings = (result?["errors"] as? [String]) ?? []
+            let errors = errorStrings.count
             let failed = (result == nil)
             let durationSec = Date().timeIntervalSince(startedAt)
 
@@ -190,6 +191,11 @@ extension HistoryPanelController {
                 self.importJobsCompleted += 1
                 self.importProcessedTotal += processed
                 self.importErrorsTotal += failed ? 1 : errors
+                if failed {
+                    self.importErrorMessages.append("IPC error: backend вернул пустой ответ")
+                } else {
+                    self.importErrorMessages.append(contentsOf: errorStrings)
+                }
                 self.importDurationTotalSec += durationSec
                 self.importJobSignatures.remove(signature)
                 self.currentImportJob = nil
@@ -231,10 +237,18 @@ extension HistoryPanelController {
         let reportPath = writeImportQueueReport(summary: summary)
         lastImportReportPath = reportPath
         openImportReportButton.isEnabled = (reportPath != nil)
-        if let reportPath {
-            showInfoAlert(title: "Импорт аудио", body: "\(summary)\nОтчёт: \(reportPath)")
+        let errorsPreview: String
+        if importErrorMessages.isEmpty {
+            errorsPreview = ""
         } else {
-            showInfoAlert(title: "Импорт аудио", body: summary)
+            let shown = importErrorMessages.prefix(3).map { "• \($0)" }.joined(separator: "\n")
+            let more = importErrorMessages.count > 3 ? "\n… +ещё \(importErrorMessages.count - 3) (см. отчёт)" : ""
+            errorsPreview = "\n\nОшибки:\n\(shown)\(more)"
+        }
+        if let reportPath {
+            showInfoAlert(title: "Импорт аудио", body: "\(summary)\(errorsPreview)\nОтчёт: \(reportPath)")
+        } else {
+            showInfoAlert(title: "Импорт аудио", body: "\(summary)\(errorsPreview)")
         }
 
         // macOS-уведомление для случая, когда пользователь переключился в другое приложение.
@@ -251,6 +265,7 @@ extension HistoryPanelController {
         importJobsCompleted = 0
         importProcessedTotal = 0
         importErrorsTotal = 0
+        importErrorMessages.removeAll()
         importDurationTotalSec = 0
         importSessionStartedAt = nil
         importJobSignatures.removeAll()
@@ -371,6 +386,13 @@ extension HistoryPanelController {
         let startedText = importSessionStartedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "-"
         let finishedText = ISO8601DateFormatter().string(from: Date())
 
+        let errorsSection: String
+        if importErrorMessages.isEmpty {
+            errorsSection = ""
+        } else {
+            let bullets = importErrorMessages.map { "- \($0)" }.joined(separator: "\n")
+            errorsSection = "\n\n## Errors\n\(bullets)\n"
+        }
         let body = """
         # Import Queue Report
 
@@ -387,7 +409,7 @@ extension HistoryPanelController {
         - formats: \(importFormatStats.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", "))
 
         ## Summary
-        \(summary)
+        \(summary)\(errorsSection)
         """
 
         do {

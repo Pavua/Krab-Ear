@@ -77,6 +77,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var importJobsCompleted = 0
     var importProcessedTotal = 0
     var importErrorsTotal = 0
+    var importErrorMessages: [String] = []
     var importDurationTotalSec: Double = 0
     var importSessionStartedAt: Date?
     var lastImportReportPath: String?

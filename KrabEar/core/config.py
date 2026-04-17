@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     STT_MODEL: str = "whisper-1"
 
     # Лимиты
-    MAX_AUDIO_MB: int = 50
+    MAX_AUDIO_MB: int = 1000
     MAX_DURATION_SEC: int = 300
     TRANSCRIBE_TIMEOUT_SEC: int = 300
 
