@@ -38,7 +38,10 @@ class Settings(BaseSettings):
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
     # Сетевые настройки
-    NETWORK_MODE: str = "offline_default"
+    # "offline_strict" — локальный MLX only, без Remote STT fallback.
+    # "offline_default" / "online_preferred" — разрешают fallback на Voice Gateway STT.
+    # Дефолт strict: Voice Gateway STT endpoint пока не реализован, fallback давал 404.
+    NETWORK_MODE: str = "offline_strict"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
     STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
     AI_MODEL: str = "google/gemini-2.0-flash"
@@ -47,7 +50,11 @@ class Settings(BaseSettings):
     # Лимиты
     MAX_AUDIO_MB: int = 1000
     MAX_DURATION_SEC: int = 300
-    TRANSCRIBE_TIMEOUT_SEC: int = 300
+    # TRANSCRIBE_TIMEOUT_SEC — верхний предел на одну попытку STT одной моделью.
+    # Для часового файла whisper-large-v3 на M4 Max: ~10-20 мин; на max profile —
+    # до 30 мин на кандидата. 300с (5 мин) покрывали только короткие диктовки.
+    # 3600с хватает на 1-часовой файл + запас для max-candidates chain.
+    TRANSCRIBE_TIMEOUT_SEC: int = 3600
 
     # TTS
     SAY_VOICE: str = ""
