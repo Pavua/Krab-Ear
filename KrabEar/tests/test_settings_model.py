@@ -78,7 +78,7 @@ class TestSettingsUnknownKeysIgnored(unittest.TestCase):
             self.fail(f"Неизвестные ключи вызвали исключение: {exc}")
 
         # Убеждаемся, что нормальные поля остались нетронутыми
-        self.assertEqual(s.NETWORK_MODE, "offline_default")
+        self.assertEqual(s.NETWORK_MODE, "offline_strict")
 
     def test_default_settings_extra_keys_in_dict(self):
         """Словарь с лишними ключами передаётся в Settings без ошибок."""
