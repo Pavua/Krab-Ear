@@ -10,7 +10,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_BIN="$ROOT_DIR/native/runtime/KrabEarAgent"
-AGENT_PATTERN="$RUNTIME_BIN --project-root $ROOT_DIR"
+APP_BUNDLE="$ROOT_DIR/Krab Ear.app"
+APP_BUNDLE_BIN="$APP_BUNDLE/Contents/MacOS/KrabEarAgent"
+PACKAGE_DIR="$ROOT_DIR/native/KrabEarAgent"
+BUILD_BIN="$PACKAGE_DIR/.build/release/KrabEarAgent"
+BUNDLE_ID="com.antigravity.krab-ear"
+# Матчим оба пути: .app bundle (рекомендуемый LaunchServices-путь) и legacy standalone runtime.
+AGENT_PATTERN_BUNDLE="$APP_BUNDLE_BIN"
+AGENT_PATTERN_LEGACY="$RUNTIME_BIN --project-root $ROOT_DIR"
 VENV_PY="$ROOT_DIR/.venv_krab_ear/bin/python"
 SETTINGS_PATH="$HOME/Library/Application Support/KrabEar/settings.json"
 
@@ -38,10 +45,14 @@ check_free_space_mb() {
 
 require_cmd swift
 require_cmd pgrep
+require_cmd codesign
+require_cmd open
 [ -x "$VENV_PY" ] || preflight_fail "не найден python venv: $VENV_PY"
 [ -d "$ROOT_DIR/native/runtime" ] || mkdir -p "$ROOT_DIR/native/runtime"
 [ -w "$ROOT_DIR/native/runtime" ] || preflight_fail "нет прав записи в $ROOT_DIR/native/runtime"
 [ -w "$ROOT_DIR" ] || preflight_fail "нет прав записи в $ROOT_DIR"
+[ -d "$APP_BUNDLE" ] || preflight_fail "не найден .app bundle: $APP_BUNDLE"
+[ -w "$APP_BUNDLE/Contents/MacOS" ] || preflight_fail "нет прав записи в $APP_BUNDLE/Contents/MacOS"
 check_free_space_mb "$ROOT_DIR" 200
 
 UPDATE_CHANNEL="stable"
@@ -62,11 +73,49 @@ PY
 fi
 
 echo "Обновляю Krab Ear Agent... (channel: $UPDATE_CHANNEL)"
-"$ROOT_DIR/scripts/start_agent.command" --force-rebuild --launched-by-launchd >/dev/null 2>&1 &
+
+# Останавливаем ранее запущенный агент (как .app bundle, так и legacy standalone).
+# Без этого pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash
+# и "висящему" экземпляру агента.
+pkill -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true
+pkill -f "$AGENT_PATTERN_LEGACY" 2>/dev/null || true
+# Небольшая пауза, чтобы процессы успели завершиться до копирования бинаря.
+for _ in {1..20}; do
+  if ! pgrep -f "$AGENT_PATTERN_BUNDLE" >/dev/null 2>&1 \
+     && ! pgrep -f "$AGENT_PATTERN_LEGACY" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+
+echo "Собираю нативный агент (Swift release)"
+swift build -c release --package-path "$PACKAGE_DIR"
+
+[ -x "$BUILD_BIN" ] || preflight_fail "build artifact не найден: $BUILD_BIN"
+
+# Синхронизируем свежесобранный бинарь в обе точки доставки:
+#   * native/runtime/KrabEarAgent — legacy путь (dev-сценарии, smoke-тесты);
+#   * Krab Ear.app/Contents/MacOS/KrabEarAgent — production, запускаемый через LaunchServices.
+cp -f "$BUILD_BIN" "$RUNTIME_BIN"
+chmod +x "$RUNTIME_BIN"
+cp -f "$BUILD_BIN" "$APP_BUNDLE_BIN"
+chmod +x "$APP_BUNDLE_BIN"
+
+# Ad-hoc codesign. Bundle подписываем целиком (включает Info.plist + ресурсы),
+# standalone бинарь — как отдельный слот с тем же bundle identifier.
+codesign --force --sign - --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN" >/dev/null 2>&1 || true
+codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+
+# Запускаем через LaunchServices (`open`) — macOS создаёт управляемый
+# application.com.antigravity.krab-ear.* job, тот же самый, что появляется при
+# клике иконки в Dock. Это гарантирует отсутствие дубликата в Dock и
+# отсутствие orphan-процесса `com.apple.xpc.launchd.unmanaged.KrabEarAgent.*`,
+# который раньше появлялся при backgrounded-exec из shell.
+open "$APP_BUNDLE"
 
 started=0
 for _ in {1..60}; do
-  if pgrep -f "$AGENT_PATTERN" >/dev/null 2>&1; then
+  if pgrep -f "$AGENT_PATTERN_BUNDLE" >/dev/null 2>&1; then
     started=1
     break
   fi
