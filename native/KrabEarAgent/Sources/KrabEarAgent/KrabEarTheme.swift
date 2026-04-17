@@ -341,19 +341,186 @@ public class ThemeCardView: NSVisualEffectView {
     }
 }
 
+/// Base class for all Krab Ear themed buttons.
+/// Manages standard pointer interaction lifecycle (hover, press, disable) via `NSTrackingArea`.
+/// Applies subtle overlays and scaling, delegating all animation timing to `KrabEarTheme.Motion.animate`.
+/// Reduce Motion accessibility preferences are intrinsically respected by the Motion wrapper.
 @MainActor
-public class ThemePrimaryButton: NSButton {
-    
+open class ThemeButton: NSButton {
+
+    private var trackingArea: NSTrackingArea?
+    private var isHovered: Bool = false
+    private var isPressed: Bool = false
+
+    private let overlayLayer = CALayer()
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupInteraction()
+    }
+
+    public required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupInteraction()
+    }
+
+    private func setupInteraction() {
+        wantsLayer = true
+
+        overlayLayer.backgroundColor = NSColor.clear.cgColor
+
+        // Insert at index 0 so it stays UNDER the native AppKit title/image rendering,
+        // acting strictly as a decorative backing tint that cannot hide the label.
+        layer?.insertSublayer(overlayLayer, at: 0)
+
+        // Apply initial state silently without triggering entry animations
+        applyInteractionState(suppressAnimation: true)
+    }
+
+    open override func layout() {
+        super.layout()
+
+        // Expand overlay to fill bounds
+        overlayLayer.frame = bounds
+
+        // Match base corner radius dynamically. Fallback to our inner glass token if unset.
+        let currentRadius = layer?.cornerRadius ?? 0
+        overlayLayer.cornerRadius = currentRadius > 0 ? currentRadius : KrabEarTheme.Metrics.innerCornerRadius
+    }
+
+    open override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .activeInKeyWindow,
+            .inVisibleRect,
+            .assumeInside
+        ]
+
+        let newArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
+        addTrackingArea(newArea)
+        trackingArea = newArea
+    }
+
+    open override var isEnabled: Bool {
+        didSet {
+            applyInteractionState(suppressAnimation: false)
+        }
+    }
+
+    open override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsDisplay = true
+        updateTrackingAreas()
+    }
+
+    open override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        applyInteractionState()
+    }
+
+    open override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        applyInteractionState()
+    }
+
+    open override func mouseDown(with event: NSEvent) {
+        isPressed = true
+        applyInteractionState()
+
+        // Pass to AppKit's standard tracking loop to handle action triggers correctly.
+        // AppKit blocks here (handling drag-out/drag-back) until mouseUp concludes.
+        super.mouseDown(with: event)
+
+        isPressed = false
+        applyInteractionState()
+    }
+
+    /// Computes a scale transform anchored to the center of the bounds.
+    /// This helper prevents origin-jumping layout artifacts natively present in AppKit when
+    /// modifying `layer.anchorPoint` directly on auto-layout backed views.
+    private func scaleTransform(scale: CGFloat) -> CATransform3D {
+        let cx = bounds.midX
+        let cy = bounds.midY
+        var t = CATransform3DIdentity
+        t = CATransform3DTranslate(t, cx, cy, 0)
+        t = CATransform3DScale(t, scale, scale, 1.0)
+        t = CATransform3DTranslate(t, -cx, -cy, 0)
+        return t
+    }
+
+    /// Applies hover/pressed styling.
+    /// Note: Reduce Motion fallback is safely handled inside the `Motion.animate` wrapper.
+    private func applyInteractionState(suppressAnimation: Bool = false) {
+        guard isEnabled else {
+            let apply = {
+                self.alphaValue = KrabEarTheme.Interaction.disabledOpacity
+                self.layer?.transform = CATransform3DIdentity
+                self.overlayLayer.backgroundColor = NSColor.clear.cgColor
+            }
+            if suppressAnimation {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                apply()
+                CATransaction.commit()
+            } else {
+                KrabEarTheme.Motion.animate(
+                    duration: KrabEarTheme.Motion.Duration.micro,
+                    easing: KrabEarTheme.Motion.Easing.easeOut,
+                    animations: apply
+                )
+            }
+            return
+        }
+
+        let apply = {
+            self.alphaValue = 1.0
+
+            if self.isPressed {
+                self.layer?.transform = self.scaleTransform(scale: KrabEarTheme.Interaction.pressedScale)
+                self.overlayLayer.backgroundColor = NSColor.black.withAlphaComponent(KrabEarTheme.Interaction.pressedOverlayAlpha).cgColor
+            } else if self.isHovered {
+                self.layer?.transform = CATransform3DIdentity
+                self.overlayLayer.backgroundColor = NSColor.white.withAlphaComponent(KrabEarTheme.Interaction.hoverOverlayAlpha).cgColor
+            } else {
+                self.layer?.transform = CATransform3DIdentity
+                self.overlayLayer.backgroundColor = NSColor.clear.cgColor
+            }
+        }
+
+        if suppressAnimation {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            apply()
+            CATransaction.commit()
+        } else {
+            KrabEarTheme.Motion.animate(
+                duration: KrabEarTheme.Motion.Duration.micro,
+                easing: KrabEarTheme.Motion.Easing.easeOut,
+                animations: apply
+            )
+        }
+    }
+}
+
+@MainActor
+public class ThemePrimaryButton: ThemeButton {
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setup()
     }
-    
+
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
     }
-    
+
     private func setup() {
         bezelStyle = .push
         isBordered = true
@@ -363,18 +530,18 @@ public class ThemePrimaryButton: NSButton {
 }
 
 @MainActor
-public class ThemeSecondaryButton: NSButton {
-    
+public class ThemeSecondaryButton: ThemeButton {
+
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setup()
     }
-    
+
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
     }
-    
+
     private func setup() {
         bezelStyle = .push
         isBordered = true
