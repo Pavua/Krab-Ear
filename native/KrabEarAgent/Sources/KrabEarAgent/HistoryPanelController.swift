@@ -24,6 +24,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         case dictation = "dictation"
         case liveTranslation = "live_translation"
         case history = "history"
+        /// Вкладка «Разговор с AI» — Phase 1.3 Voice Assistant Mode.
+        case conversation = "conversation"
 
         static func from(settingsValue: String) -> PanelTab {
             switch settingsValue {
@@ -31,6 +33,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 return .dictation
             case PanelTab.liveTranslation.rawValue:
                 return .liveTranslation
+            case PanelTab.conversation.rawValue:
+                return .conversation
             default:
                 return .history
             }
@@ -487,7 +491,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.layer?.backgroundColor = NSColor.clear.cgColor
         mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
-        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
+        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
         tabSelector.selectedSegment = 0
         tabSelector.translatesAutoresizingMaskIntoConstraints = false
         tabSelector.segmentStyle = .rounded
@@ -534,6 +538,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyContentView.translatesAutoresizingMaskIntoConstraints = false
         historyContentView.wantsLayer = true
         historyContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // Вкладка «Разговор с AI» — Phase 1.3.
+        let voiceContentView = NSView()
+        voiceContentView.translatesAutoresizingMaskIntoConstraints = false
+        voiceContentView.wantsLayer = true
+        voiceContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         // Pre-warm all tabs: make all tab views layer-backed и attached to the view
         // hierarchy before user sees them. Это предотвращает мерцание при первом
@@ -550,9 +559,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let historyTab = NSTabViewItem(identifier: PanelTab.history.rawValue)
         historyTab.label = "История"
         historyTab.view = historyContentView
+        let conversationTab = NSTabViewItem(identifier: PanelTab.conversation.rawValue)
+        conversationTab.label = "Разговор с AI"
+        conversationTab.view = voiceContentView
         mainTabView.addTabViewItem(dictationTab)
         mainTabView.addTabViewItem(liveTab)
         mainTabView.addTabViewItem(historyTab)
+        mainTabView.addTabViewItem(conversationTab)
+        // Встроить ConversationViewController в voiceContentView.
+        setupConversationTab(contentView: voiceContentView)
 
         topBar.orientation = .vertical
         topBar.spacing = KrabEarTheme.Metrics.tight
@@ -1585,7 +1600,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         ])
     }
 
-    // MARK: - Keyboard Shortcuts (Cmd+1/2/3, Cmd+F, Cmd+R, Cmd+D, Cmd+E, Cmd+I, Esc)
+    // MARK: - Keyboard Shortcuts (Cmd+1/2/3/4, Cmd+F, Cmd+R, Cmd+D, Cmd+E, Cmd+I, Esc)
 
     private func setupKeyboardShortcuts() {
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -1604,6 +1619,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 case "3":
                     self.tabSelector.selectedSegment = 2
                     self.mainTabView.selectTabViewItem(at: 2)
+                    return nil
+                case "4":
+                    self.tabSelector.selectedSegment = 3
+                    self.mainTabView.selectTabViewItem(at: 3)
                     return nil
                 case "f":
                     self.tabSelector.selectedSegment = 2
@@ -1646,6 +1665,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         ⌘1  Диктовка
         ⌘2  Live перевод
         ⌘3  История
+        ⌘4  Разговор с AI
         ⌘F  Поиск
         ⌘R  Обновить
         ⌘D  Диагностика

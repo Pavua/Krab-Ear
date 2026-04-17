@@ -4,9 +4,42 @@
  Связи модуля:
  1) AgentSettings синхронизируется с backend settings.json.
  2) HistoryItem отражает записи из history.ndjson.
+ 3) ConversationConfig — конфигурация сессии «Разговор с AI» (PR 1.3).
 */
 
 import Foundation
+
+// MARK: - ConversationConfig
+
+/// Конфигурация диалоговой сессии с AI через Voice Gateway WebSocket.
+///
+/// `wsURLString` — полный WS-URL, например `ws://127.0.0.1:8090/v1/conversation`.
+/// По умолчанию строится из `AgentSettings.voiceGatewayURL` в `HistoryPanelController+VoiceTab`.
+/// Пользователь может переопределить через Settings-drawer внутри вкладки.
+struct ConversationConfig {
+    /// WS endpoint Voice Gateway. Placeholder — реальный GW подключается в PR 1.1.
+    var wsURLString: String
+
+    /// API-ключ Voice Gateway (может быть пустой для локального режима).
+    var apiKey: String
+
+    /// Языковой хинт для STT: "auto" | "ru" | "en" | "es".
+    var languageHint: String
+
+    /// Движок AI: "auto" | "moshi" | "seamless".
+    var engine: String
+
+    /// LLM-мозг: "auto" | "qwen3-4b" | "llama-3.2-3b".
+    var brain: String
+
+    static let `default` = ConversationConfig(
+        wsURLString:  "ws://127.0.0.1:8090/v1/conversation",
+        apiKey:       "",
+        languageHint: "auto",
+        engine:       "auto",
+        brain:        "auto"
+    )
+}
 
 /// Настройки агента, синхронизированные с backend JSON.
 struct AgentSettings {
