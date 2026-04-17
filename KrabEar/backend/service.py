@@ -1973,8 +1973,12 @@ class BackendService:
                     err_msg = f"Файл не найден: {file_name}"
                 elif "Permission denied" in err_msg:
                     err_msg = f"Нет доступа к файлу: {file_name}"
-                elif "too large" in err_msg.lower() or "MAX_AUDIO_MB" in err_msg:
-                    err_msg = f"Файл слишком большой: {file_name}"
+                elif (
+                    "too large" in err_msg.lower()
+                    or "MAX_AUDIO_MB" in err_msg
+                    or "слишком большой" in err_msg.lower()
+                ):
+                    err_msg = f"{file_name}: {err_msg}"
                 elif "Unsupported" in err_msg or "codec" in err_msg.lower():
                     err_msg = f"Неподдерживаемый формат аудио: {file_name}"
                 else:
