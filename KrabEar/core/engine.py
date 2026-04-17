@@ -241,13 +241,25 @@ class AudioEngine:
         domain: str = "casual",
         extra_vocabulary: list[str] | None = None,
         lang_hint: str | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
         Args:
             lang_hint: ISO 639-1 код языка ("ru", "es", "en") или None/"auto" для
                        автоопределения whisper'ом. По умолчанию берётся из конфига (settings.TRANSCRIBE_LANGUAGE).
+            progress_callback: Опциональный колбэк для отчёта о прогрессе. Вызывается с именем
+                       этапа ("audio_load", "normalize", "stt", "cleanup", "diarize", "llm_rewrite").
+                       Исключения внутри колбэка подавляются — отчёт о прогрессе не должен ломать
+                       транскрибацию.
         """
+        def _report(stage: str) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(stage)
+                except Exception:
+                    pass
+
         start_time = time.time()
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
@@ -267,6 +279,7 @@ class AudioEngine:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
 
         # 2. Проверка лимитов и iCloud workaround для файлов
+        _report("audio_load")
         _temp_copy_path: str | None = None
         if isinstance(audio_data, (str, Path)) and os.path.exists(audio_data):
             size_mb = os.path.getsize(audio_data) / (1024 * 1024)
@@ -286,6 +299,7 @@ class AudioEngine:
                 logger.info("iCloud файл скопирован во временный: %s", _temp_copy_path)
 
         # Auto-select model for file imports based on duration
+        _report("normalize")
         if isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)) and not is_preview:
             try:
                 import soundfile as sf
@@ -301,12 +315,16 @@ class AudioEngine:
 
         try:
             # 3. Вызов распознавания с механизмом деградации (fallback)
+            _report("stt")
             result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
             raw_text = str(result.get("text", "")).strip()
             segments = result.get("segments", [])
+            if not is_preview and settings.DIARIZATION_ENABLED:
+                _report("diarize")
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview)
 
             # 4. Очистка результата через утилиты (D.7 normalization)
+            _report("cleanup")
             cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
             text = cleaned_text
 
@@ -314,6 +332,7 @@ class AudioEngine:
             llm_result = None
             llm_diff = None
             if self._llm_rewrite_allowed():
+                _report("llm_rewrite")
                 llm_result = self._llm_rewriter.rewrite(cleaned_text)
                 if llm_result.ok:
                     logger.info(
