@@ -351,8 +351,15 @@ open class ThemeButton: NSButton {
     private var trackingArea: NSTrackingArea?
     private var isHovered: Bool = false
     private var isPressed: Bool = false
+    private var isFocused: Bool = false
+
+    /// Opt-in for transparent styles (e.g., toolbar rows / headerClickButton).
+    /// When true (or when the button is borderless), hover uses the softer
+    /// `Interaction.transparentHoverAlpha` (5%) instead of the standard 10% tint.
+    open var isTransparentStyle: Bool = false
 
     private let overlayLayer = CALayer()
+    private let focusRingLayer = CALayer()
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -367,15 +374,31 @@ open class ThemeButton: NSButton {
     private func setupInteraction() {
         wantsLayer = true
 
+        // DEFENSIVE LAYER ORDERING:
+        // overlayLayer at index 0 (bottom). focusRingLayer at index 1.
+        // Both stay UNDER the native AppKit title/image rendering, acting strictly
+        // as decorative backing elements that cannot hide the label.
         overlayLayer.backgroundColor = NSColor.clear.cgColor
-
-        // Insert at index 0 so it stays UNDER the native AppKit title/image rendering,
-        // acting strictly as a decorative backing tint that cannot hide the label.
         layer?.insertSublayer(overlayLayer, at: 0)
+
+        // Focus ring: 2pt ring + subtle outer glow. Colors applied in layout()
+        // so they track effective appearance changes (light/dark mode).
+        focusRingLayer.borderWidth = 2.0
+        focusRingLayer.shadowOpacity = 0.25
+        focusRingLayer.shadowRadius = 2.0
+        focusRingLayer.shadowOffset = .zero
+        focusRingLayer.opacity = 0.0
+        layer?.insertSublayer(focusRingLayer, at: 1)
 
         // Apply initial state silently without triggering entry animations
         applyInteractionState(suppressAnimation: true)
     }
+
+    // Suppress the default macOS focus ring so our custom focusRingLayer handles
+    // focus visualization completely. AppKit's ring would otherwise composite on
+    // top and fight our layer ordering + tint logic.
+    open override func drawFocusRingMask() {}
+    open override var focusRingMaskBounds: NSRect { .zero }
 
     open override func layout() {
         super.layout()
@@ -385,7 +408,15 @@ open class ThemeButton: NSButton {
 
         // Match base corner radius dynamically. Fallback to our inner glass token if unset.
         let currentRadius = layer?.cornerRadius ?? 0
-        overlayLayer.cornerRadius = currentRadius > 0 ? currentRadius : KrabEarTheme.Metrics.innerCornerRadius
+        let radius = currentRadius > 0 ? currentRadius : KrabEarTheme.Metrics.innerCornerRadius
+        overlayLayer.cornerRadius = radius
+
+        // Keep focus ring geometry synchronized.
+        // Update colors dynamically here to safely support light/dark appearance changes.
+        focusRingLayer.frame = bounds
+        focusRingLayer.cornerRadius = radius
+        focusRingLayer.borderColor = KrabEarTheme.Colors.accent.withAlphaComponent(0.85).cgColor
+        focusRingLayer.shadowColor = KrabEarTheme.Colors.accent.cgColor
     }
 
     open override func updateTrackingAreas() {
@@ -441,6 +472,30 @@ open class ThemeButton: NSButton {
         applyInteractionState()
     }
 
+    // MARK: - Focus state
+
+    // We rely on standard AppKit first-responder transitions instead of overriding
+    // keyDown/keyUp for Space/Return: NSButton's super.keyDown enters a blocking
+    // event-tracking loop that swallows keyUp, making manual press-state tracking
+    // for keyboard activation unreliable. AppKit handles the title cell dimming for us.
+    open override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            isFocused = true
+            applyInteractionState()
+        }
+        return accepted
+    }
+
+    open override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            isFocused = false
+            applyInteractionState()
+        }
+        return resigned
+    }
+
     /// Computes a scale transform anchored to the center of the bounds.
     /// This helper prevents origin-jumping layout artifacts natively present in AppKit when
     /// modifying `layer.anchorPoint` directly on auto-layout backed views.
@@ -454,7 +509,7 @@ open class ThemeButton: NSButton {
         return t
     }
 
-    /// Applies hover/pressed styling.
+    /// Applies hover/pressed/focus styling.
     /// Note: Reduce Motion fallback is safely handled inside the `Motion.animate` wrapper.
     private func applyInteractionState(suppressAnimation: Bool = false) {
         guard isEnabled else {
@@ -462,6 +517,9 @@ open class ThemeButton: NSButton {
                 self.alphaValue = KrabEarTheme.Interaction.disabledOpacity
                 self.layer?.transform = CATransform3DIdentity
                 self.overlayLayer.backgroundColor = NSColor.clear.cgColor
+                // Disabled buttons never show the focus ring, even if they somehow
+                // remain first responder during a state change.
+                self.focusRingLayer.opacity = 0.0
             }
             if suppressAnimation {
                 CATransaction.begin()
@@ -486,10 +544,24 @@ open class ThemeButton: NSButton {
                 self.overlayLayer.backgroundColor = NSColor.black.withAlphaComponent(KrabEarTheme.Interaction.pressedOverlayAlpha).cgColor
             } else if self.isHovered {
                 self.layer?.transform = CATransform3DIdentity
-                self.overlayLayer.backgroundColor = NSColor.white.withAlphaComponent(KrabEarTheme.Interaction.hoverOverlayAlpha).cgColor
+                // Transparent/borderless buttons (e.g., header rows, toolbar hit targets)
+                // use the softer 5% hover tint so they don't flash aggressively over cards.
+                let useTransparent = self.isTransparentStyle || !self.isBordered
+                let hoverAlpha = useTransparent
+                    ? KrabEarTheme.Interaction.transparentHoverAlpha
+                    : KrabEarTheme.Interaction.hoverOverlayAlpha
+                self.overlayLayer.backgroundColor = NSColor.white.withAlphaComponent(hoverAlpha).cgColor
             } else {
                 self.layer?.transform = CATransform3DIdentity
                 self.overlayLayer.backgroundColor = NSColor.clear.cgColor
+            }
+
+            // Focus ring visibility — respect per-button focusRingType intent so
+            // explicit `.none` opt-outs (decorative buttons) still work.
+            if self.isFocused && self.focusRingType != .none {
+                self.focusRingLayer.opacity = 1.0
+            } else {
+                self.focusRingLayer.opacity = 0.0
             }
         }
 
