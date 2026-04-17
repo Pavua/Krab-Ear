@@ -399,6 +399,18 @@ extension HistoryPanelController {
         overlayOpacityValueLabel.stringValue = "\(safeOverlayPercent)%"
         // D.10a: AI Settings Sync
         diarizationButton.state = settings.diarizationEnabled ? .on : .off
+
+        // PR #20: sub-caption под диарезацией (tag 202401) — dim к 0.4 при off.
+        // UI ONLY: backend читает diarization_enabled только на старте, runtime re-init TBD в follow-up.
+        if let subCaption = self.window?.contentView?.viewWithTag(202401) as? NSTextField {
+            KrabEarTheme.Motion.animate(
+                duration: KrabEarTheme.Motion.Duration.short,
+                easing: KrabEarTheme.Motion.Easing.easeOut
+            ) {
+                subCaption.alphaValue = settings.diarizationEnabled ? 1.0 : 0.4
+            }
+        }
+
         llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
         if let idx = llmModelSelector.itemTitles.firstIndex(of: settings.llmModel) {
             llmModelSelector.selectItem(at: idx)
@@ -442,5 +454,119 @@ extension HistoryPanelController {
         updateLoadMoreButtonCaption()
         refreshCaptureSourceHint()
         refreshCallAssistState()
+    }
+
+    // MARK: - Audio Pipeline Section (PR #20 — Gemini 3.1 Pro)
+    //
+    // UI ONLY — IPC runtime apply (settings_service + engine.py diarization re-init
+    // on-the-fly) является follow-up Claude PR. Эта PR wires toggle/picker через
+    // applySettingsPatch → значение персистит в settings.json, НО backend читает
+    // diarization_enabled / quality_profile только на старте.
+    //
+    // AudioEngine.__init__ кэширует pyannote pipeline, hot-swap out of scope для MVP.
+    // User-facing restart hint показывается явно.
+    func buildAudioPipelineSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "dictation_audio_pipeline",
+            title: "Аудио-пайплайн",
+            isExpanded: true
+        )
+
+        let card = ThemeCardView()
+
+        // 1. Diarization Toggle Row
+        //    Reparents global `diarizationButton` (был в aiSettingsRow1 / AI секции)
+        //    в новую секцию. AppKit автоматически удаляет view из старого superview
+        //    при addArrangedSubview в новый stack.
+        let diarRow = NSStackView()
+        diarRow.orientation = .horizontal
+        diarRow.alignment = .top
+        diarRow.spacing = KrabEarTheme.Metrics.standard
+
+        diarizationButton.title = ""
+        diarizationButton.setButtonType(.switch)
+        diarizationButton.setAccessibilityLabel(
+            "Включить разделение говорящих (диарезация pyannote через Metal). Требует перезапуск backend."
+        )
+
+        let diarTextStack = NSStackView()
+        diarTextStack.orientation = .vertical
+        diarTextStack.alignment = .leading
+        diarTextStack.spacing = KrabEarTheme.Metrics.tight
+
+        let diarTitleStack = NSStackView()
+        diarTitleStack.orientation = .horizontal
+        diarTitleStack.alignment = .firstBaseline
+        diarTitleStack.spacing = KrabEarTheme.Metrics.standard
+
+        let diarTitle = NSTextField(labelWithString: "Разделение говорящих (диарезация)")
+        diarTitle.font = KrabEarTheme.Typography.body
+        diarTitle.textColor = KrabEarTheme.Colors.textPrimary
+
+        let diarRestartHint = NSTextField(labelWithString: "Применяется после перезапуска backend.")
+        diarRestartHint.font = KrabEarTheme.Typography.caption
+        diarRestartHint.textColor = KrabEarTheme.Colors.textSecondary
+
+        diarTitleStack.addArrangedSubview(diarTitle)
+        diarTitleStack.addArrangedSubview(diarRestartHint)
+
+        let diarSubCaption = NSTextField(labelWithString:
+            "pyannote.audio через Metal. На M4 + macOS 26 возможен краш инициализации — выключайте, если backend падает на старте."
+        )
+        diarSubCaption.font = KrabEarTheme.Typography.caption
+        diarSubCaption.textColor = KrabEarTheme.Colors.textDisabled
+        diarSubCaption.lineBreakMode = .byWordWrapping
+        diarSubCaption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        diarSubCaption.tag = 202401 // Linked к syncSettingsControls alpha animation
+        diarSubCaption.setAccessibilityLabel(
+            "Подсказка: pyannote.audio через Metal, возможен краш на M4+macOS 26"
+        )
+
+        diarTextStack.addArrangedSubview(diarTitleStack)
+        diarTextStack.addArrangedSubview(diarSubCaption)
+
+        diarRow.addArrangedSubview(diarizationButton)
+        diarRow.addArrangedSubview(diarTextStack)
+
+        // 2. Quality Profile Row
+        //    Reparents global `qualitySelector` (был в settingsRow1 / Recording секции).
+        let qualRow = NSStackView()
+        qualRow.orientation = .vertical
+        qualRow.alignment = .leading
+        qualRow.spacing = KrabEarTheme.Metrics.tight
+
+        let qualHeaderStack = NSStackView()
+        qualHeaderStack.orientation = .horizontal
+        qualHeaderStack.alignment = .firstBaseline
+        qualHeaderStack.spacing = KrabEarTheme.Metrics.standard
+
+        let qualTitle = NSTextField(labelWithString: "Качество распознавания")
+        qualTitle.font = KrabEarTheme.Typography.body
+        qualTitle.textColor = KrabEarTheme.Colors.textPrimary
+
+        qualitySelector.setAccessibilityLabel(
+            "Выбор профиля качества STT: Balanced для скорости, Max для точности"
+        )
+
+        qualHeaderStack.addArrangedSubview(qualTitle)
+        qualHeaderStack.addArrangedSubview(qualitySelector)
+
+        let qualSubCaption = NSTextField(labelWithString:
+            "Balanced — whisper-large-v3-turbo, быстро. Max — candidate chain (v3 → turbo), точнее на сложных записях, ~2× медленнее."
+        )
+        qualSubCaption.font = KrabEarTheme.Typography.caption
+        qualSubCaption.textColor = KrabEarTheme.Colors.textSecondary
+        qualSubCaption.lineBreakMode = .byWordWrapping
+        qualSubCaption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        qualRow.addArrangedSubview(qualHeaderStack)
+        qualRow.addArrangedSubview(qualSubCaption)
+
+        // Assemble card (ThemeCardView content stack уже vertical + leading).
+        card.contentStackView.addArrangedSubview(diarRow)
+        card.contentStackView.addArrangedSubview(qualRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
     }
 }

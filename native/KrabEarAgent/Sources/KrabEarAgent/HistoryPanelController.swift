@@ -1708,6 +1708,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.addArrangedSubview(systemSection)
         settingsBar.addArrangedSubview(aiSection)
 
+        // --- AUDIO PIPELINE SECTION (PR #20 — Gemini 3.1 Pro, UI only) ---
+        // Reparents `diarizationButton` (из aiSettingsRow1) + `qualitySelector`
+        // (из settingsRow1) в отдельную секцию "Аудио-пайплайн".
+        let audioPipelineSection = buildAudioPipelineSection()
+        settingsBar.addArrangedSubview(audioPipelineSection)
+
         // --- DIAGNOSTICS & METRICS SECTION ---
         let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
         let diagCard = ThemeCardView()
