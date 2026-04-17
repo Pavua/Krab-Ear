@@ -18,6 +18,23 @@ import requests
 from enum import Enum
 from typing import Optional
 
+# Profiler singleton — защищаемся от ImportError чтобы llm_rewriter оставался standalone.
+try:
+    from backend.performance_profiler import profiler as _profiler
+except Exception:  # pragma: no cover — defensive
+    class _NoOpSpan:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _NoOpProfiler:
+        def start_span(self, name: str):
+            return _NoOpSpan()
+
+    _profiler = _NoOpProfiler()  # type: ignore[assignment]
+
 logger = logging.getLogger("KrabEar.Backend.LLMRewriter")
 
 
@@ -256,6 +273,11 @@ class LLMRewriter:
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
         """
+        with _profiler.start_span("llm_rewrite"):
+            return self._rewrite_impl(text)
+
+    def _rewrite_impl(self, text: str) -> LLMRewriteResult:
+        """Внутренняя реализация rewrite() — обёрнута профайлером в rewrite()."""
         # 1. Валидация входа
         cleaned_input = (text or "").strip()
         if not cleaned_input:

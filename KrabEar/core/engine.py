@@ -54,6 +54,33 @@ from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
 from .utils import TextUtils
 
+# Profiler — module-level singleton (thread-safe, sliding window).
+# Импорт лениво-совместим: при отсутствии numpy на ранней стадии init'а
+# или любой другой ошибке ImportError — fallback на no-op, чтобы не ломать STT path.
+try:
+    from backend.performance_profiler import profiler as _profiler
+except Exception:  # pragma: no cover — defensive
+    class _NoOpSpan:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _NoOpProfiler:
+        def start_span(self, name: str):
+            return _NoOpSpan()
+
+    _profiler = _NoOpProfiler()  # type: ignore[assignment]
+
+
+def _short_model_name(model: str) -> str:
+    """Возвращает короткое имя модели для span-name (безопасное для ключей)."""
+    if not model:
+        return "unknown"
+    return str(model).rsplit("/", 1)[-1]
+
+
 logger = logging.getLogger("KrabEar.Engine")
 
 # ---------------------------------------------------------------------------
@@ -422,6 +449,12 @@ class AudioEngine:
         Перед загрузкой тяжёлых моделей (не balanced) проверяет свободную память
         через vm_stat, чтобы macOS Jetsam не убил процесс (SIGKILL).
         """
+        with _profiler.start_span("stt_with_fallback"):
+            return self._transcribe_with_fallback_impl(audio_data, prompt, language)
+
+    def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
+        """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
+        чтобы обернуть весь chain одним span'ом без изменения retry/timeout логики."""
         candidates = [self.current_model]
         if self.quality_profile == "max":
             candidates = list(dict.fromkeys(settings.model_max_list))
@@ -444,9 +477,11 @@ class AudioEngine:
 
             try:
                 timeout = settings.TRANSCRIBE_TIMEOUT_SEC
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
-                    result = future.result(timeout=timeout)
+                span_name = f"stt_model_{_short_model_name(model_name)}"
+                with _profiler.start_span(span_name):
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                        result = future.result(timeout=timeout)
                 result["model_used"] = model_name
                 return result
             except concurrent.futures.TimeoutError:
@@ -473,7 +508,8 @@ class AudioEngine:
         # Если локально ничего не вышло — пробуем облако (если разрешено)
         if settings.NETWORK_MODE != "offline_strict":
             logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
-            return self._transcribe_remote(audio_data, prompt)
+            with _profiler.start_span("stt_remote"):
+                return self._transcribe_remote(audio_data, prompt)
 
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
@@ -563,16 +599,19 @@ class AudioEngine:
 
         # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
         # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
-        try:
-            kwargs = {"token": hf_token} if hf_token else {}
-            self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-        except Exception as e:
-            self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
-            raise RuntimeError(self._diarization_load_error)
-        diarization_device = self._resolve_diarization_device()
-        self._diarization_pipeline.to(diarization_device)
-        logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-        return self._diarization_pipeline
+        # Span фиксируется только при первом реальном load'е (guard выше гарантирует
+        # что повторные вызовы сразу возвращают кэш).
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
+            try:
+                kwargs = {"token": hf_token} if hf_token else {}
+                self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
+            except Exception as e:
+                self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
+                raise RuntimeError(self._diarization_load_error)
+            diarization_device = self._resolve_diarization_device()
+            self._diarization_pipeline.to(diarization_device)
+            logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
+            return self._diarization_pipeline
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:
@@ -590,6 +629,12 @@ class AudioEngine:
 
     def _run_diarization(self, audio_path: str) -> list[dict[str, Any]]:
         """Запускает pyannote diarization и нормализует результат в словари."""
+        with _profiler.start_span("diarization"):
+            return self._run_diarization_impl(audio_path)
+
+    def _run_diarization_impl(self, audio_path: str) -> list[dict[str, Any]]:
+        """Внутренняя реализация diarization. Вынесена чтобы обернуть весь chain
+        одним span'ом без изменения обработки ошибок."""
         pipeline = self._load_diarization_pipeline()
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:

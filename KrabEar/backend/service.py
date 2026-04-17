@@ -95,6 +95,7 @@ from backend.export_scheduler import ExportScheduler
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.job_tracker import JobTracker
+from backend.performance_profiler import profiler as performance_profiler
 
 import argparse
 from datetime import datetime, timedelta
@@ -1356,6 +1357,19 @@ class BackendService:
         except Exception:
             history_count = -1
 
+        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
+        try:
+            profiler_report = performance_profiler.get_profile_report()
+        except Exception as exc:
+            logger = logging.getLogger("KrabEar.Backend.Service")
+            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
+            profiler_report = {
+                "methods": {},
+                "slowest_methods": [],
+                "total_profiled_time_sec": 0.0,
+                "error": str(exc),
+            }
+
         return {
             "system": {
                 "python_version": sys.version,
@@ -1380,6 +1394,7 @@ class BackendService:
                 "ttl_sec": self._settings_svc._cache_ttl,
                 "cached": self._settings_svc._cache is not None,
             },
+            "profiler": profiler_report,
         }
 
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
