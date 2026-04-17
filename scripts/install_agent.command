@@ -1,6 +1,20 @@
 #!/bin/zsh
 # ------------------------------------------------------------------
-# Установка launchd автозапуска Krab Ear Agent.
+# DEPRECATED: Установка launchd автозапуска Krab Ear Agent через
+# standalone-бинарь (com.krabear.agent.plist → start_agent.command →
+# native/runtime/KrabEarAgent). Этот путь вызывал появление дубликата
+# иконки в Dock, т.к. launchd при бэкграунд-форке породителей создавал
+# orphan-процесс `com.apple.xpc.launchd.unmanaged.KrabEarAgent.*`,
+# сосуществующий с .app bundle-инстансом.
+#
+# Вместо этого используйте autostart через LaunchServices и .app bundle:
+# см. `Enable Krab Ear Autostart.command` в корне проекта и
+# `LaunchAgentManager.swift` (который ставит бандл-ориентированный
+# LaunchAgent). Подробности: PR "fix(scripts): launch .app via
+# LaunchServices to prevent duplicate agent process".
+#
+# Этот скрипт оставлен для обратной совместимости dormant-сценариев и
+# должен быть удалён после очередной чистки.
 # ------------------------------------------------------------------
 
 set -euo pipefail
