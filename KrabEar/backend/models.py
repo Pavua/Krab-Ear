@@ -43,6 +43,10 @@ class HistoryItem:
     tags: list = field(default_factory=list)
     # Favorite/bookmark flag
     favorite: bool = False
+    # SenseVoice emotion label: "happy"/"neutral"/"angry"/"sad"/"fearful"/
+    # "disgusted"/"surprised"/None. Заполняется только когда SenseVoice adapter
+    # активен и SENSEVOICE_EMOTION_TO_HISTORY=True. Для Whisper-записей = None.
+    emotion: str | None = None
 
     @classmethod
     def create(
@@ -66,6 +70,7 @@ class HistoryItem:
         confidence: float | None = None,
         tags: list | None = None,
         favorite: bool = False,
+        emotion: str | None = None,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -90,6 +95,7 @@ class HistoryItem:
             confidence=round(float(confidence), 4) if confidence is not None else None,
             tags=list(tags) if tags else [],
             favorite=bool(favorite),
+            emotion=(str(emotion).strip().lower() or None) if emotion else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,6 +127,7 @@ class HistoryItem:
             confidence=float(payload["confidence"]) if payload.get("confidence") is not None else None,
             tags=[str(t) for t in payload["tags"]] if isinstance(payload.get("tags"), list) else [],
             favorite=bool(payload.get("favorite", False)),
+            emotion=(str(payload["emotion"]).strip().lower() or None) if payload.get("emotion") else None,
         )
 
 

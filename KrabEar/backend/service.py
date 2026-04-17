@@ -1058,6 +1058,7 @@ class BackendService:
             llm_applied=bool(tp.get("llm_applied", False)),
             llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
             diarization=diarization_data,
+            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
         )
         self._clipboard_history.append({
             "text": final_text,
@@ -1979,6 +1980,12 @@ class BackendService:
                     translation_engine=translation.engine,
                     diarization=diarization_data,
                     audio_duration_sec=audio_duration_sec,
+                    emotion=(
+                        transcribe_payload.get("emotion")
+                        if isinstance(transcribe_payload, dict)
+                        and isinstance(transcribe_payload.get("emotion"), str)
+                        else None
+                    ),
                 )
 
                 # Auto-summary для длинных транскрипций (>500 символов)
