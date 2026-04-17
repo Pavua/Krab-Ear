@@ -52,17 +52,17 @@ class _FakeTranslator:
         )
 
 
-class _FakeTranscriber:
-    """Фейковый transcriber, эмулирующий стадии STT через progress_callback.
-
-    Если `progress_callback` передан как kwarg — зовёт его со стадиями
-    "audio_load" и "stt" с короткими паузами. Возвращает dict той же формы,
-    что и боевой transcriber.
+class _FakeEngine:
+    """Фейковый AudioEngine — impl в _transcribe_paths_core при progress_callback
+    идёт напрямую через transcriber.engine.transcribe(...), минуя transcriber.transcribe.
     """
 
     def __init__(self, stage_sleep: float = 0.05) -> None:
         self._stage_sleep = stage_sleep
         self._counter = 0
+
+    def set_quality_profile(self, profile: str) -> None:
+        pass
 
     def transcribe(self, audio_data: Any, **kwargs: Any) -> dict[str, Any]:
         cb: Callable[[str], None] | None = kwargs.get("progress_callback")
@@ -78,6 +78,20 @@ class _FakeTranscriber:
             "language": "ru",
             "diarization": None,
         }
+
+
+class _FakeTranscriber:
+    """Фейковый transcriber, эмулирующий стадии STT через progress_callback.
+
+    Делегирует в собственный fake engine — такой же путь, как в бою, когда
+    _transcribe_paths_core идёт через transcriber.engine.transcribe(...).
+    """
+
+    def __init__(self, stage_sleep: float = 0.05) -> None:
+        self.engine = _FakeEngine(stage_sleep=stage_sleep)
+
+    def transcribe(self, audio_data: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.engine.transcribe(audio_data, **kwargs)
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
         return {"text": "", "language": "ru"}
