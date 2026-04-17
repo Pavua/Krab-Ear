@@ -2206,7 +2206,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         // Microphone Check
         let micRow = NSStackView()
         micRow.orientation = .horizontal
-        let checkMicBtn = NSButton(title: "Проверить микрофон", target: self, action: #selector(onCheckMic))
+        let checkMicBtn = ThemeSecondaryButton(title: "Проверить микрофон", target: self, action: #selector(onCheckMic))
         checkMicBtn.applyThemeSecondary()
         micRow.addArrangedSubview(checkMicBtn)
         micRow.addArrangedSubview(microphoneStatusLabel)
@@ -2215,7 +2215,7 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         // Accessibility Check
         let axRow = NSStackView()
         axRow.orientation = .horizontal
-        let checkAxBtn = NSButton(title: "Проверить Accessibility", target: self, action: #selector(onCheckAx))
+        let checkAxBtn = ThemeSecondaryButton(title: "Проверить Accessibility", target: self, action: #selector(onCheckAx))
         checkAxBtn.applyThemeSecondary()
         axRow.addArrangedSubview(checkAxBtn)
         axRow.addArrangedSubview(accessibilityStatusLabel)
@@ -2251,13 +2251,13 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
         buttonsRow.spacing = KrabEarTheme.Metrics.comfortable
         stack.addArrangedSubview(buttonsRow)
         
-        let openPanelBtn = NSButton(title: "Открыть историю", target: self, action: #selector(onOpenHistory))
+        let openPanelBtn = ThemeSecondaryButton(title: "Открыть историю", target: self, action: #selector(onOpenHistory))
         openPanelBtn.applyThemeSecondary()
         buttonsRow.addArrangedSubview(openPanelBtn)
         
         buttonsRow.addArrangedSubview(NSView()) // spacer
         
-        let completeBtn = NSButton(title: "Готово", target: self, action: #selector(onFinish))
+        let completeBtn = ThemePrimaryButton(title: "Готово", target: self, action: #selector(onFinish))
         completeBtn.applyThemePrimary()
         completeBtn.keyEquivalent = "\r"
         buttonsRow.addArrangedSubview(completeBtn)

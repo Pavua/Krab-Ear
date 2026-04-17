@@ -101,7 +101,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let historyTranslationStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyFromDateField = NSTextField(frame: .zero)
     let historyToDateField = NSTextField(frame: .zero)
-    let historyFocusModeButton = NSButton(title: "Фокус истории: ON", target: nil, action: nil)
+    let historyFocusModeButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Фокус истории: ON", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
     let qualitySelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let cleanupSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let translationSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -132,7 +136,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let callAutoSummaryButton = NSButton(checkboxWithTitle: "Авто-summary звонка", target: nil, action: nil)
     let voiceGatewayURLField = NSTextField(frame: .zero)
     let voiceGatewayAPIKeyField = NSTextField(frame: .zero)
-    let voiceGatewayCheckButton = NSButton(title: "Проверить Gateway", target: nil, action: nil)
+    let voiceGatewayCheckButton = ThemeSecondaryButton(title: "Проверить Gateway", target: nil, action: nil)
     let autoStartButton = NSButton(checkboxWithTitle: "Автозапуск", target: nil, action: nil)
     let dockIconButton = NSButton(checkboxWithTitle: "Иконка в Dock", target: nil, action: nil)
     let hotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -141,22 +145,22 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let callAssistStatusLabel = NSTextField(labelWithString: "Call Assist: idle")
     let realtimeTextView = NSTextView()
     let dictationHistoryHintLabel = NSTextField(labelWithString: "История пока пустая. После первой транскрибации записи появятся здесь.")
-    let dictationHistoryOpenButton = NSButton(title: "Открыть историю", target: nil, action: nil)
+    let dictationHistoryOpenButton = ThemeSecondaryButton(title: "Открыть историю", target: nil, action: nil)
     let dictationHistoryPreviewView = NSTextView()
-    let callAssistStartButton = NSButton(title: "Старт звонка", target: nil, action: nil)
-    let callAssistStopButton = NSButton(title: "Стоп звонка", target: nil, action: nil)
+    let callAssistStartButton = ThemePrimaryButton(title: "Старт звонка", target: nil, action: nil)
+    let callAssistStopButton = ThemeSecondaryButton(title: "Стоп звонка", target: nil, action: nil)
     let callPhrasePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let callPhraseLoadButton = NSButton(title: "Загрузить фразы", target: nil, action: nil)
+    private let callPhraseLoadButton = ThemeSecondaryButton(title: "Загрузить фразы", target: nil, action: nil)
     let callPhraseDirectionSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let callPhraseInputField = NSTextField(frame: .zero)
-    private let callPhraseSendButton = NSButton(title: "Сказать фразу", target: nil, action: nil)
-    private let callSummaryButton = NSButton(title: "Summary звонка", target: nil, action: nil)
-    private let callDiagnosticsButton = NSButton(title: "Диагностика", target: nil, action: nil)
-    private let callCostButton = NSButton(title: "Оценка стоимости", target: nil, action: nil)
-    private let callTimelineButton = NSButton(title: "Timeline", target: nil, action: nil)
-    private let callTimelineExportButton = NSButton(title: "Экспорт Timeline", target: nil, action: nil)
-    private let callTimelineToHistoryButton = NSButton(title: "Timeline -> история", target: nil, action: nil)
-    private let callTimelineClearButton = NSButton(title: "Очистить Timeline", target: nil, action: nil)
+    private let callPhraseSendButton = ThemeSecondaryButton(title: "Сказать фразу", target: nil, action: nil)
+    private let callSummaryButton = ThemeSecondaryButton(title: "Summary звонка", target: nil, action: nil)
+    private let callDiagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
+    private let callCostButton = ThemeSecondaryButton(title: "Оценка стоимости", target: nil, action: nil)
+    private let callTimelineButton = ThemeSecondaryButton(title: "Timeline", target: nil, action: nil)
+    private let callTimelineExportButton = ThemeSecondaryButton(title: "Экспорт Timeline", target: nil, action: nil)
+    private let callTimelineToHistoryButton = ThemeSecondaryButton(title: "Timeline -> история", target: nil, action: nil)
+    private let callTimelineClearButton = ThemeSecondaryButton(title: "Очистить Timeline", target: nil, action: nil)
     let callTimelineKeepLastSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let callAssistOutputView = NSTextView()
     var callPhrasePresets: [[String: Any]] = []
@@ -164,8 +168,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let topBar = NSStackView()
     private let topSearchRow = NSStackView()
     private let topActionsRow = NSStackView()
-    private let helpButton = NSButton(title: "Справка", target: nil, action: nil)
-    private let liveTranslatePresetButton = NSButton(title: "Live Translation", target: nil, action: nil)
+    private let helpButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Справка", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    private let liveTranslatePresetButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Live Translation", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
     private let filterRow1 = NSStackView()
     private let filterRow2 = NSStackView()
     private let historyQuickPresetRow = NSStackView()
@@ -184,24 +196,84 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let settingsRow7 = NSStackView()
     private let aiSettingsRow1 = NSStackView()
     private let aiSettingsRow2 = NSStackView()
-    private let startStopButton = NSButton(title: "Старт/Стоп", target: nil, action: nil)
-    private let restartButton = NSButton(title: "Перезапуск", target: nil, action: nil)
-    private let stopButton = NSButton(title: "Остановить", target: nil, action: nil)
-    let loadMoreButton = NSButton(title: "Показать ещё", target: nil, action: nil)
-    let jumpToLatestButton = NSButton(title: "К последней", target: nil, action: nil)
-    let loadAllButton = NSButton(title: "Загрузить всё", target: nil, action: nil)
-    let copyButton = NSButton(title: "Копировать", target: nil, action: nil)
-    let pasteSelectedButton = NSButton(title: "Вставить выбранное", target: nil, action: nil)
-    let copyOriginalButton = NSButton(title: "Копировать оригинал", target: nil, action: nil)
-    let copyTranslationButton = NSButton(title: "Копировать перевод", target: nil, action: nil)
-    let retranslateButton = NSButton(title: "Повторить перевод", target: nil, action: nil)
-    let summarizeSelectedButton = NSButton(title: "Summary выбранного", target: nil, action: nil)
-    let exportButton = NSButton(title: "Экспорт", target: nil, action: nil)
-    let exportNdjsonButton = NSButton(title: "Экспорт NDJSON", target: nil, action: nil)
-    let importNdjsonButton = NSButton(title: "Импорт NDJSON", target: nil, action: nil)
-    let deleteButton = NSButton(title: "Удалить", target: nil, action: nil)
-    let compactButton = NSButton(title: "Оптимизировать историю", target: nil, action: nil)
-    let openTranscriptsButton = NSButton(title: "Транскрипты", target: nil, action: nil)
+    private let startStopButton = ThemePrimaryButton(title: "Старт/Стоп", target: nil, action: nil)
+    private let restartButton = ThemeSecondaryButton(title: "Перезапуск", target: nil, action: nil)
+    private let stopButton = ThemeSecondaryButton(title: "Остановить", target: nil, action: nil)
+    let loadMoreButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Показать ещё", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let jumpToLatestButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "К последней", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let loadAllButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Загрузить всё", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let copyButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Копировать", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let pasteSelectedButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Вставить выбранное", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let copyOriginalButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Копировать оригинал", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let copyTranslationButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Копировать перевод", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let retranslateButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Повторить перевод", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let summarizeSelectedButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Summary выбранного", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let exportButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Экспорт", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let exportNdjsonButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Экспорт NDJSON", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let importNdjsonButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Импорт NDJSON", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let deleteButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Удалить", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let compactButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Оптимизировать историю", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let openTranscriptsButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Транскрипты", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
     let historyOverviewLabel = NSTextField(labelWithString: "")
     let historyStatusLabel = NSTextField(labelWithString: "")
     let glossaryStatusLabel = NSTextField(labelWithString: "Глоссарий: 0")
@@ -217,10 +289,26 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         bar.translatesAutoresizingMaskIntoConstraints = false
         return bar
     }()
-    let cancelImportButton = NSButton(title: "Отменить импорт", target: nil, action: nil)
-    let pauseImportButton = NSButton(title: "Пауза импорта", target: nil, action: nil)
-    let swapRuEsButton = NSButton(title: "Swap RU<->ES", target: nil, action: nil)
-    let openImportReportButton = NSButton(title: "Открыть отчёт", target: nil, action: nil)
+    let cancelImportButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Отменить импорт", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let pauseImportButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Пауза импорта", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let swapRuEsButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Swap RU<->ES", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
+    let openImportReportButton: ThemeSecondaryButton = {
+        let b = ThemeSecondaryButton(title: "Открыть отчёт", target: nil, action: nil)
+        b.isTransparentStyle = true
+        return b
+    }()
     let dropZoneView = ImportDropZoneView(frame: .zero)
     var previewTimer: Timer?
     private var historyFocusManagedRows: [NSView] = []
@@ -266,33 +354,33 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let statusRow = NSStackView()
     // MARK: - Diagnostics & Metrics
     var diagnosticsSection: CollapsibleSectionView?
-    private let diagnosticsButton = NSButton(title: "Диагностика", target: nil, action: nil)
-    private let metricsButton = NSButton(title: "Метрики", target: nil, action: nil)
-    private let recordingStatsButton = NSButton(title: "Статистика", target: nil, action: nil)
-    private let storageInfoButton = NSButton(title: "Хранилище", target: nil, action: nil)
+    private let diagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
+    private let metricsButton = ThemeSecondaryButton(title: "Метрики", target: nil, action: nil)
+    private let recordingStatsButton = ThemeSecondaryButton(title: "Статистика", target: nil, action: nil)
+    private let storageInfoButton = ThemeSecondaryButton(title: "Хранилище", target: nil, action: nil)
     private let diagnosticsRow = NSStackView()
     private let diagnosticsOutputScroll = NSScrollView()
     let diagnosticsOutputView = NSTextView()
     // MARK: - Profile Presets & Audio Devices
     private var profileAudioSection: CollapsibleSectionView?
     let profilePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let applyProfileButton = NSButton(title: "Применить", target: nil, action: nil)
+    private let applyProfileButton = ThemePrimaryButton(title: "Применить", target: nil, action: nil)
     let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let testMicButton = NSButton(title: "Тест микрофона", target: nil, action: nil)
+    private let testMicButton = ThemeSecondaryButton(title: "Тест микрофона", target: nil, action: nil)
     let micTestResultLabel = NSTextField(labelWithString: "")
     private let profileRow = NSStackView()
     private let audioDeviceRow = NSStackView()
     // MARK: - Clipboard History
     private var clipboardSection: CollapsibleSectionView?
-    private let clipboardHistoryButton = NSButton(title: "Буфер обмена", target: nil, action: nil)
-    private let repasteButton = NSButton(title: "Вставить повторно", target: nil, action: nil)
+    private let clipboardHistoryButton = ThemeSecondaryButton(title: "Буфер обмена", target: nil, action: nil)
+    private let repasteButton = ThemeSecondaryButton(title: "Вставить повторно", target: nil, action: nil)
     private let clipboardRow = NSStackView()
     // MARK: - History enhancements
-    private let exportSrtButton = NSButton(title: "Экспорт SRT", target: nil, action: nil)
-    private let cleanupHistoryButton = NSButton(title: "Очистка старых", target: nil, action: nil)
+    private let exportSrtButton = ThemeSecondaryButton(title: "Экспорт SRT", target: nil, action: nil)
+    private let cleanupHistoryButton = ThemeSecondaryButton(title: "Очистка старых", target: nil, action: nil)
     let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let vocabSuggestionsButton = NSButton(title: "Словарь", target: nil, action: nil)
-    private let glossarySuggestionsButton = NSButton(title: "Глоссарий авто", target: nil, action: nil)
+    private let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
+    private let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
     private let historyEnhancementsRow = NSStackView()
 
     init(
@@ -517,13 +605,21 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         topSearchRow.addArrangedSubview(searchField)
 
-        let clearSearch = NSButton(title: "Сбросить", target: self, action: #selector(onClearSearch))
+        let clearSearch: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Сбросить", target: self, action: #selector(onClearSearch))
+            b.isTransparentStyle = true
+            return b
+        }()
         clearSearch.controlSize = .small
         clearSearch.applyThemeSecondary()
         clearSearch.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         clearSearch.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         topSearchRow.addArrangedSubview(clearSearch)
-        let clearFiltersButton = NSButton(title: "Сбросить фильтры", target: self, action: #selector(onClearFilters))
+        let clearFiltersButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Сбросить фильтры", target: self, action: #selector(onClearFilters))
+            b.isTransparentStyle = true
+            return b
+        }()
         clearFiltersButton.controlSize = .small
         clearFiltersButton.applyThemeSecondary()
         clearFiltersButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
@@ -615,37 +711,69 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         filterRow2.addArrangedSubview(NSView())
 
         historyQuickPresetRow.addArrangedSubview(NSTextField(labelWithString: "Быстрые фильтры:"))
-        let historyTodayButton = NSButton(title: "Сегодня", target: self, action: #selector(onHistoryPresetToday))
+        let historyTodayButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Сегодня", target: self, action: #selector(onHistoryPresetToday))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyTodayButton.applyThemeSecondary()
         historyTodayButton.toolTip = "Показывает записи только за сегодня"
         historyQuickPresetRow.addArrangedSubview(historyTodayButton)
-        let historyWeekButton = NSButton(title: "7 дней", target: self, action: #selector(onHistoryPresetLast7Days))
+        let historyWeekButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "7 дней", target: self, action: #selector(onHistoryPresetLast7Days))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyWeekButton.applyThemeSecondary()
         historyWeekButton.toolTip = "Показывает записи за последние 7 дней"
         historyQuickPresetRow.addArrangedSubview(historyWeekButton)
-        let historyErrorsButton = NSButton(title: "Ошибки перевода", target: self, action: #selector(onHistoryPresetTranslationErrors))
+        let historyErrorsButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Ошибки перевода", target: self, action: #selector(onHistoryPresetTranslationErrors))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyErrorsButton.applyThemeSecondary()
         historyErrorsButton.toolTip = "Фильтр по translation_status=translate_error"
         historyQuickPresetRow.addArrangedSubview(historyErrorsButton)
-        let historyTranslatedButton = NSButton(title: "С переводом", target: self, action: #selector(onHistoryPresetTranslatedOnly))
+        let historyTranslatedButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "С переводом", target: self, action: #selector(onHistoryPresetTranslatedOnly))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyTranslatedButton.applyThemeSecondary()
         historyTranslatedButton.toolTip = "Показывает записи с успешным переводом (translation_status=ok)"
         historyQuickPresetRow.addArrangedSubview(historyTranslatedButton)
-        let historyNoTranslationButton = NSButton(title: "Без перевода", target: self, action: #selector(onHistoryPresetNoTranslation))
+        let historyNoTranslationButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Без перевода", target: self, action: #selector(onHistoryPresetNoTranslation))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyNoTranslationButton.applyThemeSecondary()
         historyNoTranslationButton.toolTip = "Показывает записи, где translation_mode=off"
         historyQuickPresetRow.addArrangedSubview(historyNoTranslationButton)
-        let historyPasteErrorsButton = NSButton(title: "Ошибки вставки", target: self, action: #selector(onHistoryPresetPasteFailed))
+        let historyPasteErrorsButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Ошибки вставки", target: self, action: #selector(onHistoryPresetPasteFailed))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyPasteErrorsButton.applyThemeSecondary()
         historyPasteErrorsButton.toolTip = "Фильтр по paste_status=failed"
         historyQuickPresetRow.addArrangedSubview(historyPasteErrorsButton)
-        let historyResetDatesButton = NSButton(title: "Сброс дат", target: self, action: #selector(onHistoryPresetResetDates))
+        let historyResetDatesButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Сброс дат", target: self, action: #selector(onHistoryPresetResetDates))
+            b.isTransparentStyle = true
+            return b
+        }()
         historyResetDatesButton.applyThemeSecondary()
         historyResetDatesButton.toolTip = "Очищает поля дат и перезагружает историю"
         historyQuickPresetRow.addArrangedSubview(historyResetDatesButton)
         historyQuickPresetRow.addArrangedSubview(NSView())
 
-        let importAudioButton = NSButton(title: "Импорт аудио", target: self, action: #selector(onImportAudio))
+        let importAudioButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Импорт аудио", target: self, action: #selector(onImportAudio))
+            b.isTransparentStyle = true
+            return b
+        }()
         importAudioButton.applyThemeSecondary()
         importRow.addArrangedSubview(importAudioButton)
         cancelImportButton.target = self
@@ -670,11 +798,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         swapRuEsButton.toolTip = "Быстро переключает направление перевода RU<->ES"
         toolsRow.addArrangedSubview(swapRuEsButton)
 
-        let addGlossaryButton = NSButton(title: "Добавить термин", target: self, action: #selector(onAddGlossaryTerm))
+        let addGlossaryButton = ThemePrimaryButton(title: "Добавить термин", target: self, action: #selector(onAddGlossaryTerm))
         addGlossaryButton.applyThemeSecondary()
         toolsRow.addArrangedSubview(addGlossaryButton)
 
-        let removeGlossaryButton = NSButton(title: "Удалить термин", target: self, action: #selector(onRemoveGlossaryTerm))
+        let removeGlossaryButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Удалить термин", target: self, action: #selector(onRemoveGlossaryTerm))
+            b.isTransparentStyle = true
+            return b
+        }()
         removeGlossaryButton.applyThemeSecondary()
         toolsRow.addArrangedSubview(removeGlossaryButton)
 

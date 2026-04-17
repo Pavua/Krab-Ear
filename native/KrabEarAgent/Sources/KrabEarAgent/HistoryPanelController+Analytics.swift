@@ -117,16 +117,16 @@ extension HistoryPanelController {
         let usageStack = NSStackView(views: [todayLabel, weekLabel, totalLabel])
         usageStack.orientation = .horizontal
         usageStack.spacing = KrabEarTheme.Metrics.standard
-        let refreshButton = NSButton(title: "Обновить", target: self, action: #selector(refreshUsageStatsAction))
+        let refreshButton = ThemeSecondaryButton(title: "Обновить", target: self, action: #selector(refreshUsageStatsAction))
         refreshButton.applyThemeSecondary()
         let usageRow = NSStackView(views: [usageStack, refreshButton])
         usageRow.orientation = .horizontal
         usageRow.spacing = KrabEarTheme.Metrics.standard
 
-        let errorsButton = NSButton(title: "Ошибки", target: self, action: #selector(fetchErrorStatsAction))
+        let errorsButton = ThemeSecondaryButton(title: "Ошибки", target: self, action: #selector(fetchErrorStatsAction))
         errorsButton.applyThemeSecondary()
 
-        let scoreButton = NSButton(title: "Оценка", target: self, action: #selector(scoreTranscriptionAction))
+        let scoreButton = ThemeSecondaryButton(title: "Оценка", target: self, action: #selector(scoreTranscriptionAction))
         scoreButton.applyThemeSecondary()
         let scoreRow = NSStackView(views: [scoreButton, scoreLabel])
         scoreRow.orientation = .horizontal
@@ -142,7 +142,7 @@ extension HistoryPanelController {
         // --- Health section ---
         let healthCard = ThemeCardView()
 
-        let checkButton = NSButton(title: "Проверить", target: self, action: #selector(runHealthCheckAction))
+        let checkButton = ThemeSecondaryButton(title: "Проверить", target: self, action: #selector(runHealthCheckAction))
         checkButton.applyThemeSecondary()
         let healthLabelsStack = NSStackView(views: [sttHealthLabel, llmHealthLabel, historyHealthLabel, translationHealthLabel])
         healthLabelsStack.orientation = .horizontal
@@ -151,12 +151,12 @@ extension HistoryPanelController {
         healthRow.orientation = .horizontal
         healthRow.spacing = KrabEarTheme.Metrics.standard
 
-        let llmDiffButton = NSButton(title: "LLM diff", target: self, action: #selector(fetchLLMDiffAction))
+        let llmDiffButton = ThemeSecondaryButton(title: "LLM diff", target: self, action: #selector(fetchLLMDiffAction))
         llmDiffButton.applyThemeSecondary()
 
-        let exportButton = NSButton(title: "Экспорт настроек", target: self, action: #selector(exportSettingsAction))
+        let exportButton = ThemeSecondaryButton(title: "Экспорт настроек", target: self, action: #selector(exportSettingsAction))
         exportButton.applyThemeSecondary()
-        let importButton = NSButton(title: "Импорт настроек", target: self, action: #selector(importSettingsAction))
+        let importButton = ThemeSecondaryButton(title: "Импорт настроек", target: self, action: #selector(importSettingsAction))
         importButton.applyThemeSecondary()
         let settingsRow = NSStackView(views: [exportButton, importButton])
         settingsRow.orientation = .horizontal
