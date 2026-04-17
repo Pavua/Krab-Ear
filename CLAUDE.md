@@ -273,3 +273,64 @@ make lint          # Flake8 on Python backend
 
 - Merging Krab/Ear/Voice into a single runtime — they remain separate projects with API boundaries.
 - Krab Ear does not implement web scraping; external tool/reasoning goes through OpenClaw gateway.
+
+## Working guidelines for Claude sessions
+
+### Sub-agent model selection (cost-conscious)
+
+Используй Agent tool с явным `model` параметром — **default opus сжигает quota** (user установил правило 2026-04-17 после 5h quota hit).
+
+| Model | Use for | % of tasks |
+|-------|---------|------------|
+| `haiku` | Research, docs, diagnostics, simple edits, memory updates, file reads, grep | ~80% |
+| `sonnet` | Implementation PRs, Gemini apply, rebase с conflict resolution, tests, medium refactors | ~18% |
+| `opus` | Критический debugging (cascading compiler errors), architectural decisions, когда Sonnet уже failed | ~2% |
+
+Параллелизм > глубина: **многих Haiku параллельно** лучше чем одного Opus linear (5-10× throughput при comparable cost).
+
+### Gemini 3.1 Pro для дизайна (strict rule)
+
+Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini 3.1 Pro API:
+- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyCBHw753dZVMQY6wA_08YlVdv2mq8-gtsE`
+- Pattern: draft brief `/tmp/krab-ear-gemini/<name>_payload.json` → `curl POST` → save response → apply by sub-agent.
+- Claude НЕ делает визуал сам. Граница: "стало выглядеть иначе" → Gemini; "стало себя вести иначе" → Claude/Sonnet.
+- Behavior код (Auto Layout mechanics, ThemeButton tracking areas, state machines) — ОК для Claude.
+
+### TCC permissions troubleshooting
+
+macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR absolute path). После rebuild binary с изменённой hash:
+- Старые path-based entries в TCC.db остаются но "смотрят" на stale paths.
+- Текущий `com.antigravity.krab-ear` bundle ID **может не совпасть** с историей.
+- Симптом: user грантит tumбler, app сразу опять запрашивает permission.
+
+**Diagnostic**: `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "SELECT client, service, auth_value FROM access WHERE client LIKE '%krab%';"`
+
+**Fix workflow** (only do когда user asks):
+1. `pkill -9 -f KrabEarAgent`
+2. `tccutil reset All com.antigravity.krab-ear`
+3. `tccutil reset All com.krabear.agent`  # старый ID
+4. `tccutil reset Accessibility <absolute-path-to-old-binaries>` для каждого path-based entry
+5. User вручную очищает System Settings → Privacy → Accessibility список (удаляет дубликаты), добавляет ОДИН новый `.app`.
+6. Re-toggle ON.
+
+### Parallel PR workflow (session 1 proven pattern)
+
+1 session может merge 11+ PRs с этим подходом:
+- **File-level isolation** per sub-agent (each agent owns single file/feature), низкий merge conflict.
+- **CI parallelization** (3 min backend-tests каждый PR) не блокирует coordinator work.
+- **Merge train**: когда 3+ PRs одновременно конфликтуют — rebase всех параллельно через sub-agents, merge sequentially.
+- **Research-first for big decisions**: run 3-4 parallel Haiku research agents BEFORE writing implementation plan (Moshi MLX, SeamlessM4T MLX, qwen3-30b benchmarks — каждый ~5 min, results inform plan).
+
+### Voice Assistant Mode (Phase 1, 2026-04-17 спек)
+
+Большая трансформация в процессе. Spec: `docs/superpowers/specs/2026-04-17-voice-assistant-mode-design.md` (330 lines). Plan: `docs/superpowers/plans/2026-04-17-voice-assistant-mode.md` (556 lines, 8 PRs × 3-4 weeks).
+
+Stack:
+- **Engines**: Kyutai Moshi 7B (EN) + SeamlessStreaming 2.5B (RU/ES/multilingual, PyTorch+MPS не MLX).
+- **Brain**: `lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit` via Krab agent OpenClaw.
+- **Orchestration**: Voice Gateway `/v1/sessions/{id}/conversation` WS endpoint.
+- **UI**: новый tab "Разговор с AI" в Krab Ear `.app` (`ConversationViewController`).
+- **Triggers**: GUI button + Right Option double-tap (300ms) + Silero wake word "Краб".
+- **Brain stack**: Krab agent (Telegram userbot) — общая memory + MCP tools + OpenClaw. Voice assistant = "новый channel" в same brain.
+
+Phase 2 (Live Translation), Phase 3 (Call Automation), Phase 4 (STT adapters SenseVoice/Parakeet) — отдельные sub-projects, roadmap в specs/.
