@@ -141,6 +141,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - Communicates with backend exclusively through Unix socket JSON-RPC.
 - Resolves project root by checking for `KrabEar/backend/service.py`.
 - **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
+- **`ThemeButton` base class** (PR #13) — общий предок для `ThemePrimaryButton` / `ThemeSecondaryButton`. Устанавливает `NSTrackingArea`, обрабатывает `mouseEntered/Exited/Down/Up` и применяет `KrabEarTheme.Interaction` токены: hover = 10% белый overlay, pressed = 15% чёрный overlay + scale 0.98×, disabled = opacity 40%. Все переходы идут через `KrabEarTheme.Motion.animate()` — Reduce Motion respected.
 - **`HistoryPanelController.swift`** (2196 lines) + 7 extension files: `+CallAssist`, `+Diagnostics`, `+History`, `+HistoryEnhancements`, `+Import`, `+Settings` (split for maintainability).
 - **`RealtimeOverlayController.swift`** — floating overlay for live transcription feedback.
 - **`NotificationService.swift`** — macOS user notifications (confidence warnings, errors).
@@ -244,6 +245,7 @@ make lint          # Flake8 on Python backend
 - **LLM post-processing**: engine.py hooks into LLMRewriter after STT, before paste. Chatbot guard rejects responses starting with known assistant phrases. Length ratio guard rejects output <35% or >300% of input.
 - **Collapsible GUI sections**: CollapsibleSectionView with UserDefaults persistence (key: `CollapsibleSection_{sectionId}`). Disclosure triangle toggle with animation.
 - **iCloud audio import**: files from `Mobile Documents/com~apple~CloudDocs` are auto-copied to /tmp before ffmpeg (errno 11 workaround).
+- **Audio import limits & errors** (PR #12): `MAX_AUDIO_MB` default = 1000 MB (часовые ALAC/AAC звонки 70-100 MB норма); `backend/service.py` ловит русский паттерн "Файл слишком большой" в err_msg matching. Swift `HistoryPanelController+Import.swift` прокидывает actual backend error messages в UI: первые 3 в alert, все в `.md` отчёт под `## Errors` секцией (поле `importErrorMessages: [String]`).
 - **Transcript files**: imported audio generates .md files in `~/Library/Application Support/KrabEar/transcripts/`.
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
