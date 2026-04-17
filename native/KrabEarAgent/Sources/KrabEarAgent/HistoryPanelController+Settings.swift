@@ -446,6 +446,8 @@ extension HistoryPanelController {
             mainTabView.selectTabViewItem(at: 1)
         case .history:
             mainTabView.selectTabViewItem(at: 2)
+        case .conversation:
+            mainTabView.selectTabViewItem(at: 3)
         }
         isSyncingTabs = false
         applyHistoryFocusMode(settings.historyFocusMode)
