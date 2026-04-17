@@ -46,6 +46,16 @@ extension HistoryPanelController {
         pauseImportButton.isEnabled = false
         pauseImportButton.title = "Пауза импорта"
         importStatusLabel.stringValue = "Импорт: остановка после текущей задачи..."
+
+        // Async PR #14: отменяем активную backend-задачу, чтобы STT-пайплайн остановился
+        // после текущего файла (без прерывания частичной транскрибации).
+        if let jobID = currentTranscribeJobID {
+            let endpoint = ipcClient.endpoint
+            DispatchQueue.global(qos: .userInitiated).async {
+                let client = IPCClient(socketPath: endpoint)
+                _ = try? client.call(method: "cancel_transcribe_job", params: ["job_id": jobID])
+            }
+        }
     }
 
     @objc func onToggleImportPause() {
@@ -163,53 +173,268 @@ extension HistoryPanelController {
         let startedAt = Date()
         let signature = normalizedImportSignature(jobPaths)
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, endpoint, jobPaths, qualityProfile, cleanupProfile, translationMode, translationStyle, translateAndPaste] in
-            let backgroundClient = IPCClient(socketPath: endpoint)
-            let response = try? backgroundClient.call(
-                method: "transcribe_paths",
-                params: [
-                    "paths": jobPaths,
-                    "quality_profile": qualityProfile,
-                    "cleanup_profile": cleanupProfile,
-                    "translation_mode": translationMode,
-                    "translation_style": translationStyle,
-                    "translate_and_paste": translateAndPaste,
-                ]
+        // Async PR #14: отправляем transcribe_paths_async → получаем job_id → опрашиваем
+        // get_transcribe_progress каждую секунду, показывая этап, file_index/total_files,
+        // elapsed + ETA. Снимает блокировку IPC сокета на весь STT.
+        transcribeProgressFailCount = 0
+        let params: [String: Any] = [
+            "paths": jobPaths,
+            "quality_profile": qualityProfile,
+            "cleanup_profile": cleanupProfile,
+            "translation_mode": translationMode,
+            "translation_style": translationStyle,
+            "translate_and_paste": translateAndPaste,
+        ]
+        dispatchAsyncTranscribeStart(
+            endpoint: endpoint,
+            params: params,
+            signature: signature,
+            startedAt: startedAt
+        )
+    }
+
+    /// Разбивка на 2 функции + explicit types уменьшает работу type-checker — Swift 6
+    /// крашился SIGSEGV при объединённом closure из-за optional chaining + nested async.
+    ///
+    /// Swift 6 Sendable: `[String: Any]` не Sendable, поэтому сериализуем params в JSON Data
+    /// (Sendable) до отправки в background thread, а в background десериализуем обратно.
+    private func dispatchAsyncTranscribeStart(
+        endpoint: String,
+        params: [String: Any],
+        signature: String,
+        startedAt: Date
+    ) {
+        // Сериализуем params в Data на main thread — Data является Sendable, и это
+        // снимает варнинг capture of non-Sendable type в @Sendable closure.
+        let paramsData: Data
+        do {
+            paramsData = try JSONSerialization.data(withJSONObject: params)
+        } catch {
+            handleAsyncTranscribeStarted(
+                jobID: nil,
+                endpoint: endpoint,
+                signature: signature,
+                startedAt: startedAt
             )
-            let result = response?["result"] as? [String: Any]
-            let processed = (result?["processed"] as? Int) ?? 0
-            let errorStrings = (result?["errors"] as? [String]) ?? []
-            let errors = errorStrings.count
-            let failed = (result == nil)
-            let durationSec = Date().timeIntervalSince(startedAt)
+            return
+        }
 
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        queue.async { [weak self] in
+            let jobID: String? = Self.requestAsyncJobID(endpoint: endpoint, paramsData: paramsData)
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.isImportRunning = false
-                self.stopImportElapsedTimer()
-                self.currentImportJobStartedAt = nil
-                self.importJobsCompleted += 1
-                self.importProcessedTotal += processed
-                self.importErrorsTotal += failed ? 1 : errors
-                if failed {
-                    self.importErrorMessages.append("IPC error: backend вернул пустой ответ")
-                } else {
-                    self.importErrorMessages.append(contentsOf: errorStrings)
-                }
-                self.importDurationTotalSec += durationSec
-                self.importJobSignatures.remove(signature)
-                self.currentImportJob = nil
-                self.loadInitial()
-
-                if self.importCancellationRequested {
-                    self.importCancellationRequested = false
-                    self.isImportPaused = false
-                    self.importQueue.removeAll()
-                }
-                self.updateImportStatusLabel()
-                self.processNextImportIfNeeded()
+                self?.handleAsyncTranscribeStarted(
+                    jobID: jobID,
+                    endpoint: endpoint,
+                    signature: signature,
+                    startedAt: startedAt
+                )
             }
         }
+    }
+
+    /// Синхронный (в рамках background thread) IPC-вызов transcribe_paths_async.
+    ///
+    /// `nonisolated` — функция вызывается из background thread, без main-actor context.
+    /// Принимает JSON-сериализованные params (Sendable), десериализует локально.
+    nonisolated private static func requestAsyncJobID(endpoint: String, paramsData: Data) -> String? {
+        guard let params = (try? JSONSerialization.jsonObject(with: paramsData)) as? [String: Any] else {
+            return nil
+        }
+        let client = IPCClient(socketPath: endpoint)
+        guard let response = try? client.call(method: "transcribe_paths_async", params: params) else {
+            return nil
+        }
+        let result = response["result"] as? [String: Any]
+        return result?["job_id"] as? String
+    }
+
+    /// Обработка ответа transcribe_paths_async на main thread.
+    private func handleAsyncTranscribeStarted(
+        jobID: String?,
+        endpoint: String,
+        signature: String,
+        startedAt: Date
+    ) {
+        guard let jobID, !jobID.isEmpty else {
+            importErrorMessages.append("Не удалось запустить асинхронную транскрибацию")
+            completeImportJob(
+                signature: signature,
+                processed: 0,
+                errors: 1,
+                failed: true,
+                startedAt: startedAt
+            )
+            return
+        }
+        currentTranscribeJobID = jobID
+        startTranscribeProgressTimer(
+            jobID: jobID,
+            endpoint: endpoint,
+            signature: signature,
+            startedAt: startedAt
+        )
+    }
+
+    // MARK: - Async transcribe polling (PR #14)
+
+    /// Запускает таймер опроса get_transcribe_progress с шагом 1 секунда.
+    /// При status == done|failed|cancelled останавливает таймер и вызывает completeImportJob.
+    func startTranscribeProgressTimer(jobID: String, endpoint: String, signature: String, startedAt: Date) {
+        stopTranscribeProgressTimer()
+        transcribeProgressFailCount = 0
+        transcribeProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let client = IPCClient(socketPath: endpoint)
+                let response = try? client.call(
+                    method: "get_transcribe_progress",
+                    params: ["job_id": jobID]
+                )
+                DispatchQueue.main.async {
+                    self.handleTranscribeProgress(
+                        response: response,
+                        jobID: jobID,
+                        signature: signature,
+                        startedAt: startedAt
+                    )
+                }
+            }
+        }
+    }
+
+    func stopTranscribeProgressTimer() {
+        transcribeProgressTimer?.invalidate()
+        transcribeProgressTimer = nil
+    }
+
+    /// Обрабатывает один tick ответа от get_transcribe_progress.
+    private func handleTranscribeProgress(
+        response: [String: Any]?,
+        jobID: String,
+        signature: String,
+        startedAt: Date
+    ) {
+        // Таймер мог быть сброшен параллельно (cancel, timeout).
+        guard currentTranscribeJobID == jobID else { return }
+
+        guard let result = response?["result"] as? [String: Any] else {
+            transcribeProgressFailCount += 1
+            if transcribeProgressFailCount >= 3 {
+                importErrorMessages.append("Потеряна связь с backend")
+                completeImportJob(
+                    signature: signature,
+                    processed: 0,
+                    errors: 1,
+                    failed: true,
+                    startedAt: startedAt
+                )
+            }
+            return
+        }
+        // Сбрасываем счётчик после любого успешного ответа.
+        transcribeProgressFailCount = 0
+
+        let status = (result["status"] as? String) ?? "running"
+        let currentStage = (result["current_stage"] as? String) ?? "idle"
+        let fileIndex = (result["file_index"] as? Int) ?? 0
+        let totalFiles = (result["total_files"] as? Int) ?? max(currentImportJob?.audioCount ?? 0, 1)
+        let elapsedSec = (result["elapsed_sec"] as? Double) ?? Date().timeIntervalSince(startedAt)
+        let etaSec = (result["eta_sec"] as? Double) ?? 0
+
+        // Обновляем статус-строку + progress bar (file_index/total_files * 100).
+        let stageText = stageRu(currentStage)
+        let elapsedText = mmss(elapsedSec)
+        let etaText = etaSec > 0 ? mmss(etaSec) : "--:--"
+        importStatusLabel.stringValue =
+            "Импорт: файл \(fileIndex)/\(totalFiles) — \(stageText), прошло \(elapsedText), ETA \(etaText)"
+        if totalFiles > 0 {
+            importProgressBar.isHidden = false
+            importProgressBar.doubleValue = Double(fileIndex) / Double(totalFiles) * 100.0
+        }
+
+        // Терминальные состояния: извлекаем items/errors, завершаем job.
+        if status == "done" || status == "failed" || status == "cancelled" {
+            let items = (result["items"] as? [[String: Any]]) ?? []
+            let errorsList = (result["errors"] as? [String]) ?? []
+            let processedFromServer = (result["processed"] as? Int) ?? items.count
+            let processed = max(processedFromServer, items.count)
+            let failed = (status == "failed")
+
+            // Накапливаем тексты ошибок от backend для итогового отчёта.
+            for errText in errorsList where !errText.isEmpty {
+                importErrorMessages.append(errText)
+            }
+            if status == "cancelled" {
+                importErrorMessages.append("Задача отменена пользователем")
+            }
+
+            completeImportJob(
+                signature: signature,
+                processed: processed,
+                errors: errorsList.count + (failed ? 1 : 0),
+                failed: failed,
+                startedAt: startedAt
+            )
+        }
+    }
+
+    /// Завершение текущего ImportJob: сброс счётчиков, остановка таймеров, следующий шаг очереди.
+    /// Реплицирует блок, который раньше был внутри DispatchQueue.main.async завершения sync transcribe_paths.
+    private func completeImportJob(
+        signature: String,
+        processed: Int,
+        errors: Int,
+        failed: Bool,
+        startedAt: Date
+    ) {
+        stopTranscribeProgressTimer()
+        currentTranscribeJobID = nil
+        transcribeProgressFailCount = 0
+
+        let durationSec = Date().timeIntervalSince(startedAt)
+
+        isImportRunning = false
+        stopImportElapsedTimer()
+        currentImportJobStartedAt = nil
+        importJobsCompleted += 1
+        importProcessedTotal += processed
+        importErrorsTotal += failed ? max(errors, 1) : errors
+        importDurationTotalSec += durationSec
+        importJobSignatures.remove(signature)
+        currentImportJob = nil
+        loadInitial()
+
+        if importCancellationRequested {
+            importCancellationRequested = false
+            isImportPaused = false
+            importQueue.removeAll()
+        }
+        updateImportStatusLabel()
+        processNextImportIfNeeded()
+    }
+
+    /// Русские подписи стадий пайплайна транскрибации для статус-строки.
+    private func stageRu(_ stage: String) -> String {
+        switch stage {
+        case "audio_load": return "загрузка"
+        case "normalize": return "нормализация"
+        case "stt": return "распознавание"
+        case "cleanup": return "обработка текста"
+        case "diarize": return "разделение говорящих"
+        case "translate": return "перевод"
+        case "llm_rewrite": return "LLM-правка"
+        case "idle": return "ожидание"
+        default: return stage
+        }
+    }
+
+    /// Форматирует секунды в строку MM:SS (напр. 754.2 → "12:34").
+    private func mmss(_ sec: Double) -> String {
+        let total = max(0, Int(sec.rounded()))
+        let minutes = total / 60
+        let seconds = total % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 
     func finishImportQueueIfNeeded() {
@@ -273,6 +498,7 @@ extension HistoryPanelController {
         importFormatStats.removeAll()
         importFilesPlanned = 0
         importBytesPlanned = 0
+        importErrorMessages.removeAll()
     }
 
     func sendImportNotification(filesProcessed: Int, errors: Int, duration: Int) {
@@ -393,6 +619,7 @@ extension HistoryPanelController {
             let bullets = importErrorMessages.map { "- \($0)" }.joined(separator: "\n")
             errorsSection = "\n\n## Errors\n\(bullets)\n"
         }
+
         let body = """
         # Import Queue Report
 

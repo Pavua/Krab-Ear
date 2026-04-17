@@ -87,6 +87,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var importBytesPlanned = 0
     var importElapsedTimer: Timer?
     var currentImportJobStartedAt: Date?
+    // Async transcribe (PR #14): job_id + polling timer for стадийный progress.
+    var currentTranscribeJobID: String?
+    var transcribeProgressTimer: Timer?
+    var currentJobAudioDurationSec: Double = 0
+    var transcribeProgressFailCount: Int = 0
     var isSyncingTabs = false
     var previewPollTick = 0
     var isRecoveringHistoryFromFilters = false
