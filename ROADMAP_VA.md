@@ -48,7 +48,7 @@ Intent-based workflow automation for calls (record, summarize, assist, follow-up
 - [ ] 3.4 Call metadata store (participants, duration, intent, automation results)
 - [ ] 3.5 E2E tests + fixtures
 
-**Status:** Brainstorm draft ready (`docs/superpowers/specs/_draft_2026-04-17-phase-3-call-automation-brainstorm.md`). Open design questions: 7 major decisions needed. Brainstorm session TBD.
+**Status:** Design document ready (`docs/superpowers/specs/2026-04-18-phase-3-call-automation-design.md`). Open design questions: 7 major decisions needed. Brainstorm session TBD.
 
 ---
 

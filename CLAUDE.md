@@ -321,9 +321,9 @@ macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR
 - **Merge train**: когда 3+ PRs одновременно конфликтуют — rebase всех параллельно через sub-agents, merge sequentially.
 - **Research-first for big decisions**: run 3-4 parallel Haiku research agents BEFORE writing implementation plan (Moshi MLX, SeamlessM4T MLX, qwen3-30b benchmarks — каждый ~5 min, results inform plan).
 
-### Voice Assistant Mode (Phase 1, 2026-04-17 спек)
+### Voice Assistant Mode (Phase 1 CLOSED, 2026-04-18)
 
-Большая трансформация в процессе. Spec: `docs/superpowers/specs/2026-04-17-voice-assistant-mode-design.md` (330 lines). Plan: `docs/superpowers/plans/2026-04-17-voice-assistant-mode.md` (556 lines, 8 PRs × 3-4 weeks).
+Phase 1 foundation completed and shipped (2026-04-18, 45+ PRs merged). Core components: Moshi engine, SeamlessStreaming, ConversationViewController, voice triggers, qwen3-30b routing, E2E tests all live. Reference spec: `docs/superpowers/specs/2026-04-17-voice-assistant-mode-design.md` (330 lines).
 
 Stack:
 - **Engines**: Kyutai Moshi 7B (EN) + SeamlessStreaming 2.5B (RU/ES/multilingual, PyTorch+MPS не MLX).
