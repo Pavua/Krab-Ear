@@ -59,9 +59,9 @@ Expand STT capabilities with specialized models (emotion, timestamps, multilingu
 - [x] 4.1 SenseVoice (RU + emotion) — Krab-Ear #23
 - [x] 4.2 Parakeet-TDT-1.1B (EN OpenASR leader) — Krab-Ear #26
 - [x] 4.3 WhisperX (word timestamps + diarization) — Krab-Ear #30
-- [ ] 4.4 Voxtral Mini 4B Realtime (STT + reasoning, Apache 2.0) — research done, integration pending
+- [x] 4.4 Voxtral Mini 4B Realtime (STT + reasoning, Apache 2.0) — Krab-Ear #37
 
-**Status:** 3/4 complete. Voxtral on hold pending demand signal.
+**Status:** COMPLETE. All 4/4 adapters shipped.
 
 ---
 
