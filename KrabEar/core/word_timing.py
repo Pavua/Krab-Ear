@@ -7,9 +7,12 @@ Whisper-сегментов: длительность слов, паузы, consi
 
 from __future__ import annotations
 
+import logging
 import statistics
 from dataclasses import dataclass, asdict
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 # ── Пороги хезитации и пауз ──────────────────────────────────────────────────
@@ -108,7 +111,7 @@ class WordTimingAnalyzer:
             }
         ]
         report = analyzer.analyze(segments)
-        print(report.avg_word_duration_ms, report.hesitation_count)
+        logger.info(f"Timing: {report.avg_word_duration_ms}ms, hesitations: {report.hesitation_count}")
     """
 
     def analyze(self, segments: List[dict]) -> TimingReport:
