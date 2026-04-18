@@ -10,16 +10,19 @@
 
     selector = SmartModelSelector()
     sel = selector.select_model(duration_sec=45.0, quality="max", is_preview=False)
-    print(sel.model_name, sel.reason)
+    logger.info(f"Selected: {sel.model_name}, reason: {sel.reason}")
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Latency coefficients: RTF (real-time factor) — примерная скорость обработки
 # на Apple Silicon M-серии. balanced-модель быстрее, max — точнее.
