@@ -3847,7 +3847,6 @@ class BackendService:
         Returns:
             dict: updated — количество обновлённых полей.
         """
-        allowed_fields = {"wake_word_enabled", "conversation_engine", "conversation_brain"}
         patch: dict[str, Any] = {}
 
         if "wake_word_enabled" in params:
