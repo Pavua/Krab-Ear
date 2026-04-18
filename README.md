@@ -7,9 +7,11 @@
 
 ## Возможности
 
-- 🎙️ **Офлайн STT** — распознавание речи через `mlx-whisper` на Metal GPU (Apple Silicon)
+- 🎙️ **Офлайн STT** — распознавание речи с 5 адаптерами: `mlx-whisper`, Parakeet, SenseVoice, WhisperX, Voxtral
+- 🤖 **Voice Assistant Mode** — 4-й таб "Разговор с AI", двойной Right Option, трёхуровневая архитектура (UI + Orchestration + Brain)
 - 🌐 **Перевод** — RU↔ES, EN→RU, Auto, Bilingual; глоссарий с автодополнением
 - 👥 **Диаризация** — определение спикеров через `pyannote.audio`, ускорение на MPS
+- 🔊 **TTS** — Silero (RU) + Kokoro (EN) + macOS say fallback, opt-in режим
 - 🤖 **LLM-постобработка** — локальная правка текста (qwen3-4b через LM Studio) с защитой от галлюцинаций
 - ⌨️ **Авто-вставка** — готовый текст вставляется в активное приложение через Accessibility API
 - 📂 **История транскриптов** — append-only NDJSON, нечёткий поиск, коллекции, архивация
@@ -61,6 +63,59 @@ open "Start Krab Ear.command"
 ```
 
 Pipeline v2: `запись → нормализация → STT → очистка → диаризация → перевод → LLM → вставка`
+
+---
+
+## Voice Assistant Mode (Phase 1)
+
+Новый таб "Разговор с AI" — полноценный голосовой помощник на основе локальных моделей. 
+
+- **Запуск:** Right Option (двойной нажим для включения режима) или кнопка в UI
+- **Engines:** Kyutai Moshi 7B (EN) + SeamlessStreaming 2.5B (RU/ES)
+- **Мозг:** Qwen3-30B через Voice Gateway (OpenClaw), общая память с Krab агентом
+- **Архитектура:** трёхуровневая (UI → Orchestration → Brain) с WS streaming
+
+Полная документация: [`docs/CHANGELOG.md`](docs/CHANGELOG.md#voice-assistant-mode) • 
+Roadmap: [`ROADMAP_ECOSYSTEM.md`](ROADMAP_ECOSYSTEM.md)
+
+---
+
+## STT Adapters
+
+5 адаптеров для разных сценариев:
+
+| Адаптер | Язык | Особенность | Размер |
+|---------|------|-------------|--------|
+| `mlx-whisper` (default) | EN/RU/ES/12+ | Сбалансированный, Metal GPU | 398 MB |
+| **Parakeet-TDT-1.1B** | EN | Лучше всех для английского, OpenASR leader | 430 MB |
+| **SenseVoice** | RU/EN/ZH | RU + эмоция, event detection | 290 MB |
+| **WhisperX** | 99 языков | Timestamps + диаризация в STT | 650 MB |
+| **Voxtral** | EN | STT + reasoning (экспериментально) | 1.2 GB |
+
+Выбор модели автоматический по длительности. Детали: [`docs/PHASE4_PIPELINE_IMPLEMENTATION_PLAN.md`](docs/PHASE4_PIPELINE_IMPLEMENTATION_PLAN.md)
+
+---
+
+## TTS
+
+Двухрежимная система синтеза речи:
+
+- **Silero** — русский, быстрый, качественный
+- **Kokoro** — английский, натуральный
+- **Fallback** — macOS `say` (всегда доступна)
+
+Включение: `TTS_ENABLED=True` в окружении или UI-настройки.
+
+---
+
+## Скрипты запуска
+
+Одноклик команды в корне репо:
+
+- **`Start Krab Ear.command`** — полный старт (venv + backend + агент)
+- **`start_voice_assistant.command`** — запуск всех 4 сервисов (Voice Gateway, STT, TTS, UI)
+- **`healthcheck_*.command`** — диагностика каждого компонента
+- **`stop_*.command`** — graceful shutdown
 
 ---
 
@@ -123,11 +178,20 @@ IPC-методы (195+): [`docs/IPC_API_REFERENCE.md`](docs/IPC_API_REFERENCE.md
 
 ## Документация
 
+### Быстрые ссылки
 - [Руководство пользователя](docs/USER_GUIDE.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [IPC API Reference](docs/IPC_API_REFERENCE.md)
 - [Архитектура](docs/ARCHITECTURE.md)
 - [Changelog](docs/CHANGELOG.md)
+
+### Roadmap и планы
+- [Экосистема Krab (Voice/Ear/Agent)](ROADMAP_ECOSYSTEM.md) — общий roadmap
+- [Roadmap Krab Ear](ROADMAP_KRAB_EAR.md) — локальные приоритеты
+
+### Фазовые документы
+- [Phase 4: Pipeline & STT адаптеры](docs/PHASE4_PIPELINE_IMPLEMENTATION_PLAN.md)
+- [Phase 1: Voice Assistant Mode](docs/CHANGELOG.md#phase-1-complete-voice-assistant-mode-foundation-2026-04-18)
 
 ---
 
