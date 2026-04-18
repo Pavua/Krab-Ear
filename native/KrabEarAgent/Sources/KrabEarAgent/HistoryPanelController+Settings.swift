@@ -571,4 +571,196 @@ extension HistoryPanelController {
         section.contentStackView.addArrangedSubview(card)
         return section
     }
+
+    // MARK: - Voice Assistant Section (PR 1.5)
+
+    /// Секция «Разговор с AI» в Settings tab.
+    /// Содержит:
+    ///   1. Toggle «Включить горячую клавишу» (Right Option double-tap)
+    ///   2. Toggle «Детектор пробуждения Краб» (Porcupine, default OFF)
+    ///   3. Dropdown «Предпочтительный движок» (auto / moshi / seamless)
+    ///   4. Dropdown «Мозг LLM» (auto / qwen3-30b / qwen3-4b)
+    func buildVoiceAssistantSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "settings_voice_assistant",
+            title: "Разговор с AI",
+            isExpanded: false
+        )
+
+        let card = ThemeCardView()
+
+        // 1. Hotkey toggle
+        let hotkeyRow = buildVAToggleRow(
+            button: vaHotkeyToggle,
+            title: "Горячая клавиша (Right Option двойной тап)",
+            caption: "Двойной тап Right Option за 300 мс запускает или останавливает разговор с AI. Одиночный hold сохраняет диктовку."
+        )
+
+        // 2. Wake word toggle
+        let wakeWordRow = buildVAToggleRow(
+            button: vaWakeWordToggle,
+            title: "Детектор пробуждения «Краб»",
+            caption: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен — приватность."
+        )
+
+        // 3. Engine selector
+        let engineRow = buildVAPickerRow(
+            label: "Движок",
+            popup: vaEngineSelector,
+            items: ["Авто", "Moshi (EN, 160 мс)", "SeamlessM4T (RU/ES, 1–2 с)"],
+            caption: "Moshi — для английского, быстрее. SeamlessM4T — для русского и других языков."
+        )
+
+        // 4. Brain selector
+        let brainRow = buildVAPickerRow(
+            label: "Мозг LLM",
+            popup: vaBrainSelector,
+            items: ["Авто", "qwen3-30b (точнее, 17 GB)", "qwen3-4b (быстрее, 4 GB)"],
+            caption: "qwen3-30b — лучшее качество русского. qwen3-4b — быстро, меньше памяти."
+        )
+
+        card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(wakeWordRow)
+        card.contentStackView.addArrangedSubview(engineRow)
+        card.contentStackView.addArrangedSubview(brainRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    private func buildVAToggleRow(button: NSButton, title: String, caption: String) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = KrabEarTheme.Metrics.standard
+
+        button.title = ""
+        button.setButtonType(.switch)
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = KrabEarTheme.Metrics.tight
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = KrabEarTheme.Typography.body
+        titleLabel.textColor = KrabEarTheme.Colors.textPrimary
+
+        let captionLabel = NSTextField(labelWithString: caption)
+        captionLabel.font = KrabEarTheme.Typography.caption
+        captionLabel.textColor = KrabEarTheme.Colors.textSecondary
+        captionLabel.lineBreakMode = .byWordWrapping
+        captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(captionLabel)
+
+        row.addArrangedSubview(button)
+        row.addArrangedSubview(textStack)
+        return row
+    }
+
+    private func buildVAPickerRow(
+        label: String,
+        popup: NSPopUpButton,
+        items: [String],
+        caption: String
+    ) -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = KrabEarTheme.Metrics.tight
+
+        let headerStack = NSStackView()
+        headerStack.orientation = .horizontal
+        headerStack.alignment = .firstBaseline
+        headerStack.spacing = KrabEarTheme.Metrics.standard
+
+        let labelView = NSTextField(labelWithString: label)
+        labelView.font = KrabEarTheme.Typography.body
+        labelView.textColor = KrabEarTheme.Colors.textPrimary
+
+        popup.removeAllItems()
+        popup.addItems(withTitles: items)
+
+        headerStack.addArrangedSubview(labelView)
+        headerStack.addArrangedSubview(popup)
+
+        let captionLabel = NSTextField(labelWithString: caption)
+        captionLabel.font = KrabEarTheme.Typography.caption
+        captionLabel.textColor = KrabEarTheme.Colors.textSecondary
+        captionLabel.lineBreakMode = .byWordWrapping
+        captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        row.addArrangedSubview(headerStack)
+        row.addArrangedSubview(captionLabel)
+        return row
+    }
+
+    // MARK: - VA Settings handlers
+
+    @objc func onVAHotkeyToggleChanged() {
+        let enabled = vaHotkeyToggle.state == .on
+        UserDefaults.standard.set(enabled, forKey: "KrabEar_ConversationHotkeyEnabled")
+        // Применить немедленно через applyConversationHotkeyEnabled
+        if let appDelegate = NSApp.delegate as? AgentAppDelegate {
+            appDelegate.applyConversationHotkeyEnabled(enabled)
+        }
+    }
+
+    @objc func onVAWakeWordToggleChanged() {
+        let enabled = vaWakeWordToggle.state == .on
+        UserDefaults.standard.set(enabled, forKey: "KrabEar_WakeWordEnabled")
+        if let appDelegate = NSApp.delegate as? AgentAppDelegate {
+            appDelegate.applyWakeWordEnabled(enabled)
+        }
+    }
+
+    @objc func onVAEngineSelectorChanged() {
+        let idx = vaEngineSelector.indexOfSelectedItem
+        let value: String
+        switch idx {
+        case 1: value = "moshi"
+        case 2: value = "seamless"
+        default: value = "auto"
+        }
+        UserDefaults.standard.set(value, forKey: "KrabEar_ConversationEngine")
+    }
+
+    @objc func onVABrainSelectorChanged() {
+        let idx = vaBrainSelector.indexOfSelectedItem
+        let value: String
+        switch idx {
+        case 1: value = "qwen3-30b"
+        case 2: value = "qwen3-4b"
+        default: value = "auto"
+        }
+        UserDefaults.standard.set(value, forKey: "KrabEar_ConversationBrain")
+    }
+
+    /// Синхронизировать состояние VA-контролей с UserDefaults.
+    func syncVoiceAssistantControls() {
+        let hotkeyEnabled = UserDefaults.standard.bool(forKey: "KrabEar_ConversationHotkeyEnabled")
+        // Если ключ не установлен → дефолт ON (удобно для первого запуска)
+        let hotkeyEnabledDefault = UserDefaults.standard.object(forKey: "KrabEar_ConversationHotkeyEnabled") != nil
+            ? hotkeyEnabled : true
+        vaHotkeyToggle.state = hotkeyEnabledDefault ? .on : .off
+
+        let wakeWordEnabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
+        vaWakeWordToggle.state = wakeWordEnabled ? .on : .off
+
+        let engine = UserDefaults.standard.string(forKey: "KrabEar_ConversationEngine") ?? "auto"
+        switch engine {
+        case "moshi":    vaEngineSelector.selectItem(at: 1)
+        case "seamless": vaEngineSelector.selectItem(at: 2)
+        default:         vaEngineSelector.selectItem(at: 0)
+        }
+
+        let brain = UserDefaults.standard.string(forKey: "KrabEar_ConversationBrain") ?? "auto"
+        switch brain {
+        case "qwen3-30b": vaBrainSelector.selectItem(at: 1)
+        case "qwen3-4b":  vaBrainSelector.selectItem(at: 2)
+        default:          vaBrainSelector.selectItem(at: 0)
+        }
+    }
 }
