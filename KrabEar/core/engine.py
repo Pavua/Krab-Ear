@@ -11,6 +11,7 @@ import concurrent.futures
 import logging
 import os
 import re as _re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -128,6 +129,38 @@ def _short_model_name(model: str) -> str:
 
 
 logger = logging.getLogger("KrabEar.Engine")
+
+# ---------------------------------------------------------------------------
+# Утилита: поиск ffmpeg в PATH (portable на Intel/Apple Silicon/нестандартные установки)
+# ---------------------------------------------------------------------------
+
+def _find_ffmpeg_path() -> str:
+    """Находит путь к ffmpeg через PATH или fallback на системные пути.
+
+    Порядок поиска:
+    1. shutil.which("ffmpeg") — поиск в PATH (портируемо)
+    2. /opt/homebrew/bin/ffmpeg — Homebrew на Apple Silicon
+    3. /usr/local/bin/ffmpeg — Homebrew на Intel или other installs
+
+    Если ffmpeg не найден, вернёт fallback path (может быть недоступен в runtime).
+    """
+    # Сначала проверяем PATH — самый портируемый способ
+    which_result = shutil.which("ffmpeg")
+    if which_result:
+        return which_result
+
+    # Fallback на известные Homebrew пути
+    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    # Если ничего не нашли, возвращаем логичный default
+    # (мог быть установлен в PATH или система его найдёт позже)
+    logger.warning("ffmpeg не найден в PATH или стандартных путях Homebrew; используем fallback")
+    return "ffmpeg"
+
+
+_FFMPEG_PATH = _find_ffmpeg_path()
 
 # ---------------------------------------------------------------------------
 # Утилита: проверка доступной памяти macOS через vm_stat
@@ -1436,7 +1469,7 @@ class AudioEngine:
             temp_path = Path(handle.name)
 
         cmd = [
-            "/opt/homebrew/bin/ffmpeg",
+            _FFMPEG_PATH,
             "-y",
             "-i",
             str(source_path),
