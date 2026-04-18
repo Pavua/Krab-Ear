@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 try:
     from fastapi import FastAPI, WebSocket
@@ -98,7 +101,7 @@ def mock_voice_gateway_app() -> FastAPI:
                             await websocket.send_json(control_ack)
 
         except Exception as e:
-            print(f"[mock-gateway] WS error: {e}")
+            logger.error(f"[mock-gateway] WS error: {e}")
         finally:
             await websocket.close()
 
