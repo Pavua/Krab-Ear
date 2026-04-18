@@ -2,6 +2,40 @@
 
 All notable changes to Krab Ear are documented in this file.
 
+## [2026-04-18] — Voice Assistant Mode + Phase 4 STT Adapters
+
+### Phase 1: Voice Assistant Mode Foundation
+- **#24** feat(ui): ConversationViewController + WebSocket client + UI skeleton
+- **#29** feat(ui): Right Option double-tap hotkey + Porcupine wake word "Краб"
+- **#34** feat(ui): Voice Assistant section + event handlers в Settings tab (follow-up to #29)
+- **#25** docs(plan): Porcupine integration + AVAudioEngine research + CLAUDE.md spec update
+- **#27** test(e2e): Phase 1 three-tier contract smoke tests (10/10 passing)
+- **#28** test(phase-1.8): E2E fixtures bootstrap + 33-clip matrix specification
+
+### Phase 4: STT Adapters & Model Expansion
+- **#23** feat(stt): SenseVoice adapter (RU + emotion detection)
+- **#26** feat(stt): Parakeet-TDT-1.1B adapter (EN OpenASR leader)
+- **#30** feat(stt): WhisperX adapter (word timestamps + diarization)
+
+### Phase 2: Live Translation (Specification)
+- **#31** docs(spec): Phase 2 Live Translation Overlay design (577 lines, UX + integration plan)
+
+### Documentation & Infrastructure
+- **#22** docs(spec): Voice Assistant Mode foundation spec + Phase 1 plan + CLAUDE.md guidelines
+- **#32** docs(setup): Phase 1 Voice Assistant user setup guide (476 lines, with troubleshooting)
+- **#33** feat(tts): Silero (RU) + Kokoro (EN) dual-mode TTS + macOS say fallback
+
+### Cross-Repository Companion PRs
+**Krab-Voice-Gateway:**
+- #9 feat(conversation): Moshi engine + LazyConversationEngine + WS handler (Phase 1.1)
+- #10 docs(claude-md): Document conversation module architecture
+- #11 feat(conversation): SeamlessStreaming engine + language routing (Phase 1.2)
+
+**Krab-openclaw:**
+- #18 feat(voice): voice_channel_handler + brain proxy + MCP voice tools (Phase 1.4)
+- #19 docs(claude-md): Document voice_channel module
+- #21 feat(model): qwen3-30b-a3b-2507 routing + LRU eviction (Phase 1.6)
+
 ## [Unreleased]
 
 ### Added
