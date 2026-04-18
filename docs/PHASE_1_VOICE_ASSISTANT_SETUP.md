@@ -277,7 +277,7 @@ PYTHONPATH=/Users/pablito/Antigravity_AGENTS/Krab\ Ear/KrabEar \
 
 ### ❌ "moshi-mlx" не устанавливается / конфликт torch
 
-**症状:** `pip install moshi-mlx` выдаёт ошибку версий torch.
+**Симптом:** `pip install moshi-mlx` выдаёт ошибку версий torch.
 
 **Решение:**
 ```bash
@@ -293,7 +293,7 @@ pip install moshi-mlx==0.3.0
 
 ### ❌ Qwen3-30B не загружается в LM Studio
 
-**症状:** Поиск не находит модель или скачивание зависает.
+**Симптом:** Поиск не находит модель или скачивание зависает.
 
 **Решение:**
 1. Очистите кэш HF: `rm -rf ~/.cache/huggingface/hub/models--lmstudio*`
@@ -301,11 +301,11 @@ pip install moshi-mlx==0.3.0
    ```bash
    huggingface-cli download lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit
    ```
-3. Или скачайте напрямую: [HuggingFace링크](https://huggingface.co/lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit)
+3. Или скачайте напрямую: https://huggingface.co/lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit
 
 ### ❌ Porcupine keyword не срабатывает
 
-**症状:** Говорите "Краб" но wake word не детектируется.
+**Симптом:** Говорите "Краб" но wake word не детектируется.
 
 **Решение:**
 1. Проверьте AccessKey сохранён:
@@ -321,7 +321,7 @@ pip install moshi-mlx==0.3.0
 
 ### ❌ WebSocket connection refused (8090 не доступен)
 
-**症状:** Krab Ear логирует: `ws://127.0.0.1:8090 connection refused`.
+**Симптом:** Krab Ear логирует: `ws://127.0.0.1:8090 connection refused`.
 
 **Решение:**
 1. Проверьте Voice Gateway запущен:
@@ -343,7 +343,7 @@ pip install moshi-mlx==0.3.0
 
 ### ❌ OpenClaw Gateway (8081) недоступен
 
-**症状:** Voice Gateway логирует: `OpenClaw bridge failed` или `port 8081 refused`.
+**Симптом:** Voice Gateway логирует: `OpenClaw bridge failed` или `port 8081 refused`.
 
 **Решение:**
 1. Убедитесь что Krab запущен:
@@ -362,7 +362,7 @@ pip install moshi-mlx==0.3.0
 
 ### ❌ Высокая задержка или прерывистый звук
 
-**症状:** Voice Assistant отвечает через 5+ секунд или звук заикается.
+**Симптом:** Voice Assistant отвечает через 5+ секунд или звук заикается.
 
 **Причины:**
 - Qwen3-30B полностью загрузился (первый раз — ок, это normal)
@@ -380,7 +380,7 @@ pip install moshi-mlx==0.3.0
 
 ### ❌ "Segmentation fault" при загрузке Seamless
 
-**症状:** Крах при инициализации SeamlessStreaming для RU.
+**Симптом:** Крах при инициализации SeamlessStreaming для RU.
 
 **Решение:**
 1. Убедитесь что torch скомпилирован для Metal:
