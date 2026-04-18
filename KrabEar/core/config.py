@@ -168,6 +168,25 @@ class Settings(BaseSettings):
     # При True: результат содержит word_timestamps в HistoryItem.
     WHISPERX_WORD_TIMESTAMPS: bool = True
 
+    # --- Voxtral Mini 4B Realtime adapter (Phase 4.4) ---
+    # Mistral Voxtral-Mini-4B-Realtime-2602 — мультиязычная (RU/ES/EN + 10 других) STT-модель
+    # с встроенным семантическим reasoning (Q&A, summarisation, function calling).
+    # Архитектура: audio encoder (970M) + Mistral Small 3.1 LM decoder (3.4B) = ~4B params.
+    # Размер: BF16 ~8.9 GB, 4-bit quant ~2–3 GB (MLX community port).
+    # M4 Max 36 GB: любой вариант влезает. Рекомендуем 4-bit для экономии памяти.
+    # Лицензия: Apache 2.0 — коммерческое использование ОК.
+    # Opt-in: по умолчанию выключено. При VOXTRAL_ENABLED=True адаптер добавляется
+    # в fallback chain ПОСЛЕ WhisperX и ПЕРЕД max-candidates whisper-large-v3.
+    # Требует: pip install mistral-inference (или mlx-lm + mlx-audio для MLX-варианта).
+    # Если библиотека не установлена — адаптер мягко пропускается, chain продолжается.
+    # Latency: 480ms recommended (офлайн-качество); диапазон 80ms–2.4s конфигурируемый.
+    VOXTRAL_ENABLED: bool = False
+    VOXTRAL_MODEL: str = "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"
+    # При VOXTRAL_REASONING_ENABLED=True модель дополнительно возвращает reasoning-поле
+    # (summary или Q&A) в HistoryItem.reasoning. Требует ~10–20% дополнительного времени.
+    # При False Voxtral работает только как STT (без reasoning overhead).
+    VOXTRAL_REASONING_ENABLED: bool = False
+
     # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
     # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
     # При TTS_ENABLED=True включается Silero (RU primary) + Kokoro (EN fallback) цепочка.
@@ -290,4 +309,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "conversation_engine": "auto",
     # LLM мозг: "auto" | "qwen3-30b" | "qwen3-4b"
     "conversation_brain": "auto",
+    # --- Voxtral adapter (Phase 4.4) ---
+    # Opt-in: по умолчанию выключено.
+    "voxtral_enabled": False,
+    "voxtral_model": "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit",
+    "voxtral_reasoning_enabled": False,
 }

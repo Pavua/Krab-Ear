@@ -74,6 +74,27 @@ try:
 except Exception:
     _whisperx = None  # type: ignore[assignment]
 
+# Voxtral Mini 4B Realtime (Mistral) — STT + семантический reasoning (Phase 4.4).
+# Поддерживает 13 языков (вкл. RU/ES/EN). MLX 4-bit quant ~2–3 GB.
+# Библиотека: mistral-inference (pip install mistral-inference).
+# Lazy: если библиотека не установлена — fallback chain продолжается на whisper'е.
+try:
+    from mistral_inference.transformer import Transformer as _VoxtralTransformer  # type: ignore
+    from mistral_inference.generate import generate as _voxtral_generate  # type: ignore
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer as _VoxtralTokenizer  # type: ignore
+    from mistral_common.audio import AudioChunk as _VoxtralAudioChunk  # type: ignore
+    from mistral_common.protocol.instruct.messages import UserMessage as _VoxtralUserMessage  # type: ignore
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest as _VoxtralChatRequest  # type: ignore
+    _voxtral_available = True
+except Exception:
+    _VoxtralTransformer = None  # type: ignore[assignment,misc]
+    _voxtral_generate = None  # type: ignore[assignment]
+    _VoxtralTokenizer = None  # type: ignore[assignment,misc]
+    _VoxtralAudioChunk = None  # type: ignore[assignment,misc]
+    _VoxtralUserMessage = None  # type: ignore[assignment,misc]
+    _VoxtralChatRequest = None  # type: ignore[assignment,misc]
+    _voxtral_available = False
+
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
@@ -505,6 +526,7 @@ class AudioEngine:
     _SENSEVOICE_MARKER: str = "sensevoice:adapter"
     _PARAKEET_MARKER: str = "parakeet:adapter"
     _WHISPERX_MARKER: str = "whisperx:adapter"
+    _VOXTRAL_MARKER: str = "voxtral:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -556,6 +578,22 @@ class AudioEngine:
                     break
             candidates = candidates[:insert_pos] + [self._WHISPERX_MARKER] + candidates[insert_pos:]
 
+        # --- Voxtral adapter: позиция 5 (после WhisperX, перед max-candidates) ---
+        # Mistral Voxtral Mini 4B Realtime — STT + встроенный reasoning (Phase 4.4).
+        # Chain order (когда все адаптеры включены):
+        #   balanced → Parakeet → SenseVoice → WhisperX → Voxtral → max-candidates
+        # Маркер вставляется сразу за WHISPERX_MARKER (или за последним adapter-маркером).
+        # При сбое маркер помечается как недоступный, chain продолжается на whisper'ах.
+        if settings.VOXTRAL_ENABLED and self._VOXTRAL_MARKER not in self._unavailable_models:
+            # Ищем позицию вставки: после WHISPERX_MARKER если есть, иначе после всех
+            # adapter-маркеров в начале списка (PARAKEET / SENSEVOICE / WHISPERX).
+            _adapter_markers = {self._PARAKEET_MARKER, self._SENSEVOICE_MARKER, self._WHISPERX_MARKER}
+            vx_insert_pos = 1
+            for i, c in enumerate(candidates):
+                if c in _adapter_markers:
+                    vx_insert_pos = i + 1
+            candidates = candidates[:vx_insert_pos] + [self._VOXTRAL_MARKER] + candidates[vx_insert_pos:]
+
         for model_name in candidates:
             # Parakeet adapter — отдельная ветка (не whisper).
             if model_name == self._PARAKEET_MARKER:
@@ -594,6 +632,19 @@ class AudioEngine:
                 except Exception as exc:
                     logger.warning("WhisperX adapter не сработал: %s — продолжаю whisper chain", exc)
                     self._unavailable_models.add(self._WHISPERX_MARKER)
+                    continue
+
+            # Voxtral adapter — STT + reasoning (Phase 4.4).
+            if model_name == self._VOXTRAL_MARKER:
+                try:
+                    span_name = f"stt_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"
+                    with _profiler.start_span(span_name):
+                        vt_result = self._transcribe_voxtral(audio_data, language=language)
+                    vt_result["model_used"] = settings.VOXTRAL_MODEL
+                    return vt_result
+                except Exception as exc:
+                    logger.warning("Voxtral adapter не сработал: %s — продолжаю whisper chain", exc)
+                    self._unavailable_models.add(self._VOXTRAL_MARKER)
                     continue
 
             if model_name in self._unavailable_models:
@@ -1087,6 +1138,159 @@ class AudioEngine:
             "segments": segments,
             "word_timestamps": word_timestamps,
             "speaker_turns": speaker_turns,
+        }
+
+    # --- Voxtral Mini 4B Realtime adapter (Mistral, Phase 4.4) ---
+    # Mistral Voxtral-Mini-4B-Realtime-2602: аудио-encoder (970M) + Mistral Small 3.1 LM (3.4B).
+    # STT + встроенный reasoning (summary/Q&A/function-calling). Мультиязычный (13 яз: RU/ES/EN).
+    # MLX 4-bit quant: ~2–3 GB RAM (8.9 GB BF16). Лицензия: Apache 2.0.
+    # Latency: 480ms recommended (качество ≈ Whisper offline); диапазон 80ms–2.4s.
+    # Библиотека: mistral-inference (pip install mistral-inference).
+    # При VOXTRAL_REASONING_ENABLED=True возвращает reasoning: str (summary/Q&A).
+
+    def _load_voxtral_model(self) -> Any:
+        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен."""
+        # Совместимость с тестами через AudioEngine.__new__() (без __init__).
+        if getattr(self, "_voxtral_model", None) is not None:
+            return self._voxtral_model
+        if getattr(self, "_voxtral_load_error", None):
+            raise RuntimeError(self._voxtral_load_error)
+        if not _voxtral_available:
+            self._voxtral_load_error = (
+                "mistral-inference не установлен — Voxtral adapter недоступен "
+                "(установите: pip install mistral-inference)"
+            )
+            raise RuntimeError(self._voxtral_load_error)
+
+        with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
+            try:
+                from huggingface_hub import snapshot_download  # type: ignore
+                model_path = snapshot_download(repo_id=settings.VOXTRAL_MODEL)
+                tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
+                model = _VoxtralTransformer.from_folder(model_path)
+                self._voxtral_model = (model, tokenizer)
+            except Exception as exc:
+                self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
+                raise RuntimeError(self._voxtral_load_error)
+
+        logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
+        return self._voxtral_model
+
+    def _transcribe_voxtral(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+        """Транскрибация через Voxtral Mini 4B Realtime (STT + optional reasoning).
+
+        Args:
+            audio_data: путь к wav-файлу (str/Path), numpy.ndarray (16kHz mono float32),
+                        или bytes (PCM int16 LE от AudioRecorder).
+            language: ISO 639-1 код языка ("ru", "es", "en") или None для авто.
+
+        Returns:
+            dict с ключами:
+              - text: транскрипт
+              - engine: "voxtral"
+              - language: детектированный или переданный язык (ISO 639-1) или None
+              - segments: [] (Voxtral не возвращает временные сегменты)
+              - reasoning: str | None — если VOXTRAL_REASONING_ENABLED=True
+        """
+        import numpy as _np
+        import tempfile as _tmp
+        import os as _os
+
+        model, tokenizer = self._load_voxtral_model()
+
+        # Нормализуем audio_data → временный wav-файл (mistral-inference принимает путь).
+        if isinstance(audio_data, (str, Path)):
+            audio_path = str(Path(audio_data).expanduser().resolve())
+        elif isinstance(audio_data, bytes):
+            # bytes (PCM int16 LE, 16kHz mono) → numpy → wav файл
+            arr = _np.frombuffer(audio_data, dtype=_np.int16)
+            tmp_f = _tmp.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_path = tmp_f.name
+            tmp_f.close()
+            try:
+                import soundfile as _sf
+                _sf.write(tmp_path, arr.astype(_np.float32) / 32768.0, 16000, subtype="PCM_16")
+            except Exception:
+                # Если soundfile недоступен — пробуем wave stdlib
+                import wave
+                with wave.open(tmp_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(audio_data)
+            audio_path = tmp_path
+        else:
+            # numpy array → сохраняем во временный файл
+            tmp_f = _tmp.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_path = tmp_f.name
+            tmp_f.close()
+            try:
+                import soundfile as _sf
+                audio_arr = audio_data if audio_data.dtype == _np.float32 else audio_data.astype(_np.float32)
+                _sf.write(tmp_path, audio_arr, 16000, subtype="PCM_16")
+            except Exception as exc:
+                raise RuntimeError(f"Voxtral: не удалось сохранить аудио: {exc}")
+            audio_path = tmp_path
+
+        try:
+            # Формируем prompt: STT запрос, опционально с reasoning
+            if settings.VOXTRAL_REASONING_ENABLED:
+                prompt_text = (
+                    "Transcribe the audio accurately. "
+                    "Then provide a brief summary of the content."
+                )
+            else:
+                prompt_text = "Transcribe the audio accurately."
+
+            audio_chunk = _VoxtralAudioChunk(path=audio_path)
+            completion_request = _VoxtralChatRequest(
+                messages=[
+                    _VoxtralUserMessage(content=[audio_chunk, prompt_text]),
+                ]
+            )
+
+            tokens, _ = tokenizer.encode_chat_completion(completion_request)
+            input_ids = tokens.tokens
+
+            out_tokens, _ = _voxtral_generate(
+                input_ids,
+                model,
+                max_tokens=2048,
+                temperature=0.0,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+
+            raw_output = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens)
+
+            # Парсим результат: разделяем transcript и reasoning если включён
+            reasoning: str | None = None
+            if settings.VOXTRAL_REASONING_ENABLED and "\n\n" in raw_output:
+                parts = raw_output.split("\n\n", 1)
+                transcript = parts[0].strip()
+                reasoning = parts[1].strip() if len(parts) > 1 else None
+            else:
+                transcript = raw_output.strip()
+
+        finally:
+            # Удаляем временный файл если создавали
+            if not isinstance(audio_data, (str, Path)):
+                try:
+                    _os.unlink(audio_path)
+                except Exception:
+                    pass
+
+        logger.info(
+            "Voxtral готово: %d chars, reasoning=%s, lang=%s",
+            len(transcript),
+            "да" if reasoning else "нет",
+            language or "авто",
+        )
+        return {
+            "text": transcript,
+            "engine": "voxtral",
+            "language": language,
+            "segments": [],
+            "reasoning": reasoning,
         }
 
     def _maybe_run_diarization(
