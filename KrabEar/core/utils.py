@@ -5,6 +5,7 @@
 
 import re
 import logging
+import functools
 
 logger = logging.getLogger("KrabEar.Utils")
 
@@ -80,6 +81,16 @@ BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
 # Время "15.00" / "15 00" после цифр → "15:00" (только в диапазоне часов).
 # Не трогаем числа с плавающей точкой: условие — час 0-23 и минуты 00-59.
 TIME_NORMALIZE_RE = re.compile(r"\b([01]?\d|2[0-3])\s*[.:]\s*([0-5]\d)(?!\d)")
+
+@functools.lru_cache(maxsize=256)
+def _compile_trailing_pattern(escaped_last: str) -> re.Pattern:
+    """Кэширует компиляцию динамического паттерна «конец повторной фразы».
+
+    Паттерн строится из re.escape(last) + суффикс пунктуации.  Кэш предотвращает
+    повторную компиляцию для одной и той же финальной фразы внутри сессии.
+    """
+    return re.compile(rf"{escaped_last}[.!?…]*\s*$", re.IGNORECASE)
+
 
 _HALLUCINATION_PATTERNS: list[re.Pattern] = [
     re.compile(pat) for pat in [
@@ -178,7 +189,7 @@ class TextUtils:
                     )
                 )
                 if TextUtils.same_short_phrase(last, previous) or is_suffix_repeat:
-                    clean = re.sub(rf"{re.escape(last)}[.!?…]*\s*$", "", clean, flags=re.IGNORECASE).rstrip(" .,!?:;")
+                    clean = _compile_trailing_pattern(re.escape(last)).sub("", clean).rstrip(" .,!?:;")
                     break
 
         # 3. Три одинаковых куска подряд (заикание модели)
