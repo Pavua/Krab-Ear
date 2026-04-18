@@ -1743,13 +1743,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // --- VOICE ASSISTANT SECTION (Phase 1.5) ---
         let vaSection = buildVoiceAssistantSection()
         vaHotkeyToggle.target = self
-        vaHotkeyToggle.action = #selector(onVAHotkeyToggle)
+        vaHotkeyToggle.action = #selector(onVAHotkeyToggleChanged)
         vaWakeWordToggle.target = self
-        vaWakeWordToggle.action = #selector(onVAWakeWordToggle)
+        vaWakeWordToggle.action = #selector(onVAWakeWordToggleChanged)
         vaEngineSelector.target = self
-        vaEngineSelector.action = #selector(onVAEngineChanged)
+        vaEngineSelector.action = #selector(onVAEngineSelectorChanged)
         vaBrainSelector.target = self
-        vaBrainSelector.action = #selector(onVABrainChanged)
+        vaBrainSelector.action = #selector(onVABrainSelectorChanged)
         settingsBar.addArrangedSubview(vaSection)
 
         // --- DIAGNOSTICS & METRICS SECTION ---
