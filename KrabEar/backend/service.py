@@ -92,6 +92,13 @@ from backend.call_assist_service import CallAssistService
 from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
 from backend.ipc_throttle import IPCThrottle
+from backend.ipc_constants import (
+    IPC_SOCKET_BACKLOG,
+    IPC_SOCKET_TIMEOUT_SEC,
+    IPC_MAX_MESSAGE_BYTES,
+    IPC_PREVIEW_THREAD_TIMEOUT_SEC,
+    IPC_SOCKET_PERMISSIONS,
+)
 from backend.export_scheduler import ExportScheduler
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
@@ -2357,7 +2364,7 @@ class BackendService:
     def _stop_preview_worker(self) -> None:
         self._preview_stop_event.set()
         if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=1.5)
+            self._preview_thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
         self._preview_thread = None
 
     def _reset_preview_state(self) -> None:
@@ -3906,9 +3913,9 @@ class IPCServer:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(self.socket_path))
-        os.chmod(str(self.socket_path), 0o600)
-        server.listen(32)
-        server.settimeout(0.8)
+        os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
+        server.listen(IPC_SOCKET_BACKLOG)
+        server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
 
         logger.info("IPC сервер запущен на %s", self.socket_path)
         try:
@@ -3945,7 +3952,7 @@ class IPCServer:
         """
         with conn:
             try:
-                raw = conn.recv(1024 * 1024)
+                raw = conn.recv(IPC_MAX_MESSAGE_BYTES)
                 if not raw:
                     return
                 text = raw.decode("utf-8").strip()
