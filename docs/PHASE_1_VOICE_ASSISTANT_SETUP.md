@@ -273,6 +273,140 @@ PYTHONPATH=/Users/pablito/Antigravity_AGENTS/Krab\ Ear/KrabEar \
 
 ---
 
+## Troubleshooting — Диагностика и решение проблем
+
+### Engine not loading — Timeout при загрузке Moshi
+
+**Симптом:** Voice Gateway зависает при инициализации Moshi, выдаёт timeout после 120+ сек.
+
+**Ожидаемое поведение:** первая загрузка 30-60 сек (cold start), последующие <2 сек (LRU cache).
+
+**Решение:**
+1. Проверьте доступность Metal MPS:
+   ```bash
+   python3 -c "import torch; print('MPS available:', torch.backends.mps.is_available())"
+   ```
+   Если `False` → Moshi не может использовать GPU, будет медленнее на CPU.
+
+2. Проверьте размер кэша моделей:
+   ```bash
+   du -sh ~/Library/Caches/mlx/
+   ```
+   Если > 50 GB → очистите кэш: `rm -rf ~/Library/Caches/mlx/*`
+
+3. Проверьте свободную память:
+   ```bash
+   vm_stat | grep "free\|inactive"
+   ```
+   Нужно минимум 6-8 GB свободно для Moshi 7B.
+
+### High latency (>2s end-to-end)
+
+**Симптом:** Voice Assistant отвечает через 3+ секунды (вместо ожидаемых 1.4 сек).
+
+**Целевые метрики (M4 Max 36 GB):**
+
+| Этап | p50 | p95 |
+|------|-----|-----|
+| Moshi STT (EN) | 800ms | 1.2s |
+| Qwen3-4B first token | 400ms | 800ms |
+| TTS synthesis (macOS say) | 200ms | 400ms |
+| **End-to-end (round-trip)** | **~1.4s** | **~2.4s** |
+
+**Диагностика:**
+1. Проверьте что LM Studio загрузил правильную модель (НЕ qwen3-30b):
+   ```bash
+   ps aux | grep lm-studio | grep -v grep
+   # Должна быть qwen3-4b (4 GB модель), не 30b (17 GB)
+   ```
+
+2. Проверьте Metal GPU utilization:
+   ```bash
+   # В Activity Monitor → перейдите в GPU tab
+   # Moshi должна использовать 70-90% GPU при обработке
+   # Если 0% → процесс работает на CPU (медленнее в 5-10 раз)
+   ```
+
+3. Проверьте swap pressure:
+   ```bash
+   vm_stat | grep "pageouts"
+   # Если растёт быстро → недостаточно RAM, модели вываливаются на диск
+   ```
+
+### Voice Gateway WebSocket disconnects
+
+**Симптом:** Krab Ear логирует `ws://127.0.0.1:8090 connection closed` или `WebSocket disconnected`.
+
+**Решение:**
+1. Проверьте что Voice Gateway запущена и healthcheck проходит:
+   ```bash
+   curl http://127.0.0.1:8090/health
+   # Ответ: {"status": "ok"}
+   ```
+
+2. Проверьте логи Voice Gateway:
+   ```bash
+   tail -f ~/.krab_ear_data/voice_gateway.log
+   # Ищите ошибки вроде "address already in use" или "connection reset"
+   ```
+
+3. Убедитесь что порт 8090 свободен:
+   ```bash
+   lsof -i :8090
+   # Должна быть только одна строка с uvicorn/python
+   # Если несколько процессов → `pkill -f "app.main"` и перезапустите
+   ```
+
+### TCC permission loops
+
+**Симптом:** Даже после grant Accessibility, Krab Ear снова запрашивает permission при каждом запуске.
+
+**Решение:** см. CLAUDE.md раздел "TCC permissions troubleshooting". Кратко:
+```bash
+pkill -9 -f KrabEarAgent
+tccutil reset All com.antigravity.krab-ear
+# User вручную добавляет Krab Ear.app в System Settings → Privacy → Accessibility
+```
+
+### Low free RAM prevents Moshi load
+
+**Симптом:** `MemoryError: Unable to allocate 2.3 GB for Moshi weights`.
+
+**Требования RAM:**
+- Moshi 7B: 5-6 GB (+ KV cache)
+- SeamlessStreaming 2.5B: 2-3 GB
+- Qwen3-4B (LM Studio): 4 GB
+- OS + другие приложения: 3-5 GB
+- **Итого:** нужно 12-15 GB свободно перед стартом
+
+**Решение:**
+```bash
+# Закройте браузеры, IDE и другие heavy приложения
+pkill -9 Chrome  # или Safari/Firefox
+pkill -9 Simulator
+
+# Перезагрузитесь если свободно <10 GB
+```
+
+---
+
+## Expected Latency Metrics (M4 Max 36GB)
+
+**Source:** benchmark matrix из PR #42 Phase 1 testing.
+
+| Метрика | Значение | Примечание |
+|---------|----------|-----------|
+| Moshi STT (EN) cold start | 30-60 sec | Первая загрузка модели |
+| Moshi STT (EN) warm start | <2 sec | LRU cache hit, subsequent turns |
+| Moshi STT (EN) latency | 160-200ms | Per audio frame (80 ms window) |
+| Qwen3-4B TTFT | 400ms | Time-to-first-token |
+| TTS synthesis (macOS say) | 200ms | Voice synthesis + playback |
+| **End-to-end (round-trip)** | **~1.4s** | **800+400+200 ms** |
+| Qwen3-4B throughput | 30-50 t/s | Tokens per second |
+| Full conversation (5 turn) | ~10-15 sec | 3-4 sec per cycle + TTS |
+
+---
+
 ## Troubleshooting — Решение проблем
 
 ### ❌ "moshi-mlx" не устанавливается / конфликт torch
