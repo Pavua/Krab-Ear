@@ -82,6 +82,7 @@ BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
 # Не трогаем числа с плавающей точкой: условие — час 0-23 и минуты 00-59.
 TIME_NORMALIZE_RE = re.compile(r"\b([01]?\d|2[0-3])\s*[.:]\s*([0-5]\d)(?!\d)")
 
+
 @functools.lru_cache(maxsize=256)
 def _compile_trailing_pattern(escaped_last: str) -> re.Pattern:
     """Кэширует компиляцию динамического паттерна «конец повторной фразы».
