@@ -452,6 +452,7 @@ extension HistoryPanelController {
         isSyncingTabs = false
         applyHistoryFocusMode(settings.historyFocusMode)
         applyHistoryTextDensity(settings.historyTextDensity)
+        syncVoiceAssistantControls()
         isSyncingSettings = false
         updateLoadMoreButtonCaption()
         refreshCaptureSourceHint()

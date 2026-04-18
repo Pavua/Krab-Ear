@@ -1740,6 +1740,18 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let audioPipelineSection = buildAudioPipelineSection()
         settingsBar.addArrangedSubview(audioPipelineSection)
 
+        // --- VOICE ASSISTANT SECTION (Phase 1.5) ---
+        let vaSection = buildVoiceAssistantSection()
+        vaHotkeyToggle.target = self
+        vaHotkeyToggle.action = #selector(onVAHotkeyToggle)
+        vaWakeWordToggle.target = self
+        vaWakeWordToggle.action = #selector(onVAWakeWordToggle)
+        vaEngineSelector.target = self
+        vaEngineSelector.action = #selector(onVAEngineChanged)
+        vaBrainSelector.target = self
+        vaBrainSelector.action = #selector(onVABrainChanged)
+        settingsBar.addArrangedSubview(vaSection)
+
         // --- DIAGNOSTICS & METRICS SECTION ---
         let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
         let diagCard = ThemeCardView()
