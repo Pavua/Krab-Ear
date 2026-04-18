@@ -47,6 +47,14 @@ class HistoryItem:
     # "disgusted"/"surprised"/None. Заполняется только когда SenseVoice adapter
     # активен и SENSEVOICE_EMOTION_TO_HISTORY=True. Для Whisper-записей = None.
     emotion: str | None = None
+    # WhisperX word-level timestamps (Phase 4.3).
+    # Каждый элемент: {"word": str, "start": float, "end": float, "confidence": float}.
+    # None для записей без WhisperX (обратная совместимость).
+    word_timestamps: list | None = None
+    # WhisperX diarization speaker turns (Phase 4.3).
+    # Каждый элемент: {"speaker": str, "start": float, "end": float}.
+    # None для записей без WhisperX diarization.
+    speaker_turns: list | None = None
 
     @classmethod
     def create(
@@ -71,6 +79,8 @@ class HistoryItem:
         tags: list | None = None,
         favorite: bool = False,
         emotion: str | None = None,
+        word_timestamps: list | None = None,
+        speaker_turns: list | None = None,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -96,6 +106,8 @@ class HistoryItem:
             tags=list(tags) if tags else [],
             favorite=bool(favorite),
             emotion=(str(emotion).strip().lower() or None) if emotion else None,
+            word_timestamps=list(word_timestamps) if word_timestamps else None,
+            speaker_turns=list(speaker_turns) if speaker_turns else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +140,8 @@ class HistoryItem:
             tags=[str(t) for t in payload["tags"]] if isinstance(payload.get("tags"), list) else [],
             favorite=bool(payload.get("favorite", False)),
             emotion=(str(payload["emotion"]).strip().lower() or None) if payload.get("emotion") else None,
+            word_timestamps=payload.get("word_timestamps") if isinstance(payload.get("word_timestamps"), list) else None,
+            speaker_turns=payload.get("speaker_turns") if isinstance(payload.get("speaker_turns"), list) else None,
         )
 
 
