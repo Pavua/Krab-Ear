@@ -1825,5 +1825,59 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
             self.assertTrue(resp["ok"])
 
 
+class SynthesizeSpeechIPCTestCase(unittest.TestCase):
+    """Тесты IPC-метода synthesize_speech через BackendService.handle_request."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def _req(self, params: dict) -> dict:
+        return self.service.handle_request(
+            {"id": "tts1", "method": "synthesize_speech", "params": params}
+        )
+
+    def test_synthesize_speech_empty_text_returns_error(self) -> None:
+        """synthesize_speech с пустым text -> result содержит ok=False или error."""
+        from unittest.mock import patch
+        with patch("backend.tts_service.settings") as mock_s:
+            mock_s.TTS_ENABLED = False
+            mock_s.TTS_FALLBACK_SAY = False
+            mock_s.TTS_SILERO_MODEL = "v4_ru"
+            mock_s.TTS_SILERO_VOICE = "baya"
+            mock_s.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+            mock_s.SAY_VOICE = ""
+            resp = self._req({"text": "", "language": "en"})
+        # IPC layer wraps handler result in {"ok": True, "result": <handler_result>}
+        # The handler itself returns {"ok": False, "error": "..."} for empty text
+        result = resp.get("result", {})
+        self.assertFalse(result.get("ok", True))
+
+    def test_synthesize_speech_method_registered(self) -> None:
+        """Метод synthesize_speech должен быть зарегистрирован в handlers."""
+        from unittest.mock import patch
+        with patch("backend.tts_service.settings") as mock_s:
+            mock_s.TTS_ENABLED = False
+            mock_s.TTS_FALLBACK_SAY = False
+            mock_s.TTS_SILERO_MODEL = "v4_ru"
+            mock_s.TTS_SILERO_VOICE = "baya"
+            mock_s.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+            mock_s.SAY_VOICE = ""
+            resp = self.service.handle_request(
+                {"id": "tts2", "method": "synthesize_speech", "params": {"text": "hi"}}
+            )
+        # Не должен вернуть unknown_method
+        if not resp.get("ok", True):
+            err = resp.get("error", {})
+            self.assertNotEqual(err.get("code"), "unknown_method")
+
+
 if __name__ == "__main__":
     unittest.main()
