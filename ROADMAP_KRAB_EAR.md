@@ -60,6 +60,15 @@
 - [x] Ограничение по размеру/длительности аудио.
 - [x] Безопасное хранение временных файлов и автоочистка.
 
+### EAR-5 (P1): STT Adapters (Advanced Speech Recognition)
+
+- [x] SenseVoice (RU + emotion detection) — Krab-Ear #23
+- [x] Parakeet-TDT-1.1B (EN OpenASR leader) — Krab-Ear #26
+- [x] WhisperX (word-level timestamps + diarization) — Krab-Ear #30
+- [x] Voxtral Mini 4B Realtime (STT + reasoning, Apache 2.0) — Krab-Ear #37
+
+**Статус:** Завершено 2026-04-18. Все 4 адаптера интегрированы и протестированы.
+
 ## KPI
 
 - STT success rate >= 98% на валидных аудио.
