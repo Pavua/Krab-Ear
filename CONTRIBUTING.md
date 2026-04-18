@@ -23,6 +23,16 @@ Or just on staged files:
 pre-commit run
 ```
 
+## Testing
+
+Run the full test suite from the repo root:
+
+```bash
+PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/ -v
+```
+
+**pytest tmp_path disk usage:** `pytest.ini` configures `tmp_path_retention_policy = failed` and `tmp_path_retention_count = 1`, so pytest keeps temp files only from the last failed run and discards everything else. Without this, pytest accumulates audio files (wav, m4a) across runs and the directory `/private/var/folders/.../pytest-of-<user>/` can grow to 40+ GB. If you need longer retention for debugging a specific test, pass `--basetemp=/tmp/my-debug-run` to override.
+
 ## Development
 
 See `CLAUDE.md` for project architecture, testing, and build instructions.
