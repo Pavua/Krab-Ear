@@ -255,7 +255,11 @@ make lint          # Flake8 on Python backend
 - **Service extraction pattern**: each extracted service takes `store` + specific collaborators in its constructor; handler methods named `handle_*`; `BackendService` imports the service and delegates matching IPC methods to it.
 - **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`.
 - **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
-- **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`). When set to `json`, all backend log output uses structured JSON lines for easier parsing/filtering.
+- **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`).
+  - **When using `json`**: handlers use `JsonFormatter` from `backend.log_config` (or wherever defined).
+  - **Preferred logging pattern**: `logger.info("message", extra={"key": value, ...})` — structured context required for new code.
+  - **WARNING (as of 2026-04-18)**: `JsonFormatter` does NOT automatically merge `extra={}` fields into output — pending fix. Use top-level message only for now until blocker is closed; see followup task.
+  - **Don't use `print()`** in production code. Exceptions: doctest examples, CLI scripts.
 - **GitHub Actions CI**: `.github/workflows/ci.yml` runs Python tests (pytest) and Swift build on every push/PR.
 - **Profile presets**: four built-in presets (`default`, `meeting`, `translation`, `call_recording`) applied via `apply_profile_preset` IPC method. `list_profile_presets` returns their names/descriptions.
 - **Diagnostics**: `get_diagnostics` IPC method returns a structured dict with sections: `system`, `stt`, `llm`, `history`, `settings_cache`. Use for debug panels and status reporting.

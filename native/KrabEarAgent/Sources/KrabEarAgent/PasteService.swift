@@ -18,10 +18,10 @@ struct PasteAttemptResult {
 /// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
 final class PasteService {
     // macOS virtual key codes for modifier keys
-    private let rightOptionKeyCode: CGKeyCode = 61
-    private let leftOptionKeyCode: CGKeyCode = 58
-    private let leftCommandKeyCode: CGKeyCode = 55
-    private let rightCommandKeyCode: CGKeyCode = 54
+    private let rightOptionKeyCode: CGKeyCode = Keycode.rightOption.rawValue
+    private let leftOptionKeyCode: CGKeyCode = Keycode.leftOption.rawValue
+    private let leftCommandKeyCode: CGKeyCode = Keycode.leftCommand.rawValue
+    private let rightCommandKeyCode: CGKeyCode = Keycode.rightCommand.rawValue
     /// Max time to wait for modifier keys release before giving up on paste (ms)
     private let modifierReleaseTimeoutMs = 2_500
     /// Delay after modifier release before pasting, lets the OS finish key-up processing (µs)
@@ -138,15 +138,16 @@ final class PasteService {
     }
 
     private func makeCommandVEvents(source: CGEventSource) -> (CGEvent, CGEvent)? {
+        let vKeyCode = Keycode.v.rawValue
         guard
             let keyDown = CGEvent(
                 keyboardEventSource: source,
-                virtualKey: 9, // keyCode 9 = V
+                virtualKey: vKeyCode,
                 keyDown: true
             ),
             let keyUp = CGEvent(
                 keyboardEventSource: source,
-                virtualKey: 9,
+                virtualKey: vKeyCode,
                 keyDown: false
             )
         else {

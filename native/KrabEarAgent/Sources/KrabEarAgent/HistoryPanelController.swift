@@ -1656,7 +1656,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             }
 
             // Escape — закрыть панель
-            if event.keyCode == 53 {
+            if event.keyCode == Keycode.escape.rawValue {
                 self.window?.orderOut(nil)
                 return nil
             }
