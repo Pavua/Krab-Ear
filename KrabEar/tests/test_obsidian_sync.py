@@ -457,5 +457,252 @@ class TestSyncResultDataclass(unittest.TestCase):
         self.assertIn("updated_files", d)
 
 
+class TestObsidianSyncEdgeCases(unittest.TestCase):
+    """Тесты граничных случаев: пустая история, отсутствие vault, повреждённый state."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault_dir.mkdir()
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr.configure(str(self.vault_dir))
+
+    def test_sync_empty_history_returns_zero(self) -> None:
+        """sync([]) без items возвращает SyncResult с нулевыми счётчиками и без ошибок."""
+        result = self.mgr.sync([])
+        self.assertEqual(result.synced_count, 0)
+        self.assertEqual(result.skipped_count, 0)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.new_files, [])
+        self.assertEqual(result.updated_files, [])
+
+    def test_sync_empty_history_updates_last_sync_ts(self) -> None:
+        """Даже sync([]) обновляет last_sync_ts в состоянии."""
+        self.mgr.sync([])
+        status = self.mgr.get_sync_status()
+        self.assertIsNotNone(status["last_sync_ts"])
+
+    def test_sync_creates_target_dir_if_missing(self) -> None:
+        """sync() создаёт папку vault/folder если она была удалена после configure()."""
+        target_dir = self.vault_dir / "Transcriptions"
+        # Удаляем папку после configure()
+        import shutil
+        if target_dir.exists():
+            shutil.rmtree(str(target_dir))
+        self.assertFalse(target_dir.exists())
+
+        result = self.mgr.sync([_make_item()])
+        self.assertEqual(result.synced_count, 1)
+        self.assertTrue(target_dir.exists())
+
+    def test_corrupted_state_file_graceful_recovery(self) -> None:
+        """Повреждённый obsidian_sync.json не ломает инициализацию — менеджер стартует без state."""
+        state_path = self.data_dir / "obsidian_sync.json"
+        state_path.write_text("{ NOT VALID JSON !!!", encoding="utf-8")
+
+        # Новый экземпляр должен подняться без исключения
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        # Состояние не загружено — vault не настроен
+        status = mgr2.get_sync_status()
+        self.assertFalse(status["configured"])
+
+    def test_corrupted_state_file_can_be_reconfigured(self) -> None:
+        """После повреждённого state-файла можно вызвать configure() и sync() успешно."""
+        state_path = self.data_dir / "obsidian_sync.json"
+        state_path.write_text("null", encoding="utf-8")
+
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2.configure(str(self.vault_dir))
+        result = mgr2.sync([_make_item()])
+        self.assertEqual(result.synced_count, 1)
+        self.assertEqual(result.errors, [])
+
+    def test_missing_vault_dir_after_configure_raises(self) -> None:
+        """configure() на несуществующей директории вызывает ValueError."""
+        nonexistent = Path(self.tmp.name) / "does_not_exist"
+        with self.assertRaises(ValueError):
+            self.mgr.configure(str(nonexistent))
+
+    def test_deleted_item_md_file_remains(self) -> None:
+        """Удаление item из списка не удаляет соответствующий .md файл из vault.
+
+        ObsidianSyncManager не реализует tombstone-удаление:
+        файлы остаются в vault после исчезновения item из истории.
+        """
+        item = _make_item(item_id="keep-me-00-0000-0000-000000000001")
+        result1 = self.mgr.sync([item])
+        self.assertEqual(result1.synced_count, 1)
+        created_path = Path(result1.new_files[0])
+        self.assertTrue(created_path.exists())
+
+        # Sync без этого item — файл должен остаться
+        result2 = self.mgr.sync([], force=True)
+        self.assertEqual(result2.synced_count, 0)
+        self.assertTrue(created_path.exists(), "Файл должен остаться — tombstone не реализован")
+
+
+class TestObsidianSyncFilename(unittest.TestCase):
+    """Тесты формирования имени файла _make_filename()."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault_dir.mkdir()
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr.configure(str(self.vault_dir))
+
+    def test_filename_has_md_extension(self) -> None:
+        """Имя файла заканчивается на .md."""
+        item = _make_item()
+        result = self.mgr.sync([item], force=True)
+        files = result.new_files + result.updated_files
+        self.assertTrue(files[0].endswith(".md"))
+
+    def test_filename_contains_timestamp(self) -> None:
+        """Имя файла содержит дату из ts (YYYY-MM-DD формат)."""
+        ts = "2025-03-15T10:30:00+00:00"
+        item = _make_item(ts=ts, item_id="ts-test-00-0000-0000-000000000001")
+        result = self.mgr.sync([item], force=True)
+        files = result.new_files + result.updated_files
+        filename = Path(files[0]).name
+        self.assertIn("2025-03-15", filename)
+
+    def test_filename_contains_id_prefix(self) -> None:
+        """Имя файла содержит первые 8 символов item_id."""
+        item = _make_item(item_id="abcdef12-0000-0000-0000-000000000001")
+        result = self.mgr.sync([item], force=True)
+        files = result.new_files + result.updated_files
+        filename = Path(files[0]).name
+        self.assertIn("abcdef12", filename)
+
+    def test_filename_safe_for_filesystem(self) -> None:
+        """Имя файла не содержит запрещённых символов (/, \\, :, *, ?, <, >, |)."""
+        # Item с id содержащим спецсимволы — _make_filename должен их заменить
+        item = _make_item(
+            item_id="ab:cd/ef*",
+            ts="2025-06-01T12:00:00+00:00",
+        )
+        result = self.mgr.sync([item], force=True)
+        files = result.new_files + result.updated_files
+        filename = Path(files[0]).name
+        forbidden = set('/\\:*?<>|')
+        self.assertFalse(
+            forbidden & set(filename),
+            f"Имя файла содержит запрещённые символы: {filename!r}",
+        )
+
+    def test_filename_starts_with_transcript_prefix(self) -> None:
+        """Имя файла начинается с 'transcript_'."""
+        item = _make_item()
+        result = self.mgr.sync([item], force=True)
+        files = result.new_files + result.updated_files
+        filename = Path(files[0]).name
+        self.assertTrue(filename.startswith("transcript_"))
+
+
+class TestObsidianSyncYamlFrontmatter(unittest.TestCase):
+    """Тесты разбора YAML frontmatter из сгенерированных .md файлов."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.vault_dir = Path(self.tmp.name) / "vault"
+        self.vault_dir.mkdir()
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr.configure(str(self.vault_dir))
+
+    def _parse_frontmatter(self, content: str) -> dict:
+        """Вручную парсит YAML frontmatter без внешних зависимостей."""
+        lines = content.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}
+        end = None
+        for i, ln in enumerate(lines[1:], 1):
+            if ln.strip() == "---":
+                end = i
+                break
+        if end is None:
+            return {}
+        fm_lines = lines[1:end]
+        result: dict = {}
+        current_list_key: str | None = None
+        current_list: list = []
+        for ln in fm_lines:
+            if ln.startswith("  - "):
+                if current_list_key:
+                    current_list.append(ln[4:].strip())
+            elif ":" in ln and not ln.startswith(" "):
+                if current_list_key:
+                    result[current_list_key] = current_list
+                    current_list = []
+                    current_list_key = None
+                key, _, val = ln.partition(":")
+                key = key.strip()
+                val = val.strip()
+                if val == "":
+                    current_list_key = key
+                    current_list = []
+                else:
+                    result[key] = val
+        if current_list_key:
+            result[current_list_key] = current_list
+        return result
+
+    def test_frontmatter_title_field(self) -> None:
+        """Поле title содержит строку с датой записи."""
+        ts = "2025-04-10T09:00:00+00:00"
+        item = _make_item(ts=ts, item_id="fm-title-0-0000-0000-000000000001")
+        result = self.mgr.sync([item], force=True)
+        content = Path(result.new_files[0]).read_text(encoding="utf-8")
+        fm = self._parse_frontmatter(content)
+        self.assertIn("title", fm)
+        self.assertIn("2025-04-10", fm["title"])
+
+    def test_frontmatter_id_field(self) -> None:
+        """Поле id в frontmatter совпадает с item_id."""
+        item = _make_item(item_id="myid-001-0000-0000-000000000001")
+        result = self.mgr.sync([item], force=True)
+        content = Path(result.new_files[0]).read_text(encoding="utf-8")
+        fm = self._parse_frontmatter(content)
+        self.assertIn("id", fm)
+        self.assertEqual(fm["id"], "myid-001-0000-0000-000000000001")
+
+    def test_frontmatter_source_field(self) -> None:
+        """Поле source в frontmatter равно 'krab-ear'."""
+        item = _make_item()
+        result = self.mgr.sync([item], force=True)
+        content = Path(result.new_files[0]).read_text(encoding="utf-8")
+        fm = self._parse_frontmatter(content)
+        self.assertEqual(fm.get("source"), "krab-ear")
+
+    def test_frontmatter_tags_include_krab_ear(self) -> None:
+        """Список tags в frontmatter содержит 'krab-ear' и 'transcript'."""
+        item = _make_item()
+        result = self.mgr.sync([item], force=True)
+        content = Path(result.new_files[0]).read_text(encoding="utf-8")
+        fm = self._parse_frontmatter(content)
+        tags = fm.get("tags", [])
+        self.assertIn("krab-ear", tags)
+        self.assertIn("transcript", tags)
+
+    def test_frontmatter_confidence_format(self) -> None:
+        """Поле confidence форматируется с тремя знаками после запятой."""
+        item = _make_item(confidence=0.876543)
+        result = self.mgr.sync([item], force=True)
+        content = Path(result.new_files[0]).read_text(encoding="utf-8")
+        fm = self._parse_frontmatter(content)
+        self.assertIn("confidence", fm)
+        # Должно быть "0.877" (округление до 3 знаков)
+        self.assertEqual(fm["confidence"], "0.877")
+
+
 if __name__ == "__main__":
     unittest.main()
