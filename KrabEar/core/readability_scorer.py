@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 # ── Гласные для подсчёта слогов ─────────────────────────────────────────────
