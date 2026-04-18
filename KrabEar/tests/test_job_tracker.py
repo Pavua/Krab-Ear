@@ -84,14 +84,15 @@ class UpdateTestCase(unittest.TestCase):
         self.assertEqual(state["status"], "running")
 
     def test_update_elapsed_sec(self) -> None:
-        # TODO(contract): tighten spec — impl derives elapsed_sec from started_at/finished_at
-        # in get() (monotonic-clock based), so setting it via update() is transient.
-        # We verify the derived value is non-negative and grows over time.
+        # Contract: elapsed_sec is derived in get() from (finished_at if set else now) - started_at.
+        # It is non-negative and monotonically increases over time until finished_at is set.
         state0 = self.tracker.get(self.jid)
         self.assertGreaterEqual(state0["elapsed_sec"], 0.0)
+        self.assertIsInstance(state0["elapsed_sec"], float)
         time.sleep(0.01)
         state1 = self.tracker.get(self.jid)
-        self.assertGreaterEqual(state1["elapsed_sec"], state0["elapsed_sec"])
+        self.assertGreaterEqual(state1["elapsed_sec"], state0["elapsed_sec"],
+                                "elapsed_sec must monotonically increase until finished_at is set")
 
 
 class MarkDoneTestCase(unittest.TestCase):
@@ -112,9 +113,11 @@ class MarkDoneTestCase(unittest.TestCase):
         self.assertEqual(state["errors"], [])
         # Прошлый прогресс сохраняется
         self.assertEqual(state["file_index"], 2)
-        # TODO(contract): tighten spec — elapsed_sec derived from monotonic clock in get(),
-        # so we can only assert it is non-negative post-mark_done.
+        # Contract: after mark_done(), elapsed_sec = max(0, finished_at - started_at) where
+        # both are monotonic() timestamps. Result must be non-negative, finite, and in seconds (float).
         self.assertGreaterEqual(state["elapsed_sec"], 0.0)
+        self.assertIsInstance(state["elapsed_sec"], float)
+        self.assertLess(state["elapsed_sec"], 3600.0, "job should complete in << 1 hour")
 
     def test_mark_done_with_errors(self) -> None:
         self.tracker.mark_done(self.jid, items=[{"text": "ok"}], errors=["bad.m4a: timeout"])
@@ -155,13 +158,16 @@ class CancelTestCase(unittest.TestCase):
         self.assertTrue(result)
 
     def test_cancel_flag_sets_cancelled_status(self) -> None:
-        # TODO(contract): tighten spec — impl only sets cancel_requested flag; реальная
-        # смена status на "cancelled" происходит в воркере между файлами (см. спецификацию
-        # "after current file completes"). Проверяем именно контрактное поведение флага.
+        # Contract: cancel(job_id) sets cancel_requested=True without changing status.
+        # The worker observes this flag and changes status to "cancelled" between file processing.
+        # Only the cancel_requested flag is a synchronous contract of this method.
         jid = self.tracker.create_job(1)
         self.tracker.cancel(jid)
         state = self.tracker.get(jid)
-        self.assertTrue(state["cancel_requested"])
+        self.assertIsNotNone(state)
+        self.assertTrue(state["cancel_requested"], "cancel() must set cancel_requested=True")
+        self.assertIsInstance(state["cancel_requested"], bool)
+        self.assertEqual(state["status"], "queued", "cancel() does not immediately change status")
 
     def test_cancel_missing_returns_false(self) -> None:
         result = self.tracker.cancel("j-nope")
@@ -177,14 +183,12 @@ class PruneTestCase(unittest.TestCase):
     def test_prune_removes_old_done(self) -> None:
         jid = self.tracker.create_job(1)
         self.tracker.mark_done(jid, items=[{"text": "x"}], errors=[])
-        # Искусственно «состариваем» finished_at, чтобы prune посчитал запись старой.
-        # TODO(contract): tighten spec — impl stores finished_at as time.monotonic(),
-        # so we must use monotonic() (не time.time()) при искусственной смене.
+        # Contract: prune() uses time.monotonic() for age calculation, not wall-clock time.
+        # Fake-age the finished_at to trigger pruning by setting it to monotonic() - 3600.
         old_ts = time.monotonic() - 3600
-        # Обновляем напрямую через update (поддерживает любые поля dict).
         self.tracker.update(jid, finished_at=old_ts)
         self.tracker.prune(max_age_sec=1)
-        self.assertIsNone(self.tracker.get(jid))
+        self.assertIsNone(self.tracker.get(jid), "prune() must remove done jobs older than max_age_sec")
 
     def test_prune_preserves_running(self) -> None:
         jid = self.tracker.create_job(1)
