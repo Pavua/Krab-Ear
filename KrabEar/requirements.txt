@@ -1,5 +1,5 @@
 mlx-whisper
-pyannote.audio
+pyannote.audio==4.0.4  # pinned: MPS working, Tahoe 26.5 compat verified 2026-04-18 (AF audit)
 numpy
 sounddevice
 requests
