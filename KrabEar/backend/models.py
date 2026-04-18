@@ -55,6 +55,11 @@ class HistoryItem:
     # Каждый элемент: {"speaker": str, "start": float, "end": float}.
     # None для записей без WhisperX diarization.
     speaker_turns: list | None = None
+    # Voxtral reasoning output (Phase 4.4).
+    # Заполняется когда VOXTRAL_ENABLED=True + VOXTRAL_REASONING_ENABLED=True.
+    # Содержит summary или Q&A ответ от Mistral Voxtral LM-decoder.
+    # None для всех остальных движков (обратная совместимость).
+    reasoning: str | None = None
 
     @classmethod
     def create(
@@ -81,6 +86,7 @@ class HistoryItem:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
+        reasoning: str | None = None,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -108,6 +114,7 @@ class HistoryItem:
             emotion=(str(emotion).strip().lower() or None) if emotion else None,
             word_timestamps=list(word_timestamps) if word_timestamps else None,
             speaker_turns=list(speaker_turns) if speaker_turns else None,
+            reasoning=(str(reasoning).strip() or None) if reasoning else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,6 +149,7 @@ class HistoryItem:
             emotion=(str(payload["emotion"]).strip().lower() or None) if payload.get("emotion") else None,
             word_timestamps=payload.get("word_timestamps") if isinstance(payload.get("word_timestamps"), list) else None,
             speaker_turns=payload.get("speaker_turns") if isinstance(payload.get("speaker_turns"), list) else None,
+            reasoning=(str(payload["reasoning"]).strip() or None) if payload.get("reasoning") else None,
         )
 
 
