@@ -1062,6 +1062,8 @@ class BackendService:
             llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
             diarization=diarization_data,
             emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
         )
         self._clipboard_history.append({
             "text": final_text,
@@ -1987,6 +1989,18 @@ class BackendService:
                         transcribe_payload.get("emotion")
                         if isinstance(transcribe_payload, dict)
                         and isinstance(transcribe_payload.get("emotion"), str)
+                        else None
+                    ),
+                    word_timestamps=(
+                        transcribe_payload.get("word_timestamps")
+                        if isinstance(transcribe_payload, dict)
+                        and isinstance(transcribe_payload.get("word_timestamps"), list)
+                        else None
+                    ),
+                    speaker_turns=(
+                        transcribe_payload.get("speaker_turns")
+                        if isinstance(transcribe_payload, dict)
+                        and isinstance(transcribe_payload.get("speaker_turns"), list)
                         else None
                     ),
                 )

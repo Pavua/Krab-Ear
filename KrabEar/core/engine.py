@@ -66,6 +66,14 @@ try:
 except Exception:
     _nemo_asr = None  # type: ignore[assignment]
 
+# WhisperX (m-bain/whisperX) — community wrapper над Whisper с word-level timestamps
+# и native pyannote diarization. Opt-in через WHISPERX_ENABLED.
+# Lazy: если whisperx не установлен — fallback chain продолжается на whisper'е.
+try:
+    import whisperx as _whisperx  # type: ignore
+except Exception:
+    _whisperx = None  # type: ignore[assignment]
+
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
@@ -177,6 +185,12 @@ class AudioEngine:
         # отключается через _parakeet_load_error, whisper chain продолжает жить.
         self._parakeet_model = None  # type: ignore[var-annotated]
         self._parakeet_load_error: str | None = None
+
+        # WhisperX adapter state (Phase 4.3, lazy-loaded).
+        # Если whisperx не установлен или модель не грузится — адаптер навсегда
+        # отключается через _whisperx_load_error, chain продолжает жить.
+        self._whisperx_model = None  # type: ignore[var-annotated]
+        self._whisperx_load_error: str | None = None
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -490,6 +504,7 @@ class AudioEngine:
 
     _SENSEVOICE_MARKER: str = "sensevoice:adapter"
     _PARAKEET_MARKER: str = "parakeet:adapter"
+    _WHISPERX_MARKER: str = "whisperx:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -527,6 +542,20 @@ class AudioEngine:
             else:
                 candidates = [self._SENSEVOICE_MARKER]
 
+        # --- WhisperX adapter: additive попытка ПОСЛЕ SenseVoice, перед max candidates ---
+        # Chain order (когда всё включено):
+        #   balanced → SenseVoice → WhisperX → max-candidates whisper-large-v3
+        # Маркер вставляется на позицию 2 (после balanced и SenseVoice marker если они есть).
+        # При сбое маркер помечается как недоступный, chain продолжается на whisper'ах.
+        if settings.WHISPERX_ENABLED and self._WHISPERX_MARKER not in self._unavailable_models:
+            # Находим позицию вставки: сразу за последним adapter-маркером или после balanced.
+            insert_pos = 1
+            for i, c in enumerate(candidates):
+                if c == self._SENSEVOICE_MARKER:
+                    insert_pos = i + 1
+                    break
+            candidates = candidates[:insert_pos] + [self._WHISPERX_MARKER] + candidates[insert_pos:]
+
         for model_name in candidates:
             # Parakeet adapter — отдельная ветка (не whisper).
             if model_name == self._PARAKEET_MARKER:
@@ -553,6 +582,20 @@ class AudioEngine:
                     logger.warning("SenseVoice adapter не сработал: %s — продолжаю whisper chain", exc)
                     self._unavailable_models.add(self._SENSEVOICE_MARKER)
                     continue
+
+            # WhisperX adapter — отдельная ветка (word timestamps + diarization).
+            if model_name == self._WHISPERX_MARKER:
+                try:
+                    span_name = f"stt_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"
+                    with _profiler.start_span(span_name):
+                        wx_result = self._transcribe_whisperx(audio_data, language=language)
+                    wx_result["model_used"] = settings.WHISPERX_MODEL
+                    return wx_result
+                except Exception as exc:
+                    logger.warning("WhisperX adapter не сработал: %s — продолжаю whisper chain", exc)
+                    self._unavailable_models.add(self._WHISPERX_MARKER)
+                    continue
+
             if model_name in self._unavailable_models:
                 continue
 
@@ -851,6 +894,199 @@ class AudioEngine:
             "engine": "parakeet",
             "language": "en",
             "segments": [],
+        }
+
+    # --- WhisperX adapter (Phase 4.3) ---
+    # whisperx от m-bain: whisper-large-v3 + forced phoneme alignment (word timestamps)
+    # + pyannote diarization в одном pipeline'е. Использует torch (не MLX), поэтому
+    # работает на mps/cpu; MPS ускоряет inference на Apple Silicon но не так сильно как MLX.
+    # Размер: whisper-large-v3 ~3 GB + alignment model ~200 MB + pyannote ~1.5 GB.
+    # Итого: ~4.5-5 GB RAM при полном pipeline (WHISPERX_DIARIZATION=True).
+    # При WHISPERX_DIARIZATION=False: ~3.2 GB (только whisper + aligner).
+
+    def _load_whisperx_model(self) -> Any:
+        """Ленивая загрузка WhisperX pipeline. Raises если whisperx недоступен."""
+        # Используем getattr для совместимости с тестами, которые создают движок через
+        # AudioEngine.__new__() без вызова __init__ (паттерн из SenseVoice/Parakeet тестов).
+        if getattr(self, "_whisperx_model", None) is not None:
+            return self._whisperx_model
+        if getattr(self, "_whisperx_load_error", None):
+            raise RuntimeError(self._whisperx_load_error)
+        if _whisperx is None:
+            self._whisperx_load_error = (
+                "whisperx не установлен — WhisperX adapter недоступен "
+                "(установите: pip install whisperx)"
+            )
+            raise RuntimeError(self._whisperx_load_error)
+
+        device = settings.WHISPERX_DEVICE
+        # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
+        # Если запрошен mps но недоступен — безопасный fallback на cpu.
+        if device == "mps" and torch is not None:
+            try:
+                import torch as _torch
+                if not _torch.backends.mps.is_available():
+                    logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
+                    device = "cpu"
+            except Exception:
+                device = "cpu"
+        elif torch is None:
+            device = "cpu"
+
+        # compute_type: на cpu/mps рекомендуется "float32" или "int8".
+        # "float16" работает только на CUDA; на MPS может вызвать ошибку.
+        compute_type = "float32" if device in ("cpu", "mps") else "float16"
+
+        with _profiler.start_span(f"model_load_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"):
+            try:
+                self._whisperx_model = _whisperx.load_model(
+                    settings.WHISPERX_MODEL,
+                    device=device,
+                    compute_type=compute_type,
+                )
+            except Exception as exc:
+                self._whisperx_load_error = f"Не удалось загрузить WhisperX: {exc}"
+                raise RuntimeError(self._whisperx_load_error)
+        logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
+        return self._whisperx_model
+
+    def _transcribe_whisperx(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+        """Транскрибация через WhisperX с word-level timestamps и diarization.
+
+        Args:
+            audio_data: путь к wav-файлу (str/Path) или numpy.ndarray (16kHz mono float32).
+            language: ISO 639-1 код языка ("ru", "es", "en") или None для авто.
+
+        Returns:
+            dict с ключами:
+              - text: полный транскрипт (конкатенация всех сегментов)
+              - engine: "whisperx"
+              - language: детектированный язык (ISO 639-1) или None
+              - segments: list[dict] whisper-сегменты
+              - word_timestamps: list[{word, start, end, confidence}] — если WHISPERX_WORD_TIMESTAMPS=True
+              - speaker_turns: list[{speaker, start, end}] — если WHISPERX_DIARIZATION=True
+        """
+        import numpy as _np
+
+        model = self._load_whisperx_model()
+
+        # whisperx.transcribe принимает numpy float32 16kHz mono.
+        # Если передан путь к файлу — загружаем через whisperx.load_audio.
+        if isinstance(audio_data, (str, Path)):
+            audio_path = str(Path(audio_data).expanduser().resolve())
+            audio_array = _whisperx.load_audio(audio_path)
+        elif isinstance(audio_data, bytes):
+            # bytes (из AudioRecorder) — конвертируем через numpy.
+            arr = _np.frombuffer(audio_data, dtype=_np.int16).astype(_np.float32) / 32768.0
+            audio_array = arr
+        else:
+            # Уже numpy array
+            audio_array = audio_data
+
+        # Транскрибация (batch_size=16 — безопасный дефолт для 36 GB RAM).
+        lang_param = language if language else None
+        result = model.transcribe(audio_array, batch_size=16, language=lang_param)
+
+        detected_lang = result.get("language") or language
+
+        # --- Word-level timestamps (phoneme alignment) ---
+        word_timestamps = None
+        if settings.WHISPERX_WORD_TIMESTAMPS and result.get("segments"):
+            try:
+                align_model, metadata = _whisperx.load_align_model(
+                    language_code=detected_lang or "en",
+                    device=settings.WHISPERX_DEVICE,
+                )
+                aligned = _whisperx.align(
+                    result["segments"],
+                    align_model,
+                    metadata,
+                    audio_array,
+                    settings.WHISPERX_DEVICE,
+                    return_char_alignments=False,
+                )
+                raw_words = []
+                for seg in aligned.get("segments", []):
+                    for w in seg.get("words", []):
+                        raw_words.append({
+                            "word": str(w.get("word", "")).strip(),
+                            "start": float(w.get("start", 0.0)),
+                            "end": float(w.get("end", 0.0)),
+                            "confidence": float(w.get("score", 0.0)),
+                        })
+                word_timestamps = raw_words if raw_words else None
+            except Exception as exc:
+                logger.warning("WhisperX word alignment не удался: %s — продолжаю без timestamps", exc)
+
+        # --- Diarization через pyannote внутри whisperx ---
+        speaker_turns = None
+        if settings.WHISPERX_DIARIZATION and settings.HF_TOKEN:
+            try:
+                diarize_model = _whisperx.DiarizationPipeline(
+                    use_auth_token=settings.HF_TOKEN,
+                    device=settings.WHISPERX_DEVICE,
+                )
+                diarize_segments = diarize_model(audio_array)
+                # Если есть выровненные сегменты — присваиваем спикеров словам
+                if word_timestamps is not None and aligned is not None:
+                    aligned_with_speakers = _whisperx.assign_word_speakers(
+                        diarize_segments, aligned
+                    )
+                    # Перестраиваем word_timestamps со speaker полем
+                    raw_words_spk = []
+                    for seg in aligned_with_speakers.get("segments", []):
+                        for w in seg.get("words", []):
+                            raw_words_spk.append({
+                                "word": str(w.get("word", "")).strip(),
+                                "start": float(w.get("start", 0.0)),
+                                "end": float(w.get("end", 0.0)),
+                                "confidence": float(w.get("score", 0.0)),
+                            })
+                    if raw_words_spk:
+                        word_timestamps = raw_words_spk
+                # Конвертируем diarize_segments в speaker_turns список
+                turns: list[dict[str, Any]] = []
+                if hasattr(diarize_segments, "itertracks"):
+                    for turn, _, speaker in diarize_segments.itertracks(yield_label=True):
+                        turns.append({
+                            "speaker": str(speaker),
+                            "start": float(turn.start),
+                            "end": float(turn.end),
+                        })
+                elif hasattr(diarize_segments, "iterrows"):
+                    for _, row in diarize_segments.iterrows():
+                        turns.append({
+                            "speaker": str(row.get("speaker", "")),
+                            "start": float(row.get("start", 0.0)),
+                            "end": float(row.get("end", 0.0)),
+                        })
+                speaker_turns = turns if turns else None
+            except Exception as exc:
+                logger.warning("WhisperX diarization не удалась: %s — продолжаю без спикеров", exc)
+        elif settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
+            logger.warning(
+                "WhisperX: WHISPERX_DIARIZATION=True, но HF_TOKEN не задан — "
+                "diarization пропущена. Задайте KRAB_EAR_HF_TOKEN=<ваш_токен>."
+            )
+
+        # Собираем текст из сегментов
+        segments = result.get("segments", [])
+        full_text = " ".join(str(seg.get("text", "")).strip() for seg in segments).strip()
+
+        logger.info(
+            "WhisperX готово: %d chars, %d слов, %d спикер-отрезков, lang=%s",
+            len(full_text),
+            len(word_timestamps) if word_timestamps else 0,
+            len(speaker_turns) if speaker_turns else 0,
+            detected_lang or "—",
+        )
+        return {
+            "text": full_text,
+            "engine": "whisperx",
+            "language": detected_lang,
+            "segments": segments,
+            "word_timestamps": word_timestamps,
+            "speaker_turns": speaker_turns,
         }
 
     def _maybe_run_diarization(

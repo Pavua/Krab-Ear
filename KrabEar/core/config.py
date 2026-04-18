@@ -144,6 +144,30 @@ class Settings(BaseSettings):
     PARAKEET_ENABLED: bool = False
     PARAKEET_MODEL: str = "nvidia/parakeet-tdt-1.1b"
 
+    # --- WhisperX adapter (Phase 4.3) ---
+    # whisperx — Community wrapper над whisper-large-v3 от m-bain.
+    # Добавляет word-level timestamps (точная атрибуция слов по времени)
+    # и native diarization через pyannote (заменяет наш прямой pyannote путь).
+    # Opt-in: по умолчанию выключено — существующий whisper chain не меняется.
+    # При WHISPERX_ENABLED=True адаптер добавляется в fallback chain ПОСЛЕ
+    # SenseVoice и ПЕРЕД max-candidates whisper-large-v3.
+    # Requires: pip install whisperx
+    # Device: "mps" на Apple Silicon (автодетект), "cpu" как fallback.
+    # Примечание: whisperx на MPS запускает torch (не MLX), поэтому потребляет
+    # ~3-4 GB RAM; word alignment требует отдельную модель (~200 MB).
+    WHISPERX_ENABLED: bool = False
+    WHISPERX_MODEL: str = "large-v3"
+    # Device для инференса: "mps" | "cpu" | "cuda".
+    # "mps" — использует Apple Neural Engine / GPU через torch MPS backend.
+    # Если MPS недоступен (CI/Linux) — адаптер автоматически падает на "cpu".
+    WHISPERX_DEVICE: str = "mps"
+    # Включить diarization через pyannote внутри whisperx.
+    # Требует HF_TOKEN (pyannote/speaker-diarization-3.1 — gated model).
+    WHISPERX_DIARIZATION: bool = True
+    # Включить word-level timestamps (phoneme alignment).
+    # При True: результат содержит word_timestamps в HistoryItem.
+    WHISPERX_WORD_TIMESTAMPS: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
