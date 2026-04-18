@@ -168,6 +168,20 @@ class Settings(BaseSettings):
     # При True: результат содержит word_timestamps в HistoryItem.
     WHISPERX_WORD_TIMESTAMPS: bool = True
 
+    # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
+    # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
+    # При TTS_ENABLED=True включается Silero (RU primary) + Kokoro (EN fallback) цепочка.
+    # Требует: pip install silero (или torch + torchaudio) для RU; pip install kokoro для EN.
+    # Если нужные библиотеки не установлены — TTSService мягко падает на macOS `say`.
+    TTS_ENABLED: bool = False
+    # Silero TTS: модель русского языка. Доступные голоса: aidar, baya, kseniya, xenia, eugene.
+    TTS_SILERO_MODEL: str = "v4_ru"
+    TTS_SILERO_VOICE: str = "baya"
+    # Kokoro-82M: EN fallback. Apache 2.0, ~350 MB, 54 голоса, 8 языков (без RU).
+    TTS_KOKORO_MODEL: str = "hexgrad/Kokoro-82M"
+    # При True: если Silero/Kokoro недоступны — fallback на macOS `say` (последний резерв).
+    TTS_FALLBACK_SAY: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

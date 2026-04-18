@@ -89,6 +89,7 @@ from backend.recording_merger import RecordingMerger
 from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
+from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
 from backend.ipc_throttle import IPCThrottle
 from backend.export_scheduler import ExportScheduler
@@ -185,6 +186,7 @@ class BackendService:
             reset_preview_fn=self._reset_preview_state,
             start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
         )
+        self._tts = TTSService()
         self._translation = TranslationService(
             translator=self.translator,
             store=self.store,
@@ -627,6 +629,8 @@ class BackendService:
             # --- Voice Assistant wake word config (PR 1.5) ---
             "get_wake_word_config": self._handle_get_wake_word_config,  # конфигурация wake word: enabled, access_key_present, ppn_present
             "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
+            # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
+            "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
         }
 
         handler = handlers.get(method)
