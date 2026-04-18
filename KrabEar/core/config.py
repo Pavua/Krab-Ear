@@ -127,6 +127,16 @@ class Settings(BaseSettings):
     # HistoryItem.emotion и далее в NDJSON. Для аналитики настроений.
     SENSEVOICE_EMOTION_TO_HISTORY: bool = True
 
+    # --- Parakeet-TDT-1.1B adapter (Phase 4.2, NVIDIA NeMo) ---
+    # NVIDIA Parakeet-TDT-1.1B — топ OpenASR leaderboard (English). Превосходит
+    # whisper-large-v3 по WER на EN. Opt-in, по умолчанию выключено.
+    # Позиция в chain: МЕЖДУ balanced (whisper-turbo) и SenseVoice.
+    # Требует `pip install nemo-toolkit[asr]`. На Apple Silicon (M-серия) работает
+    # через PyTorch MPS (CPU fallback). CUDA не обязателен.
+    # Если nemo не установлен — адаптер мягко возвращает ошибку и chain продолжается.
+    PARAKEET_ENABLED: bool = False
+    PARAKEET_MODEL: str = "nvidia/parakeet-tdt-1.1b"
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""

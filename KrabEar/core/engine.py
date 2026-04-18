@@ -57,6 +57,15 @@ try:
 except Exception:
     _SenseVoiceAutoModel = None  # type: ignore[assignment]
 
+# Parakeet-TDT-1.1B (NVIDIA NeMo) — опциональный EN-оптимизированный STT движок.
+# Топ OpenASR leaderboard. Требует `pip install nemo-toolkit[asr]`.
+# На Apple Silicon работает через PyTorch MPS или CPU (CUDA не обязателен).
+# Если nemo не установлен — адаптер мягко возвращает ошибку и chain продолжается.
+try:
+    import nemo.collections.asr as _nemo_asr  # type: ignore
+except Exception:
+    _nemo_asr = None  # type: ignore[assignment]
+
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
@@ -162,6 +171,12 @@ class AudioEngine:
         # отключается через _sensevoice_load_error, whisper chain продолжает жить.
         self._sensevoice_model = None  # type: ignore[var-annotated]
         self._sensevoice_load_error: str | None = None
+
+        # Parakeet-TDT-1.1B adapter state (lazy-loaded NeMo ASR model).
+        # Если nemo не установлен или модель не грузится — адаптер навсегда
+        # отключается через _parakeet_load_error, whisper chain продолжает жить.
+        self._parakeet_model = None  # type: ignore[var-annotated]
+        self._parakeet_load_error: str | None = None
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -474,6 +489,7 @@ class AudioEngine:
             return self._transcribe_with_fallback_impl(audio_data, prompt, language)
 
     _SENSEVOICE_MARKER: str = "sensevoice:adapter"
+    _PARAKEET_MARKER: str = "parakeet:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -484,18 +500,47 @@ class AudioEngine:
 
         balanced_model = settings.MODEL_BALANCED
 
+        # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
+        # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
+        # EN-оптимизирован и пробуется перед SenseVoice (которая RU+эмоция).
+        # Гейт по settings.PARAKEET_ENABLED. При сбое маркер помечается недоступным.
+        if settings.PARAKEET_ENABLED and self._PARAKEET_MARKER not in self._unavailable_models:
+            if len(candidates) >= 1:
+                candidates = [candidates[0], self._PARAKEET_MARKER] + candidates[1:]
+            else:
+                candidates = [self._PARAKEET_MARKER]
+
         # --- SenseVoice adapter: additive попытка между balanced и max candidates ---
         # Вставляем маркер в цепочку кандидатов сразу после первой попытки (balanced
         # или первого из max_list). Гейт по settings.SENSEVOICE_ENABLED. При сбое
         # маркер помечается как недоступный, и chain продолжается на whisper'ах.
+        # Примечание: если оба Parakeet и SenseVoice включены, порядок будет:
+        # [balanced, PARAKEET_MARKER, SENSEVOICE_MARKER, ...остальные].
         if settings.SENSEVOICE_ENABLED and self._SENSEVOICE_MARKER not in self._unavailable_models:
             if len(candidates) >= 1:
-                # После первой (balanced/turbo) попытки, перед whisper-large-v3
-                candidates = [candidates[0], self._SENSEVOICE_MARKER] + candidates[1:]
+                # После первой (balanced/turbo) попытки и после Parakeet (если включён)
+                # Находим позицию сразу за всеми non-whisper маркерами в начале chain
+                insert_at = 1
+                while insert_at < len(candidates) and candidates[insert_at] == self._PARAKEET_MARKER:
+                    insert_at += 1
+                candidates = candidates[:insert_at] + [self._SENSEVOICE_MARKER] + candidates[insert_at:]
             else:
                 candidates = [self._SENSEVOICE_MARKER]
 
         for model_name in candidates:
+            # Parakeet adapter — отдельная ветка (не whisper).
+            if model_name == self._PARAKEET_MARKER:
+                try:
+                    span_name = f"stt_parakeet_{_short_model_name(settings.PARAKEET_MODEL)}"
+                    with _profiler.start_span(span_name):
+                        pk_result = self._transcribe_parakeet(audio_data, language=language)
+                    pk_result["model_used"] = settings.PARAKEET_MODEL
+                    return pk_result
+                except Exception as exc:
+                    logger.warning("Parakeet adapter не сработал: %s — продолжаю chain", exc)
+                    self._unavailable_models.add(self._PARAKEET_MARKER)
+                    continue
+
             # SenseVoice adapter — отдельная ветка (не whisper).
             if model_name == self._SENSEVOICE_MARKER:
                 try:
@@ -718,6 +763,93 @@ class AudioEngine:
             "engine": "sensevoice",
             "emotion": emotion,
             "language": detected_lang,
+            "segments": [],
+        }
+
+    # --- Parakeet-TDT-1.1B adapter (NVIDIA NeMo, Phase 4.2) ---
+    # NVIDIA Parakeet-TDT-1.1B — топ OpenASR leaderboard на English.
+    # WER лучше, чем whisper-large-v3 на EN бенчмарках (LibriSpeech, MLS, etc.).
+    # Размер: ~2.3 GB на диске, ~3-4 GB RAM при загрузке (float32 + attention heads).
+    # Работает через NeMo (PyTorch backend). На Apple Silicon: MPS или CPU.
+    # CUDA не обязателен — MPS работает нативно на M-серии.
+    # Ограничения: только English (EN-only модель), нет emotion/lang tags.
+    # NeMo управляет режимом инференса внутри — мы не вмешиваемся в это.
+
+    def _load_parakeet_model(self) -> Any:
+        """Ленивая загрузка Parakeet-TDT модели через NeMo. Raises если nemo недоступен."""
+        if self._parakeet_model is not None:
+            return self._parakeet_model
+        if self._parakeet_load_error:
+            raise RuntimeError(self._parakeet_load_error)
+        if _nemo_asr is None:
+            self._parakeet_load_error = (
+                "nemo не установлен — Parakeet adapter недоступен "
+                "(установите: pip install nemo-toolkit[asr])"
+            )
+            raise RuntimeError(self._parakeet_load_error)
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.PARAKEET_MODEL)}"):
+            try:
+                # NeMo from_pretrained скачивает веса с HuggingFace/NVIDIA NGC.
+                # Устройство определяется автоматически: MPS на Apple Silicon,
+                # CUDA на NVIDIA GPU, CPU fallback. NeMo сам управляет инференсом.
+                model = _nemo_asr.models.ASRModel.from_pretrained(
+                    model_name=settings.PARAKEET_MODEL,
+                )
+                self._parakeet_model = model
+            except Exception as exc:
+                self._parakeet_load_error = f"Не удалось загрузить Parakeet: {exc}"
+                raise RuntimeError(self._parakeet_load_error)
+            logger.info("Parakeet модель загружена: %s", settings.PARAKEET_MODEL)
+            return self._parakeet_model
+
+    def _transcribe_parakeet(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+        """Транскрибация через Parakeet-TDT-1.1B (NVIDIA NeMo).
+
+        Args:
+            audio_data: путь к wav-файлу (str/Path) или numpy.ndarray (16kHz mono float32).
+            language: ISO 639-1 код (только "en" поддерживается Parakeet; иные языки
+                      пробрасываются без фильтрации, но качество будет ниже).
+
+        Returns:
+            dict с ключами:
+              - text: транскрипт
+              - engine: "parakeet"
+              - language: "en" (Parakeet EN-only)
+              - segments: [] (NeMo transcribe не возвращает segment-level данных в базовом API)
+        """
+        import tempfile as _tempfile
+        import os as _os
+
+        model = self._load_parakeet_model()
+
+        # NeMo transcribe принимает list[str] с путями к wav-файлам.
+        # Если пришёл numpy array — сохраняем во временный файл.
+        tmp_path: str | None = None
+        try:
+            if isinstance(audio_data, (str, Path)):
+                audio_paths = [str(audio_data)]
+            else:
+                # numpy array: пишем в tmp wav (16kHz, mono, float32)
+                import soundfile as _sf
+                with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp_path = f.name
+                _sf.write(tmp_path, audio_data, samplerate=16000)
+                audio_paths = [tmp_path]
+
+            # NeMo transcribe возвращает list[str] (тексты).
+            outputs = model.transcribe(audio_paths)
+            if not outputs:
+                raise RuntimeError("Parakeet вернул пустой результат")
+            text = outputs[0] if isinstance(outputs[0], str) else str(outputs[0])
+        finally:
+            if tmp_path and _os.path.exists(tmp_path):
+                _os.unlink(tmp_path)
+
+        logger.info("Parakeet готово: %d chars", len(text))
+        return {
+            "text": text,
+            "engine": "parakeet",
+            "language": "en",
             "segments": [],
         }
 
