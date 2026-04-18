@@ -7,7 +7,6 @@
  - Второе нажатие в пределах окна → вызывает callback onDoubleTap.
  - Единственное нажатие (одиночный hold) не конфликтует с диктовкой:
    callback срабатывает только на ДВА press-события, не на hold.
- - keyCode 61 = Right Option. keyCode 58 = Left Option (не отслеживаем).
 
  Связи:
  - HotkeyManager.swift: создаёт экземпляр и передаёт onDoubleTap-callback.
@@ -97,8 +96,7 @@ final class HotkeyDoubleTapDetector {
 
     @MainActor
     private func handle(event: NSEvent) {
-        // keyCode 61 = Right Option
-        guard event.keyCode == 61 else { return }
+        guard event.keyCode == Keycode.rightOption.rawValue else { return }
 
         // Реагируем только на press (флаг появился — key down)
         let isDown = event.modifierFlags.contains(.option)

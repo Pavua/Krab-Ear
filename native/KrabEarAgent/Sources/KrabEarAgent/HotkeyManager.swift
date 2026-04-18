@@ -81,16 +81,15 @@ final class HotkeyManager {
     }
 
     private func handle(event: NSEvent) {
-        // keyCode 61 = Right Option, 58 = Left Option
         let isTargetKey: Bool
 
         switch variant {
         case .rightOption, .rightOptionToggle:
-            isTargetKey = (event.keyCode == 61)
+            isTargetKey = (event.keyCode == Keycode.rightOption.rawValue)
         case .leftOption:
-            isTargetKey = (event.keyCode == 58)
+            isTargetKey = (event.keyCode == Keycode.leftOption.rawValue)
         case .anyOption:
-            isTargetKey = (event.keyCode == 61 || event.keyCode == 58)
+            isTargetKey = (event.keyCode == Keycode.rightOption.rawValue || event.keyCode == Keycode.leftOption.rawValue)
         }
 
         guard isTargetKey else { return }
