@@ -624,6 +624,9 @@ class BackendService:
             # --- model cache ---
             "list_cached_models": self._model_cache_manager.handle_list_cached_models,  # список кэшированных ML-моделей
             "get_model_cache_info": self._model_cache_manager.handle_get_model_cache_info,  # информация о кэше конкретной модели
+            # --- Voice Assistant wake word config (PR 1.5) ---
+            "get_wake_word_config": self._handle_get_wake_word_config,  # конфигурация wake word: enabled, access_key_present, ppn_present
+            "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
         }
 
         handler = handlers.get(method)
@@ -3779,6 +3782,91 @@ class BackendService:
             dict: total_checked, duplicates_found, chars_saved, dedup_rate.
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
+
+    # ------------------------------------------------------------------ PR 1.5
+
+    def _handle_get_wake_word_config(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущую конфигурацию wake word.
+
+        Проверяет наличие:
+          - AccessKey (env var KRAB_EAR_PORCUPINE_ACCESS_KEY или файл в DATA_DIR)
+          - .ppn файла «Краб» в ~/Library/Application Support/KrabEar/
+
+        Returns:
+            dict с полями:
+              wake_word_enabled (bool): текущее значение из settings.
+              access_key_present (bool): AccessKey найден.
+              ppn_present (bool): .ppn файл найден.
+              ppn_path (str | None): путь к .ppn если найден.
+              engine_preference (str): "auto" | "moshi" | "seamless".
+              brain_preference (str): "auto" | "qwen3-30b" | "qwen3-4b".
+        """
+        import os
+        from pathlib import Path
+
+        current_settings = self._settings_svc.cached_settings()
+        wake_word_enabled = current_settings.get("wake_word_enabled", False)
+        engine_pref = current_settings.get("conversation_engine", "auto")
+        brain_pref = current_settings.get("conversation_brain", "auto")
+
+        # Проверить наличие AccessKey
+        access_key = (
+            os.environ.get("KRAB_EAR_PORCUPINE_ACCESS_KEY", "")
+            or settings.PORCUPINE_ACCESS_KEY
+        )
+        key_file_path = Path(settings.DATA_DIR) / "porcupine_access_key"
+        if not access_key and key_file_path.exists():
+            access_key = key_file_path.read_text(encoding="utf-8").strip()
+        access_key_present = bool(access_key)
+
+        # Проверить наличие .ppn файла
+        ppn_candidates = [
+            Path.home() / "Library" / "Application Support" / "KrabEar" / "Краб_ru_mac_v3_0_0.ppn",
+            Path.home() / "Library" / "Application Support" / "KrabEar" / "Krab_ru_mac.ppn",
+            Path(settings.DATA_DIR) / "Краб_ru_mac_v3_0_0.ppn",
+        ]
+        ppn_path = next((str(p) for p in ppn_candidates if p.exists()), None)
+
+        return {
+            "wake_word_enabled": wake_word_enabled,
+            "access_key_present": access_key_present,
+            "ppn_present": ppn_path is not None,
+            "ppn_path": ppn_path,
+            "engine_preference": engine_pref,
+            "brain_preference": brain_pref,
+        }
+
+    def _handle_set_wake_word_config(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обновить конфигурацию wake word и разговора с AI.
+
+        Параметры:
+            wake_word_enabled (bool, optional): включить/выключить wake word.
+            conversation_engine (str, optional): "auto" | "moshi" | "seamless".
+            conversation_brain (str, optional): "auto" | "qwen3-30b" | "qwen3-4b".
+
+        Returns:
+            dict: updated — количество обновлённых полей.
+        """
+        allowed_fields = {"wake_word_enabled", "conversation_engine", "conversation_brain"}
+        patch: dict[str, Any] = {}
+
+        if "wake_word_enabled" in params:
+            enabled = bool(params["wake_word_enabled"])
+            patch["wake_word_enabled"] = enabled
+
+        engine = params.get("conversation_engine")
+        if engine in ("auto", "moshi", "seamless"):
+            patch["conversation_engine"] = engine
+
+        brain = params.get("conversation_brain")
+        if brain in ("auto", "qwen3-30b", "qwen3-4b"):
+            patch["conversation_brain"] = brain
+
+        if patch:
+            # handle_set_settings принимает patch (только изменённые поля)
+            self._settings_svc.handle_set_settings(patch)
+
+        return {"updated": len(patch), "fields": list(patch.keys())}
 
 
 class IPCServer:

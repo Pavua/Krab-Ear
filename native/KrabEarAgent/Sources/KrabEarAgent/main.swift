@@ -115,6 +115,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private var historyPanel: HistoryPanelController?
     private var hotkeyManager: HotkeyManager?
     private var statusItem: NSStatusItem?
+    // PR 1.5: Wake word listener (Porcupine)
+    private var wakeWordListener: WakeWordListener?
     private var quickStartController: QuickStartWindowController?
     private var realtimeOverlayTimer: Timer?
 
@@ -215,8 +217,19 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleRecordToggleRequest()
             }
         })
+
+        // PR 1.5: Wire Right Option double-tap → Разговор с AI trigger
+        hotkeyManager?.onConversationDoubleTap = { [weak self] in
+            DispatchQueue.main.async {
+                self?.historyPanel?.triggerConversationStart()
+            }
+        }
+
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован")
+
+        // PR 1.5: Wake word listener (default OFF — toggle в Settings)
+        setupWakeWordListenerIfEnabled()
 
         applyMode(settings.mode, persist: false)
 
@@ -261,8 +274,61 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()
+        wakeWordListener?.stop()
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
+    }
+
+    // MARK: - PR 1.5: Wake Word Setup
+
+    /// Инициализирует и запускает WakeWordListener если включён в настройках.
+    /// Дефолт: выключен (приватность). Включается в Settings → Аудио-пайплайн.
+    func setupWakeWordListenerIfEnabled() {
+        let enabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
+        guard enabled else {
+            logger.info("Wake word listener: выключен (UserDefaults KrabEar_WakeWordEnabled=false)")
+            return
+        }
+
+        let listener = WakeWordListener { [weak self] in
+            DispatchQueue.main.async {
+                self?.historyPanel?.triggerConversationFromWakeWord()
+            }
+        }
+
+        let started = listener.start()
+        if started {
+            wakeWordListener = listener
+            logger.info("Wake word listener «Краб» запущен.")
+        } else {
+            logger.warn("Wake word listener не удалось запустить. Проверьте AccessKey и .ppn файл.")
+        }
+    }
+
+    /// Перезапустить WakeWordListener с новым значением enabled.
+    /// Вызывается из HistoryPanelController+Settings при изменении тогглера.
+    func applyWakeWordEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "KrabEar_WakeWordEnabled")
+        wakeWordListener?.stop()
+        wakeWordListener = nil
+
+        if enabled {
+            setupWakeWordListenerIfEnabled()
+        }
+    }
+
+    /// Включить/выключить Right Option double-tap hotkey для Разговора с AI.
+    func applyConversationHotkeyEnabled(_ enabled: Bool) {
+        if enabled {
+            hotkeyManager?.onConversationDoubleTap = { [weak self] in
+                DispatchQueue.main.async {
+                    self?.historyPanel?.triggerConversationStart()
+                }
+            }
+        } else {
+            hotkeyManager?.onConversationDoubleTap = nil
+        }
+        logger.info("Conversation hotkey double-tap: \(enabled ? "включён" : "выключен")")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

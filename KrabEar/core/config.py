@@ -113,6 +113,13 @@ class Settings(BaseSettings):
     IPC_SIGNING_ENABLED: bool = False
     IPC_SIGNING_SECRET: str = ""
 
+    # --- Voice Assistant wake word (Phase 1.5) ---
+    # По умолчанию выключено — приватность.
+    # Требует Porcupine AccessKey (KRAB_EAR_PORCUPINE_ACCESS_KEY) +
+    # кастомный .ppn файл «Краб» (тренировка на https://console.picovoice.ai).
+    WAKE_WORD_ENABLED: bool = False
+    PORCUPINE_ACCESS_KEY: str = ""
+
     # --- SenseVoice adapter (Phase 4 quick win) ---
     # Alibaba SenseVoice (FunASR) — альтернативный STT движок, поддерживает 50+ языков
     # (вкл. RU) и эмоцию (happy/sad/angry/neutral/fearful/disgusted/surprised).
@@ -228,4 +235,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_dedup_enabled": False,
     # Порог сходства для автодедупликации (0.0–1.0).
     "auto_dedup_threshold": 0.9,
+    # --- Voice Assistant wake word (PR 1.5) ---
+    # По умолчанию off — приватность пользователя.
+    "wake_word_enabled": False,
+    # Движок разговора: "auto" | "moshi" | "seamless"
+    "conversation_engine": "auto",
+    # LLM мозг: "auto" | "qwen3-30b" | "qwen3-4b"
+    "conversation_brain": "auto",
 }

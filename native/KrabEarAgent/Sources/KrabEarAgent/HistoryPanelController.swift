@@ -174,6 +174,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let callAssistOutputView = NSTextView()
     var callPhrasePresets: [[String: Any]] = []
 
+    // PR 1.5 — Voice Assistant Settings controls
+    let vaHotkeyToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let vaWakeWordToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let vaEngineSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let vaBrainSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+
     private let topBar = NSStackView()
     private let topSearchRow = NSStackView()
     private let topActionsRow = NSStackView()
