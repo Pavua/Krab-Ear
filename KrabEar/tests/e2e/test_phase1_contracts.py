@@ -62,7 +62,7 @@ def mock_voice_gateway_app() -> FastAPI:
 
                 if "bytes" in data:
                     message_count += 1
-                    
+
                     # Send final on 3rd chunk, partial before that
                     if message_count >= 3:
                         final_event = {
@@ -208,7 +208,7 @@ class TestPhase1Contracts:
             f"/v1/sessions/{session_id}/stream"
         ) as ws:
             ws.receive_json()  # engine.loaded
-            
+
             # Send 2 audio chunks, expecting partial responses
             for i in range(2):
                 ws.send_bytes(b"\x00" * 2560)
