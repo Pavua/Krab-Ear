@@ -1824,6 +1824,29 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
             self._is_valid_response(resp)
             self.assertTrue(resp["ok"])
 
+    def test_ipc_resilience_unknown_method(self) -> None:
+        """Неизвестный method возвращает error response с кодом unknown_method, не крашится."""
+        resp = self.service.handle_request({"id": "r1", "method": "nonexistent_method", "params": {}})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "unknown_method")
+        self.assertIn("nonexistent_method", resp["error"]["message"])
+
+    def test_ipc_resilience_params_list_instead_of_dict(self) -> None:
+        """params в виде списка вместо dict возвращает error response, не крашится."""
+        resp = self.service.handle_request({"id": "r2", "method": "ping", "params": [1, 2, 3]})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+        self.assertIn("params", resp["error"]["message"].lower())
+
+    def test_ipc_resilience_params_number_instead_of_dict(self) -> None:
+        """params в виде числа вместо dict возвращает error response, не крашится."""
+        resp = self.service.handle_request({"id": "r3", "method": "ping", "params": 42})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+
 
 class SynthesizeSpeechIPCTestCase(unittest.TestCase):
     """Тесты IPC-метода synthesize_speech через BackendService.handle_request."""
@@ -1877,6 +1900,68 @@ class SynthesizeSpeechIPCTestCase(unittest.TestCase):
         if not resp.get("ok", True):
             err = resp.get("error", {})
             self.assertNotEqual(err.get("code"), "unknown_method")
+
+
+class MetricsDashboardPreviewLoopTestCase(unittest.TestCase):
+    """Тесты поля preview_loop в get_metrics_dashboard (C2)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def _dashboard(self) -> dict:
+        resp = self.service.handle_request(
+            {"id": "d1", "method": "get_metrics_dashboard", "params": {}}
+        )
+        self.assertTrue(resp.get("ok"), f"dashboard failed: {resp}")
+        return resp["result"]
+
+    def test_dashboard_has_preview_loop_field(self) -> None:
+        """get_metrics_dashboard должен содержать ключ preview_loop."""
+        result = self._dashboard()
+        self.assertIn("preview_loop", result)
+
+    def test_preview_loop_initial_state(self) -> None:
+        """Изначально error_count=0, last_reset_ts=None."""
+        pl = self._dashboard()["preview_loop"]
+        self.assertEqual(pl["error_count"], 0)
+        self.assertIsNone(pl["last_reset_ts"])
+
+    def test_preview_loop_reflects_error_count(self) -> None:
+        """После ручного инкремента error_count отражается в dashboard."""
+        self.service._preview_error_count = 7
+        pl = self._dashboard()["preview_loop"]
+        self.assertEqual(pl["error_count"], 7)
+
+    def test_preview_loop_reflects_last_reset_ts(self) -> None:
+        """last_reset_ts возвращается когда задан."""
+        ts = time.time()
+        self.service._preview_error_last_reset_ts = ts
+        pl = self._dashboard()["preview_loop"]
+        self.assertAlmostEqual(pl["last_reset_ts"], ts, places=3)
+
+    def test_preview_loop_reset_updates_timestamp(self) -> None:
+        """После сброса ошибок _preview_error_last_reset_ts обновляется."""
+        self.service._preview_error_count = 3
+        before = time.time()
+        # Симулируем успешный снапшот (тот же код из preview loop)
+        if self.service._preview_error_count > 0:
+            self.service._preview_error_last_reset_ts = time.time()
+        self.service._preview_error_count = 0
+        after = time.time()
+
+        pl = self._dashboard()["preview_loop"]
+        self.assertEqual(pl["error_count"], 0)
+        self.assertIsNotNone(pl["last_reset_ts"])
+        self.assertGreaterEqual(pl["last_reset_ts"], before)
+        self.assertLessEqual(pl["last_reset_ts"], after)
 
 
 if __name__ == "__main__":

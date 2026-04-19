@@ -136,6 +136,7 @@ logger = logging.getLogger("KrabEar.Engine")
 # Утилита: поиск ffmpeg в PATH (portable на Intel/Apple Silicon/нестандартные установки)
 # ---------------------------------------------------------------------------
 
+
 def _find_ffmpeg_path() -> str:
     """Находит путь к ffmpeg через PATH или fallback на системные пути.
 
