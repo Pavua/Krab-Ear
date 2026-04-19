@@ -170,6 +170,66 @@ class CollectionManagerItemsTestCase(unittest.TestCase):
         self.assertEqual([it["id"] for it in items], ["id0", "id1", "id2"])
 
 
+class CollectionManagerBulkTestCase(unittest.TestCase):
+    """Тесты массового добавления элементов в коллекцию."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = CollectionManager(store=self._store)
+        self._mgr.create_collection("Bulk")
+
+    def test_bulk_add_15_items(self) -> None:
+        """Добавление 15 элементов: item_count должен быть ровно 15."""
+        for i in range(15):
+            self._store.add_fake_item(f"bulk_{i}", f"текст {i}")
+            self._mgr.add_to_collection("Bulk", f"bulk_{i}")
+        cols = self._mgr.list_collections()
+        col = next(c for c in cols if c["name"] == "Bulk")
+        self.assertEqual(col["item_count"], 15)
+
+    def test_bulk_add_idempotent_deduplication(self) -> None:
+        """Повторное добавление 10 элементов не создаёт дублей."""
+        for i in range(10):
+            self._store.add_fake_item(f"dup_{i}", f"текст {i}")
+        for _ in range(3):
+            for i in range(10):
+                self._mgr.add_to_collection("Bulk", f"dup_{i}")
+        cols = self._mgr.list_collections()
+        col = next(c for c in cols if c["name"] == "Bulk")
+        self.assertEqual(col["item_count"], 10)
+
+    def test_bulk_add_and_partial_remove(self) -> None:
+        """Добавить 12 элементов, удалить половину — остаток 6."""
+        for i in range(12):
+            self._store.add_fake_item(f"p_{i}", f"текст {i}")
+            self._mgr.add_to_collection("Bulk", f"p_{i}")
+        for i in range(6):
+            self._mgr.remove_from_collection("Bulk", f"p_{i}")
+        cols = self._mgr.list_collections()
+        col = next(c for c in cols if c["name"] == "Bulk")
+        self.assertEqual(col["item_count"], 6)
+
+    def test_bulk_items_persisted_to_file(self) -> None:
+        """После массового добавления данные корректно сохраняются в JSON."""
+        for i in range(10):
+            self._store.add_fake_item(f"pf_{i}", f"текст {i}")
+            self._mgr.add_to_collection("Bulk", f"pf_{i}")
+        data = json.loads(
+            (Path(self._tmpdir) / "collections.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(data["collections"]["Bulk"]["item_ids"]), 10)
+
+    def test_bulk_get_collection_items_order(self) -> None:
+        """get_collection_items сохраняет порядок вставки при 10+ элементах."""
+        ids = [f"ord_{i}" for i in range(10)]
+        for item_id in ids:
+            self._store.add_fake_item(item_id, f"текст {item_id}")
+            self._mgr.add_to_collection("Bulk", item_id)
+        items = self._mgr.get_collection_items("Bulk")
+        self.assertEqual([it["id"] for it in items], ids)
+
+
 class CollectionManagerIPCHandlersTestCase(unittest.TestCase):
     """Тесты IPC-обработчиков."""
 
