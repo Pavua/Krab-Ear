@@ -14,6 +14,7 @@ from KrabEar.__version__ import __version__ as APP_VERSION
 
 
 class APIVersion(Enum):
+    """Поддерживаемые версии REST API."""
     V1 = "v1"
     V2 = "v2"
 
