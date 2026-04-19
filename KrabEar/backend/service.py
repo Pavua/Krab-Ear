@@ -801,6 +801,37 @@ class BackendService:
             self._start_preview_worker(quality_profile=quality_profile)
         return {"status": "recording"}
 
+    def _build_empty_audio_response(
+        self,
+        duration_sec: float,
+        quality_profile: str,
+        cleanup_profile: str,
+        translation_mode: str,
+        translate_and_paste: bool,
+        stop_tail_trim_ms: int,
+        silence_detected: bool = False,
+        silence_guard_enabled: bool = False,
+        background_guard_rejected: bool = False,
+    ) -> dict[str, Any]:
+        """Helper to build canonical empty_audio response dict."""
+        return {
+            "status": "empty_audio",
+            "duration_sec": duration_sec,
+            "quality_profile": quality_profile,
+            "cleanup_profile": cleanup_profile,
+            "translation_mode": translation_mode,
+            "translate_and_paste": translate_and_paste,
+            "text": "",
+            "original_text": "",
+            "translated_text": "",
+            "translation_status": "not_requested",
+            "history_id": None,
+            "stop_tail_trim_ms": stop_tail_trim_ms,
+            "silence_detected": silence_detected,
+            "silence_guard_enabled": silence_guard_enabled,
+            "background_guard_rejected": background_guard_rejected,
+        }
+
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
         settings = self._cached_settings()
@@ -897,23 +928,14 @@ class BackendService:
         )
 
         if getattr(audio, "size", 0) == 0:
-            return {
-                "status": "empty_audio",
-                "duration_sec": duration_sec,
-                "quality_profile": quality_profile,
-                "cleanup_profile": cleanup_profile,
-                "translation_mode": translation_mode,
-                "translate_and_paste": translate_and_paste,
-                "text": "",
-                "original_text": "",
-                "translated_text": "",
-                "translation_status": "not_requested",
-                "history_id": None,
-                "stop_tail_trim_ms": stop_tail_trim_ms,
-                "silence_detected": False,
-                "silence_guard_enabled": silence_guard_enabled,
-                "background_guard_rejected": False,
-            }
+            return self._build_empty_audio_response(
+                duration_sec=duration_sec,
+                quality_profile=quality_profile,
+                cleanup_profile=cleanup_profile,
+                translation_mode=translation_mode,
+                translate_and_paste=translate_and_paste,
+                stop_tail_trim_ms=stop_tail_trim_ms,
+            )
 
         silence_detected = False
         if silence_guard_enabled:
@@ -934,23 +956,16 @@ class BackendService:
                         "active_ratio_threshold": silence_active_ratio_threshold,
                     },
                 )
-                return {
-                    "status": "empty_audio",
-                    "duration_sec": duration_sec,
-                    "quality_profile": quality_profile,
-                    "cleanup_profile": cleanup_profile,
-                    "translation_mode": translation_mode,
-                    "translate_and_paste": translate_and_paste,
-                    "text": "",
-                    "original_text": "",
-                    "translated_text": "",
-                    "translation_status": "not_requested",
-                    "history_id": None,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                    "silence_detected": True,
-                    "silence_guard_enabled": True,
-                    "background_guard_rejected": False,
-                }
+                return self._build_empty_audio_response(
+                    duration_sec=duration_sec,
+                    quality_profile=quality_profile,
+                    cleanup_profile=cleanup_profile,
+                    translation_mode=translation_mode,
+                    translate_and_paste=translate_and_paste,
+                    stop_tail_trim_ms=stop_tail_trim_ms,
+                    silence_detected=True,
+                    silence_guard_enabled=True,
+                )
 
         background_guard_rejected = False
         if background_guard_enabled:
@@ -973,23 +988,16 @@ class BackendService:
                         "max_uniform_active_ratio": background_guard_max_uniform_active_ratio,
                     },
                 )
-                return {
-                    "status": "empty_audio",
-                    "duration_sec": duration_sec,
-                    "quality_profile": quality_profile,
-                    "cleanup_profile": cleanup_profile,
-                    "translation_mode": translation_mode,
-                    "translate_and_paste": translate_and_paste,
-                    "text": "",
-                    "original_text": "",
-                    "translated_text": "",
-                    "translation_status": "not_requested",
-                    "history_id": None,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                    "silence_detected": False,
-                    "silence_guard_enabled": silence_guard_enabled,
-                    "background_guard_rejected": True,
-                }
+                return self._build_empty_audio_response(
+                    duration_sec=duration_sec,
+                    quality_profile=quality_profile,
+                    cleanup_profile=cleanup_profile,
+                    translation_mode=translation_mode,
+                    translate_and_paste=translate_and_paste,
+                    stop_tail_trim_ms=stop_tail_trim_ms,
+                    silence_guard_enabled=silence_guard_enabled,
+                    background_guard_rejected=True,
+                )
 
         # Загружаем пользовательский vocabulary для подсказок Whisper
         user_vocabulary = self.vocabulary.load() or []
