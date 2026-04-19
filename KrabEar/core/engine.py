@@ -35,6 +35,8 @@ try:
 except Exception:
     mlx_whisper = None  # type: ignore[assignment]
 
+from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
+
 try:
     import soundfile as sf  # type: ignore
 except Exception:
@@ -732,7 +734,12 @@ class AudioEngine:
         raise RuntimeError("Все доступные STT-движки вышли из строя.")
 
     def _transcribe_model(self, audio_data: Any, model_name: str, prompt: str, language: str | None = None) -> dict[str, Any]:
-        """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов."""
+        """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов.
+
+        Все MLX вызовы сериализуются через глобальный RLock (mlx_lock) во избежание
+        race condition в __hash_table<MTL::Resource*> внутри libmlx.dylib (SIGSEGV).
+        RLock позволяет повторный захват из того же потока (fallback chain).
+        """
         effective_language = language if language is not None else settings.TRANSCRIBE_LANGUAGE
         base_params = {
             "path_or_hf_repo": model_name,
@@ -750,11 +757,14 @@ class AudioEngine:
         ]
 
         last_err = None
-        for params in variants:
-            try:
-                return mlx_whisper.transcribe(audio_data, **params)
-            except TypeError as e:
-                last_err = e
+        # Сериализуем доступ к GPU через глобальный MLX lock.
+        # Минимальный critical section: только сам mlx_whisper.transcribe вызов.
+        with mlx_lock():
+            for params in variants:
+                try:
+                    return mlx_whisper.transcribe(audio_data, **params)
+                except TypeError as e:
+                    last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
     # --- SenseVoice adapter (Alibaba FunASR, Phase 4 quick win) ---
