@@ -7,6 +7,9 @@
 
 import Foundation
 
+/// Макс. размер IPC-ответа: 4 KB хватает на все текущие payloads; при превышении response чанкуется.
+private let ipcReadBufferSize = 4096
+
 enum IPCError: Error, LocalizedError {
     case socketCreateFailed(errno: Int32)
     case socketConnectFailed(String)
@@ -71,8 +74,6 @@ final class IPCClient {
         }
 
         var responseData = Data()
-        // IPC reads in a loop until EOF, so this is just the per-read buffer size
-        let ipcReadBufferSize = 4096
         var chunk = [UInt8](repeating: 0, count: ipcReadBufferSize)
 
         while true {

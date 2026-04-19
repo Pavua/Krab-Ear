@@ -799,7 +799,7 @@ class BackendService:
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
         settings = self._cached_settings()
-        stop_tail_trim_ms = self._coerce_bounded_int(
+        stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
             default=180,
             min_value=0,
@@ -841,50 +841,50 @@ class BackendService:
         )
         network_mode = str(settings.get("network_mode", "offline_default"))
         silence_guard_enabled = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
-        silence_rms_threshold = self._coerce_bounded_float(
+        silence_rms_threshold = self._coerce_bounded(
             value=settings.get("silence_guard_rms_threshold", 0.0020),
             default=0.0020,
             min_value=0.0003,
             max_value=0.05,
         )
-        silence_peak_threshold = self._coerce_bounded_float(
+        silence_peak_threshold = self._coerce_bounded(
             value=settings.get("silence_guard_peak_threshold", 0.0120),
             default=0.0120,
             min_value=0.001,
             max_value=0.2,
         )
-        silence_active_ratio_threshold = self._coerce_bounded_float(
+        silence_active_ratio_threshold = self._coerce_bounded(
             value=settings.get("silence_guard_active_ratio_threshold", 0.015),
             default=0.015,
             min_value=0.001,
             max_value=0.30,
         )
         background_guard_enabled = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
-        background_guard_min_peak = self._coerce_bounded_float(
+        background_guard_min_peak = self._coerce_bounded(
             value=settings.get("background_guard_min_peak", 0.025),
             default=0.025,
             min_value=0.003,
             max_value=0.25,
         )
-        background_guard_min_rms = self._coerce_bounded_float(
+        background_guard_min_rms = self._coerce_bounded(
             value=settings.get("background_guard_min_rms", 0.0040),
             default=0.0040,
             min_value=0.0008,
             max_value=0.08,
         )
-        background_guard_uniform_frame_threshold = self._coerce_bounded_float(
+        background_guard_uniform_frame_threshold = self._coerce_bounded(
             value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
             default=0.0060,
             min_value=0.001,
             max_value=0.20,
         )
-        background_guard_max_uniform_active_ratio = self._coerce_bounded_float(
+        background_guard_max_uniform_active_ratio = self._coerce_bounded(
             value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
             default=0.92,
             min_value=0.40,
             max_value=0.99,
         )
-        sample_rate = self._coerce_bounded_int(
+        sample_rate = self._coerce_bounded(
             value=getattr(self.recorder, "sample_rate", 16000),
             default=16000,
             min_value=8000,
@@ -2553,9 +2553,6 @@ class BackendService:
             parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
 
-    # Aliases for backward compatibility with existing call sites
-    _coerce_bounded_int = _coerce_bounded
-    _coerce_bounded_float = _coerce_bounded
 
     def _stop_recorder_guarded(self, stop_tail_trim_ms: int) -> tuple[Any, float] | None:
         """
