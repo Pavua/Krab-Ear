@@ -1824,6 +1824,29 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
             self._is_valid_response(resp)
             self.assertTrue(resp["ok"])
 
+    def test_ipc_resilience_unknown_method(self) -> None:
+        """Неизвестный method возвращает error response с кодом unknown_method, не крашится."""
+        resp = self.service.handle_request({"id": "r1", "method": "nonexistent_method", "params": {}})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "unknown_method")
+        self.assertIn("nonexistent_method", resp["error"]["message"])
+
+    def test_ipc_resilience_params_list_instead_of_dict(self) -> None:
+        """params в виде списка вместо dict возвращает error response, не крашится."""
+        resp = self.service.handle_request({"id": "r2", "method": "ping", "params": [1, 2, 3]})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+        self.assertIn("params", resp["error"]["message"].lower())
+
+    def test_ipc_resilience_params_number_instead_of_dict(self) -> None:
+        """params в виде числа вместо dict возвращает error response, не крашится."""
+        resp = self.service.handle_request({"id": "r3", "method": "ping", "params": 42})
+        self._is_valid_response(resp)
+        self.assertFalse(resp["ok"])
+        self.assertEqual(resp["error"]["code"], "invalid_params")
+
 
 class SynthesizeSpeechIPCTestCase(unittest.TestCase):
     """Тесты IPC-метода synthesize_speech через BackendService.handle_request."""
