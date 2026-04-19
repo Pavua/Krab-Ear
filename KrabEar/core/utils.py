@@ -206,23 +206,31 @@ class TextUtils:
     def _cleanup_strict(clean: str) -> str:
         """Более агрессивное удаление повторов и известных галлюцинаций."""
         # 0. Убираем повтор финального предложения, если оно уже встречалось ранее.
+        #    Оптимизация (vs оригинал):
+        #    a) normalize_phrase вызывается 1 раз на сегмент, а не 3× (было:
+        #       explicit normalize + 2× normalize внутри same_short_phrase).
+        #    b) suffix_probe строится один раз вне цикла, а не как f-string
+        #       на каждой итерации (избегаем лишних аллокаций строк).
+        #    c) same_short_phrase заменён инлайн-сравнением через уже
+        #       вычисленные normalized_prev/normalized_last (нет дублирования).
         segments = [part.strip() for part in _SENTENCE_SPLIT_RE.split(clean) if part.strip()]
         if len(segments) >= 2:
             last = segments[-1]
             normalized_last = TextUtils.normalize_phrase(last)
-            for previous in reversed(segments[:-1]):
-                normalized_prev = TextUtils.normalize_phrase(previous)
-                is_suffix_repeat = bool(
-                    normalized_last
-                    and normalized_prev
-                    and (
+            if normalized_last:
+                suffix_probe = " " + normalized_last  # built once, not per-iteration
+                found = False
+                # Scan previous segments in reverse; normalize each exactly once.
+                for seg in reversed(segments[:-1]):
+                    normalized_prev = TextUtils.normalize_phrase(seg)
+                    if normalized_prev and (
                         normalized_prev == normalized_last
-                        or normalized_prev.endswith(f" {normalized_last}")
-                    )
-                )
-                if TextUtils.same_short_phrase(last, previous) or is_suffix_repeat:
+                        or normalized_prev.endswith(suffix_probe)
+                    ):
+                        found = True
+                        break
+                if found:
                     clean = _compile_trailing_pattern(re.escape(last)).sub("", clean).rstrip(" .,!?:;")
-                    break
 
         # 3. Три одинаковых куска подряд (заикание модели)
         words = clean.split()
