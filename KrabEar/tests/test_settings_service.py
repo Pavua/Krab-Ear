@@ -194,7 +194,7 @@ class TestHandleSetSettings(unittest.TestCase):
         svc = SettingsService(store=store)
 
         svc.cached_settings()
-        result = svc.handle_set_settings({"quality_profile": "max"})
+        svc.handle_set_settings({"quality_profile": "max"})
 
         self.assertEqual(store._current.get("quality_profile"), "max")
         self.assertIsNone(svc._cache)  # cache invalidated
@@ -470,14 +470,14 @@ class TestCacheMultipleCalls(unittest.TestCase):
 
         with patch("time.monotonic") as mock_time:
             mock_time.return_value = 100.0
-            result1 = svc.cached_settings()
+            svc.cached_settings()
             store.load_settings.reset_mock()
 
             # Инвалидируем кэш
             svc.invalidate_cache()
 
             # Следующий call должен загрузить, даже если время не прошло
-            result2 = svc.cached_settings()
+            svc.cached_settings()
 
             store.load_settings.assert_called_once()
 
