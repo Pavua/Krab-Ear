@@ -75,7 +75,7 @@ Pipeline v2: `запись → нормализация → STT → очистк
 - **Мозг:** Qwen3-30B через Voice Gateway (OpenClaw), общая память с Krab агентом
 - **Архитектура:** трёхуровневая (UI → Orchestration → Brain) с WS streaming
 
-Полная документация: [`docs/CHANGELOG.md`](docs/CHANGELOG.md#voice-assistant-mode) • 
+Полная документация: [`CHANGELOG.md`](CHANGELOG.md#phase-1-voice-assistant-mode-foundation-complete) • 
 Roadmap: [`ROADMAP_ECOSYSTEM.md`](ROADMAP_ECOSYSTEM.md)
 
 ---
@@ -182,8 +182,8 @@ IPC-методы (195+): [`docs/IPC_API_REFERENCE.md`](docs/IPC_API_REFERENCE.md
 - [Руководство пользователя](docs/USER_GUIDE.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [IPC API Reference](docs/IPC_API_REFERENCE.md)
-- [Архитектура](docs/ARCHITECTURE.md)
-- [Changelog](docs/CHANGELOG.md)
+- [Архитектура](docs/ARCHITECTURE-KRAB-EAR.md)
+- [Changelog](CHANGELOG.md)
 
 ### Roadmap и планы
 - [Экосистема Krab (Voice/Ear/Agent)](ROADMAP_ECOSYSTEM.md) — общий roadmap
@@ -191,7 +191,7 @@ IPC-методы (195+): [`docs/IPC_API_REFERENCE.md`](docs/IPC_API_REFERENCE.md
 
 ### Фазовые документы
 - [Phase 4: Pipeline & STT адаптеры](docs/PHASE4_PIPELINE_IMPLEMENTATION_PLAN.md)
-- [Phase 1: Voice Assistant Mode](docs/CHANGELOG.md#phase-1-complete-voice-assistant-mode-foundation-2026-04-18)
+- [Phase 1: Voice Assistant Mode](CHANGELOG.md#phase-1-voice-assistant-mode-foundation-complete)
 
 ---
 
