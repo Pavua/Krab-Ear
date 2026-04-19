@@ -1,8 +1,52 @@
-# Changelog
+# Changelog — Krab Ear
 
 All notable changes to Krab Ear are documented in this file.
 
-## [2026-04-18] — Phase 1 Voice Assistant Mode Complete + Phase 4 STT Adapters
+**Note (2026-04-18):** Root CHANGELOG consolidated from `/docs/CHANGELOG.md` (archived). For Krab Core (Telegram userbot) architecture, see `PRD-KRAB-CORE.md` and `ARCHITECTURE-KRAB-CORE.md`. For Krab Ear Native documentation, see `docs/PRD-KRAB-EAR.md` and `docs/ARCHITECTURE-KRAB-EAR.md`.
+
+## [2026-04-18] Session II — Documentation Consolidation + CI Hardening
+
+**Session overview:** 16 merged PRs. Consolidation of root/docs/ markdown duplicates (CHANGELOG/PRD/ARCHITECTURE). CI hardening via constant refactor and test infrastructure fixes.
+
+### Documentation & Consolidation
+
+- **#48** docs(consolidation): Merge root + docs/ CHANGELOG/PRD/ARCHITECTURE duplicates, add session 2026-04-18 log
+- **#62** docs(p1): AA audit resolution — root vs docs/ markdown consolidation (CHANGELOG merged, PRD/ARCHITECTURE unified)
+
+### IPC & Protocol Improvements
+
+- **#50** refactor(ipc): Extract IPC constants (`METHOD_*`, `FIELD_*`) into `backend/ipc_constants.py` for type safety and schema clarity
+
+### Testing Infrastructure & Quality
+
+- **#46** chore(tests): Replace print() with logger in test infrastructure (128 files, consistency + better filtering)
+- **#54** refactor(core): Move transcription_scorer logging to proper logger (remove print, use logger.debug)
+- **#55** refactor(tests): Standardize all test logging via logger (avoid print in test outputs)
+- **#57** refactor(tests): Add formal test contracts for obsidian_sync module
+- **#58** refactor(tests): Formalize state_store test suite with integration patterns
+- **#60** refactor(tests): Expand translation_service test coverage (glossary, vocabulary, multi-language flows)
+- **#61** refactor(tests): Standardize transcriber module tests with mock pipelines
+- **#63** fix(backend): Resolve ffmpeg subprocess path for audio conversion (macOS .app env)
+
+### Design & Architecture
+
+- **#56** docs(spec): Phase 2.3 backend architecture update (async event dispatch, job tracking, diagnostics)
+
+### Code Consolidation & Refactoring
+
+- **#47** refactor: Mega consolidation — extract logging, dedupe test utilities, harmonize mock patterns
+- **#51** refactor(logging): Audit all logging calls in O/R/S modules, consolidate to logger pattern
+- **#52** docs(phase2.1): Design doc for Phase 2.1 backend infrastructure (async, event streaming, diagnostics)
+- **#53** refactor(serialization): JsonFormatter consolidation for JSON-RPC and event payloads
+
+### Cleanup & Technical Debt
+
+- **#59** fix(diarization): Pin pyannote.audio version + GPU selection for consistent Metal GPU performance
+- **#63** fix(ffmpeg): Resolve subprocess PATH in macOS .app bundle + add diagnostic for missing ffmpeg
+
+---
+
+## [2026-04-17/18] — Phase 1 Voice Assistant Mode Complete + Phase 4 STT Adapters
 
 **Session overview:** 32 merged PRs across 3 repos (Krab-Ear, Voice Gateway, Krab-openclaw) over 2 days. Phase 1 Voice Assistant foundation complete. Phase 4 STT adapters 4/5 delivered. All 4482 tests passing.
 
@@ -84,26 +128,51 @@ Specialized speech recognition for emotion, timestamps, multilingual, and realti
 
 - **#18** fix(scripts): Launch .app via LaunchServices (prevent duplicate agent process)
 
-## [Unreleased]
+---
 
-### Added
-- **Async transcribe with stage-level progress UI** (#15) — backend emits stage events (audio_load → normalize → STT → cleanup → diarize → translate → llm_rewrite); Swift polls every 1s and shows `"файл N/M — <этап>, прошло MM:SS, ETA MM:SS"`. Threaded IPCServer позволяет параллельные запросы во время STT. New `JobTracker`.
-- **ThemeButton hover/press/disabled** (#13) — base class with NSTrackingArea-driven interaction states (10% white hover / 15% black + 0.98× press / 40% disabled opacity), все анимации через `Motion.animate()` → Reduce Motion автоматически работает.
-- **Liquid Glass на tabs + scroll enclosures** (#11) — прозрачные NSTabView + NSSegmentedControl + 5 NSScrollView.
-- **Interaction + Motion + Elevation tokens** (#10) — token foundation via Gemini 3.1 Pro.
-- **Spacing migration** (#8) — 60 sites → 4pt grid (The Great 8pt Shift).
-- **Colors usage migration** (#7) — 20 sites → semantic tokens.
-- **Font system** (#5) — 6 typography tokens.
+## Archive (v2.0.0 — v2.2.0, 2026-04-12 and earlier)
 
-### Changed
-- **`TRANSCRIBE_TIMEOUT_SEC: 300 → 3600`** (#14) — корректное значение для часовых файлов.
-- **`NETWORK_MODE` default: `offline_default → offline_strict`** (#14) — без fallback на несуществующий Voice Gateway STT endpoint.
-- **`MAX_AUDIO_MB: 50 → 1000`** (#12) — 1-часовые ALAC/AAC звонки укладываются.
-- **Swift import report** (#12) — actual backend error messages surface в alert (first 3) + markdown report (`## Errors` section).
+### v2.2.0 — 2026-04-12 (branch: claude/objective-wu, waves 17–18)
 
-### Fixed
-- **Autopep8 import breakage** (hotfix 336042f) — `from KrabEar.__version__` → `from __version__`.
-- **codesign identifier** (hotfix d9b951c) — `start_agent.command` теперь `com.antigravity.krab-ear`.
+Финальный хардинг и расширение покрытия. 41 коммит, 282 файла, +77 013 строк. 168 тест-файлов, 4099 тестов (0 ошибок), 152 Python-модуля, 90 961 строк.
 
-### Internal
-- **Backend tech debt** (#9) — timeout constants + type hints refactor.
+**Новые функции (волны 17–18):**
+- **Аудио/STT**: Gain Normalizer, Word Timing, Smart Model Selector, Playback Tracker, Recording Insights (39 тестов)
+- **История/хранилище**: Archive Manager, Search History, Activity Calendar, Stats Report Generator, Auto-deduplication, Timeline Export
+- **Аналитика**: Health Dashboard, Metadata Enricher, Comparison Module, Export Scheduler, Smart Vocabulary Suggestions
+- **Текстовая обработка**: Text Post-Processor (58 тестов)
+- **Инфраструктура**: Graceful Shutdown, Startup Diagnostics
+- **Тесты**: 4099 тестов (4 пропущено), 168 тест-файлов
+
+---
+
+### v2.1.0 — 2026-04-12 (branch: claude/objective-wu, waves 9–16)
+
+Продолжение крупного цикла разработки. 27 коммитов, 244 файла, +60 027 строк. 148 тест-файлов, 601 IPC-метод, 74 888 строк Python.
+
+**Основные компоненты:**
+- **Аудио/STT**: VAD, Noise Profiler, Stage Cache, Recording Merger, Speech Pace Analyzer, Smart silence skip, Calibrator STT
+- **Текстовая обработка**: Abbreviation Expander, Anonymizer, Text Chunker, Punctuation Fixer, Term Extractor, Text Comparator
+- **История/хранилище**: Transcript Versioning, Collection Manager, Period Comparison, Quality Trends, Integrity Checker, Daily Digest, Obsidian Sync
+- **Спикеры**: Speaker Manager, Topic Tracker, Emotion Detector, Sentiment Analysis
+- **Аналитика**: Analytics Dashboard, Cost Estimator, HTML Report Generator, Speaker Statistics, Language Learning Integration
+- **Инфраструктура**: Transcription Queue, Request Signing, Feature Flags, Retry Strategy, Auto-backup, Audit logging, Webhooks, Plugin system
+
+---
+
+### v2.0.0 — 2026-04-12
+
+Крупный релиз. Полный roadmap закрыт: 16 коммитов, 2114 тестов, 100+ новых компонентов.
+
+**Основные подсистемы:**
+- **UI**: Liquid Glass theme, RealtimeOverlay, GUI-кнопки управления AI, 9 коллапсируемых секций
+- **STT**: Цепочка фоллбэков (balanced → max → remote), диаризация на Metal GPU, коррекция пунктуации
+- **Перевод**: 6 режимов (off, ru_to_es, es_to_ru, en_to_ru, auto, bilingual), глоссарий с авто-обучением, 3 стиля (neutral, chat, formal)
+- **LLM**: Интеграция с LM Studio (qwen3-4b-abliterated), circuitbreaker, защиты (chatbot guard, length ratio)
+- **История**: Append-only NDJSON, теги, коллекции, избранное, буфер обмена (20 последних), fuzzy-поиск
+- **Экспорт**: SRT, Markdown, CSV, JSON, Obsidian, Batch-экспорт
+- **REST API**: OpenAPI/Swagger, Bearer-токен auth, Rate limiting, SSE/WebSocket, Prometheus-метрики
+- **Call Assist**: Live-трансляция звонков, timeline, quick phrases, LLM-суммари
+- **Аналитика**: MetricsCollector (latency p50/p95/p99), дашборд метрик, статистика использования, Error reporter
+- **Swift-агент**: 7 extension-файлов, LaunchAgentManager, SystemAudioDuckingService, NotificationService, PermissionWizard
+- **Тесты**: 2114 тестов с полным охватом AudioEngine, BackendService, всех IPC-методов
