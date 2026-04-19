@@ -2564,7 +2564,6 @@ class BackendService:
             parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
 
-
     def _stop_recorder_guarded(self, stop_tail_trim_ms: int) -> tuple[Any, float] | None:
         """
         Останавливает рекордер с поддержкой старых сигнатур stop().
