@@ -85,13 +85,56 @@ class ErrorReporterRingBufferTestCase(unittest.TestCase):
         self.assertEqual(reporter.get_recent_errors(), [])
 
 
+class ErrorReporterResolveTestCase(unittest.TestCase):
+    """Тесты resolve_error."""
+
+    def setUp(self) -> None:
+        self.reporter = ErrorReporter()
+
+    # 9 — resolve_error помечает ошибку как resolved
+    def test_resolve_error_marks_resolved(self) -> None:
+        self.reporter.report_error("stt", "TimeoutError", "msg1")
+        self.reporter.report_error("stt", "TimeoutError", "msg2")
+        errors = self.reporter.get_recent_errors(limit=2)
+        # Последняя добавленная — первая в списке (msg2)
+        self.assertEqual(errors[0].message, "msg2")
+        self.assertFalse(errors[0].resolved)
+        # resolve_error работает с индексом в исходном буфере (от старого к новому)
+        # индекс 1 — это вторая добавленная ошибка (msg2)
+        success = self.reporter.resolve_error(1)
+        self.assertTrue(success)
+        errors_after = self.reporter.get_recent_errors(limit=2)
+        self.assertTrue(errors_after[0].resolved)
+
+    # 10 — resolve_error возвращает False для неверного индекса
+    def test_resolve_error_invalid_index(self) -> None:
+        self.reporter.report_error("stt", "E", "msg")
+        success = self.reporter.resolve_error(999)
+        self.assertFalse(success)
+
+    # 11 — resolve_error на пустом буфере возвращает False
+    def test_resolve_error_empty_buffer(self) -> None:
+        success = self.reporter.resolve_error(0)
+        self.assertFalse(success)
+
+    # 12 — ErrorRecord.to_dict() работает корректно
+    def test_error_record_to_dict(self) -> None:
+        rec = self.reporter.report_error("audio", "OSError", "no device", context={"device_id": 1})
+        d = rec.to_dict()
+        self.assertEqual(d["component"], "audio")
+        self.assertEqual(d["error_type"], "OSError")
+        self.assertEqual(d["message"], "no device")
+        self.assertEqual(d["context"]["device_id"], 1)
+        self.assertFalse(d["resolved"])
+
+
 class ErrorReporterStatsTestCase(unittest.TestCase):
     """Тесты get_error_stats."""
 
     def setUp(self) -> None:
         self.reporter = ErrorReporter()
 
-    # 9 — get_error_stats содержит нужные ключи при пустом буфере
+    # 13 — get_error_stats содержит нужные ключи при пустом буфере
     def test_stats_empty(self) -> None:
         stats = self.reporter.get_error_stats()
         self.assertEqual(stats["total"], 0)
@@ -99,7 +142,7 @@ class ErrorReporterStatsTestCase(unittest.TestCase):
         self.assertIn("by_type", stats)
         self.assertIn("by_time_window", stats)
 
-    # 10 — счётчики by_component корректны
+    # 14 — счётчики by_component корректны
     def test_stats_by_component(self) -> None:
         self.reporter.report_error("stt", "TimeoutError", "t1")
         self.reporter.report_error("stt", "ValueError", "t2")
@@ -109,7 +152,7 @@ class ErrorReporterStatsTestCase(unittest.TestCase):
         self.assertEqual(stats["by_component"]["llm"], 1)
         self.assertEqual(stats["total"], 3)
 
-    # 11 — счётчики by_type корректны
+    # 15 — счётчики by_type корректны
     def test_stats_by_type(self) -> None:
         self.reporter.report_error("ipc", "ConnectionError", "c1")
         self.reporter.report_error("ipc", "ConnectionError", "c2")
@@ -118,7 +161,7 @@ class ErrorReporterStatsTestCase(unittest.TestCase):
         self.assertEqual(stats["by_type"]["ConnectionError"], 2)
         self.assertEqual(stats["by_type"]["OSError"], 1)
 
-    # 12 — свежие ошибки попадают в last_5m
+    # 16 — свежие ошибки попадают в last_5m
     def test_stats_time_window_last_5m(self) -> None:
         self.reporter.report_error("translation", "NetworkError", "net fail")
         stats = self.reporter.get_error_stats()
@@ -135,7 +178,7 @@ class ErrorReporterIPCTestCase(unittest.TestCase):
         for i in range(5):
             self.reporter.report_error("storage", "IOError", f"disk error {i}")
 
-    # 13 — handle_get_error_report возвращает правильный формат
+    # 17 — handle_get_error_report возвращает правильный формат
     def test_handle_get_error_report_format(self) -> None:
         result = self.reporter.handle_get_error_report({"limit": 3})
         self.assertIn("errors", result)
@@ -145,19 +188,19 @@ class ErrorReporterIPCTestCase(unittest.TestCase):
         for key in ("timestamp", "component", "error_type", "message", "context", "resolved"):
             self.assertIn(key, rec)
 
-    # 14 — handle_get_error_stats возвращает корректную статистику
+    # 18 — handle_get_error_stats возвращает корректную статистику
     def test_handle_get_error_stats(self) -> None:
         result = self.reporter.handle_get_error_stats({})
         self.assertEqual(result["total"], 5)
         self.assertEqual(result["by_component"]["storage"], 5)
         self.assertIn("last_5m", result["by_time_window"])
 
-    # 15 — limit в handle_get_error_report работает
+    # 19 — limit в handle_get_error_report работает
     def test_handle_get_error_report_limit(self) -> None:
         result = self.reporter.handle_get_error_report({"limit": 2})
         self.assertEqual(len(result["errors"]), 2)
 
-    # 16 — handle_get_error_report без параметров использует limit=50
+    # 20 — handle_get_error_report без параметров использует limit=50
     def test_handle_get_error_report_default_limit(self) -> None:
         result = self.reporter.handle_get_error_report({})
         # 5 ошибок < 50, должны вернуть все
@@ -167,7 +210,7 @@ class ErrorReporterIPCTestCase(unittest.TestCase):
 class ErrorReporterThreadSafetyTestCase(unittest.TestCase):
     """Тест потокобезопасности."""
 
-    # 17 — одновременная запись из нескольких потоков не приводит к потере/дублированию
+    # 21 — одновременная запись из нескольких потоков не приводит к потере/дублированию
     def test_concurrent_report_does_not_crash(self) -> None:
         reporter = ErrorReporter(max_size=200)
         errors = []
