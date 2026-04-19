@@ -272,6 +272,16 @@ make lint          # Flake8 on Python backend
 - **Diarization on Metal GPU**: pyannote.audio + torch 2.11, device selected via `diarization_device` setting (auto-selects `mps` on Apple Silicon when available).
 - **GUI layout**: 3 tabs (Main, History, Settings) with 9 total collapsible sections. Tab state is persisted via NSUserDefaults.
 - **Call Assist**: `start_call_assist` / `stop_call_assist` and related IPC methods (`call_assist_diagnostics`, `call_assist_summary`, `call_assist_timeline_*`, `call_assist_quick_phrase`) manage a real-time call translation/assist session.
+- **MLX thread-safety**: MLX (mlx_whisper, mlx.core) is NOT thread-safe — concurrent GPU access corrupts internal `__hash_table<MTL::Resource*>` causing SIGSEGV. ALL MLX inference must be serialized through `core.mlx_lock.mlx_lock()` (RLock — reentrant). Pattern:
+  ```python
+  from core.mlx_lock import mlx_lock
+  
+  with mlx_lock():
+      result = mlx_whisper.transcribe(audio, ...)
+  ```
+  - PyTorch+MPS adapters (SenseVoice, Parakeet, WhisperX, Voxtral) don't need this lock.
+  - Profile switches (balanced↔max) trigger model reload in MLX → protect these too.
+  - 2026-04-19 crash report: `~/Library/Logs/DiagnosticReports/Python-2026-04-19-213636.ips`. Fix: PR #71.
 
 ## Non-goals (from PRD)
 
@@ -324,6 +334,10 @@ macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR
 - **CI parallelization** (3 min backend-tests каждый PR) не блокирует coordinator work.
 - **Merge train**: когда 3+ PRs одновременно конфликтуют — rebase всех параллельно через sub-agents, merge sequentially.
 - **Research-first for big decisions**: run 3-4 parallel Haiku research agents BEFORE writing implementation plan (Moshi MLX, SeamlessM4T MLX, qwen3-30b benchmarks — каждый ~5 min, results inform plan).
+
+### MLX thread-safety in any session
+
+При любой работе с mlx-whisper / MLX-based STT — обязательно оборачивать ALL MLX inference в `with mlx_lock():` context manager. MLX не потокобезопасен и concurrent GPU access вызывает SIGSEGV. (See "MLX thread-safety" in Important Patterns section for details и примеры.)
 
 ### Voice Assistant Mode (Phase 1 CLOSED, 2026-04-18)
 
