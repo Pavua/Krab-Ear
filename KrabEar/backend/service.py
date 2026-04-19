@@ -638,6 +638,10 @@ class BackendService:
             "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
+            # --- Hallucination pattern management ---
+            "add_hallucination_pattern": self._handle_add_hallucination_pattern,  # добавить пользовательский паттерн галлюцинации
+            "remove_hallucination_pattern": self._handle_remove_hallucination_pattern,  # удалить пользовательский паттерн галлюцинации
+            "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
         }
 
         handler = handlers.get(method)
