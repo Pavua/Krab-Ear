@@ -132,6 +132,7 @@ def _short_model_name(model: str) -> str:
 
 logger = logging.getLogger("KrabEar.Engine")
 
+
 # ---------------------------------------------------------------------------
 # Утилита: поиск ffmpeg в PATH (portable на Intel/Apple Silicon/нестандартные установки)
 # ---------------------------------------------------------------------------
@@ -163,6 +164,17 @@ def _find_ffmpeg_path() -> str:
 
 
 _FFMPEG_PATH = _find_ffmpeg_path()
+
+# ---------------------------------------------------------------------------
+# Константы для магических чисел
+# ---------------------------------------------------------------------------
+
+# Конвертация размеров файлов: байты в МБ (повторяется в разных местах).
+_BYTES_PER_MB = 1024 * 1024
+
+# Voxtral Mini 4B (Mistral) — максимум токенов генерации для STT + reasoning.
+# Достаточно для ~30 секунд аудио (~300 токенов STT) + краткого резюме.
+_VOXTRAL_MAX_TOKENS = 2048
 
 # ---------------------------------------------------------------------------
 # Утилита: проверка доступной памяти macOS через vm_stat
@@ -408,7 +420,7 @@ class AudioEngine:
         _report("audio_load")
         _temp_copy_path: str | None = None
         if isinstance(audio_data, (str, Path)) and os.path.exists(audio_data):
-            size_mb = os.path.getsize(audio_data) / (1024 * 1024)
+            size_mb = os.path.getsize(audio_data) / _BYTES_PER_MB
             if size_mb > settings.MAX_AUDIO_MB:
                 raise ValueError(f"Файл слишком большой: {size_mb:.1f}MB > {settings.MAX_AUDIO_MB}MB")
             # iCloud Drive files may trigger "Resource deadlock avoided" (errno 11)
@@ -1298,7 +1310,7 @@ class AudioEngine:
             out_tokens, _ = _voxtral_generate(
                 input_ids,
                 model,
-                max_tokens=2048,
+                max_tokens=_VOXTRAL_MAX_TOKENS,
                 temperature=0.0,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
