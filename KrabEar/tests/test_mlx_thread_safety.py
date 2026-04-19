@@ -116,7 +116,6 @@ class TestEngineTranscribeUsesLock(unittest.TestCase):
 
     def _make_engine(self):
         """Создаём AudioEngine без тяжёлых зависимостей через __new__."""
-        import importlib
         # Патчим mlx_whisper перед импортом модуля чтобы движок его не искал
         with patch.dict("sys.modules", {"mlx_whisper": MagicMock()}):
             from core import engine as engine_mod
@@ -171,7 +170,6 @@ class TestEngineTranscribeUsesLock(unittest.TestCase):
     def test_no_concurrent_mlx_calls(self):
         """Два одновременных _transcribe_model вызова НЕ пересекаются в критической секции."""
         call_log = []
-        call_done = threading.Event()
         first_entered = threading.Event()
 
         fake_mlx = MagicMock()
