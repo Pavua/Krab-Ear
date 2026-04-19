@@ -209,6 +209,10 @@ final class PasteService {
         guard focusedStatus == .success, let focusedRef else {
             return .unknown
         }
+        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
+            logger.warn("[PasteService] inspectFocusedElementState: focusedRef не является AXUIElement (typeID=\(CFGetTypeID(focusedRef))), pid=\(pid)")
+            return .unknown
+        }
         let focusedElement = focusedRef as! AXUIElement
 
         var editableRef: CFTypeRef?
@@ -253,6 +257,10 @@ final class PasteService {
             &focusedRef
         )
         guard focusedStatus == .success, let focusedRef else { return }
+        guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
+            logger.warn("[PasteService] collapseSelectionIfNeeded: focusedRef не является AXUIElement (typeID=\(CFGetTypeID(focusedRef))), pid=\(pid)")
+            return
+        }
         let focusedElement = focusedRef as! AXUIElement
 
         var selectedRangeRef: CFTypeRef?
@@ -262,6 +270,10 @@ final class PasteService {
             &selectedRangeRef
         )
         guard selectedStatus == .success, let selectedRangeRef else { return }
+        guard CFGetTypeID(selectedRangeRef) == AXValueGetTypeID() else {
+            logger.warn("[PasteService] collapseSelectionIfNeeded: selectedRangeRef не является AXValue (typeID=\(CFGetTypeID(selectedRangeRef))), pid=\(pid)")
+            return
+        }
         let selectedRangeValue = selectedRangeRef as! AXValue
         guard AXValueGetType(selectedRangeValue) == .cfRange else { return }
 
