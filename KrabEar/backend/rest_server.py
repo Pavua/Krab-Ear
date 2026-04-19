@@ -145,18 +145,21 @@ VALID_DOMAIN = {"casual", "finance", "code", "conversational", "medical"}
 
 
 class HealthResponseSchema(Schema):
+    """Pydantic schema для ответа /health endpoint — статус сервиса и текущий профиль."""
     status = ma_fields.String(metadata={"description": "Always 'ok' when alive"})
     service = ma_fields.String(metadata={"description": "Service name constant"})
     profile = ma_fields.String(metadata={"description": "Current AudioEngine quality profile"})
 
 
 class ReadinessComponentsSchema(Schema):
+    """Pydantic schema для компонентов готовности — статус STT, диаризации и трансляции."""
     stt = ma_fields.Boolean()
     diarization = ma_fields.Boolean()
     translation = ma_fields.Boolean()
 
 
 class ReadinessResponseSchema(Schema):
+    """Pydantic schema для ответа /readiness endpoint — общая готовность и статусы компонентов."""
     overall_ready = ma_fields.Boolean(metadata={"description": "True when all required components are available"})
     components = ma_fields.Dict(keys=ma_fields.String(), values=ma_fields.Boolean())
 
