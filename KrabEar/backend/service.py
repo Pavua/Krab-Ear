@@ -176,6 +176,7 @@ class BackendService:
         self._preview_duration_sec = 0.0
         self._preview_updated_at = 0.0
         self._preview_error_count: int = 0
+        self._preview_error_last_reset_ts: float | None = None
         self._clipboard_history: list[dict] = []
         self._collections = CollectionManager(store=self.store)
         self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
@@ -638,6 +639,10 @@ class BackendService:
             "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
+            # --- Hallucination pattern management ---
+            "add_hallucination_pattern": self._handle_add_hallucination_pattern,  # добавить пользовательский паттерн галлюцинации
+            "remove_hallucination_pattern": self._handle_remove_hallucination_pattern,  # удалить пользовательский паттерн галлюцинации
+            "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
         }
 
         handler = handlers.get(method)
@@ -1660,6 +1665,10 @@ class BackendService:
                 "preview_text_length": len(self._preview_text),
                 "preview_duration_sec": self._preview_duration_sec,
             },
+            "preview_loop": {
+                "error_count": self._preview_error_count,
+                "last_reset_ts": self._preview_error_last_reset_ts,
+            },
             "llm": {
                 "enabled": settings.get("llm_rewrite_enabled", False),
                 "model": settings.get("llm_model", "?"),
@@ -2438,6 +2447,8 @@ class BackendService:
                 self._preview_stop_event.wait(poll_interval)
                 continue
 
+            if self._preview_error_count > 0:
+                self._preview_error_last_reset_ts = time.time()
             self._preview_error_count = 0
             if preview_text:
                 with self._preview_lock:
