@@ -1156,7 +1156,7 @@ class HistoryService:
             items (list): список записей {text, ts, history_id}
             count (int): общее количество элементов в истории
         """
-        limit = self._coerce_bounded_int(
+        limit = self._coerce_bounded(
             value=params.get("limit", 10),
             default=10,
             min_value=1,
@@ -1750,9 +1750,6 @@ class HistoryService:
         except (TypeError, ValueError):
             parsed = coerce(default)
         return max(min_value, min(parsed, max_value))
-
-    _coerce_bounded_int = _coerce_bounded
-    _coerce_bounded_float = _coerce_bounded
 
     # ------------------------------------------------------------------
     # Экспорт в формат Obsidian
