@@ -21,7 +21,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -110,14 +110,14 @@ class TranscriberInitTests(unittest.TestCase):
         """Если передан engine и llm_rewriter, llm_rewriter должен быть инжектирован."""
         fake_engine = FakeAudioEngine(llm_rewriter=None)
         mock_llm = MagicMock()
-        transcriber = Transcriber(engine=fake_engine, llm_rewriter=mock_llm)
+        Transcriber(engine=fake_engine, llm_rewriter=mock_llm)
         self.assertIs(fake_engine._llm_rewriter, mock_llm)
 
     def test_init_injects_settings_get(self):
         """Если settings_get передан, он должен быть инжектирован в engine."""
         fake_engine = FakeAudioEngine()
         mock_settings_get = MagicMock()
-        transcriber = Transcriber(engine=fake_engine, settings_get=mock_settings_get)
+        Transcriber(engine=fake_engine, settings_get=mock_settings_get)
         self.assertIs(fake_engine._settings_get, mock_settings_get)
 
     def test_init_does_not_overwrite_existing_llm_rewriter(self):
@@ -125,7 +125,7 @@ class TranscriberInitTests(unittest.TestCase):
         existing_llm = MagicMock()
         fake_engine = FakeAudioEngine(llm_rewriter=existing_llm)
         new_llm = MagicMock()
-        transcriber = Transcriber(engine=fake_engine, llm_rewriter=new_llm)
+        Transcriber(engine=fake_engine, llm_rewriter=new_llm)
         # Существующий должен остаться
         self.assertIs(fake_engine._llm_rewriter, existing_llm)
 
@@ -154,7 +154,7 @@ class TranscriberTranscribeTests(unittest.TestCase):
     def test_transcribe_default_parameters(self):
         """Проверяем значения параметров по умолчанию."""
         audio_data = b"test_audio"
-        result = self.transcriber.transcribe(audio_data)
+        self.transcriber.transcribe(audio_data)
 
         call = self.fake_engine.transcribe_calls[0]
         self.assertEqual(call["cleanup_profile"], "soft")
@@ -212,7 +212,7 @@ class TranscriberTranscribeTests(unittest.TestCase):
         """Проверяем транскрибацию со всеми кастомными параметрами."""
         audio_data = b"complex_audio"
         vocab = ["краб", "уши"]
-        result = self.transcriber.transcribe(
+        self.transcriber.transcribe(
             audio_data,
             quality_profile="max",
             cleanup_profile="strict",
@@ -564,12 +564,12 @@ class IntegrationTests(unittest.TestCase):
 
         call1 = self.fake_engine.transcribe_calls[0]
         self.assertEqual(call1["lang_hint"], "ru")
-        self.assertTrue(call1["is_preview"] == False)
+        self.assertFalse(call1["is_preview"])
 
         call2 = self.fake_engine.transcribe_calls[1]
         self.assertEqual(call2["lang_hint"], "es")
         self.assertEqual(call2["extra_vocabulary"], ["foo", "bar"])
-        self.assertTrue(call2["is_preview"] == False)
+        self.assertFalse(call2["is_preview"])
 
         call3 = self.fake_engine.transcribe_calls[2]
         self.assertTrue(call3["is_preview"])  # Preview mode

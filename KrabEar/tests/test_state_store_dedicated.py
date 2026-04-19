@@ -147,7 +147,7 @@ class CompactTestCase(unittest.TestCase):
 
         # After compact: history file should only have 2 active lines
         raw = self.store.history_path.read_text(encoding="utf-8")
-        lines = [l for l in raw.splitlines() if l.strip()]
+        lines = [line for line in raw.splitlines() if line.strip()]
         self.assertEqual(len(lines), 2)
 
         # Deleted IDs must NOT appear in the file
