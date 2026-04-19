@@ -15,7 +15,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -137,7 +137,6 @@ class HandleTranslateTextTestCase(unittest.TestCase):
         })
 
         self.assertEqual(result["translation_mode"], "auto")
-        _, call_kwargs = translator.translate.call_args[0], translator.translate.call_args[1]
         # mode должен быть передан переводчику
         self.assertEqual(translator.translate.call_args.kwargs.get("mode") or
                          translator.translate.call_args[1].get("mode") or

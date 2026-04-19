@@ -17,9 +17,6 @@ def _make_json_formatter():
     We patch settings and call the relevant inner class directly, reproducing the same
     logic without triggering file I/O side effects.
     """
-    import importlib
-    import types
-
     # We need to instantiate JsonFormatter without side effects.
     # Reproduce the class exactly as in service.py — this is a white-box test.
     import json as _json

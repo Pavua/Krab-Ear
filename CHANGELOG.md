@@ -4,6 +4,38 @@ All notable changes to Krab Ear are documented in this file.
 
 **Note (2026-04-18):** Root CHANGELOG consolidated from `/docs/CHANGELOG.md` (archived). For Krab Core (Telegram userbot) architecture, see `PRD-KRAB-CORE.md` and `ARCHITECTURE-KRAB-CORE.md`. For Krab Ear Native documentation, see `docs/PRD-KRAB-EAR.md` and `docs/ARCHITECTURE-KRAB-EAR.md`.
 
+## [2026-04-18] Session III — Crash Recovery + Tech Debt
+
+**Session overview:** 24 merged PRs (19 main round + 5 follow-up). Critical MLX thread-safety SIGSEGV fix (concurrent GPU access serialization). Phase 3 Call Automation design (7 ADR). 112 new unit tests (translator, llm_rewriter.summarize, history_service). Test suite expanded to 4944 tests passing.
+
+### Fixed
+
+- **CRITICAL: MLX thread-safety SIGSEGV** — concurrent GPU access in `mlx_whisper.transcribe` via ThreadPoolExecutor corrupted Metal resource hash table → immediate crash. Global `threading.RLock` in `core/mlx_lock.py` serializes all MLX inference calls. Zero recurrence post-fix. PR #71.
+
+### Added
+
+- **`core/mlx_lock.py`** — reentrant RLock wrapper with context manager for thread-safe MLX operations across concurrent recorders
+- **Phase 3 Call Automation ADR** (7 design decisions, architecture document) — PR #65
+- **Phase 2.4 E2E tests design** (23 test cases × 7 classes, comprehensive call assist flows) — PR #68
+- **+112 unit tests** — translation_service glossary (44), llm_rewriter.summarize (17), history_service CRUD (51) — PR #70
+- **7 MLX thread-safety regression tests** — concurrent recorder + GPU load simulation — PR #71
+- **Imports hygiene audit report** (0 unused imports, autoflake pass) — PR #69
+
+### Changed
+
+- **`normalize_entities()` optimization** — combined literal-hint fast-path: 2.6–7.6× speedup (inline regex cache, branch prediction). PR #67.
+- **Docs consolidation** — CHANGELOG/PRD/ARCHITECTURE root + docs/ merged (PR #66). Deduplicate markdown, single source of truth.
+- **ROADMAP_VA session 2 update** — Phase 1 complete, Phase 2.1 backend underway, Phase 4 adapters 4/5 delivered. PR #64.
+
+### Metrics
+
+- **24 PRs merged this session** (19 in main round, 5 follow-up) 
+- **4944 unit tests passing** (up from 4482 baseline)
+- **MLX crashes: 0 recurrence** after restart (metal resource corruption fully mitigated)
+- **Test execution time**: ~24 min on M4 Max (12 cores)
+
+---
+
 ## [2026-04-18] Session II — Documentation Consolidation + CI Hardening
 
 **Session overview:** 16 merged PRs. Consolidation of root/docs/ markdown duplicates (CHANGELOG/PRD/ARCHITECTURE). CI hardening via constant refactor and test infrastructure fixes.
