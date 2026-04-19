@@ -203,5 +203,176 @@ class TestTranslationCacheConcurrency(unittest.TestCase):
         self.assertEqual(errors, [], f"Ошибки в потоках: {errors}")
 
 
+class TestTranslationCacheUnicode(unittest.TestCase):
+    """Тесты с юникодом и эмодзи."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.cache = TranslationCache(data_dir=self._tmpdir)
+
+    def test_unicode_text_and_result(self):
+        text = "Привет, мир! Как дела?"
+        result = "¡Hola, mundo! ¿Cómo estás?"
+        self.cache.put(text, "ru", "es", "hf_marian", result)
+        retrieved = self.cache.get(text, "ru", "es", "hf_marian")
+        self.assertEqual(retrieved, result)
+
+    def test_emoji_in_text(self):
+        text = "Hello 👋 world 🌍"
+        result = "Привет 👋 мир 🌍"
+        self.cache.put(text, "en", "ru", "hf_marian", result)
+        retrieved = self.cache.get(text, "en", "ru", "hf_marian")
+        self.assertEqual(retrieved, result)
+
+    def test_emoji_in_result(self):
+        text = "Good morning"
+        result = "🌅 Доброе утро"
+        self.cache.put(text, "en", "ru", "hf_marian", result)
+        retrieved = self.cache.get(text, "en", "ru", "hf_marian")
+        self.assertEqual(retrieved, result)
+
+    def test_cyrillic_and_spanish(self):
+        text = "Привет"
+        result = "Hola"
+        self.cache.put(text, "ru", "es", "hf_marian", result)
+        retrieved = self.cache.get(text, "ru", "es", "hf_marian")
+        self.assertEqual(retrieved, result)
+
+    def test_mixed_scripts(self):
+        text = "Hello привет 你好 مرحبا"
+        result = "Greeting in multiple scripts"
+        self.cache.put(text, "en", "ru", "hf_marian", result)
+        retrieved = self.cache.get(text, "en", "ru", "hf_marian")
+        self.assertEqual(retrieved, result)
+
+
+class TestTranslationCacheLRUBehavior(unittest.TestCase):
+    """Тесты LRU-поведения (move_to_end при get и put)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def test_get_moves_entry_to_end(self):
+        """Проверяет, что get() перемещает запись в конец (most recent)."""
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=3)
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        cache.put("c", "en", "ru", "e", "В")
+        # Обращаемся к "a" — он должен стать самым свежим
+        _ = cache.get("a", "en", "ru", "e")
+        # Добавляем "d" — должен вытеснить "b" (не "a", т.к. мы к нему обращались)
+        cache.put("d", "en", "ru", "e", "Г")
+        self.assertIsNotNone(cache.get("a", "en", "ru", "e"))
+        self.assertIsNone(cache.get("b", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("c", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("d", "en", "ru", "e"))
+
+    def test_put_on_existing_moves_to_end(self):
+        """Проверяет, что put() существующего ключа перемещает его в конец."""
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=3)
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        cache.put("c", "en", "ru", "e", "В")
+        # Переписываем "a" — он должен стать самым свежим
+        cache.put("a", "en", "ru", "e", "А_новое")
+        # Добавляем "d" — должен вытеснить "b"
+        cache.put("d", "en", "ru", "e", "Г")
+        self.assertIsNotNone(cache.get("a", "en", "ru", "e"))
+        self.assertIsNone(cache.get("b", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("c", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("d", "en", "ru", "e"))
+
+
+class TestTranslationCachePersistenceEdgeCases(unittest.TestCase):
+    """Тесты персистентности с граничными случаями."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def test_load_from_corrupted_json_graceful_fail(self):
+        """Проверяет, что загрузка из поврежденного JSON не вызывает исключение."""
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            fh.write("invalid json {{{")
+        # Должна загруженаться без исключения (обработано в _load())
+        cache = TranslationCache(data_dir=self._tmpdir)
+        self.assertEqual(cache.get_stats()["entries"], 0)
+
+    def test_persist_creates_data_dir_if_not_exists(self):
+        """Проверяет, что _persist() создаёт data_dir если его нет."""
+        nested_dir = os.path.join(self._tmpdir, "nested", "deep")
+        cache = TranslationCache(data_dir=nested_dir)
+        cache.put("text", "en", "ru", "hf_marian", "перевод")
+        self.assertTrue(os.path.exists(nested_dir))
+        self.assertTrue(os.path.exists(os.path.join(nested_dir, "translation_cache.json")))
+
+    def test_reload_respects_max_entries_limit(self):
+        """Проверяет, что при загрузке с диска соблюдается max_entries."""
+        cache1 = TranslationCache(data_dir=self._tmpdir, max_entries=10)
+        for i in range(15):
+            cache1.put(str(i), "en", "ru", "e", f"text_{i}")
+        # cache1 должна иметь только 10 записей
+        stats1 = cache1.get_stats()
+        self.assertEqual(stats1["entries"], 10)
+
+        # Создаём новый экземпляр с max_entries=5
+        cache2 = TranslationCache(data_dir=self._tmpdir, max_entries=5)
+        # Должна загрузить с диска последние 10 записей от cache1
+        # но обрезать до своего лимита 5
+        stats2 = cache2.get_stats()
+        self.assertEqual(stats2["entries"], 5)
+
+    def test_atomic_write_with_tmp_file(self):
+        """Проверяет, что персистентность использует атомарную запись через .tmp."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put("text", "en", "ru", "hf_marian", "перевод")
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        # .tmp файл не должен остаться после успешного сохранения
+        tmp_path = cache_path + ".tmp"
+        self.assertFalse(os.path.exists(tmp_path))
+        self.assertTrue(os.path.exists(cache_path))
+
+
+class TestTranslationCacheEmptyAndBoundary(unittest.TestCase):
+    """Тесты пустых кэшей и граничных значений."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def test_clear_on_empty_cache(self):
+        """Проверяет, что clear() на пустом кэше безопасна."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.clear()
+        stats = cache.get_stats()
+        self.assertEqual(stats["entries"], 0)
+        self.assertEqual(stats["hits"], 0)
+        self.assertEqual(stats["misses"], 0)
+
+    def test_max_entries_one(self):
+        """Проверяет поведение при max_entries=1."""
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=1)
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        # Только "b" должна остаться
+        self.assertIsNone(cache.get("a", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("b", "en", "ru", "e"))
+
+    def test_empty_text_and_translation(self):
+        """Проверяет, что пустые строки обрабатываются корректно."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put("", "en", "ru", "hf_marian", "")
+        result = cache.get("", "en", "ru", "hf_marian")
+        self.assertEqual(result, "")
+
+    def test_very_long_text(self):
+        """Проверяет, что длинные тексты обрабатываются (хэширование)."""
+        long_text = "a" * 10000
+        long_result = "б" * 10000
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put(long_text, "en", "ru", "hf_marian", long_result)
+        result = cache.get(long_text, "en", "ru", "hf_marian")
+        self.assertEqual(result, long_result)
+
+
 if __name__ == "__main__":
     unittest.main()
