@@ -283,27 +283,24 @@ class LLMRewriterRewriteSuccessTestCase(unittest.TestCase):
         }
         return mock_resp
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_successful_rewrite_returns_ok_result(self, mock_post):
-        mock_post.return_value = self._mock_response("Привет, мир.")
+    def test_successful_rewrite_returns_ok_result(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_response("Привет, мир."))
         result = self.rewriter.rewrite("привет мир")
         self.assertTrue(result.ok)
         self.assertEqual(result.text, "Привет, мир.")
         self.assertIsNone(result.fallback_reason)
         self.assertIsNotNone(result.latency_ms)
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_rewrite_calls_correct_endpoint(self, mock_post):
-        mock_post.return_value = self._mock_response("ok")
+    def test_rewrite_calls_correct_endpoint(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_response("ok"))
         self.rewriter.rewrite("test")
-        args, kwargs = mock_post.call_args
+        args, kwargs = self.rewriter._session.post.call_args
         self.assertEqual(args[0], "http://localhost:1234/v1/chat/completions")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_rewrite_sends_correct_payload(self, mock_post):
-        mock_post.return_value = self._mock_response("ok")
+    def test_rewrite_sends_correct_payload(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_response("ok"))
         self.rewriter.rewrite("test input")
-        kwargs = mock_post.call_args.kwargs
+        kwargs = self.rewriter._session.post.call_args.kwargs
         payload = kwargs["json"]
         self.assertEqual(payload["model"], "test-model")
         self.assertEqual(payload["temperature"], 0.0)
@@ -313,32 +310,30 @@ class LLMRewriterRewriteSuccessTestCase(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["role"], "user")
         self.assertEqual(payload["messages"][1]["content"], "test input")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_rewrite_sends_authorization_header(self, mock_post):
-        mock_post.return_value = self._mock_response("ok")
+    def test_rewrite_sends_authorization_header(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_response("ok"))
         self.rewriter.rewrite("test")
-        kwargs = mock_post.call_args.kwargs
+        kwargs = self.rewriter._session.post.call_args.kwargs
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer sk-test")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_rewrite_strips_quotes_from_response(self, mock_post):
-        mock_post.return_value = self._mock_response('"Привет, мир."')
+    def test_rewrite_strips_quotes_from_response(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_response('"Привет, мир."'))
         result = self.rewriter.rewrite("привет мир")
         self.assertEqual(result.text, "Привет, мир.")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_empty_input_returns_empty_input_without_http_call(self, mock_post):
+    def test_empty_input_returns_empty_input_without_http_call(self):
+        self.rewriter._session.post = MagicMock()
         result = self.rewriter.rewrite("")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "empty_input")
-        mock_post.assert_not_called()
+        self.rewriter._session.post.assert_not_called()
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_whitespace_only_input_returns_empty_input(self, mock_post):
+    def test_whitespace_only_input_returns_empty_input(self):
+        self.rewriter._session.post = MagicMock()
         result = self.rewriter.rewrite("   \n  ")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "empty_input")
-        mock_post.assert_not_called()
+        self.rewriter._session.post.assert_not_called()
 
 
 class LLMRewriterRewriteFailuresTestCase(unittest.TestCase):
@@ -352,72 +347,65 @@ class LLMRewriterRewriteFailuresTestCase(unittest.TestCase):
             model="test-model",
         )
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_timeout_returns_fallback_and_records_failure(self, mock_post):
+    def test_timeout_returns_fallback_and_records_failure(self):
         import requests
-        mock_post.side_effect = requests.Timeout("timeout")
+        self.rewriter._session.post = MagicMock(side_effect=requests.Timeout("timeout"))
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "timeout")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_connection_error_returns_fallback(self, mock_post):
+    def test_connection_error_returns_fallback(self):
         import requests
-        mock_post.side_effect = requests.ConnectionError("refused")
+        self.rewriter._session.post = MagicMock(side_effect=requests.ConnectionError("refused"))
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "connection_error")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_http_500_returns_fallback(self, mock_post):
+    def test_http_500_returns_fallback(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_resp.text = "Internal Server Error"
-        mock_post.return_value = mock_resp
+        self.rewriter._session.post = MagicMock(return_value=mock_resp)
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "http_500")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_malformed_json_returns_parse_error(self, mock_post):
+    def test_malformed_json_returns_parse_error(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.side_effect = ValueError("not json")
-        mock_post.return_value = mock_resp
+        self.rewriter._session.post = MagicMock(return_value=mock_resp)
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "parse_error")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_missing_choices_returns_parse_error(self, mock_post):
+    def test_missing_choices_returns_parse_error(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"error": "no choices"}
-        mock_post.return_value = mock_resp
+        self.rewriter._session.post = MagicMock(return_value=mock_resp)
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "parse_error")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_empty_content_returns_empty_response(self, mock_post):
+    def test_empty_content_returns_empty_response(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"choices": [{"message": {"content": ""}}]}
-        mock_post.return_value = mock_resp
+        self.rewriter._session.post = MagicMock(return_value=mock_resp)
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "empty_response")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_circuit_opens_after_three_consecutive_failures(self, mock_post):
+    def test_circuit_opens_after_three_consecutive_failures(self):
         import requests
-        mock_post.side_effect = requests.ConnectionError("refused")
+        self.rewriter._session.post = MagicMock(side_effect=requests.ConnectionError("refused"))
         for _ in range(3):
             self.rewriter.rewrite("test")
         result = self.rewriter.rewrite("test")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "circuit_open")
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(self.rewriter._session.post.call_count, 3)
 
 
 class LLMRewriterCircuitIntegrationTestCase(unittest.TestCase):
@@ -431,14 +419,13 @@ class LLMRewriterCircuitIntegrationTestCase(unittest.TestCase):
             model="test-model",
         )
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_empty_input_does_not_count_as_failure(self, mock_post):
+    def test_empty_input_does_not_count_as_failure(self):
         for _ in range(5):
             self.rewriter.rewrite("")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
-        mock_post.return_value = mock_resp
+        self.rewriter._session.post = MagicMock(return_value=mock_resp)
         result = self.rewriter.rewrite("real text")
         self.assertTrue(result.ok)
 
@@ -455,39 +442,34 @@ class LLMRewriterPingTestCase(unittest.TestCase):
             timeout_sec=2.0,
         )
 
-    @patch("backend.llm_rewriter.requests.get")
-    def test_ping_returns_true_on_200(self, mock_get):
+    def test_ping_returns_true_on_200(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_get.return_value = mock_resp
+        self.rewriter._session.get = MagicMock(return_value=mock_resp)
         self.assertTrue(self.rewriter.ping())
 
-    @patch("backend.llm_rewriter.requests.get")
-    def test_ping_returns_false_on_connection_error(self, mock_get):
+    def test_ping_returns_false_on_connection_error(self):
         import requests
-        mock_get.side_effect = requests.ConnectionError("refused")
+        self.rewriter._session.get = MagicMock(side_effect=requests.ConnectionError("refused"))
         self.assertFalse(self.rewriter.ping())
 
-    @patch("backend.llm_rewriter.requests.get")
-    def test_ping_returns_false_on_timeout(self, mock_get):
+    def test_ping_returns_false_on_timeout(self):
         import requests
-        mock_get.side_effect = requests.Timeout()
+        self.rewriter._session.get = MagicMock(side_effect=requests.Timeout())
         self.assertFalse(self.rewriter.ping())
 
-    @patch("backend.llm_rewriter.requests.get")
-    def test_ping_returns_false_on_http_error(self, mock_get):
+    def test_ping_returns_false_on_http_error(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 500
-        mock_get.return_value = mock_resp
+        self.rewriter._session.get = MagicMock(return_value=mock_resp)
         self.assertFalse(self.rewriter.ping())
 
-    @patch("backend.llm_rewriter.requests.get")
-    def test_ping_uses_models_endpoint(self, mock_get):
+    def test_ping_uses_models_endpoint(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_get.return_value = mock_resp
+        self.rewriter._session.get = MagicMock(return_value=mock_resp)
         self.rewriter.ping()
-        args, _ = mock_get.call_args
+        args, _ = self.rewriter._session.get.call_args
         self.assertEqual(args[0], "http://localhost:1234/v1/models")
 
 
@@ -555,31 +537,27 @@ class LLMRewriterChatbotGuardTestCase(unittest.TestCase):
         mock_resp.json.return_value = {"choices": [{"message": {"content": content}}]}
         return mock_resp
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_chatbot_guard_rejects_sure(self, mock_post):
-        mock_post.return_value = self._mock_resp("Sure, here is the corrected text: привет.")
+    def test_chatbot_guard_rejects_sure(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp("Sure, here is the corrected text: привет."))
         result = self.rewriter.rewrite("привет мир тест строка")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "chatbot_response")
         self.assertIsNone(result.text)
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_chatbot_guard_rejects_here_is(self, mock_post):
-        mock_post.return_value = self._mock_resp("Here is the corrected version: текст.")
+    def test_chatbot_guard_rejects_here_is(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp("Here is the corrected version: текст."))
         result = self.rewriter.rewrite("некоторый текст для проверки guard")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "chatbot_response")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_chatbot_guard_rejects_k_sozhaleniyu(self, mock_post):
-        mock_post.return_value = self._mock_resp("К сожалению, я не могу это исправить.")
+    def test_chatbot_guard_rejects_k_sozhaleniyu(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp("К сожалению, я не могу это исправить."))
         result = self.rewriter.rewrite("какой-то текст для обработки guard")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "chatbot_response")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_chatbot_guard_passes_normal_correction(self, mock_post):
-        mock_post.return_value = self._mock_resp("Привет, мир! Как дела?")
+    def test_chatbot_guard_passes_normal_correction(self):
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp("Привет, мир! Как дела?"))
         result = self.rewriter.rewrite("привет мир как дела")
         self.assertTrue(result.ok)
         self.assertEqual(result.text, "Привет, мир! Как дела?")
@@ -602,42 +580,38 @@ class LLMRewriterLengthRatioGuardTestCase(unittest.TestCase):
         mock_resp.json.return_value = {"choices": [{"message": {"content": content}}]}
         return mock_resp
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_length_ratio_too_short(self, mock_post):
+    def test_length_ratio_too_short(self):
         # input 100 chars, output 5 chars → ratio 0.05 < 0.35
         long_input = "а" * 100
         short_output = "б" * 5
-        mock_post.return_value = self._mock_resp(short_output)
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp(short_output))
         result = self.rewriter.rewrite(long_input)
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "output_too_short")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_length_ratio_too_long(self, mock_post):
+    def test_length_ratio_too_long(self):
         # input 25 chars, output 200 chars → ratio 8.0 > 3.0
         short_input = "а" * 25
         long_output = "б" * 200
-        mock_post.return_value = self._mock_resp(long_output)
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp(long_output))
         result = self.rewriter.rewrite(short_input)
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "output_too_long")
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_length_ratio_guard_skipped_for_short_input(self, mock_post):
+    def test_length_ratio_guard_skipped_for_short_input(self):
         # input <= 20 chars — guard не применяется, даже если ratio экстремальный
         short_input = "а" * 20  # ровно 20 — guard не активен
         tiny_output = "б"
-        mock_post.return_value = self._mock_resp(tiny_output)
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp(tiny_output))
         result = self.rewriter.rewrite(short_input)
         # guard пропущен, ok=True
         self.assertTrue(result.ok)
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_length_ratio_within_bounds_passes(self, mock_post):
+    def test_length_ratio_within_bounds_passes(self):
         # input 100 chars, output 80 chars → ratio 0.8 — в норме
         normal_input = "а" * 100
         normal_output = "б" * 80
-        mock_post.return_value = self._mock_resp(normal_output)
+        self.rewriter._session.post = MagicMock(return_value=self._mock_resp(normal_output))
         result = self.rewriter.rewrite(normal_input)
         self.assertTrue(result.ok)
 
@@ -655,20 +629,18 @@ class LLMRewriterTimeoutHandlingTestCase(unittest.TestCase):
             circuit_fail_threshold=3,
         )
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_timeout_returns_fallback_no_raise(self, mock_post):
+    def test_timeout_returns_fallback_no_raise(self):
         import requests as req
-        mock_post.side_effect = req.Timeout("timed out")
+        self.rewriter._session.post = MagicMock(side_effect=req.Timeout("timed out"))
         result = self.rewriter.rewrite("какой-то текст для транскрипции")
         self.assertFalse(result.ok)
         self.assertEqual(result.fallback_reason, "timeout")
         self.assertIsNone(result.text)
         self.assertIsNone(result.latency_ms)
 
-    @patch("backend.llm_rewriter.requests.post")
-    def test_timeout_accumulates_circuit_failures(self, mock_post):
+    def test_timeout_accumulates_circuit_failures(self):
         import requests as req
-        mock_post.side_effect = req.Timeout()
+        self.rewriter._session.post = MagicMock(side_effect=req.Timeout())
         input_text = "текст один два три четыре пять шесть"
         # 3 таймаута открывают circuit (fail_threshold=3)
         for _ in range(3):
@@ -676,7 +648,7 @@ class LLMRewriterTimeoutHandlingTestCase(unittest.TestCase):
         result = self.rewriter.rewrite(input_text)
         self.assertEqual(result.fallback_reason, "circuit_open")
         # 4-й вызов не должен делать HTTP запрос
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(self.rewriter._session.post.call_count, 3)
 
 
 if __name__ == "__main__":
