@@ -89,7 +89,7 @@ struct LaunchOptions {
     }
 }
 
-private struct LastTranscriptionSnapshot {
+struct LastTranscriptionSnapshot {
     let finalText: String
     let originalText: String
     let translatedText: String
@@ -102,15 +102,15 @@ private struct LastTranscriptionSnapshot {
 final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private let controlNotificationName = Notification.Name("com.krabear.agent.control")
     private let options: LaunchOptions
-    private let backendSupervisor: BackendSupervisor
+    let backendSupervisor: BackendSupervisor
     private let launchAgentManager: LaunchAgentManager
-    private var ipcClient: IPCClient
+    var ipcClient: IPCClient
 
     private let pasteService = PasteService()
-    private let audioDuckingService = SystemAudioDuckingService()
+    let audioDuckingService = SystemAudioDuckingService()
     private let notificationService = NotificationService()
     private let realtimeOverlay = RealtimeOverlayController()
-    private let logger = AgentLogger.shared
+    let logger = AgentLogger.shared
 
     private var historyPanel: HistoryPanelController?
     private var hotkeyManager: HotkeyManager?
@@ -120,22 +120,22 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private var quickStartController: QuickStartWindowController?
     private var realtimeOverlayTimer: Timer?
 
-    private var settings: AgentSettings = .default
-    private var isRecording = false
-    private var isProcessing = false
-    private var lastToggleRequestAt: TimeInterval = 0
-    private let toggleDebounceSec: TimeInterval = 0.35
-    private var recordingTargetApp: NSRunningApplication?
+    var settings: AgentSettings = .default
+    var isRecording = false
+    var isProcessing = false
+    var lastToggleRequestAt: TimeInterval = 0
+    let toggleDebounceSec: TimeInterval = 0.35
+    var recordingTargetApp: NSRunningApplication?
     private var lastExternalApp: NSRunningApplication?
     private var hasShownAccessibilityHint = false
-    private var lastResult: LastTranscriptionSnapshot?
-    private var lastPreviewTranslationSource = ""
-    private var lastPreviewTranslationText = ""
-    private var lastPreviewTranslationAt: TimeInterval = 0
-    private var lastPreviewTranslationMode = ""
-    private var lastPreviewTranslationFailureAt: TimeInterval = 0
-    private var lastPreviewTranslationFailures = 0
-    private var lastPreviewTranslationSuccessAt: TimeInterval = 0
+    var lastResult: LastTranscriptionSnapshot?
+    var lastPreviewTranslationSource = ""
+    var lastPreviewTranslationText = ""
+    var lastPreviewTranslationAt: TimeInterval = 0
+    var lastPreviewTranslationMode = ""
+    var lastPreviewTranslationFailureAt: TimeInterval = 0
+    var lastPreviewTranslationFailures = 0
+    var lastPreviewTranslationSuccessAt: TimeInterval = 0
     private var recentAutoPasteFingerprints: [String: TimeInterval] = [:]
 
     init(options: LaunchOptions) {
@@ -240,35 +240,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Backend recovery
-
-    /// Обёртка над IPC-вызовом с автоматическим перезапуском backend при ошибке соединения.
-    ///
-    /// Если первый вызов падает с socketConnectFailed/writeFailed/readFailed,
-    /// пробуем `backendSupervisor.restartIfDead()` и повторяем запрос один раз.
-    func callWithRecovery(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
-        do {
-            return try ipcClient.call(method: method, params: params)
-        } catch let error as IPCError where Self.isConnectionError(error) {
-            logger.warn("IPC ошибка соединения (\(error.localizedDescription)), пытаюсь перезапустить backend...")
-            if backendSupervisor.restartIfDead() {
-                logger.info("Backend перезапущен, повторяю вызов \(method)")
-                return try ipcClient.call(method: method, params: params)
-            } else {
-                logger.error("Не удалось перезапустить backend (лимит перезапусков)")
-                throw error
-            }
-        }
-    }
-
-    private static func isConnectionError(_ error: IPCError) -> Bool {
-        switch error {
-        case .socketCreateFailed, .socketConnectFailed, .writeFailed, .readFailed:
-            return true
-        case .invalidResponse, .backendError:
-            return false
-        }
-    }
+    // MARK: - Backend recovery (see main+IPCRecovery.swift)
 
     func applicationWillTerminate(_ notification: Notification) {
         DistributedNotificationCenter.default().removeObserver(self)
@@ -803,219 +775,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         lastExternalApp = app
     }
 
-    private func handleRecordToggleRequest() {
-        if isProcessing {
-            return
-        }
+    // MARK: - Hotkey recording (see main+HotkeyRecording.swift)
 
-        let now = Date().timeIntervalSince1970
-        if now - lastToggleRequestAt < toggleDebounceSec {
-            logger.warn("Игнорирую повторный toggle (debounce)")
-            return
-        }
-        lastToggleRequestAt = now
-
-        let wasRecordingLocally = isRecording
-        let backendRecording = syncRecordingStateWithBackend()
-        if backendRecording != wasRecordingLocally {
-            logger.warn("Десинхрон состояния записи: local=\(wasRecordingLocally), backend=\(backendRecording)")
-        }
-
-        // Если локально считалось, что пишем, но backend уже idle — не стартуем новую
-        // запись этим же нажатием. Сначала фиксируем состояние, следующий toggle начнёт запись явно.
-        if wasRecordingLocally && !backendRecording {
-            notify(
-                title: "Krab Ear",
-                body: "Запись уже остановлена в backend. Состояние синхронизировано."
-            )
-            return
-        }
-
-        // Если backend пишет, а локально флаг был сбит, сначала корректно завершаем зависшую запись.
-        if !wasRecordingLocally && backendRecording {
-            notify(
-                title: "Krab Ear",
-                body: "Найден рассинхрон записи. Сначала завершаю зависшую сессию."
-            )
-            stopRecording()
-            return
-        }
-
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-
-    private func syncRecordingStateWithBackend() -> Bool {
-        guard
-            let stateResponse = try? callWithRecovery(method: "get_recording_state", params: [:]),
-            let state = stateResponse["result"] as? [String: Any]
-        else {
-            return isRecording
-        }
-
-        let backendRecording = (state["is_recording"] as? Bool) ?? false
-        if backendRecording != isRecording {
-            isRecording = backendRecording
-            refreshStatusItemTitle()
-            rebuildStatusMenu()
-        }
-        return backendRecording
-    }
-
-    private func startRecording() {
-        captureRecordingTargetApp()
-        let targetBundle = recordingTargetApp?.bundleIdentifier ?? "nil"
-        logger.info("Старт записи. targetApp=\(targetBundle)")
-        do {
-            // Сначала приглушаем системный звук, чтобы в запись не попадали внешние звуки.
-            // В режиме mic принудительно используем mute (100), иначе даже 25%/50%
-            // может физически пробиваться в микрофон и давать ложную транскрипцию.
-            let effectiveDuckingPercent: Int
-            if settings.captureSourceMode == "mic" {
-                effectiveDuckingPercent = 100
-            } else {
-                effectiveDuckingPercent = settings.audioDuckingPercent
-            }
-            audioDuckingService.duckForRecording(
-                enabled: settings.audioDuckingEnabled,
-                duckPercent: effectiveDuckingPercent
-            )
-            let response = try callWithRecovery(method: "start_recording", params: [:])
-            let result = response["result"] as? [String: Any]
-            let status = (result?["status"] as? String) ?? "recording"
-            if status == "already_recording" {
-                logger.warn("Backend вернул already_recording на start_recording")
-                isRecording = true
-                startRealtimeOverlayPolling()
-                refreshStatusItemTitle()
-                rebuildStatusMenu()
-                // Это штатная идемпотентная синхронизация, не показываем шумный алерт.
-                return
-            }
-            if status != "recording" {
-                throw NSError(
-                    domain: "KrabEarAgent",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Неожиданный статус backend: \(status)"]
-                )
-            }
-            isRecording = true
-            lastPreviewTranslationSource = ""
-            lastPreviewTranslationText = ""
-            lastPreviewTranslationAt = 0
-            startRealtimeOverlayPolling()
-            playStartSoundIfEnabled()
-            refreshStatusItemTitle()
-            rebuildStatusMenu()
-        } catch {
-            logger.error("Ошибка start_recording: \(error.localizedDescription)")
-            notify(
-                title: "Krab Ear",
-                body: "Не удалось начать запись: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func stopRecording() {
-        logger.info("Остановка записи запрошена")
-        stopRealtimeOverlayPolling()
-        isRecording = false
-        isProcessing = true
-        refreshStatusItemTitle()
-        rebuildStatusMenu()
-
-        defer {
-            // Важно: восстанавливаем системный звук только после завершения stop-пайплайна,
-            // чтобы хвост фонового аудио не попадал в запись при отпускании hotkey.
-            audioDuckingService.restoreAfterRecording()
-            isProcessing = false
-            refreshStatusItemTitle()
-            rebuildStatusMenu()
-            recordingTargetApp = nil
-        }
-
-        do {
-            let response = try callWithRecovery(
-                method: "stop_recording",
-                params: [
-                    "quality_profile": settings.qualityProfile,
-                    "cleanup_profile": settings.cleanupProfile,
-                    "translation_mode": settings.translationMode,
-                    "translation_style": settings.translationStyle,
-                    "translate_and_paste": settings.translateAndPaste,
-                ]
-            )
-
-            guard let result = response["result"] as? [String: Any] else {
-                notify(title: "Krab Ear", body: "Backend вернул пустой ответ")
-                return
-            }
-
-            let status = (result["status"] as? String) ?? "unknown"
-            let historyId = result["history_id"] as? String
-            let text = (result["text"] as? String) ?? ""
-            let originalText = (result["original_text"] as? String) ?? text
-            let translatedText = (result["translated_text"] as? String) ?? ""
-            let translationMode = (result["translation_mode"] as? String) ?? "off"
-            let translationStatus = (result["translation_status"] as? String) ?? "not_requested"
-            let translateAndPaste = (result["translate_and_paste"] as? Bool) ?? false
-            logger.info("Ответ stop_recording: status=\(status), text_len=\(text.count), history_id=\(historyId ?? "nil")")
-
-            switch status {
-            case "ok":
-                if translationMode != "off" && translationStatus != "ok" && translateAndPaste {
-                    notify(
-                        title: "Krab Ear",
-                        body: "Перевод сейчас недоступен (\(translationStatus)). Вставлен оригинальный текст."
-                    )
-                }
-                lastResult = LastTranscriptionSnapshot(
-                    finalText: text,
-                    originalText: originalText,
-                    translatedText: translatedText,
-                    historyId: historyId,
-                    translationMode: translationMode,
-                    translationStatus: translationStatus
-                )
-                handleTranscriptionResult(text: text, historyId: historyId)
-            case "already_stopped":
-                // Идемпотентный stop: backend уже в idle, лишние уведомления пользователю не нужны.
-                logger.info("stop_recording: backend уже idle (already_stopped), синхронизирую состояние")
-                _ = syncRecordingStateWithBackend()
-            case "empty_audio":
-                logger.warn("stop_recording вернул empty_audio")
-                notify(title: "Krab Ear", body: "Аудио пустое, попробуйте ещё раз")
-            case "empty_text":
-                logger.warn("stop_recording вернул empty_text")
-                if !recoverFromPreviewFallback(reason: "Финальная транскрибация пустая") {
-                    notify(title: "Krab Ear", body: "Речь не распознана")
-                }
-            default:
-                logger.warn("stop_recording вернул неожиданный статус: \(status)")
-                if !recoverFromPreviewFallback(reason: "Неожиданный статус stop: \(status)") {
-                    notify(title: "Krab Ear", body: "Неожиданный статус: \(status)")
-                }
-            }
-        } catch {
-            logger.error("Ошибка stop_recording: \(error.localizedDescription)")
-            if isBackendNotRecordingError(error) {
-                logger.warn("stop_recording: backend уже в idle, fallback не нужен")
-                _ = syncRecordingStateWithBackend()
-                return
-            }
-            if !recoverFromPreviewFallback(reason: "Ошибка stop_recording: \(error.localizedDescription)") {
-                notify(
-                    title: "Krab Ear",
-                    body: "Не удалось завершить запись: \(error.localizedDescription)"
-                )
-            }
-        }
-    }
-
-    private func handleTranscriptionResult(text: String, historyId: String?) {
+    func handleTranscriptionResult(text: String, historyId: String?) {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else {
             logger.warn("handleTranscriptionResult получил пустой текст")
@@ -1097,7 +859,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    private func pasteSnapshotText(text: String, historyId: String?, sourceTag: String) {
+    func pasteSnapshotText(text: String, historyId: String?, sourceTag: String) {
         let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else {
             notify(title: "Krab Ear", body: "Нечего вставлять: текст пустой")
@@ -1277,7 +1039,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func captureRecordingTargetApp() {
+    func captureRecordingTargetApp() {
         if let frontmost = NSWorkspace.shared.frontmostApplication,
            frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier,
            frontmost.activationPolicy == .regular {
@@ -1358,7 +1120,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         self.statusItem = nil
     }
 
-    private func refreshStatusItemTitle() {
+    func refreshStatusItemTitle() {
         guard let button = statusItem?.button else {
             return
         }
@@ -1371,7 +1133,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func rebuildStatusMenu() {
+    func rebuildStatusMenu() {
         guard let statusItem else {
             return
         }
@@ -1826,7 +1588,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    private func playStartSoundIfEnabled() {
+    func playStartSoundIfEnabled() {
         guard settings.playStartSound else {
             return
         }
@@ -1838,11 +1600,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func notify(title: String, body: String) {
+    func notify(title: String, body: String) {
         notificationService.notify(title: title, body: body)
     }
 
-    private func recoverFromPreviewFallback(reason: String) -> Bool {
+    func recoverFromPreviewFallback(reason: String) -> Bool {
         logger.warn("Запуск fallback из realtime preview: \(reason)")
         guard
             let stateResponse = try? ipcClient.call(method: "get_recording_state", params: [:]),
@@ -1986,7 +1748,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    private func isBackendNotRecordingError(_ error: Error) -> Bool {
+    func isBackendNotRecordingError(_ error: Error) -> Bool {
         let lowered = error.localizedDescription.lowercased()
         return lowered.contains("запись не была запущена")
             || lowered.contains("recording was not started")
@@ -2007,7 +1769,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func startRealtimeOverlayPolling() {
+    func startRealtimeOverlayPolling() {
         stopRealtimeOverlayPolling()
         guard settings.realtimePreviewEnabled else { return }
 
@@ -2024,7 +1786,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         refreshRealtimeOverlay()
     }
 
-    private func stopRealtimeOverlayPolling() {
+    func stopRealtimeOverlayPolling() {
         realtimeOverlayTimer?.invalidate()
         realtimeOverlayTimer = nil
         lastPreviewTranslationSource = ""
