@@ -76,11 +76,10 @@ class IntegrityCheckerTestCase(unittest.TestCase):
         report = self.checker.check_integrity(self.data_dir)
         result = self.checker.repair(self.data_dir, report)
         self.assertGreaterEqual(result.fixed, 0)
-        # После repair файл должен быть валидным NDJSON
         lines = history_path.read_text(encoding="utf-8").strip().splitlines()
         for line in lines:
             if line.strip():
-                json.loads(line)  # не должно бросить исключение
+                json.loads(line)
 
     def test_repair_clean_store_is_noop(self) -> None:
         """Чистое хранилище — repair() ничего не меняет."""
@@ -88,6 +87,136 @@ class IntegrityCheckerTestCase(unittest.TestCase):
         report = self.checker.check_integrity(self.data_dir)
         result = self.checker.repair(self.data_dir, report)
         self.assertEqual(result.fixed, 0)
+
+    def test_check_integrity_detects_missing_required_fields(self) -> None:
+        """Items missing required fields (id, ts, text) детектируются как ошибка."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id": "1", "ts": "2024-01-01T00:00:00", "text": "ok"}\n'
+            '{"id": "2", "ts": "2024-01-02T00:00:00"}\n'
+            '{"ts": "2024-01-03T00:00:00", "text": "ok"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        required_check = next(
+            (c for c in report.checks if c.name == "required_fields"), None
+        )
+        self.assertIsNotNone(required_check)
+        self.assertIn(required_check.status, ("error", "warning"))
+
+    def test_check_integrity_detects_orphaned_tombstones(self) -> None:
+        """Tombstone entries для несуществующих ID обнаруживаются."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id": "1", "ts": "2024-01-01T00:00:00", "text": "ok"}\n',
+            encoding="utf-8",
+        )
+        tombstones_path = self.data_dir / "history_tombstones.ndjson"
+        tombstones_path.write_text(
+            '{"id": "999", "ts": "2024-01-01T00:00:00"}\n'
+            '{"id": "1", "ts": "2024-01-02T00:00:00"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertGreater(report.orphaned_tombstones, 0)
+        orphaned_check = next(
+            (c for c in report.checks if c.name == "orphaned_tombstones"), None
+        )
+        self.assertIsNotNone(orphaned_check)
+        self.assertTrue(orphaned_check.auto_fixable)
+
+    def test_repair_removes_orphaned_tombstones(self) -> None:
+        """repair() удаляет orphaned tombstone entries, сохраняя валидные."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id": "1", "ts": "2024-01-01T00:00:00", "text": "ok"}\n'
+            '{"id": "2", "ts": "2024-01-02T00:00:00", "text": "ok"}\n',
+            encoding="utf-8",
+        )
+        tombstones_path = self.data_dir / "history_tombstones.ndjson"
+        tombstones_path.write_text(
+            '{"id": "1", "ts": "2024-01-01T00:00:00"}\n'
+            '{"id": "999", "ts": "2024-01-02T00:00:00"}\n'
+            '{"id": "2", "ts": "2024-01-03T00:00:00"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        result = self.checker.repair(self.data_dir, report)
+        self.assertGreaterEqual(result.fixed, 0)
+        remaining_tombstones = []
+        for line in tombstones_path.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                remaining_tombstones.append(json.loads(line))
+        remaining_ids = {t.get("id") for t in remaining_tombstones}
+        self.assertNotIn("999", remaining_ids)
+        self.assertIn("1", remaining_ids)
+
+    def test_check_integrity_with_corrupted_settings_json(self) -> None:
+        """Повреждённый settings.json обнаруживается как ошибка."""
+        settings_path = self.data_dir / "settings.json"
+        settings_path.write_text('{"invalid json', encoding="utf-8")
+        report = self.checker.check_integrity(self.data_dir)
+        settings_check = next(
+            (c for c in report.checks if c.name == "settings_json"), None
+        )
+        self.assertIsNotNone(settings_check)
+        self.assertEqual(settings_check.status, "error")
+        self.assertTrue(settings_check.auto_fixable)
+
+    def test_repair_fixes_corrupted_settings_json(self) -> None:
+        """repair() восстанавливает повреждённый settings.json до {}."""
+        settings_path = self.data_dir / "settings.json"
+        settings_path.write_text('{"broken json', encoding="utf-8")
+        report = self.checker.check_integrity(self.data_dir)
+        result = self.checker.repair(self.data_dir, report)
+        self.assertGreaterEqual(result.fixed, 0)
+        repaired = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertIsInstance(repaired, dict)
+
+    def test_check_integrity_timestamp_format_validation(self) -> None:
+        """Items с неправильным форматом timestamp обнаруживаются."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id": "1", "ts": "2024-01-01T00:00:00", "text": "ok"}\n'
+            '{"id": "2", "ts": "not a timestamp", "text": "ok"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        ts_check = next(
+            (c for c in report.checks if c.name == "timestamp_format"), None
+        )
+        self.assertIsNotNone(ts_check)
+        self.assertIn(ts_check.status, ("warning", "error"))
+
+    def test_check_integrity_detects_duplicate_ids(self) -> None:
+        """Items с дублирующимися ID обнаруживаются."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id": "same-id", "ts": "2024-01-01T00:00:00", "text": "first"}\n'
+            '{"id": "same-id", "ts": "2024-01-02T00:00:00", "text": "duplicate"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        dup_check = next(
+            (c for c in report.checks if c.name == "duplicate_ids"), None
+        )
+        self.assertIsNotNone(dup_check)
+        self.assertEqual(dup_check.status, "warning")
+
+    def test_ndjson_repair_creates_tmp_file_safely(self) -> None:
+        """repair() использует .tmp файл для безопасной замены."""
+        history_path = self.data_dir / "history.ndjson"
+        original_content = (
+            '{"id": "1", "ts": "2024-01-01T00:00:00", "text": "ok"}\n'
+            'INVALID\n'
+        )
+        history_path.write_text(original_content, encoding="utf-8")
+        report = self.checker.check_integrity(self.data_dir)
+        result = self.checker.repair(self.data_dir, report)
+        self.assertIsInstance(result, RepairResult)
+        self.assertTrue(history_path.exists())
+        tmp_path = history_path.with_suffix(".ndjson.tmp")
+        self.assertFalse(tmp_path.exists())
 
 
 class IntegrityCheckerIPCTestCase(unittest.TestCase):
