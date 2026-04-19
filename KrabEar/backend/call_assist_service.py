@@ -190,6 +190,8 @@ class CallAssistService:
             "session_id": None,
             "gateway_session_id": None,
         }
+        self._pending_post_count: int = 0
+        self._max_pending_post_depth_observed: int = 0
 
     @staticmethod
     def _default_extract_text(payload: Any) -> str:
@@ -434,6 +436,8 @@ class CallAssistService:
         with self._lock:
             gateway_session_id = str(self._state.get("gateway_session_id") or "").strip()
             active = bool(self._state.get("active"))
+            pending_current = self._pending_post_count
+            pending_max = self._max_pending_post_depth_observed
         if not gateway_session_id:
             raise RuntimeError("Нет активной gateway-сессии call assist")
 
@@ -463,6 +467,10 @@ class CallAssistService:
             "gateway_session_id": gateway_session_id,
             "diagnostics": diag_result.get("payload", {}),
             "why": why_payload,
+            "pending_posts": {
+                "current": pending_current,
+                "max_observed": pending_max,
+            },
         }
 
     def handle_summary(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -921,6 +929,9 @@ class CallAssistService:
     def _assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
         """Фоновый цикл отправки транскрибации в Voice Gateway."""
         last_sent_text = ""
+        backoff_delay: float = 0.0
+        _BACKOFF_STEPS = [0.5, 1.0, 2.0, 4.0]
+        _BACKOFF_MAX = 4.0
 
         while True:
             with self._lock:
@@ -946,14 +957,42 @@ class CallAssistService:
 
                 if text and text != last_sent_text:
                     logger.debug(f"Call Assist: sending text='{text}'")
-                    resp = self.gateway.post(
-                        gateway_url,
-                        api_key,
-                        f"/v1/sessions/{session_id}/events",
-                        {"type": "stt.partial", "data": {"text": text}},
-                    )
+
+                    with self._lock:
+                        self._pending_post_count += 1
+                        current_pending = self._pending_post_count
+                        if current_pending > self._max_pending_post_depth_observed:
+                            self._max_pending_post_depth_observed = current_pending
+                    if current_pending > 3:
+                        logger.warning("Call assist backpressure: %d POSTs in flight", current_pending)
+
+                    try:
+                        resp = self.gateway.post(
+                            gateway_url,
+                            api_key,
+                            f"/v1/sessions/{session_id}/events",
+                            {"type": "stt.partial", "data": {"text": text}},
+                        )
+                    finally:
+                        with self._lock:
+                            self._pending_post_count = max(0, self._pending_post_count - 1)
+
                     logger.debug(f"Call Assist: post result={resp}")
-                    last_sent_text = text
+                    if resp.get("ok"):
+                        backoff_delay = 0.0
+                        last_sent_text = text
+                    else:
+                        if backoff_delay == 0.0:
+                            backoff_delay = _BACKOFF_STEPS[0]
+                        else:
+                            backoff_delay = min(backoff_delay * 2, _BACKOFF_MAX)
+                        logger.warning(
+                            "Call Assist: POST failed (%s), backoff=%.1fs",
+                            resp.get("error"),
+                            backoff_delay,
+                        )
+                        time.sleep(backoff_delay)
+                        continue
 
             except Exception:
                 logger.exception("Call Assist loop error")
