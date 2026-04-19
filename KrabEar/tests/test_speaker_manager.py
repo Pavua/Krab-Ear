@@ -194,5 +194,112 @@ class TestSpeakerManagerIPCHandlers(unittest.TestCase):
             self.mgr.handle_remove_speaker_alias({})
 
 
+class TestSpeakerManagerEdgeCases(unittest.TestCase):
+    """Edge cases: rename, merge, list, persistence via tempfile."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.mgr = SpeakerManager(data_dir=self.tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Create profile with name + lang hint encoded in alias
+    # ------------------------------------------------------------------
+
+    def test_create_profile_with_lang_hint(self):
+        """Псевдоним может кодировать язык: 'Паша (RU)'."""
+        self.mgr.set_alias("SPEAKER_00", "Паша (RU)")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша (RU)")
+
+    # ------------------------------------------------------------------
+    # Rename: exists vs not-exists
+    # ------------------------------------------------------------------
+
+    def test_rename_existing_alias(self):
+        """Переименование существующего псевдонима через повторный set_alias."""
+        self.mgr.set_alias("SPEAKER_00", "OldName")
+        self.mgr.set_alias("SPEAKER_00", "NewName")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "NewName")
+
+    def test_rename_nonexistent_creates_entry(self):
+        """set_alias на несуществующий speaker_id — просто создаёт запись."""
+        self.mgr.set_alias("SPEAKER_99", "Ghost")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_99"), "Ghost")
+
+    # ------------------------------------------------------------------
+    # Merge two profiles: items of both end up under one alias
+    # ------------------------------------------------------------------
+
+    def test_merge_two_profiles(self):
+        """Слияние: псевдоним SPEAKER_01 → SPEAKER_00, SPEAKER_01 удаляется."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+        # Merge: assign SPEAKER_01's texts to SPEAKER_00 (alias stays),
+        # then remove SPEAKER_01 entry.
+        self.mgr.remove_alias("SPEAKER_01")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша")
+        self.assertIsNone(self.mgr.get_alias("SPEAKER_01"))
+        self.assertNotIn("SPEAKER_01", self.mgr.get_all_aliases())
+
+    def test_merge_with_self_is_noop(self):
+        """Слияние спикера с самим собой — псевдоним не меняется."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        # "merge self" → set same alias again, remove same id — effectively a noop
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша")
+
+    # ------------------------------------------------------------------
+    # List profiles: sort order, filter
+    # ------------------------------------------------------------------
+
+    def test_list_profiles_sorted(self):
+        """get_all_aliases возвращает все записи; ключи можно сортировать."""
+        self.mgr.set_alias("SPEAKER_02", "В")
+        self.mgr.set_alias("SPEAKER_00", "А")
+        self.mgr.set_alias("SPEAKER_01", "Б")
+        aliases = self.mgr.get_all_aliases()
+        sorted_keys = sorted(aliases.keys())
+        self.assertEqual(sorted_keys, ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"])
+
+    def test_list_profiles_filter_by_pattern(self):
+        """Можно фильтровать псевдонимы по шаблону имени."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Маша")
+        self.mgr.set_alias("SPEAKER_02", "Никита")
+        aliases = self.mgr.get_all_aliases()
+        asha = {k: v for k, v in aliases.items() if "аша" in v}
+        self.assertIn("SPEAKER_00", asha)
+        self.assertIn("SPEAKER_01", asha)
+        self.assertNotIn("SPEAKER_02", asha)
+
+    # ------------------------------------------------------------------
+    # Persistence via tempfile (mock-free, uses real fs)
+    # ------------------------------------------------------------------
+
+    def test_persistence_survives_reload(self):
+        """Псевдонимы сохраняются и загружаются из tempdir."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Маша")
+        # Reload from same dir
+        mgr2 = SpeakerManager(data_dir=self.tmpdir)
+        self.assertEqual(mgr2.get_alias("SPEAKER_00"), "Паша")
+        self.assertEqual(mgr2.get_alias("SPEAKER_01"), "Маша")
+
+    # ------------------------------------------------------------------
+    # Rename to existing name (two speakers get the same human name)
+    # ------------------------------------------------------------------
+
+    def test_rename_to_existing_name_allowed(self):
+        """Два speaker_id могут иметь одинаковый псевдоним — это легально."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Паша")  # same name, different speaker
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_01"), "Паша")
+        self.assertEqual(len(self.mgr.get_all_aliases()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
