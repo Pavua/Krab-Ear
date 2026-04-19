@@ -1,4 +1,4 @@
-"""Тесты ObsidianSyncManager — синхронизация транскрипций с Obsidian vault.
+"""Unit-тесты ObsidianSyncManager.
 
 Проверяют:
 - configure() с валидным/невалидным путём
@@ -12,18 +12,21 @@
 """
 
 from __future__ import annotations
-from backend.obsidian_sync import ObsidianSyncManager, SyncResult
 
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import sys
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+for _p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from backend.obsidian_sync import ObsidianSyncManager, SyncResult  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
