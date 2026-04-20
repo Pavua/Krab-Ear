@@ -1715,24 +1715,42 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         recordingSection.contentStackView.addArrangedSubview(recordingCard)
         self.dictationRecordingSection = recordingSection
 
-        let systemSection = CollapsibleSectionView(sectionId: "dictation_system", title: "Горячие клавиши и система", isExpanded: false)
-        let systemCard = ThemeCardView()
-        systemCard.contentStackView.addArrangedSubview(settingsRow4)
-        systemCard.contentStackView.addArrangedSubview(settingsRow6)
-        systemCard.contentStackView.addArrangedSubview(settingsRow7) // Moved from Live tab
-        systemSection.contentStackView.addArrangedSubview(systemCard)
-        self.dictationSystemSection = systemSection
+        // --- HOTKEY SECTION (Path A: makeSettingRow helpers) ---
+        let hotkeySection = buildHotkeySection()
+        // Wire targets/actions (controls are declared as class properties)
+        hotkeySelector.target = self
+        hotkeySelector.action = #selector(onHotkeyChanged)
+        hotkeyProfileSelector.target = self
+        hotkeyProfileSelector.action = #selector(onHotkeyProfileChanged)
 
-        let aiSection = CollapsibleSectionView(sectionId: "dictation_ai", title: "AI и обработка", isExpanded: false)
-        let aiCard = ThemeCardView()
-        aiCard.contentStackView.addArrangedSubview(aiSettingsRow1)
-        aiCard.contentStackView.addArrangedSubview(aiSettingsRow2)
-        aiSection.contentStackView.addArrangedSubview(aiCard)
-        self.dictationAISection = aiSection
+        // --- SYSTEM SECTION (Path A: makeSwitchRow / makeSettingRow helpers) ---
+        let builtSystemSection = buildSystemSection()
+        // Wire targets/actions for controls reparented from settingsRow4/6/7
+        audioDuckingButton.target = self
+        audioDuckingButton.action = #selector(onAudioDuckingChanged)
+        audioDuckingSlider.target = self
+        audioDuckingSlider.action = #selector(onAudioDuckingPercentChanged)
+        overlayOpacitySlider.target = self
+        overlayOpacitySlider.action = #selector(onOverlayOpacityChanged)
+        autoStartButton.target = self
+        autoStartButton.action = #selector(onAutostartChanged)
+        dockIconButton.target = self
+        dockIconButton.action = #selector(onDockChanged)
+        self.dictationSystemSection = builtSystemSection
+
+        // --- AI / LLM SECTION (Path A: makeSwitchRow / makeSettingRow helpers) ---
+        let llmSection = buildLLMSection()
+        // Wire targets/actions (diarizationButton wired in buildAudioPipelineSection call below)
+        llmRewriteButton.target = self
+        llmRewriteButton.action = #selector(onLlmRewriteChanged)
+        llmModelSelector.target = self
+        llmModelSelector.action = #selector(onLlmModelChanged)
+        self.dictationAISection = llmSection
 
         settingsBar.addArrangedSubview(recordingSection)
-        settingsBar.addArrangedSubview(systemSection)
-        settingsBar.addArrangedSubview(aiSection)
+        settingsBar.addArrangedSubview(hotkeySection)
+        settingsBar.addArrangedSubview(builtSystemSection)
+        settingsBar.addArrangedSubview(llmSection)
 
         // --- AUDIO PIPELINE SECTION (PR #20 — Gemini 3.1 Pro, UI only) ---
         // Reparents `diarizationButton` (из aiSettingsRow1) + `qualitySelector`
@@ -1740,7 +1758,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let audioPipelineSection = buildAudioPipelineSection()
         settingsBar.addArrangedSubview(audioPipelineSection)
 
-        // --- VOICE ASSISTANT SECTION (Phase 1.5) ---
+        // --- VOICE ASSISTANT SECTION (Phase 1.5, Path A refactor) ---
+        // buildVoiceAssistantSection() now uses makeSwitchRow/makeSettingRow helpers
+        // and populates vaEngineSelector/vaBrainSelector items internally.
         let vaSection = buildVoiceAssistantSection()
         vaHotkeyToggle.target = self
         vaHotkeyToggle.action = #selector(onVAHotkeyToggleChanged)
@@ -1865,18 +1885,20 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
 
         // --- LIVE TRANSLATION TAB ---
-        let translationSettingsCard = ThemeCardView()
-        translationSettingsCard.title = ""  // Section provides the title
-        for view in [settingsRow2, toolsRow] as [NSView] {
-            view.removeFromSuperview()
-            translationSettingsCard.contentStackView.addArrangedSubview(view)
-        }
-        let translationSection = CollapsibleSectionView(sectionId: "live_translation_settings", title: "Настройки перевода", isExpanded: true)
-        translationSection.contentStackView.addArrangedSubview(translationSettingsCard)
+        // Translation section now uses makeSettingRow helpers (Path A).
+        // Wire targets/actions for controls used in buildTranslationSection().
+        translationSelector.target = self
+        translationSelector.action = #selector(onTranslationModeChanged)
+        networkSelector.target = self
+        networkSelector.action = #selector(onNetworkModeChanged)
+        translationStyleSelector.target = self
+        translationStyleSelector.action = #selector(onTranslationStyleChanged)
+        let translationSection = buildTranslationSection()
 
         let gatewayCard = ThemeCardView()
         gatewayCard.title = ""  // Section provides the title
-        for view in [voiceGatewayRow, callAssistConfigRow] as [NSView] {
+        // toolsRow (swap RU<->ES + glossary buttons) moved here from old translationSettingsCard
+        for view in [toolsRow, voiceGatewayRow, callAssistConfigRow] as [NSView] {
             view.removeFromSuperview()
             gatewayCard.contentStackView.addArrangedSubview(view)
         }
