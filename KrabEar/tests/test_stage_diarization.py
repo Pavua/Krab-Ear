@@ -153,3 +153,85 @@ class TestDiarizationStageProcess(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDiarizationEdgeCases(unittest.TestCase):
+    """Edge cases: single speaker, overlapping speakers, extreme timings."""
+
+    def test_single_speaker_segment_entire_audio(self):
+        # One speaker for entire duration
+        segments = [{"start": 0.0, "end": 60.0, "speaker": "SPEAKER_00"}]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        self.assertEqual(result.num_speakers, 1)
+        self.assertEqual(len(result.speaker_segments), 1)
+
+    def test_single_short_speaker_segment(self):
+        # Very short segment
+        segments = [{"start": 0.0, "end": 0.1, "speaker": "SPEAKER_00"}]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        self.assertEqual(result.num_speakers, 1)
+        self.assertAlmostEqual(result.speaker_segments[0]["end"] - result.speaker_segments[0]["start"], 0.1)
+
+    def test_overlapping_speakers(self):
+        # Multiple speakers with overlapping time ranges
+        segments = [
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 3.0, "end": 8.0, "speaker": "SPEAKER_01"},  # Overlaps
+            {"start": 7.0, "end": 10.0, "speaker": "SPEAKER_00"},
+        ]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        # Should handle overlapping gracefully
+        self.assertEqual(len(result.speaker_segments), 3)
+        self.assertIn("SPEAKER_00", [s["speaker"] for s in result.speaker_segments])
+        self.assertIn("SPEAKER_01", [s["speaker"] for s in result.speaker_segments])
+
+    def test_many_speakers(self):
+        # High speaker count
+        segments = [
+            {"start": i * 1.0, "end": (i + 1) * 1.0, "speaker": f"SPEAKER_{i:02d}"}
+            for i in range(20)
+        ]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        self.assertEqual(result.num_speakers, 20)
+
+    def test_zero_duration_segment(self):
+        # start == end
+        segments = [{"start": 5.0, "end": 5.0, "speaker": "SPEAKER_00"}]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        # Should include but recognize as zero-duration
+        self.assertEqual(result.num_speakers, 1)
+
+    def test_negative_timestamps(self):
+        # Start/end before zero (edge case)
+        segments = [
+            {"start": -1.0, "end": 2.0, "speaker": "SPEAKER_00"},
+            {"start": 2.0, "end": 5.0, "speaker": "SPEAKER_01"},
+        ]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        # Should include or error gracefully
+        self.assertIsNotNone(result.speaker_segments)
+
+    def test_unsorted_segments(self):
+        # Segments not in temporal order
+        segments = [
+            {"start": 5.0, "end": 10.0, "speaker": "SPEAKER_01"},
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 10.0, "end": 15.0, "speaker": "SPEAKER_02"},
+        ]
+        stage = DiarizationStage(diarization_fn=_fake_diarization(segments))
+        ctx = _ctx(audio_input="/tmp/audio.wav")
+        result = stage.process(ctx)
+        # Should handle unsorted gracefully
+        self.assertEqual(result.num_speakers, 3)

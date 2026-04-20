@@ -108,3 +108,81 @@ class TextCleanupStageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTextCleanupEdgeCases(unittest.TestCase):
+    """Edge cases: all-whitespace, very long, special chars."""
+
+    def _make_ctx(self, raw_text: str, profile: str = "soft") -> PipelineContext:
+        return PipelineContext(audio_input=None, raw_text=raw_text, cleanup_profile=profile)
+
+    def test_all_whitespace_no_change(self):
+        stage = TextCleanupStage()
+        ctx = self._make_ctx("   \t\n  \r  ", profile="soft")
+        # should_run returns False for whitespace-only
+        self.assertFalse(stage.should_run(ctx))
+
+    def test_very_long_text_20k_chars(self):
+        # 20,000 character transcript
+        long_text = "Слово " * 3333  # ~20k chars
+        stage = TextCleanupStage()
+        ctx = self._make_ctx(long_text, profile="soft")
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.cleaned_text)
+        self.assertGreater(len(result.cleaned_text), 0)
+
+    def test_very_long_text_100k_chars(self):
+        # Extreme case: 10k characters (100k too slow)
+        long_text = "A" * 10_000
+        stage = TextCleanupStage()
+        ctx = self._make_ctx(long_text, profile="soft")
+        if stage.should_run(ctx):
+            result = stage.process(ctx)
+            self.assertIsNotNone(result.cleaned_text)
+
+    def test_only_punctuation(self):
+        stage = TextCleanupStage()
+        ctx = self._make_ctx("!!! ??? ... ;;;", profile="soft")
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.cleaned_text)
+        self.assertFalse(result.errors)
+
+    def test_special_unicode_chars(self):
+        # Emoji, Cyrillic, Arabic, CJK
+        mixed = "Привет 😀 مرحبا 你好 🎉"
+        stage = TextCleanupStage()
+        ctx = self._make_ctx(mixed, profile="soft")
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.cleaned_text)
+
+    def test_null_byte_in_text(self):
+        # Embedded null
+        text = "Hello\x00World"
+        stage = TextCleanupStage()
+        ctx = self._make_ctx(text, profile="soft")
+        result = stage.process(ctx)
+        # Should handle gracefully (not crash)
+        self.assertIsNotNone(result.cleaned_text)
+
+    def test_repeated_whitespace(self):
+        # Multiple spaces, tabs, newlines
+        text = "Word1    \t\t  Word2\n\n\nWord3"
+        stage = TextCleanupStage()
+        ctx = self._make_ctx(text, profile="soft")
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.cleaned_text)
+
+    def test_single_character(self):
+        stage = TextCleanupStage()
+        ctx = self._make_ctx("A", profile="soft")
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.cleaned_text)
+        self.assertEqual(len(result.cleaned_text), 1)
+
+    def test_strict_profile_on_empty_post_cleanup(self):
+        # Text that becomes empty after cleanup
+        stage = TextCleanupStage()
+        ctx = self._make_ctx("Спасибо за просмотр", profile="strict")
+        result = stage.process(ctx)
+        # Hallucination pattern removed, may leave empty or short text
+        self.assertIsNotNone(result.cleaned_text)

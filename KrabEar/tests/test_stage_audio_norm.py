@@ -179,3 +179,76 @@ class TestUnknownInput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAudioNormEdgeCases(unittest.TestCase):
+    """Edge cases: very short/long audio, extreme amplitudes."""
+
+    def setUp(self):
+        self.stage = AudioNormalizationStage()
+
+    def test_very_short_audio_less_than_100_samples(self):
+        # 50 samples at 16kHz ≈ 3ms
+        data = np.array([0.1, 0.2, 0.15, 0.05, -0.1, -0.2] * 8 + [0.1], dtype=np.float32)
+        self.assertEqual(len(data), 49)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        self.assertIsNotNone(result.normalized_audio)
+        self.assertEqual(result.normalized_audio.shape[0], 49)
+
+    def test_very_short_audio_single_sample(self):
+        data = np.array([0.5], dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        # Should not crash, passthrough or normalize
+        self.assertIsNotNone(result.normalized_audio)
+
+    def test_very_long_audio_10_million_samples(self):
+        # 10M samples at 16kHz ≈ 10 minutes
+        data = np.ones(10_000_000, dtype=np.float32) * 0.3
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        self.assertIsNotNone(result.normalized_audio)
+        # Verify clipping
+        self.assertLessEqual(float(result.normalized_audio.max()), 1.0)
+        self.assertGreaterEqual(float(result.normalized_audio.min()), -1.0)
+
+    def test_extreme_amplitude_positive(self):
+        # Very large positive values
+        data = np.full(1000, 100.0, dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        # Should be clipped/normalized
+        self.assertLessEqual(float(result.normalized_audio.max()), 1.0)
+
+    def test_extreme_amplitude_negative(self):
+        # Very large negative values
+        data = np.full(1000, -50.0, dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        self.assertGreaterEqual(float(result.normalized_audio.min()), -1.0)
+
+    def test_mixed_extreme_values(self):
+        # Mix of very large positive and negative
+        data = np.concatenate([
+            np.full(500, 1000.0, dtype=np.float32),
+            np.full(500, -500.0, dtype=np.float32)
+        ])
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        self.assertLessEqual(float(result.normalized_audio.max()), 1.0)
+        self.assertGreaterEqual(float(result.normalized_audio.min()), -1.0)
+
+    def test_nan_values_handled_gracefully(self):
+        data = np.array([0.1, 0.2, np.nan, 0.3, 0.4], dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        # Should either skip NaN or add error (implementation-dependent)
+        self.assertIsNotNone(result.normalized_audio)
+
+    def test_inf_values_handled_gracefully(self):
+        data = np.array([0.1, np.inf, 0.3, -np.inf, 0.5], dtype=np.float32)
+        ctx = _make_ctx(data)
+        result = self.stage.process(ctx)
+        # Should handle infinity gracefully
+        self.assertIsNotNone(result.normalized_audio)

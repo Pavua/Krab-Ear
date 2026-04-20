@@ -146,3 +146,82 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLLMRewriteEdgeCases(unittest.TestCase):
+    """Edge cases: circuit breaker states, max tokens, empty inputs."""
+
+    def test_circuit_breaker_open_skips_rewrite(self):
+        rewriter = _mock_rewriter()
+        rewriter._circuit.state = "open"
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="текст")
+        result = stage.process(ctx)
+        # Circuit open → should_run returns False
+        self.assertFalse(stage.should_run(ctx))
+
+    def test_circuit_breaker_half_open_allows_retry(self):
+        rewriter = _mock_rewriter()
+        rewriter._circuit.state = "half_open"
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="текст")
+        # should_run True in half_open
+        self.assertTrue(stage.should_run(ctx))
+
+    def test_max_tokens_exceeded(self):
+        # Simulate rewriter hitting max tokens limit
+        rewriter = _mock_rewriter(ok=False, fallback="max_tokens_exceeded", latency=100)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="очень очень очень очень очень очень длинный текст " * 100)
+        result = stage.process(ctx)
+        self.assertFalse(result.llm_applied)
+        self.assertEqual(result.llm_fallback_reason, "max_tokens_exceeded")
+
+    def test_empty_cleaned_text_fallback_to_raw(self):
+        rewriter = _mock_rewriter(ok=True, text="из raw")
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="", raw_text="raw текст для переписи")
+        result = stage.process(ctx)
+        # Should call rewriter with raw_text
+        rewriter.rewrite.assert_called_with("raw текст для переписи")
+
+    def test_both_cleaned_and_raw_empty(self):
+        rewriter = _mock_rewriter(ok=True, text="default")
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="", raw_text="")
+        result = stage.process(ctx)
+        # Should still call with empty string
+        rewriter.rewrite.assert_called_once_with("")
+
+    def test_timeout_during_rewrite(self):
+        rewriter = _mock_rewriter(ok=False, fallback="timeout", latency=5000)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="текст")
+        result = stage.process(ctx)
+        self.assertFalse(result.llm_applied)
+        self.assertEqual(result.llm_fallback_reason, "timeout")
+        self.assertEqual(result.llm_latency_ms, 5000)
+
+    def test_very_short_input_text(self):
+        rewriter = _mock_rewriter(ok=True, text="a")
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="a")
+        result = stage.process(ctx)
+        self.assertTrue(result.llm_applied)
+
+    def test_rewriter_returns_none_text(self):
+        # Rewriter returns ok=True but text=None (edge case)
+        rewriter = _mock_rewriter(ok=True, text=None)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="оригинал")
+        result = stage.process(ctx)
+        # Should handle gracefully
+        self.assertIsNotNone(result.rewritten_text)
+
+    def test_settings_get_missing_returns_default(self):
+        # settings_get not provided → defaults to False
+        rewriter = _mock_rewriter()
+        stage = LLMRewriteStage(rewriter=rewriter)
+        ctx = _make_ctx(cleaned_text="текст")
+        # should_run returns False (default disabled)
+        self.assertFalse(stage.should_run(ctx))
