@@ -166,5 +166,73 @@ class TestHotwordDetectorBasic(unittest.TestCase):
         self.assertEqual(matches[0].word, "alpha")
 
 
+class TestHotwordDetectorExtended(unittest.TestCase):
+    """Extended test coverage for HotwordDetector focus scenarios."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.detector = HotwordDetector(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # 21. detect present — hotword found in transcript
+    def test_detect_hotword_present(self):
+        """Test that detector correctly identifies a hotword present in text."""
+        self.detector.add_hotword("important")
+        matches = self.detector.check_text("This is important news.")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].word, "important")
+        self.assertIn("important", matches[0].context)
+
+    # 22. detect absent — hotword not found in transcript
+    def test_detect_hotword_absent(self):
+        """Test that detector returns empty list when hotword absent."""
+        self.detector.add_hotword("urgent")
+        matches = self.detector.check_text("This is routine information.")
+        self.assertEqual(len(matches), 0)
+
+    # 23. multiple triggers in single text
+    def test_multiple_triggers_in_text(self):
+        """Test detection of multiple different hotwords in a single transcript."""
+        self.detector.add_hotword("warning")
+        self.detector.add_hotword("critical")
+        self.detector.add_hotword("action")
+        text = "WARNING: critical system issue requires immediate action now."
+        matches = self.detector.check_text(text)
+        self.assertEqual(len(matches), 3)
+        words_found = {m.word for m in matches}
+        self.assertEqual(words_found, {"warning", "critical", "action"})
+
+    # 24. case-insensitive matching by default
+    def test_case_insensitive_default(self):
+        """Test case-insensitive matching is default behavior."""
+        self.detector.add_hotword("ERROR")
+        # Test various case combinations
+        matches1 = self.detector.check_text("error detected")
+        matches2 = self.detector.check_text("ERROR detected")
+        matches3 = self.detector.check_text("Error detected")
+        self.assertEqual(len(matches1), 1)
+        self.assertEqual(len(matches2), 1)
+        self.assertEqual(len(matches3), 1)
+
+    # 25. empty text handling
+    def test_empty_text(self):
+        """Test that empty text returns no matches."""
+        self.detector.add_hotword("trigger")
+        matches = self.detector.check_text("")
+        self.assertEqual(matches, [])
+
+    # 26. word boundary matching (no partial words)
+    def test_word_boundary_matching(self):
+        """Test that hotwords are matched as whole words only."""
+        self.detector.add_hotword("test")
+        # "test" should match, "contest" should not (partial match)
+        matches_full = self.detector.check_text("This is a test case.")
+        matches_partial = self.detector.check_text("This is a contest now.")
+        self.assertEqual(len(matches_full), 1)
+        self.assertEqual(len(matches_partial), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
