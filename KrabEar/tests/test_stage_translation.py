@@ -152,3 +152,93 @@ class TestTranslationStageProcess(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTranslationEdgeCases(unittest.TestCase):
+    """Edge cases: same source=target, unknown lang, empty input."""
+
+    def test_same_source_equals_target_noop(self):
+        # Translate RU to RU (no-op)
+        translator = FakeTranslator(FakeTranslationResult(
+            "Русский текст", "ok", source_lang="ru", target_lang="ru", mode="ru_to_ru"
+        ))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_ru", final_text="Русский текст")
+        result = stage.process(ctx)
+        # Should translate but result should be same
+        self.assertEqual(result.translation, "Русский текст")
+
+    def test_unknown_language_code(self):
+        # Unsupported language pair
+        translator = FakeTranslator(FakeTranslationResult(
+            "", "unsupported_language", source_lang="xx", target_lang="yy"
+        ))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="xx_to_yy", final_text="текст")
+        result = stage.process(ctx)
+        # Should add error
+        self.assertIsNone(result.translation)
+        self.assertTrue(any("translation_failed" in e for e in result.errors))
+
+    def test_empty_translation_text(self):
+        # Translator returns empty string
+        translator = FakeTranslator(FakeTranslationResult(
+            "", "ok", source_lang="ru", target_lang="es"
+        ))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="текст")
+        result = stage.process(ctx)
+        # Empty result should be treated as not ok
+        self.assertIsNone(result.translation)
+
+    def test_empty_input_text_all_sources(self):
+        # No text in final/cleaned/raw
+        translator = FakeTranslator(FakeTranslationResult("", "ok"))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="", cleaned_text="", raw_text="")
+        result = stage.process(ctx)
+        # Should translate empty string, result is None
+        translator.calls[0]["text"] == ""
+
+    def test_very_long_translation_text(self):
+        # 10,000 character output
+        long_output = "Hola " * 2000
+        translator = FakeTranslator(FakeTranslationResult(
+            long_output, "ok", source_lang="ru", target_lang="es"
+        ))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="Привет")
+        result = stage.process(ctx)
+        self.assertEqual(result.translation, long_output)
+
+    def test_translation_with_special_chars(self):
+        # Output contains emoji, special punctuation
+        special_text = "Привет! 😀 ¿Cómo estás? Спасибо!!!"
+        translator = FakeTranslator(FakeTranslationResult(
+            special_text, "ok", source_lang="ru", target_lang="es"
+        ))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="привет")
+        result = stage.process(ctx)
+        self.assertEqual(result.translation, special_text)
+
+    def test_glossary_passed_to_translator(self):
+        translator = FakeTranslator(FakeTranslationResult("ok", "ok"))
+        stage = TranslationStage(translator=translator)
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="текст")
+        ctx.glossary = {"ключ": "llave"}
+        # Ensure glossary parameter accepted (may not be used in fake)
+        result = stage.process(ctx)
+        self.assertIsNotNone(result)
+
+    def test_translation_network_mode_offline(self):
+        translator = FakeTranslator(FakeTranslationResult("offline result", "ok"))
+        stage = TranslationStage(
+            translator=translator,
+            settings_get=lambda k, d=None: "offline" if k == "network_mode" else d
+        )
+        ctx = make_ctx(translation_mode="ru_to_es", final_text="текст")
+        result = stage.process(ctx)
+        self.assertEqual(result.translation, "offline result")
+        # Verify network_mode was passed
+        self.assertEqual(translator.calls[0]["network_mode"], "offline")

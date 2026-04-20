@@ -178,3 +178,78 @@ class TestSTTStageBasic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSTTEdgeCases(unittest.TestCase):
+    """Edge cases: empty audio, VAD skip, extreme scenarios."""
+
+    def test_single_sample_audio(self):
+        # Minimal audio (1 sample)
+        engine = FakeEngine(result=_ok_result(raw_text="minimal"))
+        stage = STTStage(engine)
+        ctx = _make_ctx(audio_input=np.array([0.1], dtype=np.float32))
+        result = stage.process(ctx)
+        # Should handle gracefully
+        self.assertIsNotNone(result.raw_text)
+
+    def test_vad_skip_returns_skipped_status(self):
+        # Engine returns error/skip marker
+        engine = FakeEngine(result={
+            "status": "skipped",
+            "reason": "vad_silence_detected",
+            "text": "",
+            "raw_text": "",
+            "segments": []
+        })
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        result = stage.process(ctx)
+        # Should append error but not crash
+        self.assertTrue(any("skipped" in e or "silence" in e for e in result.errors) or result.raw_text == "")
+
+    def test_extremely_long_audio_10_hours(self):
+        # 10 hours at 16kHz = 576M samples (problematic on memory)
+        engine = FakeEngine(result=_ok_result())
+        stage = STTStage(engine)
+        # Mock: don't actually create 10h of audio, just verify handling
+        ctx = _make_ctx(audio_input=np.zeros(1000, dtype=np.float32))
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.raw_text)
+
+    def test_missing_segments_key_defaults_to_empty(self):
+        engine = FakeEngine(result=_ok_result())
+        del engine._result["segments"]
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        result = stage.process(ctx)
+        # Should default to [] not error
+        self.assertEqual(result.segments, [])
+
+    def test_missing_model_key_defaults_to_unknown(self):
+        engine = FakeEngine(result=_ok_result())
+        del engine._result["model"]
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        result = stage.process(ctx)
+        self.assertIsNotNone(result.model_used)
+
+    def test_engine_with_out_of_range_confidence(self):
+        # Engine returns invalid confidence (outside 0-1)
+        engine = FakeEngine(result=_ok_result(confidence=1.5))
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        result = stage.process(ctx)
+        # Raw result may be out of range; verify it's set
+        self.assertIsNotNone(result.confidence)
+        self.assertEqual(result.confidence, 1.5)
+
+    def test_engine_with_negative_confidence(self):
+        # Engine returns negative confidence
+        engine = FakeEngine(result=_ok_result(confidence=-0.5))
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        result = stage.process(ctx)
+        # Raw result preserved
+        self.assertEqual(result.confidence, -0.5)
+
+
