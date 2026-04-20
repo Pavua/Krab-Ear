@@ -945,7 +945,7 @@ class CallAssistService:
                 audio_data, duration_sec = self.recorder.snapshot_audio(max_duration_sec=25.0)
                 current_size = getattr(audio_data, "size", 0)
                 if current_size < 16000:
-                    time.sleep(1.0)
+                    time.sleep(1.0)  # sync context OK: runs in threading.Thread
                     continue
 
                 logger.debug(f"Call Assist: transcribing {current_size} samples")
@@ -991,13 +991,13 @@ class CallAssistService:
                             resp.get("error"),
                             backoff_delay,
                         )
-                        time.sleep(backoff_delay)
+                        time.sleep(backoff_delay)  # sync context OK: runs in threading.Thread
                         continue
 
             except Exception:
                 logger.exception("Call Assist loop error")
 
-            time.sleep(1.5)
+            time.sleep(1.5)  # sync context OK: runs in threading.Thread
 
     @staticmethod
     def _build_call_summary_history_text(summary_payload: dict[str, Any], session_id: str) -> str:

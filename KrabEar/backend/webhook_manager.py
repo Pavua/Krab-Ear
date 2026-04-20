@@ -285,7 +285,7 @@ class WebhookManager:
 
             if attempt < _MAX_RETRIES:
                 delay = _BACKOFF_BASE_SEC * (2 ** (attempt - 1))  # 1s, 2s, 4s
-                time.sleep(delay)
+                time.sleep(delay)  # sync context OK: runs in threading.Thread
 
         self._record_failure(webhook_id, last_status)
 

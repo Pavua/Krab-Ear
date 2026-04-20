@@ -90,7 +90,7 @@ class RetryStrategy:
                     "retry_strategy: ошибка %s (%s), повтор через %.2fs (попытка %d/%d)",
                     type(exc).__name__, exc, delay, attempt + 1, self.config.max_retries,
                 )
-                time.sleep(delay)
+                time.sleep(delay)  # sync context OK: synchronous retry wrapper, callers run in threads
 
         raise last_error  # type: ignore[misc]
 
