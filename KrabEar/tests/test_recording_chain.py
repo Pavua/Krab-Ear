@@ -1,7 +1,6 @@
 """Unit-тесты для RecordingChainManager."""
 
 from __future__ import annotations
-from backend.recording_chain import RecordingChainManager
 
 import sys
 import tempfile
@@ -12,6 +11,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.recording_chain import RecordingChainManager
 
 
 class FakeHistoryItem:
