@@ -459,6 +459,95 @@ extension HistoryPanelController {
         refreshCallAssistState()
     }
 
+    // MARK: - Gemini 3.1 Pro Design Helpers (Settings Redesign)
+
+    /// Унифицированная строка настройки: лейбл слева, опциональный badge рядом с лейблом,
+    /// контрол прижат вправо, описание снизу мелким шрифтом.
+    @MainActor
+    func makeSettingRow(
+        label: String,
+        description: String? = nil,
+        control: NSView,
+        badge: NSView? = nil
+    ) -> NSView {
+        let labelField = NSTextField(labelWithString: label)
+        labelField.font = KrabEarTheme.Typography.body
+        labelField.textColor = KrabEarTheme.Colors.textPrimary
+
+        let labelStack = NSStackView()
+        labelStack.orientation = .horizontal
+        labelStack.spacing = KrabEarTheme.Metrics.tight
+        labelStack.alignment = .centerY
+        labelStack.addArrangedSubview(labelField)
+        if let badge {
+            labelStack.addArrangedSubview(badge)
+        }
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let hStack = NSStackView()
+        hStack.orientation = .horizontal
+        hStack.distribution = .fill
+        hStack.alignment = .centerY
+        hStack.spacing = KrabEarTheme.Metrics.standard
+        hStack.addArrangedSubview(labelStack)
+        hStack.addArrangedSubview(spacer)
+        hStack.addArrangedSubview(control)
+
+        if let desc = description {
+            let descLabel = NSTextField(labelWithString: desc)
+            descLabel.font = KrabEarTheme.Typography.caption
+            descLabel.textColor = KrabEarTheme.Colors.textDisabled
+            descLabel.lineBreakMode = .byWordWrapping
+            descLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            let vStack = NSStackView()
+            vStack.orientation = .vertical
+            vStack.alignment = .leading
+            vStack.spacing = KrabEarTheme.Metrics.tight
+            vStack.addArrangedSubview(hStack)
+            vStack.addArrangedSubview(descLabel)
+            hStack.widthAnchor.constraint(equalTo: vStack.widthAnchor).isActive = true
+            return vStack
+        }
+        return hStack
+    }
+
+    /// Тонкий горизонтальный разделитель (1 pt) для разбивки карточек на зоны.
+    @MainActor
+    func makeSeparator() -> NSView {
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = KrabEarTheme.Colors.border.cgColor
+        separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return separator
+    }
+
+    /// Лейбл-бейдж: малый текст, цвет из KrabEarTheme, опциональный тултип.
+    @MainActor
+    func makeBadge(text: String, color: NSColor, tooltip: String? = nil) -> NSTextField {
+        let badge = NSTextField(labelWithString: text)
+        badge.font = KrabEarTheme.Typography.captionMedium
+        badge.textColor = color
+        if let tooltip {
+            badge.toolTip = tooltip
+        }
+        return badge
+    }
+
+    /// Строка с NSButton.switch в стиле Liquid Glass + лейбл + опциональный badge.
+    @MainActor
+    func makeSwitchRow(
+        label: String,
+        description: String? = nil,
+        button: NSButton,
+        statusBadge: NSView? = nil
+    ) -> NSView {
+        KrabEarTheme.styleCheckbox(button)
+        return makeSettingRow(label: label, description: description, control: button, badge: statusBadge)
+    }
+
     // MARK: - Audio Pipeline Section (PR #20 — Gemini 3.1 Pro)
     //
     // UI ONLY — IPC runtime apply (settings_service + engine.py diarization re-init
@@ -477,41 +566,21 @@ extension HistoryPanelController {
 
         let card = ThemeCardView()
 
-        // 1. Diarization Toggle Row
+        // 1. Diarization Toggle Row — Gemini design: makeSwitchRow + GPU-crash badge.
         //    Reparents global `diarizationButton` (был в aiSettingsRow1 / AI секции)
         //    в новую секцию. AppKit автоматически удаляет view из старого superview
         //    при addArrangedSubview в новый stack.
-        let diarRow = NSStackView()
-        diarRow.orientation = .horizontal
-        diarRow.alignment = .top
-        diarRow.spacing = KrabEarTheme.Metrics.standard
-
         diarizationButton.title = ""
         diarizationButton.setButtonType(.switch)
         diarizationButton.setAccessibilityLabel(
             "Включить разделение говорящих (диарезация pyannote через Metal). Требует перезапуск backend."
         )
 
-        let diarTextStack = NSStackView()
-        diarTextStack.orientation = .vertical
-        diarTextStack.alignment = .leading
-        diarTextStack.spacing = KrabEarTheme.Metrics.tight
-
-        let diarTitleStack = NSStackView()
-        diarTitleStack.orientation = .horizontal
-        diarTitleStack.alignment = .firstBaseline
-        diarTitleStack.spacing = KrabEarTheme.Metrics.standard
-
-        let diarTitle = NSTextField(labelWithString: "Разделение говорящих (диарезация)")
-        diarTitle.font = KrabEarTheme.Typography.body
-        diarTitle.textColor = KrabEarTheme.Colors.textPrimary
-
-        let diarRestartHint = NSTextField(labelWithString: "Применяется после перезапуска backend.")
-        diarRestartHint.font = KrabEarTheme.Typography.caption
-        diarRestartHint.textColor = KrabEarTheme.Colors.textSecondary
-
-        diarTitleStack.addArrangedSubview(diarTitle)
-        diarTitleStack.addArrangedSubview(diarRestartHint)
+        let gpuCrashBadge = makeBadge(
+            text: "⚠ бета",
+            color: .systemOrange,
+            tooltip: "Может вызывать сбой GPU на Apple Silicon. Отключите при нестабильной работе."
+        )
 
         let diarSubCaption = NSTextField(labelWithString:
             "pyannote.audio через Metal. На M4 + macOS 26 возможен краш инициализации — выключайте, если backend падает на старте."
@@ -525,48 +594,34 @@ extension HistoryPanelController {
             "Подсказка: pyannote.audio через Metal, возможен краш на M4+macOS 26"
         )
 
-        diarTextStack.addArrangedSubview(diarTitleStack)
-        diarTextStack.addArrangedSubview(diarSubCaption)
+        // Оборачиваем в вертикальный стек: строка-toggle + sub-caption
+        let diarRowInner = makeSwitchRow(
+            label: "Разделение говорящих",
+            button: diarizationButton,
+            statusBadge: gpuCrashBadge
+        )
+        let diarRow = NSStackView()
+        diarRow.orientation = .vertical
+        diarRow.alignment = .leading
+        diarRow.spacing = KrabEarTheme.Metrics.tight
+        diarRow.addArrangedSubview(diarRowInner)
+        diarRow.addArrangedSubview(diarSubCaption)
 
-        diarRow.addArrangedSubview(diarizationButton)
-        diarRow.addArrangedSubview(diarTextStack)
-
-        // 2. Quality Profile Row
+        // 2. Quality Profile Row — Gemini design: makeSettingRow.
         //    Reparents global `qualitySelector` (был в settingsRow1 / Recording секции).
-        let qualRow = NSStackView()
-        qualRow.orientation = .vertical
-        qualRow.alignment = .leading
-        qualRow.spacing = KrabEarTheme.Metrics.tight
-
-        let qualHeaderStack = NSStackView()
-        qualHeaderStack.orientation = .horizontal
-        qualHeaderStack.alignment = .firstBaseline
-        qualHeaderStack.spacing = KrabEarTheme.Metrics.standard
-
-        let qualTitle = NSTextField(labelWithString: "Качество распознавания")
-        qualTitle.font = KrabEarTheme.Typography.body
-        qualTitle.textColor = KrabEarTheme.Colors.textPrimary
-
         qualitySelector.setAccessibilityLabel(
             "Выбор профиля качества STT: Balanced для скорости, Max для точности"
         )
 
-        qualHeaderStack.addArrangedSubview(qualTitle)
-        qualHeaderStack.addArrangedSubview(qualitySelector)
-
-        let qualSubCaption = NSTextField(labelWithString:
-            "Balanced — whisper-large-v3-turbo, быстро. Max — candidate chain (v3 → turbo), точнее на сложных записях, ~2× медленнее."
+        let qualRow = makeSettingRow(
+            label: "Качество распознавания",
+            description: "Balanced — whisper-large-v3-turbo, быстро. Max — candidate chain (v3 → turbo), точнее на сложных записях, ~2× медленнее.",
+            control: qualitySelector
         )
-        qualSubCaption.font = KrabEarTheme.Typography.caption
-        qualSubCaption.textColor = KrabEarTheme.Colors.textSecondary
-        qualSubCaption.lineBreakMode = .byWordWrapping
-        qualSubCaption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        qualRow.addArrangedSubview(qualHeaderStack)
-        qualRow.addArrangedSubview(qualSubCaption)
 
         // Assemble card (ThemeCardView content stack уже vertical + leading).
         card.contentStackView.addArrangedSubview(diarRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(qualRow)
 
         section.contentStackView.addArrangedSubview(card)
