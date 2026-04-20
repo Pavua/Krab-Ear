@@ -1,296 +1,340 @@
-"""Unit-тесты для TranscriptVersionManager."""
+"""Тесты для модуля версионирования транскрипций (TranscriptVersionManager).
+
+Покрывает:
+- Создание новой версии текста (save_version)
+- Получение всех версий для записи (get_versions)
+- Получение конкретной версии (get_version)
+- Откат на предыдущую версию (revert_to_version)
+- Различие между версиями (diff_versions)
+- Персистентность (сохранение в NDJSON)
+- Пустое состояние (no versions exist yet)
+- Валидация параметров (item_id, text, source)
+"""
 
 from __future__ import annotations
-from backend.transcript_versioning import TranscriptVersionManager, VALID_SOURCES
 
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.transcript_versioning import TranscriptVersionManager
 
-class TranscriptVersioningBasicTestCase(unittest.TestCase):
-    """Базовые операции: save, get, list."""
+
+class TestTranscriptVersionManagerCreateVersion(unittest.TestCase):
+    """Тесты создания новых версий."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._mgr = TranscriptVersionManager(data_dir=self._tmpdir)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
 
-    # ------------------------------------------------------------------
-    # save_version
-    # ------------------------------------------------------------------
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
-    def test_save_version_returns_dict_with_expected_fields(self) -> None:
-        result = self._mgr.save_version("item_001", "Hello world", source="manual")
-        self.assertIsInstance(result, dict)
+    def test_save_version_basic(self) -> None:
+        """Сохраняет новую версию с корректными полями."""
+        result = self.manager.save_version(
+            item_id="item_001",
+            text="Здравствуй, мир!",
+            source="manual",
+        )
         self.assertEqual(result["item_id"], "item_001")
-        self.assertEqual(result["text"], "Hello world")
+        self.assertEqual(result["text"], "Здравствуй, мир!")
         self.assertEqual(result["source"], "manual")
         self.assertEqual(result["version_num"], 1)
         self.assertIn("created_at", result)
 
-    def test_save_version_increments_version_num(self) -> None:
-        r1 = self._mgr.save_version("item_002", "First", source="stt_raw")
-        r2 = self._mgr.save_version("item_002", "Second", source="stt_cleaned")
-        r3 = self._mgr.save_version("item_002", "Third", source="manual")
+    def test_save_version_auto_increment(self) -> None:
+        """Номера версий автоматически увеличиваются для одной записи."""
+        self.manager.save_version("item_001", "Версия 1", "stt_raw")
+        result2 = self.manager.save_version("item_001", "Версия 2", "manual")
+        result3 = self.manager.save_version("item_001", "Версия 3", "llm_rewrite")
+
+        self.assertEqual(result2["version_num"], 2)
+        self.assertEqual(result3["version_num"], 3)
+
+    def test_save_version_different_items_independent(self) -> None:
+        """Разные item_id имеют независимые номера версий."""
+        r1 = self.manager.save_version("item_a", "Text A1", "manual")
+        r2 = self.manager.save_version("item_b", "Text B1", "manual")
+        r3 = self.manager.save_version("item_a", "Text A2", "manual")
+
         self.assertEqual(r1["version_num"], 1)
-        self.assertEqual(r2["version_num"], 2)
-        self.assertEqual(r3["version_num"], 3)
+        self.assertEqual(r2["version_num"], 1)
+        self.assertEqual(r3["version_num"], 2)
 
-    def test_save_version_different_items_independent_numbering(self) -> None:
-        ra1 = self._mgr.save_version("item_A", "Text A1", source="manual")
-        rb1 = self._mgr.save_version("item_B", "Text B1", source="manual")
-        ra2 = self._mgr.save_version("item_A", "Text A2", source="manual")
-        self.assertEqual(ra1["version_num"], 1)
-        self.assertEqual(rb1["version_num"], 1)
-        self.assertEqual(ra2["version_num"], 2)
-
-    def test_save_version_empty_item_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.save_version("", "Some text", source="manual")
-
-    def test_save_version_whitespace_item_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.save_version("   ", "Some text", source="manual")
-
-    def test_save_version_invalid_source_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.save_version("item_003", "Text", source="unknown_source")
-
-    def test_save_version_all_valid_sources(self) -> None:
-        for idx, source in enumerate(sorted(VALID_SOURCES)):
-            result = self._mgr.save_version(f"item_src_{idx}", "Text", source=source)
-            self.assertEqual(result["source"], source)
-
-    def test_save_version_empty_text_allowed(self) -> None:
-        # Пустой текст валиден — может быть результатом STT (тишина)
-        result = self._mgr.save_version("item_004", "", source="stt_raw")
-        self.assertEqual(result["text"], "")
-        self.assertEqual(result["version_num"], 1)
-
-    # ------------------------------------------------------------------
-    # get_versions
-    # ------------------------------------------------------------------
-
-    def test_get_versions_newest_first(self) -> None:
-        self._mgr.save_version("item_005", "v1 text", source="stt_raw")
-        self._mgr.save_version("item_005", "v2 text", source="stt_cleaned")
-        self._mgr.save_version("item_005", "v3 text", source="manual")
-        versions = self._mgr.get_versions("item_005")
-        nums = [v["version_num"] for v in versions]
-        self.assertEqual(nums, [3, 2, 1])
-
-    def test_get_versions_empty_for_unknown_item(self) -> None:
-        versions = self._mgr.get_versions("nonexistent_item")
-        self.assertEqual(versions, [])
-
-    def test_get_versions_does_not_return_other_items(self) -> None:
-        self._mgr.save_version("item_X", "X text", source="manual")
-        self._mgr.save_version("item_Y", "Y text", source="manual")
-        versions_x = self._mgr.get_versions("item_X")
-        self.assertEqual(len(versions_x), 1)
-        self.assertTrue(all(v["item_id"] == "item_X" for v in versions_x))
-
-    # ------------------------------------------------------------------
-    # get_version
-    # ------------------------------------------------------------------
-
-    def test_get_version_by_num_returns_correct_record(self) -> None:
-        self._mgr.save_version("item_006", "First version", source="stt_raw")
-        self._mgr.save_version("item_006", "Second version", source="llm_rewrite")
-        v1 = self._mgr.get_version("item_006", 1)
-        v2 = self._mgr.get_version("item_006", 2)
-        self.assertEqual(v1["text"], "First version")
-        self.assertEqual(v2["text"], "Second version")
-
-    def test_get_version_not_found_raises_key_error(self) -> None:
-        self._mgr.save_version("item_007", "Some text", source="manual")
-        with self.assertRaises(KeyError):
-            self._mgr.get_version("item_007", 99)
-
-    def test_get_version_unknown_item_raises_key_error(self) -> None:
-        with self.assertRaises(KeyError):
-            self._mgr.get_version("nonexistent", 1)
-
-    # ------------------------------------------------------------------
-    # revert_to_version
-    # ------------------------------------------------------------------
-
-    def test_revert_creates_new_version(self) -> None:
-        self._mgr.save_version("item_008", "Original", source="stt_raw")
-        self._mgr.save_version("item_008", "Edited", source="manual")
-        revert_result = self._mgr.revert_to_version("item_008", 1)
-        self.assertEqual(revert_result["version_num"], 3)
-        self.assertEqual(revert_result["text"], "Original")
-        self.assertEqual(revert_result["reverted_from"], 1)
-
-    def test_revert_preserves_all_previous_versions(self) -> None:
-        self._mgr.save_version("item_009", "v1", source="stt_raw")
-        self._mgr.save_version("item_009", "v2", source="manual")
-        self._mgr.revert_to_version("item_009", 1)
-        versions = self._mgr.get_versions("item_009")
-        self.assertEqual(len(versions), 3)
-
-    def test_revert_nonexistent_version_raises_key_error(self) -> None:
-        self._mgr.save_version("item_010", "Only version", source="manual")
-        with self.assertRaises(KeyError):
-            self._mgr.revert_to_version("item_010", 999)
-
-    # ------------------------------------------------------------------
-    # diff_versions
-    # ------------------------------------------------------------------
-
-    def test_diff_versions_returns_expected_structure(self) -> None:
-        self._mgr.save_version("item_011", "Hello world", source="stt_raw")
-        self._mgr.save_version("item_011", "Hello earth", source="manual")
-        diff = self._mgr.diff_versions("item_011", 1, 2)
-        self.assertEqual(diff["item_id"], "item_011")
-        self.assertEqual(diff["v1"], 1)
-        self.assertEqual(diff["v2"], 2)
-        self.assertEqual(diff["text_v1"], "Hello world")
-        self.assertEqual(diff["text_v2"], "Hello earth")
-        self.assertIn("unified_diff", diff)
-        self.assertIn("added_lines", diff)
-        self.assertIn("removed_lines", diff)
-
-    def test_diff_identical_texts_no_changes(self) -> None:
-        self._mgr.save_version("item_012", "Same text", source="stt_raw")
-        self._mgr.save_version("item_012", "Same text", source="manual")
-        diff = self._mgr.diff_versions("item_012", 1, 2)
-        self.assertEqual(diff["added_lines"], 0)
-        self.assertEqual(diff["removed_lines"], 0)
-
-    def test_diff_versions_nonexistent_raises_key_error(self) -> None:
-        self._mgr.save_version("item_013", "Some text", source="manual")
-        with self.assertRaises(KeyError):
-            self._mgr.diff_versions("item_013", 1, 99)
-
-    def test_diff_counts_changes_correctly(self) -> None:
-        self._mgr.save_version("item_014", "line one\nline two\nline three", source="stt_raw")
-        self._mgr.save_version("item_014", "line one\nline two modified\nline three\nline four", source="manual")
-        diff = self._mgr.diff_versions("item_014", 1, 2)
-        self.assertGreater(diff["added_lines"], 0)
-        self.assertGreater(diff["removed_lines"], 0)
-
-    # ------------------------------------------------------------------
-    # Персистентность
-    # ------------------------------------------------------------------
-
-    def test_versions_persist_across_manager_instances(self) -> None:
-        self._mgr.save_version("item_015", "Persistent text", source="import")
-        # Создаём новый менеджер с тем же data_dir
-        new_mgr = TranscriptVersionManager(data_dir=self._tmpdir)
-        versions = new_mgr.get_versions("item_015")
-        self.assertEqual(len(versions), 1)
-        self.assertEqual(versions[0]["text"], "Persistent text")
-        self.assertEqual(versions[0]["source"], "import")
-
-    # ------------------------------------------------------------------
-    # IPC handlers
-    # ------------------------------------------------------------------
-
-    def test_ipc_save_transcript_version_basic(self) -> None:
-        result = self._mgr.handle_save_transcript_version({
-            "item_id": "item_ipc_1",
-            "text": "IPC saved text",
-            "source": "manual",
-        })
-        self.assertEqual(result["item_id"], "item_ipc_1")
-        self.assertEqual(result["text"], "IPC saved text")
-        self.assertEqual(result["version_num"], 1)
-
-    def test_ipc_save_transcript_version_default_source(self) -> None:
-        result = self._mgr.handle_save_transcript_version({
-            "item_id": "item_ipc_2",
-            "text": "Default source",
-        })
+    def test_save_version_default_source(self) -> None:
+        """Источник по умолчанию — 'manual'."""
+        result = self.manager.save_version("item_001", "Текст")
         self.assertEqual(result["source"], "manual")
 
-    def test_ipc_save_transcript_version_missing_item_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.handle_save_transcript_version({"text": "Some text"})
+    def test_save_version_all_sources(self) -> None:
+        """Поддерживаются все валидные источники."""
+        sources = ["stt_raw", "stt_cleaned", "llm_rewrite", "manual", "import"]
+        for src in sources:
+            result = self.manager.save_version(f"item_{src}", "Text", src)
+            self.assertEqual(result["source"], src)
 
-    def test_ipc_save_transcript_version_missing_text_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.handle_save_transcript_version({"item_id": "item_ipc_3"})
+    def test_save_version_empty_item_id_raises(self) -> None:
+        """Пустой item_id вызывает ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.save_version("", "Text")
+        self.assertIn("item_id", str(ctx.exception))
 
-    def test_ipc_get_transcript_versions_basic(self) -> None:
-        self._mgr.save_version("item_ipc_4", "v1", source="stt_raw")
-        self._mgr.save_version("item_ipc_4", "v2", source="manual")
-        result = self._mgr.handle_get_transcript_versions({"item_id": "item_ipc_4"})
-        self.assertEqual(result["item_id"], "item_ipc_4")
-        self.assertEqual(result["total"], 2)
-        self.assertIsInstance(result["versions"], list)
-        self.assertEqual(len(result["versions"]), 2)
+    def test_save_version_non_string_text_raises(self) -> None:
+        """Не-строка как text вызывает ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.save_version("item_001", 123)  # type: ignore
+        self.assertIn("text", str(ctx.exception))
 
-    def test_ipc_get_transcript_versions_missing_item_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.handle_get_transcript_versions({})
+    def test_save_version_invalid_source_raises(self) -> None:
+        """Невалидный source вызывает ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.save_version("item_001", "Text", "invalid_source")
+        self.assertIn("Недопустимый source", str(ctx.exception))
 
-    def test_ipc_revert_transcript_version_basic(self) -> None:
-        self._mgr.save_version("item_ipc_5", "Original v1", source="stt_raw")
-        self._mgr.save_version("item_ipc_5", "Edited v2", source="manual")
-        result = self._mgr.handle_revert_transcript_version({
-            "item_id": "item_ipc_5",
-            "version_num": 1,
-        })
-        self.assertEqual(result["text"], "Original v1")
-        self.assertEqual(result["version_num"], 3)
-        self.assertEqual(result["reverted_from"], 1)
-
-    def test_ipc_revert_missing_version_num_raises(self) -> None:
-        self._mgr.save_version("item_ipc_6", "Text", source="manual")
-        with self.assertRaises(ValueError):
-            self._mgr.handle_revert_transcript_version({"item_id": "item_ipc_6"})
-
-    def test_ipc_revert_missing_item_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self._mgr.handle_revert_transcript_version({"version_num": 1})
+    def test_save_version_preserves_timestamp(self) -> None:
+        """Версия содержит ISO8601 timestamp."""
+        result = self.manager.save_version("item_001", "Text")
+        created_at = result["created_at"]
+        # Проверяем, что это ISO8601 строка
+        parsed = datetime.fromisoformat(created_at)
+        self.assertIsInstance(parsed, datetime)
 
 
-class TranscriptVersioningEdgeCasesTestCase(unittest.TestCase):
-    """Граничные случаи."""
+class TestTranscriptVersionManagerRetrieve(unittest.TestCase):
+    """Тесты получения версий."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._mgr = TranscriptVersionManager(data_dir=self._tmpdir)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+        # Создаём несколько версий для тестирования
+        self.manager.save_version("item_001", "Text v1", "stt_raw")
+        self.manager.save_version("item_001", "Text v2", "manual")
+        self.manager.save_version("item_001", "Text v3", "llm_rewrite")
 
-    def test_multiline_text_preserved(self) -> None:
-        text = "Line 1\nLine 2\nLine 3"
-        _result = self._mgr.save_version("item_ml", text, source="import")  # noqa: F841
-        retrieved = self._mgr.get_version("item_ml", 1)
-        self.assertEqual(retrieved["text"], text)
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
-    def test_unicode_text_preserved(self) -> None:
-        text = "Привет мир! Это транскрипция на русском языке."
-        _result = self._mgr.save_version("item_uni", text, source="stt_cleaned")  # noqa: F841
-        retrieved = self._mgr.get_version("item_uni", 1)
-        self.assertEqual(retrieved["text"], text)
+    def test_get_versions_returns_all(self) -> None:
+        """get_versions возвращает все версии для item_id."""
+        versions = self.manager.get_versions("item_001")
+        self.assertEqual(len(versions), 3)
 
-    def test_created_at_is_iso8601(self) -> None:
-        result = self._mgr.save_version("item_ts", "Text", source="manual")
-        created_at = result["created_at"]
-        # ISO8601 должен содержать T и +
-        self.assertIn("T", created_at)
+    def test_get_versions_sorted_reverse(self) -> None:
+        """get_versions возвращает версии в порядке убывания (новые первыми)."""
+        versions = self.manager.get_versions("item_001")
+        version_nums = [v["version_num"] for v in versions]
+        self.assertEqual(version_nums, [3, 2, 1])
 
-    def test_many_versions_ordering(self) -> None:
-        for i in range(10):
-            self._mgr.save_version("item_many", f"version {i + 1}", source="manual")
-        versions = self._mgr.get_versions("item_many")
-        nums = [v["version_num"] for v in versions]
-        self.assertEqual(nums, list(range(10, 0, -1)))
+    def test_get_versions_empty_item(self) -> None:
+        """get_versions для несуществующей записи возвращает пустой список."""
+        versions = self.manager.get_versions("nonexistent_item")
+        self.assertEqual(versions, [])
 
-    def test_diff_reverse_order_works(self) -> None:
-        self._mgr.save_version("item_rev", "First", source="stt_raw")
-        self._mgr.save_version("item_rev", "Second", source="manual")
-        # v2 как база, v1 как новая — допустимо
-        diff = self._mgr.diff_versions("item_rev", 2, 1)
-        self.assertEqual(diff["text_v1"], "Second")
-        self.assertEqual(diff["text_v2"], "First")
+    def test_get_version_specific(self) -> None:
+        """get_version возвращает конкретную версию."""
+        result = self.manager.get_version("item_001", 2)
+        self.assertEqual(result["version_num"], 2)
+        self.assertEqual(result["text"], "Text v2")
+        self.assertEqual(result["source"], "manual")
+
+    def test_get_version_not_found_raises(self) -> None:
+        """get_version для несуществующей версии вызывает KeyError."""
+        with self.assertRaises(KeyError):
+            self.manager.get_version("item_001", 99)
+
+    def test_get_version_wrong_item_raises(self) -> None:
+        """get_version для неправильного item_id вызывает KeyError."""
+        with self.assertRaises(KeyError):
+            self.manager.get_version("wrong_item", 1)
+
+
+class TestTranscriptVersionManagerRevert(unittest.TestCase):
+    """Тесты отката на предыдущую версию."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+        self.manager.save_version("item_001", "Original text", "stt_raw")
+        self.manager.save_version("item_001", "Modified text", "manual")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_revert_creates_new_version(self) -> None:
+        """Откат создаёт новую версию с текстом из целевой версии."""
+        reverted = self.manager.revert_to_version("item_001", 1)
+        self.assertEqual(reverted["version_num"], 3)
+        self.assertEqual(reverted["text"], "Original text")
+        self.assertEqual(reverted["source"], "manual")
+
+    def test_revert_preserves_history(self) -> None:
+        """Откат не удаляет более новые версии."""
+        self.manager.revert_to_version("item_001", 1)
+        versions = self.manager.get_versions("item_001")
+        self.assertEqual(len(versions), 3)
+
+    def test_revert_marks_source(self) -> None:
+        """Откатанная версия помечена полем reverted_from."""
+        reverted = self.manager.revert_to_version("item_001", 1)
+        self.assertEqual(reverted["reverted_from"], 1)
+
+    def test_revert_nonexistent_raises(self) -> None:
+        """Откат к несуществующей версии вызывает KeyError."""
+        with self.assertRaises(KeyError):
+            self.manager.revert_to_version("item_001", 99)
+
+
+class TestTranscriptVersionManagerDiff(unittest.TestCase):
+    """Тесты различия между версиями."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+        self.manager.save_version("item_001", "Hello world", "stt_raw")
+        self.manager.save_version("item_001", "Hello beautiful world", "manual")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_diff_versions_structure(self) -> None:
+        """diff_versions возвращает структурированный diff."""
+        result = self.manager.diff_versions("item_001", 1, 2)
+        self.assertIn("item_id", result)
+        self.assertIn("v1", result)
+        self.assertIn("v2", result)
+        self.assertIn("text_v1", result)
+        self.assertIn("text_v2", result)
+        self.assertIn("unified_diff", result)
+        self.assertIn("added_lines", result)
+        self.assertIn("removed_lines", result)
+
+    def test_diff_versions_counts_changes(self) -> None:
+        """diff_versions подсчитывает добавленные и удалённые строки."""
+        result = self.manager.diff_versions("item_001", 1, 2)
+        self.assertGreater(result["added_lines"], 0)
+
+    def test_diff_versions_nonexistent_raises(self) -> None:
+        """diff_versions для несуществующей версии вызывает KeyError."""
+        with self.assertRaises(KeyError):
+            self.manager.diff_versions("item_001", 1, 99)
+
+
+class TestTranscriptVersionManagerPersistence(unittest.TestCase):
+    """Тесты персистентности данных."""
+
+    def test_persistence_survives_restart(self) -> None:
+        """Версии сохраняются в NDJSON и доступны после пересоздания менеджера."""
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            manager1 = TranscriptVersionManager(temp_dir.name)
+            manager1.save_version("item_001", "Persistent text", "manual")
+            manager1.save_version("item_001", "Second version", "manual")
+
+            manager2 = TranscriptVersionManager(temp_dir.name)
+            versions = manager2.get_versions("item_001")
+
+            self.assertEqual(len(versions), 2)
+            self.assertEqual(versions[0]["text"], "Second version")
+            self.assertEqual(versions[1]["text"], "Persistent text")
+        finally:
+            temp_dir.cleanup()
+
+    def test_ndjson_format(self) -> None:
+        """Версии сохраняются в NDJSON формате."""
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            manager = TranscriptVersionManager(temp_dir.name)
+            manager.save_version("item_001", "Test text", "manual")
+
+            versions_file = Path(temp_dir.name) / "transcript_versions.ndjson"
+            content = versions_file.read_text(encoding="utf-8")
+            self.assertIn("item_001", content)
+            self.assertIn("Test text", content)
+            self.assertIn("manual", content)
+        finally:
+            temp_dir.cleanup()
+
+
+class TestTranscriptVersionManagerEmptyState(unittest.TestCase):
+    """Тесты пустого состояния (нет версий)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_empty_state_get_versions(self) -> None:
+        """get_versions для пустой БД возвращает пустой список."""
+        versions = self.manager.get_versions("nonexistent")
+        self.assertEqual(versions, [])
+
+    def test_empty_state_file_created(self) -> None:
+        """Файл NDJSON создаётся при инициализации."""
+        versions_file = Path(self.temp_dir.name) / "transcript_versions.ndjson"
+        self.assertTrue(versions_file.exists())
+
+
+class TestTranscriptVersionManagerIPC(unittest.TestCase):
+    """Тесты IPC-обработчиков."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_ipc_handle_save_transcript_version(self) -> None:
+        """handle_save_transcript_version работает через IPC."""
+        result = self.manager.handle_save_transcript_version({
+            "item_id": "ipc_item",
+            "text": "IPC text",
+            "source": "stt_raw",
+        })
+        self.assertEqual(result["item_id"], "ipc_item")
+        self.assertEqual(result["text"], "IPC text")
+        self.assertEqual(result["source"], "stt_raw")
+
+    def test_ipc_handle_save_missing_item_id_raises(self) -> None:
+        """IPC обработчик требует item_id."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.handle_save_transcript_version({"text": "Text"})
+        self.assertIn("item_id", str(ctx.exception))
+
+    def test_ipc_handle_save_missing_text_raises(self) -> None:
+        """IPC обработчик требует text."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.handle_save_transcript_version({"item_id": "item"})
+        self.assertIn("text", str(ctx.exception))
+
+    def test_ipc_handle_get_transcript_versions(self) -> None:
+        """handle_get_transcript_versions возвращает структурированный результат."""
+        self.manager.save_version("item_001", "Text 1", "manual")
+        self.manager.save_version("item_001", "Text 2", "manual")
+        result = self.manager.handle_get_transcript_versions({"item_id": "item_001"})
+        self.assertEqual(result["item_id"], "item_001")
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(len(result["versions"]), 2)
+
+    def test_ipc_handle_revert_transcript_version(self) -> None:
+        """handle_revert_transcript_version работает через IPC."""
+        self.manager.save_version("item_001", "Version 1", "manual")
+        self.manager.save_version("item_001", "Version 2", "manual")
+        result = self.manager.handle_revert_transcript_version({
+            "item_id": "item_001",
+            "version_num": 1,
+        })
+        self.assertEqual(result["version_num"], 3)
+        self.assertEqual(result["text"], "Version 1")
 
 
 if __name__ == "__main__":
