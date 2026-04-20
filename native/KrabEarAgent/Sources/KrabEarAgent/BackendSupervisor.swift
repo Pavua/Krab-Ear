@@ -38,6 +38,22 @@ final class BackendSupervisor {
     /// только когда BackendSupervisor начинает работать (обычно в ensureBackendRunning).
     private(set) lazy var supervisionMode: SupervisionMode = Self.detectSupervisionMode()
 
+#if DEBUG
+    /// Тест-хук: позволяет форсировать режим без launchctl вызова.
+    /// Должен вызываться до первого обращения к supervisionMode.
+    func overrideSupervisionMode(_ mode: SupervisionMode) {
+        supervisionMode = mode
+    }
+
+    /// Тест-хук: инжектируемый ping-предикат. Если задан, используется вместо
+    /// реального IPC вызова в isBackendAlive() и ensureBackendRunning().
+    var _testPingOverride: (() -> Bool)? = nil
+
+    /// Тест-хук: если задан, ensureBackendRunning() вызывает этот блок вместо
+    /// реального spawn/wait (исключает 20-секундный sleep в тестах).
+    var _testEnsureOverride: (() throws -> Void)? = nil
+#endif
+
     init(projectRoot: String) {
         self.projectRoot = projectRoot
         self.dataDir = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath
@@ -66,6 +82,9 @@ final class BackendSupervisor {
 
     /// Проверяет, жив ли backend (процесс запущен + отвечает на ping).
     func isBackendAlive() -> Bool {
+#if DEBUG
+        if let ping = _testPingOverride { return ping() }
+#endif
         let client = IPCClient(socketPath: socketPath)
         switch supervisionMode {
         case .passive:
@@ -79,10 +98,22 @@ final class BackendSupervisor {
     }
 
     func ensureBackendRunning() throws {
+#if DEBUG
+        if let testEnsure = _testEnsureOverride {
+            try testEnsure()
+            return
+        }
+#endif
         let client = IPCClient(socketPath: socketPath)
 
         // Fast path: backend уже отвечает → готов (не важно кто владелец)
-        if (try? client.call(method: "ping")) != nil {
+        let pingOK: () -> Bool = {
+#if DEBUG
+            if let ping = self._testPingOverride { return ping() }
+#endif
+            return (try? client.call(method: "ping")) != nil
+        }
+        if pingOK() {
             consecutiveRestarts = 0
             return
         }

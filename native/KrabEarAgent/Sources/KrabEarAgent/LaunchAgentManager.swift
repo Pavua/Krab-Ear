@@ -70,6 +70,46 @@ final class LaunchAgentManager {
         reloadAgent()
     }
 
+#if DEBUG
+    /// Тест-хук: возвращает сгенерированный plist XML без записи на диск.
+    /// Используется в unit-тестах для проверки содержимого без FileManager side-effects.
+    func buildPlistContent() -> String {
+        let startScript = (projectRoot as NSString).appendingPathComponent("scripts/start_agent.command")
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(label)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/bin/zsh</string>
+                <string>\(startScript)</string>
+                <string>--launched-by-launchd</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>WorkingDirectory</key>
+            <string>\(projectRoot)</string>
+            <key>StandardOutPath</key>
+            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath)</string>
+            <key>StandardErrorPath</key>
+            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.error.log").expandingTildeInPath)</string>
+        </dict>
+        </plist>
+        """
+    }
+
+    /// Тест-хук: возвращает вычисленный путь к plist файлу без побочных эффектов.
+    var plistPathForTest: String { plistPath }
+
+    /// Тест-хук: возвращает label агента.
+    var labelForTest: String { label }
+#endif
+
     func uninstall() {
         let uid = getuid()
         _ = runLaunchctl(args: ["bootout", "gui/\(uid)", plistPath])
