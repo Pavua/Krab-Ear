@@ -202,6 +202,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let bottomBar1 = NSStackView()
     private let bottomBar2 = NSStackView()
     private let settingsBar = NSStackView()
+    /// Claude Design A/B variant stack (populated by buildClaudeDesignSettingsSections).
+    /// Kept as a var so buildClaudeDesignSettingsSections can replace it on toggle.
+    var settingsBarCD = NSStackView()
     private let settingsRow1 = NSStackView()
     private let settingsRow2 = NSStackView()
     private let settingsRow3 = NSStackView()
@@ -1463,6 +1466,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
             controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
+            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHintLabel.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1875,7 +1879,20 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let controlCard = ThemeCardView()
         controlCard.contentStackView.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(controlCard)
-        dictationStack.addArrangedSubview(settingsBar)
+
+        // A/B variant: Claude Design or Gemini Design settings sections.
+        // UserDefaults key "KrabEar_UseClaudeDesign" selects the active variant.
+        if UserDefaults.standard.useClaudeDesignVariant {
+            // Build 5 Claude Design sections into settingsBarCD, then add to stack.
+            buildClaudeDesignSettingsSections()
+            settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
+            settingsBar.isHidden = true
+            dictationStack.addArrangedSubview(settingsBarCD)
+        } else {
+            settingsBarCD.isHidden = true
+            dictationStack.addArrangedSubview(settingsBar)
+        }
+
         // Gemini 3.1 Pro: аналитика + здоровье
         let (analyticsSection, healthSection) = setupAnalyticsSections()
         dictationStack.addArrangedSubview(analyticsSection)
@@ -2074,6 +2091,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Width constraints for settingsBar children (Dictation tab sections)
         for child in settingsBar.arrangedSubviews {
             child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor).isActive = true
+        }
+
+        // Width constraints for settingsBarCD children (Claude Design variant)
+        for child in settingsBarCD.arrangedSubviews {
+            child.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor).isActive = true
         }
 
         for child in dictationStack.arrangedSubviews {
