@@ -172,6 +172,34 @@ extension HistoryPanelController {
         return (analyticsSection, healthSection)
     }
     
+    // MARK: - Testable static helpers (pure functions)
+
+    /// Форматирует результат get_usage_stats в строки для метки.
+    /// `static` — доступна для юнит-тестов без инстанцирования.
+    static func usageLabelTexts(from result: [String: Any]) -> (today: String, week: String, total: String) {
+        let today = "Сегодня: \(result["today"] ?? "0")"
+        let week  = "Неделя: \(result["week"]  ?? "0")"
+        let total = "Всего: \(result["total"]  ?? "0")"
+        return (today, week, total)
+    }
+
+    /// Форматирует результат score_transcription в строку метки.
+    static func scoreLabelText(from result: [String: Any]) -> String {
+        "Оценка: \(result["score"] ?? "—")"
+    }
+
+    /// Форматирует error_stats dict в строку диагностики.
+    static func errorStatsText(from result: [String: Any]) -> String {
+        let text = result.map { "\($0.key): \($0.value)" }.sorted().joined(separator: "\n")
+        return "Статистика ошибок:\n\(text)"
+    }
+
+    /// Определяет цвет метки компонента по булевому флагу health-check.
+    /// Возвращает `true` (success) / `false` (error) — маппинг на NSColor выполняется в UI.
+    static func componentHealthy(_ result: [String: Any], key: String) -> Bool {
+        result[key] as? Bool == true
+    }
+
     @objc private func refreshUsageStatsAction() {
         nonisolated(unsafe) let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

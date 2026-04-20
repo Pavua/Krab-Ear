@@ -648,6 +648,50 @@ extension HistoryPanelController {
     }
 }
 
+// MARK: - Testable static helpers (pure functions)
+
+extension HistoryPanelController {
+    /// Статическая версия stageRu — доступна без инстанцирования для юнит-тестов.
+    static func stageRuStatic(_ stage: String) -> String {
+        switch stage {
+        case "audio_load": return "загрузка"
+        case "normalize": return "нормализация"
+        case "stt": return "распознавание"
+        case "cleanup": return "обработка текста"
+        case "diarize": return "разделение говорящих"
+        case "translate": return "перевод"
+        case "llm_rewrite": return "LLM-правка"
+        case "idle": return "ожидание"
+        default: return stage
+        }
+    }
+
+    /// Статическая версия mmss — доступна без инстанцирования для юнит-тестов.
+    static func mmssStatic(_ sec: Double) -> String {
+        let total = max(0, Int(sec.rounded()))
+        let minutes = total / 60
+        let seconds = total % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    /// Статическая версия normalizedImportSignature — для юнит-тестов.
+    static func normalizedImportSignatureStatic(_ paths: [String]) -> String {
+        let normalized = paths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+        return normalized.joined(separator: "|")
+    }
+
+    /// Статическая версия errorsPreview-блока — для юнит-тестов.
+    static func errorsPreviewText(errorMessages: [String]) -> String {
+        guard !errorMessages.isEmpty else { return "" }
+        let shown = errorMessages.prefix(3).map { "• \($0)" }.joined(separator: "\n")
+        let more = errorMessages.count > 3 ? "\n… +ещё \(errorMessages.count - 3) (см. отчёт)" : ""
+        return "\n\nОшибки:\n\(shown)\(more)"
+    }
+}
+
 // MARK: - ImportDropZoneView
 
 final class ImportDropZoneView: NSView {
