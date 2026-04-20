@@ -632,7 +632,238 @@ extension HistoryPanelController {
         return section
     }
 
-    // MARK: - Voice Assistant Section (PR 1.5)
+    // MARK: - Translation Section
+
+    /// Секция «Перевод» в Live Translation tab.
+    /// Строки: режим перевода, сеть, стиль, swap, глоссарий.
+    /// Переписана через makeSettingRow / makeSwitchRow / makeSeparator (Path A).
+    func buildTranslationSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "live_translation_settings",
+            title: "Настройки перевода",
+            isExpanded: true
+        )
+        let card = ThemeCardView()
+
+        // 1. Translation mode
+        translationSelector.setAccessibilityLabel("Режим перевода: направление или выключен")
+        let modeRow = makeSettingRow(
+            label: "Перевод",
+            description: "Off — без перевода. Auto — определяет язык автоматически. Bilingual — добавляет оба языка в вывод.",
+            control: translationSelector
+        )
+
+        // 2. Network mode
+        networkSelector.setAccessibilityLabel("Режим сети: offline или online")
+        let networkRow = makeSettingRow(
+            label: "Сеть",
+            description: "Offline default — STT только локально. Offline strict — никаких внешних запросов. Online opt-in — разрешить облако явно.",
+            control: networkSelector
+        )
+
+        // 3. Translation style
+        translationStyleSelector.setAccessibilityLabel("Стиль перевода: нейтральный, разговорный или официальный")
+        let styleRow = makeSettingRow(
+            label: "Стиль перевода",
+            description: "Neutral — стандартный. Chat — разговорный. Formal — официальный.",
+            control: translationStyleSelector
+        )
+
+        card.contentStackView.addArrangedSubview(modeRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(networkRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(styleRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - LLM Section
+
+    /// Секция «LLM постобработка» в Dictation tab.
+    /// Строки: toggle LLM rewrite + модель.
+    /// Переписана через makeSwitchRow / makeSettingRow / makeSeparator (Path A).
+    func buildLLMSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "dictation_llm",
+            title: "LLM постобработка",
+            isExpanded: false
+        )
+        let card = ThemeCardView()
+
+        // 1. LLM rewrite toggle
+        llmRewriteButton.title = ""
+        llmRewriteButton.setButtonType(.switch)
+        llmRewriteButton.setAccessibilityLabel("Включить LLM постобработку текста транскрипции через LM Studio")
+        let llmBetaBadge = makeBadge(
+            text: "бета",
+            color: KrabEarTheme.Colors.warning,
+            tooltip: "LM Studio должен быть запущен локально с совместимой моделью."
+        )
+        let llmToggleRow = makeSwitchRow(
+            label: "LLM постобработка",
+            description: "Пропускает транскрипт через локальную LLM (LM Studio) для улучшения читаемости. Требует запущенный LM Studio.",
+            button: llmRewriteButton,
+            statusBadge: llmBetaBadge
+        )
+
+        // 2. Model selector
+        llmModelSelector.setAccessibilityLabel("Выбор LLM-модели для постобработки")
+        let modelRow = makeSettingRow(
+            label: "Модель LLM",
+            description: "Должна совпадать с именем загруженной модели в LM Studio.",
+            control: llmModelSelector
+        )
+
+        card.contentStackView.addArrangedSubview(llmToggleRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(modelRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - Hotkey Section
+
+    /// Секция «Горячие клавиши» в Dictation tab.
+    /// Строки: hotkey selector + hotkey profile.
+    /// Переписана через makeSettingRow / makeSeparator (Path A).
+    func buildHotkeySection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "dictation_hotkeys",
+            title: "Горячие клавиши",
+            isExpanded: false
+        )
+        let card = ThemeCardView()
+
+        // 1. Hotkey key selector
+        hotkeySelector.setAccessibilityLabel("Выбор клавиши-триггера: Right Option, Left Option или любой Option")
+        let hotkeyRow = makeSettingRow(
+            label: "Клавиша записи",
+            description: "Удержание клавиши — запись. Отпускание — транскрипция + вставка.",
+            control: hotkeySelector
+        )
+
+        // 2. Hotkey profile
+        hotkeyProfileSelector.setAccessibilityLabel("Профиль горячей клавиши: Default, Meeting или Translation")
+        let profileRow = makeSettingRow(
+            label: "Профиль",
+            description: "Default — стандартные параметры. Meeting — оптимизация для совещаний. Translation — автоматический перевод.",
+            control: hotkeyProfileSelector
+        )
+
+        card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(profileRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - System Section
+
+    /// Секция «Система» в Dictation tab.
+    /// Строки: audioDucking toggle + slider, overlay opacity slider, autoStart toggle, dockIcon toggle.
+    /// Переписана через makeSwitchRow / makeSettingRow / makeSeparator (Path A).
+    func buildSystemSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "dictation_system_settings",
+            title: "Система",
+            isExpanded: false
+        )
+        let card = ThemeCardView()
+
+        // 1. Audio ducking toggle
+        audioDuckingButton.title = ""
+        audioDuckingButton.setButtonType(.switch)
+        audioDuckingButton.setAccessibilityLabel("Приглушать системный звук во время записи")
+        let duckingToggleRow = makeSwitchRow(
+            label: "Приглушение звука при записи",
+            description: "Снижает громкость системного аудио во время диктовки — уменьшает обратную связь и эхо.",
+            button: audioDuckingButton
+        )
+
+        // 2. Audio ducking percent slider (complex layout — not helper-ified)
+        //    Slider + value label together don't fit makeSettingRow's single-control model;
+        //    assembled manually consistent with the existing pattern used in buildAudioPipelineSection.
+        let duckLabelField = NSTextField(labelWithString: "Громкость при записи")
+        duckLabelField.font = KrabEarTheme.Typography.body
+        duckLabelField.textColor = KrabEarTheme.Colors.textPrimary
+        let duckSpacer = NSView()
+        duckSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        duckSpacer.setAccessibilityElement(false)
+        let duckSliderStack = NSStackView()
+        duckSliderStack.orientation = .horizontal
+        duckSliderStack.spacing = KrabEarTheme.Metrics.tight
+        duckSliderStack.alignment = .centerY
+        duckSliderStack.addArrangedSubview(audioDuckingSlider)
+        duckSliderStack.addArrangedSubview(audioDuckingValueLabel)
+        let duckRow = NSStackView()
+        duckRow.orientation = .horizontal
+        duckRow.distribution = .fill
+        duckRow.alignment = .centerY
+        duckRow.spacing = KrabEarTheme.Metrics.standard
+        duckRow.addArrangedSubview(duckLabelField)
+        duckRow.addArrangedSubview(duckSpacer)
+        duckRow.addArrangedSubview(duckSliderStack)
+
+        // 3. Overlay opacity slider (same complex layout)
+        let overlayLabelField = NSTextField(labelWithString: "Прозрачность оверлея")
+        overlayLabelField.font = KrabEarTheme.Typography.body
+        overlayLabelField.textColor = KrabEarTheme.Colors.textPrimary
+        let overlaySpacer = NSView()
+        overlaySpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        overlaySpacer.setAccessibilityElement(false)
+        let overlaySliderStack = NSStackView()
+        overlaySliderStack.orientation = .horizontal
+        overlaySliderStack.spacing = KrabEarTheme.Metrics.tight
+        overlaySliderStack.alignment = .centerY
+        overlaySliderStack.addArrangedSubview(overlayOpacitySlider)
+        overlaySliderStack.addArrangedSubview(overlayOpacityValueLabel)
+        let overlayRow = NSStackView()
+        overlayRow.orientation = .horizontal
+        overlayRow.distribution = .fill
+        overlayRow.alignment = .centerY
+        overlayRow.spacing = KrabEarTheme.Metrics.standard
+        overlayRow.addArrangedSubview(overlayLabelField)
+        overlayRow.addArrangedSubview(overlaySpacer)
+        overlayRow.addArrangedSubview(overlaySliderStack)
+
+        // 4. Autostart toggle
+        autoStartButton.title = ""
+        autoStartButton.setButtonType(.switch)
+        autoStartButton.setAccessibilityLabel("Запускать Krab Ear автоматически при входе в систему")
+        let autoStartRow = makeSwitchRow(
+            label: "Автозапуск при старте macOS",
+            description: "Krab Ear запускается автоматически через LaunchAgent при входе в систему.",
+            button: autoStartButton
+        )
+
+        // 5. Dock icon toggle
+        dockIconButton.title = ""
+        dockIconButton.setButtonType(.switch)
+        dockIconButton.setAccessibilityLabel("Показывать иконку в Dock")
+        let dockRow = makeSwitchRow(
+            label: "Иконка в Dock",
+            description: "Показывать иконку приложения в Dock. По умолчанию Krab Ear работает только в строке меню.",
+            button: dockIconButton
+        )
+
+        card.contentStackView.addArrangedSubview(duckingToggleRow)
+        card.contentStackView.addArrangedSubview(duckRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(overlayRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(autoStartRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(dockRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - Voice Assistant Section (PR 1.5, Path A refactor)
 
     /// Секция «Разговор с AI» в Settings tab.
     /// Содержит:
@@ -640,6 +871,7 @@ extension HistoryPanelController {
     ///   2. Toggle «Детектор пробуждения Краб» (Porcupine, default OFF)
     ///   3. Dropdown «Предпочтительный движок» (auto / moshi / seamless)
     ///   4. Dropdown «Мозг LLM» (auto / qwen3-30b / qwen3-4b)
+    /// Переписана через makeSwitchRow / makeSettingRow / makeSeparator (Path A).
     func buildVoiceAssistantSection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
             sectionId: "settings_voice_assistant",
@@ -649,112 +881,62 @@ extension HistoryPanelController {
 
         let card = ThemeCardView()
 
-        // 1. Hotkey toggle
-        let hotkeyRow = buildVAToggleRow(
-            button: vaHotkeyToggle,
-            title: "Горячая клавиша (Right Option двойной тап)",
-            caption: "Двойной тап Right Option за 300 мс запускает или останавливает разговор с AI. Одиночный hold сохраняет диктовку."
+        // 1. Hotkey double-tap toggle
+        vaHotkeyToggle.title = ""
+        vaHotkeyToggle.setButtonType(.switch)
+        vaHotkeyToggle.setAccessibilityLabel("Включить запуск разговора с AI двойным тапом Right Option")
+        let hotkeyToggleRow = makeSwitchRow(
+            label: "Горячая клавиша (двойной тап Right Option)",
+            description: "Двойной тап Right Option за 300 мс запускает или останавливает разговор с AI. Одиночный hold сохраняет диктовку.",
+            button: vaHotkeyToggle
         )
 
         // 2. Wake word toggle
-        let wakeWordRow = buildVAToggleRow(
+        vaWakeWordToggle.title = ""
+        vaWakeWordToggle.setButtonType(.switch)
+        vaWakeWordToggle.setAccessibilityLabel("Включить детектор пробуждения «Краб» через Porcupine")
+        let wakePrivacyBadge = makeBadge(
+            text: "приватность",
+            color: KrabEarTheme.Colors.textSecondary,
+            tooltip: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен."
+        )
+        let wakeWordRow = makeSwitchRow(
+            label: "Детектор пробуждения «Краб»",
+            description: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен — приватность.",
             button: vaWakeWordToggle,
-            title: "Детектор пробуждения «Краб»",
-            caption: "Требует Porcupine AccessKey + .ppn файл «Краб» (Picovoice Console, free tier). По умолчанию выключен — приватность."
+            statusBadge: wakePrivacyBadge
         )
 
         // 3. Engine selector
-        let engineRow = buildVAPickerRow(
+        vaEngineSelector.removeAllItems()
+        vaEngineSelector.addItems(withTitles: ["Авто", "Moshi (EN, 160 мс)", "SeamlessM4T (RU/ES, 1–2 с)"])
+        vaEngineSelector.setAccessibilityLabel("Предпочтительный движок для разговора с AI")
+        let engineRow = makeSettingRow(
             label: "Движок",
-            popup: vaEngineSelector,
-            items: ["Авто", "Moshi (EN, 160 мс)", "SeamlessM4T (RU/ES, 1–2 с)"],
-            caption: "Moshi — для английского, быстрее. SeamlessM4T — для русского и других языков."
+            description: "Moshi — для английского, быстрее. SeamlessM4T — для русского и других языков.",
+            control: vaEngineSelector
         )
 
-        // 4. Brain selector
-        let brainRow = buildVAPickerRow(
+        // 4. Brain (LLM) selector
+        vaBrainSelector.removeAllItems()
+        vaBrainSelector.addItems(withTitles: ["Авто", "qwen3-30b (точнее, 17 GB)", "qwen3-4b (быстрее, 4 GB)"])
+        vaBrainSelector.setAccessibilityLabel("Выбор LLM-мозга для разговора с AI")
+        let brainRow = makeSettingRow(
             label: "Мозг LLM",
-            popup: vaBrainSelector,
-            items: ["Авто", "qwen3-30b (точнее, 17 GB)", "qwen3-4b (быстрее, 4 GB)"],
-            caption: "qwen3-30b — лучшее качество русского. qwen3-4b — быстро, меньше памяти."
+            description: "qwen3-30b — лучшее качество русского. qwen3-4b — быстро, меньше памяти.",
+            control: vaBrainSelector
         )
 
-        card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(hotkeyToggleRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(wakeWordRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(engineRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(brainRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
-    }
-
-    private func buildVAToggleRow(button: NSButton, title: String, caption: String) -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.spacing = KrabEarTheme.Metrics.standard
-
-        button.title = ""
-        button.setButtonType(.switch)
-
-        let textStack = NSStackView()
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = KrabEarTheme.Metrics.tight
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = KrabEarTheme.Typography.body
-        titleLabel.textColor = KrabEarTheme.Colors.textPrimary
-
-        let captionLabel = NSTextField(labelWithString: caption)
-        captionLabel.font = KrabEarTheme.Typography.caption
-        captionLabel.textColor = KrabEarTheme.Colors.textSecondary
-        captionLabel.lineBreakMode = .byWordWrapping
-        captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        textStack.addArrangedSubview(titleLabel)
-        textStack.addArrangedSubview(captionLabel)
-
-        row.addArrangedSubview(button)
-        row.addArrangedSubview(textStack)
-        return row
-    }
-
-    private func buildVAPickerRow(
-        label: String,
-        popup: NSPopUpButton,
-        items: [String],
-        caption: String
-    ) -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .vertical
-        row.alignment = .leading
-        row.spacing = KrabEarTheme.Metrics.tight
-
-        let headerStack = NSStackView()
-        headerStack.orientation = .horizontal
-        headerStack.alignment = .firstBaseline
-        headerStack.spacing = KrabEarTheme.Metrics.standard
-
-        let labelView = NSTextField(labelWithString: label)
-        labelView.font = KrabEarTheme.Typography.body
-        labelView.textColor = KrabEarTheme.Colors.textPrimary
-
-        popup.removeAllItems()
-        popup.addItems(withTitles: items)
-
-        headerStack.addArrangedSubview(labelView)
-        headerStack.addArrangedSubview(popup)
-
-        let captionLabel = NSTextField(labelWithString: caption)
-        captionLabel.font = KrabEarTheme.Typography.caption
-        captionLabel.textColor = KrabEarTheme.Colors.textSecondary
-        captionLabel.lineBreakMode = .byWordWrapping
-        captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        row.addArrangedSubview(headerStack)
-        row.addArrangedSubview(captionLabel)
-        return row
     }
 
     // MARK: - VA Settings handlers
