@@ -104,7 +104,6 @@ final class PermissionWizard {
             showDiagnosticsStep()
         }
     }
-}
 
     // MARK: - Тест-хук
 
@@ -124,3 +123,4 @@ final class PermissionWizard {
         persistSettings(updated.toPayload())
         return updated
     }
+}
