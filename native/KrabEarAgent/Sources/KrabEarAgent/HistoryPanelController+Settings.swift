@@ -850,6 +850,17 @@ extension HistoryPanelController {
             button: dockIconButton
         )
 
+        // 6. A/B variant toggle — Claude Design compact layout
+        let abToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onUseClaudeDesignChanged))
+        abToggle.setButtonType(.switch)
+        abToggle.state = UserDefaults.standard.useClaudeDesignVariant ? .on : .off
+        abToggle.tag = 202501
+        let abRow = makeSwitchRow(
+            label: "Использовать компактную вёрстку (Claude Design A/B)",
+            description: "Переключает панель настроек между Gemini-дизайном (по умолчанию) и компактным Claude Design. Изменение вступает в силу при следующем открытии панели.",
+            button: abToggle
+        )
+
         card.contentStackView.addArrangedSubview(duckingToggleRow)
         card.contentStackView.addArrangedSubview(duckRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
@@ -858,6 +869,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(autoStartRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(dockRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(abRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
