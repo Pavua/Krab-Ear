@@ -7,6 +7,12 @@
 
  Redesign: Liquid Glass aesthetic (NSVisualEffectView + near-cursor + reveal animation).
  - macOS 13+ target, Swift 6.0 strict concurrency.
+
+ Gemini 3.1 Pro redesign (2026-04-19):
+ 4a: Recording state red dot via CABasicAnimation
+ 4b: State-differentiated tint (red 0.04 recording / accent 0.04 transcribing)
+ 4c: stageLabel as pill/badge (StageBadgeView)
+ 4d: Pulse via CABasicAnimation (no Timer)
 */
 
 import AppKit
@@ -17,8 +23,71 @@ import QuartzCore
 
 private enum OverlayState {
     case hidden
-    case live        // during recording, pulsing text
+    case live        // during recording, pulsing text + red dot
     case reveal      // 3-stage progression after stop_recording
+}
+
+// MARK: - DynamicTintView (4b)
+
+/// NSView с динамическим cgColor — корректно перерисовывается при смене Light/Dark темы.
+@MainActor
+private final class DynamicTintView: NSView {
+    var tintColor: NSColor = .clear {
+        didSet { needsDisplay = true }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.backgroundColor = tintColor.cgColor
+    }
+}
+
+// MARK: - StageBadgeView (4c)
+
+/// Pill/badge для stage label в reveal animation.
+@MainActor
+private final class StageBadgeView: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    var stageText: String = "" {
+        didSet {
+            label.stringValue = stageText
+            isHidden = stageText.isEmpty
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func setupUI() {
+        wantsLayer = true
+        layer?.cornerRadius = 4
+
+        label.font = KrabEarTheme.Typography.captionMedium
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+        ])
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.12).cgColor
+    }
 }
 
 // MARK: - RealtimeOverlayController
@@ -36,6 +105,9 @@ public final class RealtimeOverlayController {
     /// Glass background — NSVisualEffectView с виброй
     private let effectView: NSVisualEffectView
 
+    /// 4b: Dynamic tint overlay (red during recording / accent during transcribing)
+    private let tintView: DynamicTintView
+
     /// Hairline inner border поверх effectView
     private let borderLayer = CALayer()
 
@@ -43,8 +115,11 @@ public final class RealtimeOverlayController {
     private let statusLabel  = NSTextField(labelWithString: "00:00")
     private let modeLabel    = NSTextField(labelWithString: "—")
 
-    /// Stage label для reveal animation ("Распознано" / "Очищено" / "LLM")
-    private let stageLabel   = NSTextField(labelWithString: "")
+    /// 4a: Recording indicator dot (red, CABasicAnimation pulse)
+    private let recordingDot = NSView()
+
+    /// 4c: Stage badge (pill) для reveal animation ("Распознано" / "Очищено" / "LLM")
+    private let stageBadge   = StageBadgeView()
 
     /// Основной текст (preview / stage text)
     private let primaryLabel = NSTextField(wrappingLabelWithString: "")
@@ -53,15 +128,11 @@ public final class RealtimeOverlayController {
 
     private var overlayState: OverlayState = .hidden
     private var opacityPercent: Int = 100
-    
+
     private var targetAlpha: CGFloat {
         CGFloat(opacityPercent) / 100.0
     }
 
-    /// Таймер пульсации во время live mode
-    private var pulseTimer: Timer?
-    private var pulseFadeOut: Bool = true
-    
     /// Таск для управления стадиями reveal анимации
     private var revealTask: Task<Void, Never>?
 
@@ -78,6 +149,10 @@ public final class RealtimeOverlayController {
     private let maxHeight:  CGFloat = 180
     private let cornerRadius: CGFloat = KrabEarTheme.Metrics.cardCornerRadius
 
+    // CABasicAnimation keys
+    private let dotPulseKey   = "krabEarDotPulse"
+    private let labelPulseKey = "krabEarLabelPulse"
+
     // MARK: Init
 
     public init() {
@@ -90,6 +165,7 @@ public final class RealtimeOverlayController {
         )
 
         self.effectView = NSVisualEffectView(frame: initialRect)
+        self.tintView   = DynamicTintView(frame: initialRect)
 
         setupPanel()
         setupEffectView()
@@ -102,19 +178,24 @@ public final class RealtimeOverlayController {
         revealTask?.cancel()
         guard overlayState == .hidden else { return }
         overlayState = .live
-        stageLabel.isHidden = true
+        stageBadge.isHidden = true
+        tintView.tintColor = NSColor.systemRed.withAlphaComponent(0.04)
         positionNearCursor()
         panel.alphaValue = 0
         panel.orderFront(nil)
         animateShow()
-        startPulse()
+        startDotPulse()    // 4a
+        startLabelPulse()  // 4d
+        recordingDot.isHidden = false
     }
 
     public func hide() {
         revealTask?.cancel()
-        stopPulse()
+        stopAllPulse()
         if overlayState == .hidden { return }
         overlayState = .hidden
+        recordingDot.isHidden = true
+        tintView.tintColor = .clear
         animateHide { [weak self] in
             Task { @MainActor [weak self] in
                 self?.panel.orderOut(nil)
@@ -124,7 +205,7 @@ public final class RealtimeOverlayController {
 
     public func update(previewText: String, translatedText: String?, durationText: String, modeHint: String) {
         guard overlayState == .live else { return }
-        
+
         statusLabel.stringValue = durationText
         modeLabel.stringValue   = modeHint.isEmpty ? "—" : modeHint
 
@@ -166,8 +247,9 @@ public final class RealtimeOverlayController {
         duration: TimeInterval = 2.5
     ) {
         revealTask?.cancel()
-        stopPulse()
-        
+        stopAllPulse()
+        recordingDot.isHidden = true
+
         if overlayState == .hidden {
             primaryLabel.stringValue = rawText.isEmpty ? "…" : rawText
             positionNearCursor()
@@ -177,12 +259,15 @@ public final class RealtimeOverlayController {
         }
 
         overlayState = .reveal
+        // 4b: accent tint during transcribing
+        tintView.tintColor = NSColor.controlAccentColor.withAlphaComponent(0.04)
+
         let stageInterval = duration / 3.0
 
         revealTask = Task { @MainActor in
             // Stage 1 — Распознано
             showStage(text: rawText.isEmpty ? "…" : rawText, label: "Распознано")
-            
+
             try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
             guard !Task.isCancelled else { return }
 
@@ -191,7 +276,7 @@ public final class RealtimeOverlayController {
                 text: cleanedText.isEmpty ? rawText : cleanedText,
                 label: "Очищено"
             )
-            
+
             try? await Task.sleep(nanoseconds: UInt64(stageInterval * 1_000_000_000))
             guard !Task.isCancelled else { return }
 
@@ -199,10 +284,10 @@ public final class RealtimeOverlayController {
             let finalLabel = llmApplied ? "LLM rewrite" : "Итог"
             let finalContent = finalText.isEmpty ? (cleanedText.isEmpty ? rawText : cleanedText) : finalText
             crossfadeStage(text: finalContent, label: finalLabel)
-            
+
             try? await Task.sleep(nanoseconds: UInt64((stageInterval + 0.4) * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            
+
             hide()
         }
     }
@@ -259,6 +344,21 @@ public final class RealtimeOverlayController {
     }
 
     private func setupUI() {
+        // 4b: tint view (behind all labels, inside effectView)
+        tintView.wantsLayer = true
+        tintView.layer?.cornerRadius = cornerRadius
+        tintView.tintColor = .clear
+        tintView.translatesAutoresizingMaskIntoConstraints = false
+        effectView.addSubview(tintView)
+        if let ev = effectView as NSView? {
+            NSLayoutConstraint.activate([
+                tintView.topAnchor.constraint(equalTo: ev.topAnchor),
+                tintView.leadingAnchor.constraint(equalTo: ev.leadingAnchor),
+                tintView.trailingAnchor.constraint(equalTo: ev.trailingAnchor),
+                tintView.bottomAnchor.constraint(equalTo: ev.bottomAnchor),
+            ])
+        }
+
         statusLabel.font      = KrabEarTheme.Typography.captionMedium
         statusLabel.textColor = .tertiaryLabelColor
         statusLabel.alignment = .right
@@ -269,11 +369,16 @@ public final class RealtimeOverlayController {
         modeLabel.alignment = .left
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        stageLabel.font      = KrabEarTheme.Typography.captionMedium
-        stageLabel.textColor = .secondaryLabelColor
-        stageLabel.alignment = .left
-        stageLabel.isHidden  = true
-        stageLabel.translatesAutoresizingMaskIntoConstraints = false
+        // 4a: Recording dot
+        recordingDot.wantsLayer = true
+        recordingDot.layer?.cornerRadius = 4
+        recordingDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        recordingDot.isHidden = true
+        recordingDot.translatesAutoresizingMaskIntoConstraints = false
+
+        // 4c: Stage badge (pill)
+        stageBadge.isHidden = true
+        stageBadge.translatesAutoresizingMaskIntoConstraints = false
 
         primaryLabel.font            = KrabEarTheme.Typography.display
         primaryLabel.textColor       = .labelColor
@@ -281,11 +386,13 @@ public final class RealtimeOverlayController {
         primaryLabel.maximumNumberOfLines = 0
         primaryLabel.lineBreakMode   = .byWordWrapping
         primaryLabel.stringValue     = "Слушаю…"
+        primaryLabel.wantsLayer      = true
         primaryLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        effectView.addSubview(statusLabel)
         effectView.addSubview(modeLabel)
-        effectView.addSubview(stageLabel)
+        effectView.addSubview(statusLabel)
+        effectView.addSubview(recordingDot)
+        effectView.addSubview(stageBadge)
         effectView.addSubview(primaryLabel)
 
         NSLayoutConstraint.activate([
@@ -295,10 +402,17 @@ public final class RealtimeOverlayController {
             statusLabel.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
             statusLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
 
-            stageLabel.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
-            stageLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
+            // 4a: red dot — left of modeLabel, vertically centered
+            recordingDot.widthAnchor.constraint(equalToConstant: 8),
+            recordingDot.heightAnchor.constraint(equalToConstant: 8),
+            recordingDot.trailingAnchor.constraint(equalTo: modeLabel.leadingAnchor, constant: -6),
+            recordingDot.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
 
-            primaryLabel.topAnchor.constraint(equalTo: stageLabel.bottomAnchor, constant: 2),
+            // 4c: stage badge — right of recordingDot / below modeLabel row in reveal
+            stageBadge.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
+            stageBadge.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
+
+            primaryLabel.topAnchor.constraint(equalTo: stageBadge.bottomAnchor, constant: 2),
             primaryLabel.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
             primaryLabel.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
             primaryLabel.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -12),
@@ -350,42 +464,73 @@ public final class RealtimeOverlayController {
         })
     }
 
-    private func startPulse() {
-        guard !reduceMotion else { return }
-        stopPulse()
-        pulseFadeOut = true
-        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.overlayState == .live else { return }
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.7
-                    ctx.allowsImplicitAnimation = true
-                    self.primaryLabel.animator().alphaValue = self.pulseFadeOut ? 0.65 : 1.0
-                }
-                self.pulseFadeOut.toggle()
-            }
+    // MARK: - 4a: Recording Dot Pulse (CABasicAnimation)
+
+    private func startDotPulse() {
+        guard !reduceMotion else {
+            recordingDot.layer?.opacity = 1.0
+            return
         }
-        if let t = pulseTimer { RunLoop.main.add(t, forMode: .common) }
+        recordingDot.layer?.removeAnimation(forKey: dotPulseKey)
+
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue   = 0.2
+        pulse.duration  = 0.7
+        pulse.autoreverses  = true
+        pulse.repeatCount   = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        recordingDot.layer?.add(pulse, forKey: dotPulseKey)
     }
 
-    private func stopPulse() {
-        pulseTimer?.invalidate()
-        pulseTimer = nil
-        primaryLabel.alphaValue = 1.0
+    private func stopDotPulse() {
+        recordingDot.layer?.removeAnimation(forKey: dotPulseKey)
+        recordingDot.layer?.opacity = 1.0
+    }
+
+    // MARK: - 4d: Label Pulse (CABasicAnimation, replaces pulseTimer)
+
+    private func startLabelPulse() {
+        guard !reduceMotion else {
+            primaryLabel.layer?.opacity = 1.0
+            return
+        }
+        primaryLabel.layer?.removeAnimation(forKey: labelPulseKey)
+
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1.0
+        pulse.toValue   = 0.65
+        pulse.duration  = 0.7
+        pulse.autoreverses  = true
+        pulse.repeatCount   = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        primaryLabel.layer?.add(pulse, forKey: labelPulseKey)
+    }
+
+    private func stopLabelPulse() {
+        primaryLabel.layer?.removeAnimation(forKey: labelPulseKey)
+        primaryLabel.layer?.opacity = 1.0
+    }
+
+    private func stopAllPulse() {
+        stopDotPulse()
+        stopLabelPulse()
     }
 
     // MARK: - Reveal animation helpers
 
     private func showStage(text: String, label: String) {
-        stageLabel.isHidden  = false
-        stageLabel.stringValue = label
+        stageBadge.stageText   = label
+        stageBadge.isHidden    = false
         primaryLabel.stringValue = text
         adjustHeight()
     }
 
     private func crossfadeStage(text: String, label: String) {
         if reduceMotion {
-            stageLabel.stringValue   = label
+            stageBadge.stageText     = label
             primaryLabel.stringValue = text
             adjustHeight()
             return
@@ -394,18 +539,19 @@ public final class RealtimeOverlayController {
             ctx.duration = 0.3
             ctx.allowsImplicitAnimation = true
             primaryLabel.animator().alphaValue = 0
-            stageLabel.animator().alphaValue   = 0
+            stageBadge.animator().alphaValue   = 0
         }, completionHandler: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.stageLabel.stringValue   = label
-                self.primaryLabel.stringValue = text
+                self.stageBadge.stageText      = label
+                self.stageBadge.isHidden       = false
+                self.primaryLabel.stringValue  = text
                 self.adjustHeight()
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.3
                     ctx.allowsImplicitAnimation = true
                     self.primaryLabel.animator().alphaValue = 1.0
-                    self.stageLabel.animator().alphaValue   = 1.0
+                    self.stageBadge.animator().alphaValue   = 1.0
                 }
             }
         })
@@ -450,7 +596,7 @@ public final class RealtimeOverlayController {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
         let insets: CGFloat = 14 * 2
         let topRowH: CGFloat = 26
-        let stageLabelH: CGFloat = stageLabel.isHidden ? 0 : 18
+        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
         let padding: CGFloat = 10 + 8 + 2 + 12
         let textWidth = width - insets
 
@@ -469,7 +615,7 @@ public final class RealtimeOverlayController {
         let width: CGFloat = 520
         let insets: CGFloat = 14 * 2
         let topRowH: CGFloat = 26
-        let stageLabelH: CGFloat = stageLabel.isHidden ? 0 : 18
+        let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
         let padding: CGFloat = 10 + 8 + 2 + 12
         let textWidth = width - insets
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
