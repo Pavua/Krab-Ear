@@ -3,158 +3,116 @@
 
  Подход: синтетические потоки событий через прямой вызов внутреннего метода.
  NSEvent нельзя создать программно в unit-тестах → тестируем логику таймингов
- через testable-интерфейс (whitebox через метод simulateTap).
+ через тест-хук performTap() (extension в тест-таргете, @MainActor).
+
+ Swift 6: все тесты помечены @MainActor (detector изолирован на MainActor).
 */
 
 import XCTest
 @testable import KrabEarAgent
 
+@MainActor
 final class HotkeyDoubleTapDetectorTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Создаёт detector и добавляет синтетический метод simulateTap для тестирования
-    /// без реальных NSEvent.
     private func makeDetector(
         windowMs: TimeInterval = 0.3,
-        onDoubleTap: @escaping () -> Void
-    ) -> HotkeyDoubleTapDetectorTestable {
-        HotkeyDoubleTapDetectorTestable(windowMs: windowMs, onDoubleTap: onDoubleTap)
+        onDoubleTap: @escaping @MainActor () -> Void
+    ) -> HotkeyDoubleTapDetector {
+        HotkeyDoubleTapDetector(windowMs: windowMs, onDoubleTap: onDoubleTap)
     }
 
     // MARK: - Tests
 
-    func test_singleTap_doesNotTriggerCallback() {
+    func test_singleTap_doesNotTriggerCallback() async {
         var triggered = false
         let detector = makeDetector { triggered = true }
 
-        detector.simulateTap()
+        detector.performTap()
 
         // Ждём чуть дольше окна — callback не должен сработать
-        let exp = expectation(description: "no double-tap")
-        exp.isInverted = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 0.5)
+        try? await Task.sleep(nanoseconds: 350_000_000) // 350 ms
         XCTAssertFalse(triggered, "Одиночный тап не должен вызывать callback")
     }
 
-    func test_doubleTapWithinWindow_triggersCallback() {
+    func test_doubleTapWithinWindow_triggersCallback() async {
         var tapCount = 0
-        let exp = expectation(description: "double-tap callback")
-        let detector = makeDetector(windowMs: 0.3) {
-            tapCount += 1
-            exp.fulfill()
-        }
+        let detector = makeDetector(windowMs: 0.3) { tapCount += 1 }
 
-        detector.simulateTap()
+        detector.performTap()
         // Второй тап через 100 мс (в пределах окна 300 мс)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            detector.simulateTap()
-        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        detector.performTap()
 
-        wait(for: [exp], timeout: 1.0)
+        // Небольшая пауза чтобы callback выполнился
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(tapCount, 1, "Double-tap должен вызывать callback ровно 1 раз")
     }
 
-    func test_doubleTapOutsideWindow_doesNotTrigger() {
+    func test_doubleTapOutsideWindow_doesNotTrigger() async {
         var triggered = false
         let detector = makeDetector(windowMs: 0.15) { triggered = true }
 
-        detector.simulateTap()
+        detector.performTap()
         // Второй тап через 250 мс — за пределами окна 150 мс
-        let exp = expectation(description: "outside window - no callback")
-        exp.isInverted = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            detector.simulateTap()
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 0.5)
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        detector.performTap()
+
+        // Дополнительная пауза
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertFalse(triggered, "Второй тап за пределами окна не должен вызывать callback")
     }
 
-    func test_tripleRapidTaps_triggersOnlyOnce() {
+    func test_tripleRapidTaps_triggersOnlyOnce() async {
         var tapCount = 0
-        let exp = expectation(description: "triggered once")
-        let detector = makeDetector(windowMs: 0.3) {
-            tapCount += 1
-            if tapCount == 1 { exp.fulfill() }
-        }
+        let detector = makeDetector(windowMs: 0.3) { tapCount += 1 }
 
-        detector.simulateTap()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            detector.simulateTap()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-            detector.simulateTap()
-        }
+        detector.performTap()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        detector.performTap()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        detector.performTap()
 
-        wait(for: [exp], timeout: 1.0)
-        // Подождём ещё немного, убедимся что не двойной вызов
-        let pause = expectation(description: "wait for potential second call")
-        pause.isInverted = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            pause.fulfill()
-        }
-        wait(for: [pause], timeout: 0.6)
+        // Ждём, убедимся что нет двойного вызова
+        try? await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(tapCount, 1, "Тройной тап должен давать ровно 1 callback")
     }
 
-    func test_windowMs_isRespected() {
-        // Проверяем что окно 50 мс работает независимо от дефолта 300 мс
+    func test_windowMs_isRespected() async {
         var triggered = false
-        let exp = expectation(description: "tiny window double-tap")
-        let detector = makeDetector(windowMs: 0.05) {
-            triggered = true
-            exp.fulfill()
-        }
+        let detector = makeDetector(windowMs: 0.05) { triggered = true }
 
-        detector.simulateTap()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            detector.simulateTap()
-        }
+        detector.performTap()
+        try? await Task.sleep(nanoseconds: 30_000_000) // 30 мс < окно 50 мс
+        detector.performTap()
 
-        wait(for: [exp], timeout: 1.0)
-        XCTAssertTrue(triggered)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(triggered, "Double-tap в пределах 50 мс окна должен сработать")
     }
 
-    func test_stopClearsState() {
+    func test_stopClearsState() async {
         var triggered = false
         let detector = makeDetector { triggered = true }
 
-        detector.simulateTap()
+        detector.performTap()
         detector.stop()  // Остановили — state сброшен
 
         // Второй тап — но state уже сброшен stop(), первый тап исчез
-        let exp = expectation(description: "no callback after stop")
-        exp.isInverted = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            detector.simulateTap()
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 0.3)
-        XCTAssertFalse(triggered)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        detector.performTap()
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(triggered, "После stop() двойной тап не должен срабатывать")
     }
 }
 
-// MARK: - HotkeyDoubleTapDetectorTestable
-
-/// Testable subclass с синтетическим методом simulateTap для unit-тестов.
-/// В prod-коде используется только HotkeyDoubleTapDetector (без simulateTap).
-final class HotkeyDoubleTapDetectorTestable: HotkeyDoubleTapDetector {
-
-    /// Имитирует одно нажатие Right Option (без реального NSEvent).
-    func simulateTap() {
-        // Напрямую вызываем логику через reflected method.
-        // Используем Selector-based тест-хук через extension в тест-таргете.
-        performTap()
-    }
-}
+// MARK: - Test hook extension
 
 extension HotkeyDoubleTapDetector {
     /// Тест-хук: инжектировать синтетическое press-событие в логику детектора.
-    /// Вызывается только из testable subclass в тестовом таргете.
+    /// Вызывается только из тестового таргета.
+    @MainActor
     func performTap() {
         let now = Date().timeIntervalSinceReferenceDate
         injectTapAt(time: now)

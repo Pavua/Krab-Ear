@@ -12,7 +12,7 @@ import XCTest
 
 // MARK: - MockPorcupineEngine
 
-final class MockPorcupineEngine: PorcupineEngineProtocol {
+final class MockPorcupineEngine: PorcupineEngineProtocol, @unchecked Sendable {
     var processResults: [Int32]
     var processCallCount = 0
     var deleteWasCalled = false
@@ -36,7 +36,7 @@ final class MockPorcupineEngine: PorcupineEngineProtocol {
 
 // MARK: - MockPorcupineThrows
 
-final class MockPorcupineThrows: PorcupineEngineProtocol {
+final class MockPorcupineThrows: PorcupineEngineProtocol, @unchecked Sendable {
     func process(pcm: [Int16]) throws -> Int32 {
         throw NSError(domain: "MockPorcupine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Mock error"])
     }
