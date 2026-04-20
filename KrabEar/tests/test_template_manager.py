@@ -224,5 +224,171 @@ class TestTemplateManagerPersistence(unittest.TestCase):
         self.assertIn("greeting_ru", names)
 
 
+class TestTemplateManagerEdgeCases(unittest.TestCase):
+    """Тесты граничных случаев и специальных символов."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def test_template_name_with_underscore(self):
+        result = self.tm.add_template("my_template_name", "Текст")
+        self.assertEqual(result["name"], "my_template_name")
+
+    def test_template_name_with_hyphens(self):
+        result = self.tm.add_template("my-template-name", "Текст")
+        self.assertEqual(result["name"], "my-template-name")
+
+    def test_template_name_with_numbers(self):
+        result = self.tm.add_template("template123", "Текст")
+        self.assertEqual(result["name"], "template123")
+
+    def test_template_text_with_cyrillic(self):
+        text = "Привет, это кириллица! Спасибо, {name}!"
+        result = self.tm.add_template("cyrillic_tpl", text)
+        self.assertEqual(result["text"], text)
+
+    def test_template_text_with_special_chars(self):
+        text = "Текст с символами: @#$%^&*() и переменная {var}"
+        result = self.tm.add_template("special_chars", text)
+        self.assertEqual(result["text"], text)
+
+    def test_template_with_multiline_text(self):
+        text = "Строка 1\nСтрока 2\nСтрока 3 с {var}"
+        result = self.tm.add_template("multiline", text)
+        self.assertEqual(result["text"], text)
+
+    def test_apply_template_with_empty_variables_dict(self):
+        self.tm.add_template("empty_vars", "Привет, {name}!")
+        text = self.tm.apply_template("empty_vars", {})
+        self.assertIn("{name}", text)
+
+    def test_apply_template_with_numeric_variable_value(self):
+        self.tm.add_template("numeric_var", "Количество: {count}")
+        text = self.tm.apply_template("numeric_var", {"count": 42})
+        self.assertEqual(text, "Количество: 42")
+
+    def test_apply_template_with_float_variable_value(self):
+        self.tm.add_template("float_var", "Цена: {price} рублей")
+        text = self.tm.apply_template("float_var", {"price": 99.99})
+        self.assertEqual(text, "Цена: 99.99 рублей")
+
+    def test_template_with_repeated_variables(self):
+        self.tm.add_template("repeated", "{name} - это {name}!")
+        text = self.tm.apply_template("repeated", {"name": "Краб"})
+        self.assertEqual(text, "Краб - это Краб!")
+
+    def test_template_name_strip_whitespace(self):
+        """add_template должен trimить имя и текст."""
+        result = self.tm.add_template("  spaced_name  ", "  spaced text  ")
+        self.assertEqual(result["name"], "spaced_name")
+        self.assertEqual(result["text"], "spaced text")
+
+    def test_remove_template_with_whitespace_name(self):
+        """remove_template должен корректно работать с whitespace."""
+        self.tm.add_template("to_remove", "Текст")
+        removed = self.tm.remove_template("  to_remove  ")
+        self.assertTrue(removed)
+
+    def test_apply_template_return_type_is_string(self):
+        self.tm.add_template("type_test", "Текст {var}")
+        text = self.tm.apply_template("type_test", {"var": "значение"})
+        self.assertIsInstance(text, str)
+
+    def test_user_template_overrides_builtin(self):
+        """Пользовательский шаблон должен переопределять встроенный."""
+        custom_text = "Переопределённое приветствие для {name}"
+        self.tm.add_template("greeting_ru", custom_text)
+        templates = self.tm.get_templates()
+        matching = [t for t in templates if t["name"] == "greeting_ru"]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["text"], custom_text)
+        self.assertFalse(matching[0].get("builtin", False))
+
+    def test_template_category_default_general(self):
+        result = self.tm.add_template("no_category", "Текст")
+        self.assertEqual(result["category"], "general")
+
+    def test_template_category_strip_whitespace(self):
+        result = self.tm.add_template("with_cat", "Текст", "  custom_cat  ")
+        self.assertEqual(result["category"], "custom_cat")
+
+
+class TestTemplateManagerThreadSafety(unittest.TestCase):
+    """Тесты потокобезопасности (базовые)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def test_concurrent_get_templates(self):
+        """get_templates должен работать безопасно в многопоточной среде."""
+        import threading
+        results = []
+
+        def get_and_append():
+            templates = self.tm.get_templates()
+            results.append(len(templates) > 0)
+
+        threads = [threading.Thread(target=get_and_append) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(results), 5)
+        self.assertTrue(all(results))
+
+    def test_lock_exists(self):
+        """TemplateManager должен иметь _lock для потокобезопасности."""
+        self.assertTrue(hasattr(self.tm, "_lock"))
+        # Проверяем, что _lock имеет методы acquire/release (интерфейс Lock)
+        self.assertTrue(hasattr(self.tm._lock, "acquire"))
+        self.assertTrue(hasattr(self.tm._lock, "release"))
+
+
+class TestTemplateManagerIPCEdgeCases(unittest.TestCase):
+    """Тесты IPC-обработчиков с edge case'ами."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def test_handle_add_template_with_missing_params(self):
+        """handle_add_template должен обрабатывать пустые параметры."""
+        with self.assertRaises(ValueError):
+            # Пустое имя вызовет ValueError в add_template
+            self.tm.handle_add_template({})
+
+    def test_handle_add_template_with_nondict_params(self):
+        """handle_add_template должен приводить типы к строкам."""
+        # Передаём целое число как имя
+        result = self.tm.handle_add_template({
+            "name": 123,
+            "text": "Текст",
+        })
+        self.assertEqual(result["template"]["name"], "123")
+
+    def test_handle_apply_template_with_invalid_variables(self):
+        """handle_apply_template должен игнорировать невалидные переменные."""
+        self.tm.add_template("ipc_edge", "Привет, {name}!")
+        result = self.tm.handle_apply_template({
+            "name": "ipc_edge",
+            "variables": "not_a_dict",  # Строка вместо dict
+        })
+        self.assertEqual(result["text"], "Привет, {name}!")
+
+    def test_handle_remove_template_with_nonexistent(self):
+        result = self.tm.handle_remove_template({"name": "nonexistent_via_ipc"})
+        self.assertFalse(result["removed"])
+
+    def test_handle_get_templates_returns_correct_structure(self):
+        self.tm.add_template("ipc_struct", "Текст")
+        result = self.tm.handle_get_templates({})
+        self.assertIn("templates", result)
+        self.assertIsInstance(result["templates"], list)
+        self.assertTrue(len(result["templates"]) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()
