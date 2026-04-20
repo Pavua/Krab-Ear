@@ -1,0 +1,302 @@
+{
+  "global": {
+    "color": {
+      "windowBackground": {
+        "value": "rgba(0, 0, 0, 0)",
+        "type": "color",
+        "description": "Window root: clear (NSColor.clear), layered over NSVisualEffectView"
+      },
+      "cardBackground": {
+        "value": "rgba(255, 255, 255, 0.5)",
+        "type": "color",
+        "description": "Liquid Glass card: NSColor.controlBackgroundColor @ alpha 0.5. Light-mode approximation; in dark mode will appear darker."
+      },
+      "accent": {
+        "value": "#0066FF",
+        "type": "color",
+        "description": "macOS .controlAccentColor — default system blue. User may have customised this in System Settings > Appearance. #0066FF is the canonical macOS default."
+      },
+      "textPrimary": {
+        "value": "#000000",
+        "type": "color",
+        "description": "NSColor.labelColor — black in light mode, white in dark mode. Hex shown is light-mode value."
+      },
+      "textSecondary": {
+        "value": "rgba(0, 0, 0, 0.5)",
+        "type": "color",
+        "description": "NSColor.secondaryLabelColor — ~50% opacity label. Light-mode approximation."
+      },
+      "textDisabled": {
+        "value": "rgba(0, 0, 0, 0.26)",
+        "type": "color",
+        "description": "NSColor.tertiaryLabelColor — muted/disabled text. Light-mode approximation."
+      },
+      "borderDark": {
+        "value": "rgba(255, 255, 255, 0.15)",
+        "type": "color",
+        "description": "Dynamic border in dark mode: white @ 0.15 alpha"
+      },
+      "borderLight": {
+        "value": "rgba(0, 0, 0, 0.10)",
+        "type": "color",
+        "description": "Dynamic border in light mode: black @ 0.10 alpha"
+      },
+      "success": {
+        "value": "#34C759",
+        "type": "color",
+        "description": "NSColor.systemGreen — macOS standard green"
+      },
+      "error": {
+        "value": "#FF3B30",
+        "type": "color",
+        "description": "NSColor.systemRed — macOS standard red"
+      },
+      "warning": {
+        "value": "#FF9500",
+        "type": "color",
+        "description": "NSColor.systemOrange — macOS standard orange (legacy alias)"
+      },
+      "overlayShadow": {
+        "value": "rgba(0, 0, 0, 0.25)",
+        "type": "color",
+        "description": "NSColor.black @ alpha 0.25 — used by RealtimeOverlay shadow"
+      },
+      "separator": {
+        "value": "rgba(0, 0, 0, 0.10)",
+        "type": "color",
+        "description": "Deprecated alias for border — keep for migration; prefer border"
+      }
+    },
+    "spacing": {
+      "tight": {
+        "value": "4",
+        "type": "spacing",
+        "description": "Metrics.tight — minor offsets, disclosure padding (4pt, 4-pt grid base)"
+      },
+      "standard": {
+        "value": "8",
+        "type": "spacing",
+        "description": "Metrics.standard — item/inner padding, dominant default (8pt, was itemSpacing)"
+      },
+      "comfortable": {
+        "value": "12",
+        "type": "spacing",
+        "description": "Metrics.comfortable — card padding, mid-level inset (12pt, was cardPadding)"
+      },
+      "spacious": {
+        "value": "24",
+        "type": "spacing",
+        "description": "Metrics.spacious — window root padding, external margins (24pt, was sectionSpacing=16)"
+      },
+      "cardCornerRadius": {
+        "value": "12",
+        "type": "borderRadius",
+        "description": "Metrics.cardCornerRadius — outer card radius with continuous curve (squircle)"
+      },
+      "innerCornerRadius": {
+        "value": "8",
+        "type": "borderRadius",
+        "description": "Metrics.innerCornerRadius — inner radius for scroll views, text views inside cards (Apple rule: outer - padding/3)"
+      },
+      "controlHeight": {
+        "value": "24",
+        "type": "sizing",
+        "description": "Metrics.controlHeight — standard NSControl.ControlSize.regular height"
+      }
+    },
+    "fontSize": {
+      "display": {
+        "value": "17",
+        "type": "fontSizes",
+        "description": "Typography.display — primary RealtimeOverlay transcription text"
+      },
+      "sectionTitle": {
+        "value": "13",
+        "type": "fontSizes",
+        "description": "Typography.sectionTitle — headers: panels, sections, settings groups"
+      },
+      "body": {
+        "value": "13",
+        "type": "fontSizes",
+        "description": "Typography.body — body text, inputs, buttons, controls (macOS standard)"
+      },
+      "caption": {
+        "value": "11",
+        "type": "fontSizes",
+        "description": "Typography.caption — secondary captions, dates, filters"
+      },
+      "captionMedium": {
+        "value": "11",
+        "type": "fontSizes",
+        "description": "Typography.captionMedium — accented captions, badges, status labels"
+      },
+      "monospace": {
+        "value": "11",
+        "type": "fontSizes",
+        "description": "Typography.monospace — logs, diagnostics, raw data output"
+      }
+    },
+    "fontWeight": {
+      "regular": {
+        "value": "400",
+        "type": "fontWeights",
+        "description": "NSFont.Weight.regular — display, body, caption, monospace"
+      },
+      "medium": {
+        "value": "500",
+        "type": "fontWeights",
+        "description": "NSFont.Weight.medium — captionMedium badges and status"
+      },
+      "semibold": {
+        "value": "600",
+        "type": "fontWeights",
+        "description": "NSFont.Weight.semibold — sectionTitle headers (changed from bold in macOS 13+)"
+      }
+    },
+    "fontFamily": {
+      "system": {
+        "value": "-apple-system, 'SF Pro Text', 'SF Pro Display', BlinkMacSystemFont, sans-serif",
+        "type": "fontFamilies",
+        "description": "NSFont.systemFont — SF Pro (Display ≥20pt, Text <20pt). Used for all non-monospace tokens."
+      },
+      "monospaced": {
+        "value": "'SF Mono', 'Menlo', monospace",
+        "type": "fontFamilies",
+        "description": "NSFont.monospacedSystemFont — SF Mono. Used for Typography.monospace token."
+      }
+    },
+    "lineHeight": {
+      "normal": {
+        "value": "1.4",
+        "type": "lineHeights",
+        "description": "Default system line-height for body/caption text (unitless ratio)"
+      },
+      "tight": {
+        "value": "1.2",
+        "type": "lineHeights",
+        "description": "Tight line-height for captions and badges"
+      }
+    },
+    "motion": {
+      "durationMicro": {
+        "value": "0.15",
+        "type": "other",
+        "description": "Motion.Duration.micro — hover, press, checkbox toggle (0.15s)"
+      },
+      "durationShort": {
+        "value": "0.25",
+        "type": "other",
+        "description": "Motion.Duration.short — expand/collapse, tab switch (0.25s)"
+      },
+      "durationStandard": {
+        "value": "0.40",
+        "type": "other",
+        "description": "Motion.Duration.standard — overlay show, modals (0.40s)"
+      },
+      "durationLong": {
+        "value": "0.70",
+        "type": "other",
+        "description": "Motion.Duration.long — pulse, attention loops (0.70s)"
+      },
+      "easingEaseOut": {
+        "value": "ease-out",
+        "type": "other",
+        "description": "Motion.Easing.easeOut — CAMediaTimingFunction(.easeOut). Used as default animation easing."
+      },
+      "easingEaseIn": {
+        "value": "ease-in",
+        "type": "other",
+        "description": "Motion.Easing.easeIn — CAMediaTimingFunction(.easeIn)"
+      },
+      "easingEaseInOut": {
+        "value": "ease-in-out",
+        "type": "other",
+        "description": "Motion.Easing.easeInOut — CAMediaTimingFunction(.easeInEaseOut)"
+      },
+      "easingLinear": {
+        "value": "linear",
+        "type": "other",
+        "description": "Motion.Easing.linear — CAMediaTimingFunction(.linear)"
+      }
+    },
+    "interaction": {
+      "hoverOverlayAlpha": {
+        "value": "0.10",
+        "type": "other",
+        "description": "Interaction.hoverOverlayAlpha — white @ 10% over background on hover (dark mode)"
+      },
+      "pressedScale": {
+        "value": "0.98",
+        "type": "other",
+        "description": "Interaction.pressedScale — micro-shrink 2% on press (0.98x)"
+      },
+      "pressedOverlayAlpha": {
+        "value": "0.15",
+        "type": "other",
+        "description": "Interaction.pressedOverlayAlpha — black @ 15% over background on press"
+      },
+      "disabledOpacity": {
+        "value": "0.40",
+        "type": "other",
+        "description": "Interaction.disabledOpacity — overall element opacity 40% when disabled"
+      },
+      "transparentHoverAlpha": {
+        "value": "0.05",
+        "type": "other",
+        "description": "Interaction.transparentHoverAlpha — white @ 5% for borderless/transparent buttons on hover"
+      }
+    },
+    "elevation": {
+      "cardShadowColor": {
+        "value": "rgba(0, 0, 0, 1)",
+        "type": "color",
+        "description": "Elevation.applyCard — NSColor.black shadow color"
+      },
+      "cardShadowOpacity": {
+        "value": "0.15",
+        "type": "other",
+        "description": "Elevation.applyCard — shadow opacity"
+      },
+      "cardShadowRadius": {
+        "value": "6",
+        "type": "other",
+        "description": "Elevation.applyCard — shadow blur radius (pt)"
+      },
+      "cardShadowOffsetY": {
+        "value": "-2",
+        "type": "other",
+        "description": "Elevation.applyCard — shadow offset Y (pt)"
+      },
+      "popupShadowOpacity": {
+        "value": "0.20",
+        "type": "other",
+        "description": "Elevation.applyPopup — popup/dropdown shadow opacity"
+      },
+      "popupShadowRadius": {
+        "value": "16",
+        "type": "other",
+        "description": "Elevation.applyPopup — popup shadow blur radius (pt)"
+      },
+      "popupShadowOffsetY": {
+        "value": "-6",
+        "type": "other",
+        "description": "Elevation.applyPopup — popup shadow offset Y (pt)"
+      },
+      "overlayShadowOpacity": {
+        "value": "0.30",
+        "type": "other",
+        "description": "Elevation.applyOverlay — RealtimeOverlay panel shadow opacity"
+      },
+      "overlayShadowRadius": {
+        "value": "32",
+        "type": "other",
+        "description": "Elevation.applyOverlay — overlay shadow blur radius (pt)"
+      },
+      "overlayShadowOffsetY": {
+        "value": "-12",
+        "type": "other",
+        "description": "Elevation.applyOverlay — overlay shadow offset Y (pt)"
+      }
+    }
+  }
+}
