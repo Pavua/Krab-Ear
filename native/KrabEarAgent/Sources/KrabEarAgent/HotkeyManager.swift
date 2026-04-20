@@ -108,3 +108,32 @@ final class HotkeyManager {
     }
 }
 
+
+    // MARK: - Тест-хук
+
+    /// Инжектировать синтетическое событие клавиши в логику фильтрации.
+    /// Используется только из тестового таргета — имитирует флаги keyCode и option.
+    @MainActor
+    func injectEventLogic(keyCode: UInt16, isOptionDown: Bool) {
+        let isTargetKey: Bool
+        switch variant {
+        case .rightOption, .rightOptionToggle:
+            isTargetKey = (keyCode == Keycode.rightOption.rawValue)
+        case .leftOption:
+            isTargetKey = (keyCode == Keycode.leftOption.rawValue)
+        case .anyOption:
+            isTargetKey = (keyCode == Keycode.rightOption.rawValue || keyCode == Keycode.leftOption.rawValue)
+        }
+
+        guard isTargetKey else { return }
+
+        if isOptionDown && !isPressed {
+            isPressed = true
+            onToggle()
+            return
+        }
+
+        if !isOptionDown && isPressed {
+            isPressed = false
+        }
+    }

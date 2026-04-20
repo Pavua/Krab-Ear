@@ -105,3 +105,22 @@ final class PermissionWizard {
         }
     }
 }
+
+    // MARK: - Тест-хук
+
+    /// Применить финальные мутации настроек без показа UI-диалогов.
+    /// Используется только из тестового таргета.
+    @MainActor
+    func applyCompletionState(
+        to settings: AgentSettings,
+        autostart: Bool,
+        persistSettings: ([String: Any]) -> Void,
+        launchAgentManager: LaunchAgentManager
+    ) -> AgentSettings {
+        var updated = settings
+        launchAgentManager.setAutostart(enabled: autostart)
+        updated.autoStartEnabled = autostart
+        updated.onboardingCompleted = true
+        persistSettings(updated.toPayload())
+        return updated
+    }
