@@ -483,8 +483,11 @@ extension HistoryPanelController {
             labelStack.addArrangedSubview(badge)
         }
 
+        // Spacer: suppressed from accessibility and focus traversal — it is a purely
+        // visual layout element; allowing Tab to land here wastes a key press.
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setAccessibilityElement(false)
 
         let hStack = NSStackView()
         hStack.orientation = .horizontal
@@ -514,19 +517,20 @@ extension HistoryPanelController {
         return hStack
     }
 
-    /// Тонкий горизонтальный разделитель (1 pt) для разбивки карточек на зоны.
+    /// Тонкий горизонтальный разделитель для разбивки карточек на зоны.
+    /// Использует NSBox.separator (AppKit-managed rendering) вместо bare NSView,
+    /// чтобы цвет разделителя применялся корректно до того как view добавляется в окно.
     @MainActor
-    func makeSeparator() -> NSView {
-        let separator = NSView()
-        separator.wantsLayer = true
-        separator.layer?.backgroundColor = KrabEarTheme.Colors.border.cgColor
-        separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
+    private func makeSeparator() -> NSView {
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
         return separator
     }
 
     /// Лейбл-бейдж: малый текст, цвет из KrabEarTheme, опциональный тултип.
     @MainActor
-    func makeBadge(text: String, color: NSColor, tooltip: String? = nil) -> NSTextField {
+    private func makeBadge(text: String, color: NSColor, tooltip: String? = nil) -> NSTextField {
         let badge = NSTextField(labelWithString: text)
         badge.font = KrabEarTheme.Typography.captionMedium
         badge.textColor = color
@@ -578,7 +582,7 @@ extension HistoryPanelController {
 
         let gpuCrashBadge = makeBadge(
             text: "⚠ бета",
-            color: .systemOrange,
+            color: KrabEarTheme.Colors.warning, // предупреждение, не ошибка — orange через токен
             tooltip: "Может вызывать сбой GPU на Apple Silicon. Отключите при нестабильной работе."
         )
 
