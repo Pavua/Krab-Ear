@@ -352,5 +352,198 @@ class RenderFormatsTestCase(unittest.TestCase):
                 self.assertGreater(len(pkg.content), 0)
 
 
+# ---------------------------------------------------------------------------
+# Тесты персистентности и очистки
+# ---------------------------------------------------------------------------
+
+class PersistenceAndCleanupTestCase(unittest.TestCase):
+    """Тесты сохранения индекса и очистки старых пакетов."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._store.add_fake_item("p1", "текст для сохранения")
+
+    def test_index_file_created_after_prepare_share(self) -> None:
+        """После prepare_share должен создаться shares_index.json."""
+        self._mgr.prepare_share(["p1"])
+        index_path = Path(self._tmpdir) / "shares" / "shares_index.json"
+        self.assertTrue(index_path.exists())
+
+    def test_index_file_valid_json(self) -> None:
+        """Сохранённый индекс должен быть валидным JSON."""
+        self._mgr.prepare_share(["p1"])
+        index_path = Path(self._tmpdir) / "shares" / "shares_index.json"
+        content = index_path.read_text(encoding="utf-8")
+        data = json.loads(content)
+        self.assertIsInstance(data, dict)
+
+    def test_shares_dir_created(self) -> None:
+        """Должна быть создана директория shares."""
+        self._mgr.prepare_share(["p1"])
+        shares_dir = Path(self._tmpdir) / "shares"
+        self.assertTrue(shares_dir.is_dir())
+
+    def test_index_survives_manager_reload(self) -> None:
+        """После перезагрузки SharingManager индекс должен быть восстановлен."""
+        pkg1 = self._mgr.prepare_share(["p1"])
+
+        # Создаём новый экземпляр, который загружает индекс с диска
+        mgr2 = SharingManager(store=self._store)
+
+        # Старый пакет должен быть виден
+        found = mgr2.get_shared(pkg1.share_id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.share_id, pkg1.share_id)
+
+    def test_invalid_index_file_ignored_gracefully(self) -> None:
+        """Если индекс повреждён, должен создаться пустой индекс без ошибки."""
+        # Создаём повреждённый индекс
+        index_path = Path(self._tmpdir) / "shares" / "shares_index.json"
+        index_path.write_text("not valid json {", encoding="utf-8")
+
+        # Новый экземпляр должен игнорировать повреждённый файл
+        mgr2 = SharingManager(store=self._store)
+        # list_shared должен вернуть пустой список (индекс переинициализирован)
+        self.assertEqual(mgr2.list_shared(), [])
+
+
+# ---------------------------------------------------------------------------
+# Тесты потокобезопасности
+# ---------------------------------------------------------------------------
+
+class ThreadSafetyTestCase(unittest.TestCase):
+    """Тесты потокобезопасности SharingManager."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        # Добавляем несколько элементов для параллельного использования
+        for i in range(10):
+            self._store.add_fake_item(f"item_{i}", f"текст {i}")
+
+    def test_concurrent_prepare_share_calls(self) -> None:
+        """Параллельные вызовы prepare_share должны работать без коллизий."""
+        import threading
+
+        results = []
+        lock = threading.Lock()
+
+        def prepare_and_store(item_id: str) -> None:
+            pkg = self._mgr.prepare_share([item_id])
+            with lock:
+                results.append(pkg.share_id)
+
+        threads = []
+        for i in range(5):
+            t = threading.Thread(target=prepare_and_store, args=(f"item_{i}",))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # Все вызовы должны завершиться успешно
+        self.assertEqual(len(results), 5)
+        # Все ID должны быть уникальны
+        self.assertEqual(len(set(results)), 5)
+
+    def test_concurrent_list_and_prepare(self) -> None:
+        """Одновременные list_shared и prepare_share должны работать корректно."""
+        import threading
+
+        list_results = []
+        lock = threading.Lock()
+
+        def prepare_share_thread() -> None:
+            for i in range(3):
+                self._mgr.prepare_share([f"item_{i}"])
+
+        def list_share_thread() -> None:
+            for _ in range(3):
+                result = self._mgr.list_shared()
+                with lock:
+                    list_results.append(len(result))
+
+        t1 = threading.Thread(target=prepare_share_thread)
+        t2 = threading.Thread(target=list_share_thread)
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # list_shared вызывался 3 раза и всегда возвращал корректные длины
+        self.assertEqual(len(list_results), 3)
+        # Все значения должны быть целые числа >= 0
+        for length in list_results:
+            self.assertIsInstance(length, int)
+            self.assertGreaterEqual(length, 0)
+
+
+# ---------------------------------------------------------------------------
+# Тесты граничных случаев
+# ---------------------------------------------------------------------------
+
+class EdgeCasesTestCase(unittest.TestCase):
+    """Тесты граничных случаев и исключительных ситуаций."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+
+    def test_very_large_content(self) -> None:
+        """Тест с очень большим контентом (10MB)."""
+        large_text = "x" * (10 * 1024 * 1024)  # 10MB
+        self._store.add_fake_item("big", large_text)
+        pkg = self._mgr.prepare_share(["big"])
+        self.assertGreater(pkg.size_bytes, 10 * 1024 * 1024)
+
+    def test_unicode_content(self) -> None:
+        """Тест с разнообразным юникодом."""
+        unicode_text = "Русский текст 中文 العربية 🚀 emoji"
+        self._store.add_fake_item("unicode", unicode_text)
+        pkg = self._mgr.prepare_share(["unicode"], format="json")
+        data = json.loads(pkg.content)
+        self.assertEqual(data[0]["text"], unicode_text)
+
+    def test_format_case_insensitive(self) -> None:
+        """Формат должен быть case-insensitive."""
+        self._store.add_fake_item("case", "тест")
+        pkg1 = self._mgr.prepare_share(["case"], format="MARKDOWN")
+        pkg2 = self._mgr.prepare_share(["case"], format="markdown")
+        # Оба должны создать .md файлы
+        self.assertTrue(pkg1.filename.endswith(".md"))
+        self.assertTrue(pkg2.filename.endswith(".md"))
+
+    def test_whitespace_in_format_trimmed(self) -> None:
+        """Пробелы в формате должны обрезаться."""
+        self._store.add_fake_item("space", "тест")
+        pkg = self._mgr.prepare_share(["space"], format="  text  ")
+        self.assertIn(".txt", pkg.filename)
+
+    def test_share_id_uniqueness_collision_resistance(self) -> None:
+        """После 20 попыток generate_share_id должно гарантироваться создание уникального ID."""
+        # Получаем ID, заполняем индекс до 20+ значений
+        pkg_ids = []
+        for i in range(25):
+            self._store.add_fake_item(f"item_{i}", f"текст {i}")
+            pkg = self._mgr.prepare_share([f"item_{i}"])
+            pkg_ids.append(pkg.share_id)
+
+        # Все ID должны быть уникальны
+        self.assertEqual(len(pkg_ids), len(set(pkg_ids)))
+
+    def test_special_characters_in_filenames(self) -> None:
+        """Проверяем, что filename всегда содержит валидные символы."""
+        self._store.add_fake_item("special", "текст")
+        pkg = self._mgr.prepare_share(["special"])
+        # Filename должен содержать только буквы, цифры, подчёркивание, точку
+        self.assertRegex(pkg.filename, r'^[\w\-\.]+\.(?:md|txt|json)$')
+
+
 if __name__ == "__main__":
     unittest.main()
