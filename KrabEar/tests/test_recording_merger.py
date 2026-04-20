@@ -349,5 +349,83 @@ class TestMergeTranslation(unittest.TestCase):
         self.assertEqual(result["target_lang"], "ru")
 
 
+class TestMergeEdgeCases(unittest.TestCase):
+    """Edge case тесты для RecordingMerger."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    # 23. Слияние с пропуском в событиях (временной разрыв)
+    def test_merge_with_time_gap(self) -> None:
+        self._add("gap1", "Morning note", ts="2026-04-12T09:00:00")
+        self._add("gap2", "Evening note", ts="2026-04-12T18:00:00")
+        result = self.merger.merge_items(["gap1", "gap2"], self.store)
+        self.assertIn("Morning note", result["text"])
+        self.assertIn("Evening note", result["text"])
+        self.assertIn("09:00", result["text"])
+        self.assertIn("18:00", result["text"])
+
+    # 24. Слияние 3+ элементов
+    def test_merge_multiple_items_three_plus(self) -> None:
+        self._add("multi1", "First", ts="2026-04-12T10:00:00")
+        self._add("multi2", "Second", ts="2026-04-12T10:01:00")
+        self._add("multi3", "Third", ts="2026-04-12T10:02:00")
+        self._add("multi4", "Fourth", ts="2026-04-12T10:03:00")
+        result = self.merger.merge_items(["multi1", "multi2", "multi3", "multi4"], self.store)
+        for text in ["First", "Second", "Third", "Fourth"]:
+            self.assertIn(text, result["text"])
+
+    # 25. Уверенность с None значениями
+    def test_merge_confidence_with_none_values(self) -> None:
+        self._add("conf1", "Has confidence", ts="2026-04-12T10:00:00", confidence=0.9)
+        self._add("conf2", "No confidence", ts="2026-04-12T10:01:00", confidence=None)
+        result = self.merger.merge_items(["conf1", "conf2"], self.store)
+        self.assertAlmostEqual(result["confidence"], 0.9, places=4)
+
+    # 26. Длительность только у одного элемента
+    def test_merge_duration_single_item_has_duration(self) -> None:
+        self._add("dur1", "Has duration", ts="2026-04-12T10:00:00", audio_duration_sec=30.0)
+        self._add("dur2", "No duration", ts="2026-04-12T10:01:00", audio_duration_sec=None)
+        result = self.merger.merge_items(["dur1", "dur2"], self.store)
+        self.assertAlmostEqual(result["audio_duration_sec"], 30.0, places=2)
+
+    # 27. Пустые теги (пропускаются)
+    def test_merge_tags_empty_strings_skipped(self) -> None:
+        self._add("tag1", "A", ts="2026-04-12T10:00:00", tags=["valid", ""])
+        self._add("tag2", "B", ts="2026-04-12T10:01:00", tags=["other", "  "])
+        result = self.merger.merge_items(["tag1", "tag2"], self.store)
+        merged_tags = result["tags"]
+        self.assertIn("valid", merged_tags)
+        self.assertIn("other", merged_tags)
+        self.assertNotIn("", merged_tags)
+
+    # 28. Пользовательский разделитель текста
+    def test_merge_custom_separator(self) -> None:
+        self._add("sep1", "Part one", ts="2026-04-12T10:00:00")
+        self._add("sep2", "Part two", ts="2026-04-12T10:01:00")
+        result = self.merger.merge_items(
+            ["sep1", "sep2"],
+            self.store,
+            separator=" ||| ",
+        )
+        self.assertIn(" ||| ", result["text"])
+
+    # 29. Одиночный элемент выбрасывает ValueError
+    def test_merge_single_item_error(self) -> None:
+        self._add("single", "Only one")
+        with self.assertRaises(ValueError) as ctx:
+            self.merger.merge_items(["single"], self.store)
+        self.assertIn("минимум 2", str(ctx.exception))
+
+    # 30. IPC без item_ids параметра
+    def test_handle_merge_recordings_missing_item_ids_raises(self) -> None:
+        with self.assertRaises((ValueError, KeyError)):
+            self.merger.handle_merge_recordings({}, self.store)
+
+
 if __name__ == "__main__":
     unittest.main()
