@@ -506,5 +506,163 @@ class EdgeCasesTestCase(unittest.TestCase):
             json.dumps(d)
 
 
+# ---------------------------------------------------------------------------
+# Тест: расширенные сценарии и комбинации инсайтов
+# ---------------------------------------------------------------------------
+
+class MultipleInsightsTestCase(unittest.TestCase):
+    """Тесты для сценариев с множественными инсайтами."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_generate_insights_combines_multiple_types(self) -> None:
+        """Проверяет, что generate_insights может вернуть несколько инсайтов одновременно."""
+        # Создаём записи, которые должны триггерить разные инсайты
+        # Peak productivity: разное распределение по часам
+        peak_items = [_make_item(ts_offset_days=i * 0.1, hour=10) for i in range(7)]
+        peak_items += [_make_item(ts_offset_days=i * 0.1 + 0.05, hour=18) for i in range(3)]
+
+        # Quality improvement: растущая confidence
+        quality_items = [
+            _make_item(ts_offset_days=8 + i, confidence=0.60) for i in range(4)
+        ]
+        quality_items += [
+            _make_item(ts_offset_days=i, confidence=0.95) for i in range(4)
+        ]
+
+        # Topic detection: много технологических слов
+        topic_items = [
+            _make_item(ts_offset_days=i * 0.2, text="программа код сервер база данные")
+            for i in range(5)
+        ]
+
+        all_items = peak_items + quality_items + topic_items
+        insights = self.gen.generate_insights(all_items, days=7)
+
+        # Должно быть несколько инсайтов
+        self.assertGreater(len(insights), 1)
+        # Все должны быть правильными инстансами
+        for ins in insights:
+            self.assertIsInstance(ins, Insight)
+            self.assertGreaterEqual(ins.confidence, 0.0)
+            self.assertLessEqual(ins.confidence, 1.0)
+
+    def test_insights_sorted_by_confidence_can_be_topped(self) -> None:
+        """Проверяет возможность получить top-N инсайтов по confidence."""
+        items = [_make_item(ts_offset_days=i * 0.1, hour=14) for i in range(10)]
+        insights = self.gen.generate_insights(items, days=7)
+
+        if len(insights) > 1:
+            # Сортируем по confidence
+            sorted_insights = sorted(insights, key=lambda x: x.confidence, reverse=True)
+            top_3 = sorted_insights[:3]
+            # Проверяем что confidence у top-3 монотонно не растёт
+            for i in range(len(top_3) - 1):
+                self.assertGreaterEqual(
+                    top_3[i].confidence,
+                    top_3[i + 1].confidence
+                )
+
+    def test_single_item_with_all_fields_in_history(self) -> None:
+        """Граничный случай: одна запись со всеми полями."""
+        single_item = [
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "text": "программа код сервер база данные система приложение функция модель",
+                "source_lang": "ru",
+                "confidence": 0.92,
+                "audio_duration_sec": 15.0,
+            }
+        ]
+        # Недостаточно данных для инсайтов (минимум 3)
+        result = self.gen.generate_insights(single_item, days=7)
+        self.assertEqual(result, [])
+
+    def test_insights_with_object_attributes_vs_dict(self) -> None:
+        """Проверяет совместимость с объектами (не только dict)."""
+        # Создаём простой класс-подобный объект
+        class MockHistoryItem:
+            def __init__(self, ts, text, source_lang, confidence, audio_duration_sec):
+                self.ts = ts
+                self.text = text
+                self.source_lang = source_lang
+                self.confidence = confidence
+                self.audio_duration_sec = audio_duration_sec
+
+        now = datetime.now(timezone.utc)
+        mock_items = [
+            MockHistoryItem(
+                ts=(now - timedelta(days=i * 0.1)).isoformat(),
+                text="программа код сервер база данные система python",
+                source_lang="ru",
+                confidence=0.85,
+                audio_duration_sec=10.0,
+            )
+            for i in range(5)
+        ]
+
+        # Должно работать с объектами через getattr
+        insights = self.gen.generate_insights(mock_items, days=7)
+        self.assertIsInstance(insights, list)
+
+    def test_large_dataset_performance(self) -> None:
+        """Тест производительности с большим количеством записей."""
+        # Создаём 100 записей
+        items = []
+        for i in range(100):
+            items.append(
+                _make_item(
+                    ts_offset_days=i * 0.01,
+                    text=f"текст запись номер {i} программа код сервер база данные",
+                    hour=(10 + i) % 24,
+                    confidence=0.5 + (i % 50) / 100.0,
+                    audio_duration_sec=5.0 + i % 15,
+                )
+            )
+
+        # Должно завершиться без ошибок
+        insights = self.gen.generate_insights(items, days=7)
+        self.assertIsInstance(insights, list)
+        # Все инсайты должны быть валидными
+        for ins in insights:
+            self.assertIsInstance(ins, Insight)
+
+
+class SpecialValueEdgeCasesTestCase(unittest.TestCase):
+    """Тесты для специальных значений и граничных случаев."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_confidence_at_boundaries(self) -> None:
+        """Проверяет обработку confidence на границах 0.0 и 1.0."""
+        items = [
+            _make_item(ts_offset_days=i * 0.1, confidence=0.0) for i in range(3)
+        ]
+        items += [
+            _make_item(ts_offset_days=i * 0.1 + 0.05, confidence=1.0) for i in range(3)
+        ]
+        # Должно не бросать исключений
+        insights = self.gen.generate_insights(items, days=7)
+        self.assertIsInstance(insights, list)
+
+    def test_very_old_items_ignored(self) -> None:
+        """Проверяет, что очень старые записи игнорируются в расчётах."""
+        old = [
+            _make_item(ts_offset_days=100 + i, confidence=0.5, hour=15)
+            for i in range(10)
+        ]
+        recent = [
+            _make_item(ts_offset_days=i * 0.1, confidence=0.95, hour=9)
+            for i in range(5)
+        ]
+        insights = self.gen.generate_insights(old + recent, days=7)
+        # Peak hour должен быть 9, а не 15 (только свежие данные)
+        peak_ins = next((i for i in insights if i.type == "peak_productivity"), None)
+        if peak_ins:
+            self.assertEqual(peak_ins.data["peak_hour"], 9)
+
+
 if __name__ == "__main__":
     unittest.main()
