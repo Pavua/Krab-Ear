@@ -166,3 +166,40 @@ private final class WSHolder: NSObject {
     var task: URLSessionWebSocketTask?
     var session: URLSession?
 }
+
+// MARK: - DEBUG test hooks
+
+#if DEBUG
+extension ConversationViewController {
+
+    /// Список JSON-строк, которые были отправлены через sendControlMessage в тестовом режиме.
+    /// Используется в XCTest для проверки содержимого uplink-сообщений без реального сокета.
+    nonisolated(unsafe) static var _testSentMessages: [String] = []
+
+    /// Сброс тестового буфера между тестами.
+    static func _resetTestState() {
+        _testSentMessages = []
+    }
+
+    /// Собирает URLRequest, который был бы отправлен при connect(url:), без открытия сокета.
+    /// Возвращает итоговый URL с query-параметрами для проверки в тестах.
+    func _buildWSRequest(for urlString: String) -> URLRequest? {
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        if !config.apiKey.isEmpty {
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            var items = components.queryItems ?? []
+            if config.engine != "auto" { items.append(URLQueryItem(name: "engine", value: config.engine)) }
+            if config.brain  != "auto" { items.append(URLQueryItem(name: "brain",  value: config.brain))  }
+            if config.languageHint != "auto" { items.append(URLQueryItem(name: "lang", value: config.languageHint)) }
+            if !items.isEmpty {
+                components.queryItems = items
+                if let newURL = components.url { request.url = newURL }
+            }
+        }
+        return request
+    }
+}
+#endif
