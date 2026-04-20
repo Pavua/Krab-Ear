@@ -201,6 +201,9 @@ BACKEND_PLIST="$HOME/Library/LaunchAgents/ai.krab.ear.backend.plist"
 if [ -f "$BACKEND_PLIST" ]; then
   UID_NUM="$(id -u)"
   if ! launchctl print "gui/$UID_NUM/ai.krab.ear.backend" >/dev/null 2>&1; then
+    # Defensive: launchd StandardOutPath/StandardErrorPath в plist указывают
+    # на $ROOT_DIR/logs/*.log — если каталога нет, bootstrap fails с I/O error.
+    mkdir -p "$ROOT_DIR/logs"
     log "Bootstrap backend launchd job (ai.krab.ear.backend)"
     launchctl bootstrap "gui/$UID_NUM" "$BACKEND_PLIST" 2>&1 | grep -v "already loaded" || true
   fi
