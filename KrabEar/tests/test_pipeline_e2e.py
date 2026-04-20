@@ -770,5 +770,381 @@ class TestE2EBridgeIntegration(unittest.TestCase):
         self.assertEqual(result["confidence"], 0.0)
 
 
+# ---------------------------------------------------------------------------
+# 11. NEW: Happy-path Russian → Spanish translation
+# ---------------------------------------------------------------------------
+
+class TestE2EHappyPathRussianToSpanish(unittest.TestCase):
+    """Scenario 1: STT returns Russian text, translation produces Spanish output."""
+
+    def setUp(self):
+        self.audio = np.zeros(16000, dtype=np.float32)
+
+    def test_russian_text_translated_to_spanish(self):
+        """STT 'Привет мир' → cleanup noop → translation 'Hola mundo' → final output."""
+        engine = _make_mock_engine("Привет мир")
+        translator = _make_mock_translator(ok=True, text="Hola mundo")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertEqual(ctx.raw_text, "Привет мир")
+        self.assertEqual(ctx.translation, "Hola mundo")
+        self.assertIn("Hola mundo", ctx.translation)
+
+    def test_happy_path_final_text_contains_original_transcript(self):
+        """final_text should reflect transcript (LLM disabled by default)."""
+        engine = _make_mock_engine("Привет мир")
+        translator = _make_mock_translator(ok=True, text="Hola mundo")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        # final_text = rewritten or cleaned or raw; no LLM → cleaned or raw
+        self.assertTrue(len(ctx.final_text) > 0)
+        self.assertIn(ctx.final_text, [ctx.raw_text, ctx.cleaned_text, ctx.rewritten_text])
+
+    def test_happy_path_all_stages_ran(self):
+        """All 6 stages should have metrics in happy-path scenario."""
+        engine = _make_mock_engine("Привет мир")
+        translator = _make_mock_translator(ok=True, text="Hola mundo")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertEqual(len(ctx.stage_metrics), 6)
+        self.assertEqual(len(ctx.errors), 0)
+
+
+# ---------------------------------------------------------------------------
+# 12. NEW: Silence input — empty audio bytes returns early / no crash
+# ---------------------------------------------------------------------------
+
+class TestE2ESilenceInput(unittest.TestCase):
+    """Scenario 2: empty / silent audio does not crash the pipeline."""
+
+    def test_empty_audio_array_does_not_raise(self):
+        """Empty numpy array flows through pipeline without exception."""
+        empty = np.array([], dtype=np.float32)
+        engine = MagicMock()
+        del engine.run_diarization
+        # STT may receive near-empty normalized audio — return empty transcription
+        engine.transcribe.return_value = {
+            "text": "", "raw_text": "", "language": "ru",
+            "model": "test", "confidence": 0.0, "segments": [],
+        }
+
+        pipeline = create_default_pipeline(engine)
+        ctx = PipelineContext(audio_input=empty)
+        # Must not raise
+        ctx = pipeline.run(ctx)
+
+        self.assertIsInstance(ctx, PipelineContext)
+        self.assertEqual(ctx.raw_text, "")
+
+    def test_all_zeros_audio_produces_empty_text(self):
+        """All-zeros (silence) audio → STT returns empty string, pipeline completes."""
+        silent = np.zeros(8000, dtype=np.float32)
+        engine = _make_mock_engine("")
+        engine.transcribe.return_value = {
+            "text": "", "raw_text": "", "language": "ru",
+            "model": "test", "confidence": 0.0, "segments": [],
+        }
+
+        pipeline = create_default_pipeline(engine)
+        ctx = PipelineContext(audio_input=silent)
+        ctx = pipeline.run(ctx)
+
+        self.assertEqual(ctx.raw_text, "")
+        self.assertEqual(ctx.final_text, "")
+        self.assertEqual(len(ctx.stage_metrics), 6)
+
+    def test_silent_audio_bridge_returns_dict_with_empty_text(self):
+        """transcribe_v2 on silent audio returns a complete dict with empty text."""
+        silent = np.zeros(16000, dtype=np.float32)
+        engine = _make_mock_engine("")
+        engine.transcribe.return_value = {
+            "text": "", "raw_text": "", "language": "ru",
+            "model": "test", "confidence": 0.0, "segments": [],
+        }
+
+        result = transcribe_v2(engine, silent)
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["confidence"], 0.0)
+        for key in EXPECTED_LEGACY_KEYS:
+            self.assertIn(key, result)
+
+
+# ---------------------------------------------------------------------------
+# 13. NEW: STT failure fallback — primary fails, secondary tried, clean error
+# ---------------------------------------------------------------------------
+
+class TestE2ESTTFailureFallback(unittest.TestCase):
+    """Scenario 3: STT failures produce clean stt_failed status, no exception propagated."""
+
+    def test_primary_stt_raises_pipeline_records_error(self):
+        """When engine.transcribe raises, errors list gets stt_exception entry."""
+        audio = np.zeros(16000, dtype=np.float32)
+        engine = MagicMock()
+        del engine.run_diarization
+        engine.transcribe.side_effect = RuntimeError("model unavailable")
+
+        pipeline = create_default_pipeline(engine)
+        ctx = PipelineContext(audio_input=audio)
+        ctx = pipeline.run(ctx)
+
+        self.assertTrue(
+            any("stt" in e.lower() for e in ctx.errors),
+            f"Expected stt error in {ctx.errors}",
+        )
+
+    def test_stt_failure_does_not_propagate_exception(self):
+        """pipeline.run() must return context even when STT raises."""
+        audio = np.zeros(16000, dtype=np.float32)
+        engine = MagicMock()
+        del engine.run_diarization
+        engine.transcribe.side_effect = Exception("all models failed")
+
+        pipeline = create_default_pipeline(engine)
+        # Should not raise
+        ctx = pipeline.run(PipelineContext(audio_input=audio))
+        self.assertIsInstance(ctx, PipelineContext)
+
+    def test_stt_failure_raw_text_is_empty_string(self):
+        """After STT failure, raw_text must be empty (not undefined)."""
+        audio = np.zeros(16000, dtype=np.float32)
+        engine = MagicMock()
+        del engine.run_diarization
+        engine.transcribe.side_effect = RuntimeError("stt failed")
+
+        pipeline = create_default_pipeline(engine)
+        ctx = pipeline.run(PipelineContext(audio_input=audio))
+
+        self.assertEqual(ctx.raw_text, "")
+
+    def test_stt_failure_full_stage_metrics_still_present(self):
+        """Even on STT failure, all 6 stages record metrics (pipeline continues)."""
+        audio = np.zeros(16000, dtype=np.float32)
+        engine = MagicMock()
+        del engine.run_diarization
+        engine.transcribe.side_effect = RuntimeError("fatal stt error")
+
+        pipeline = create_default_pipeline(engine)
+        ctx = pipeline.run(PipelineContext(audio_input=audio))
+
+        self.assertEqual(len(ctx.stage_metrics), 6)
+
+
+# ---------------------------------------------------------------------------
+# 14. NEW: Partial success — STT ok, translation fails → original + error field
+# ---------------------------------------------------------------------------
+
+class TestE2EPartialSuccessTranslationFail(unittest.TestCase):
+    """Scenario 4: STT succeeds, translation network error → transcript preserved + error."""
+
+    def setUp(self):
+        self.audio = np.zeros(16000, dtype=np.float32)
+
+    def test_original_transcript_preserved_when_translation_fails(self):
+        """raw_text must survive even if translation stage raises."""
+        engine = _make_mock_engine("Исходный текст")
+        translator = MagicMock()
+        translator.translate.side_effect = OSError("network unreachable")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertEqual(ctx.raw_text, "Исходный текст")
+
+    def test_translation_error_recorded_in_errors(self):
+        """translation exception must appear in ctx.errors."""
+        engine = _make_mock_engine("Ошибка перевода")
+        translator = MagicMock()
+        translator.translate.side_effect = RuntimeError("translation network error")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertTrue(
+            any("translation" in e.lower() for e in ctx.errors),
+            f"Expected translation error in {ctx.errors}",
+        )
+
+    def test_translation_is_none_on_failure(self):
+        """ctx.translation must remain None when translation stage raises."""
+        engine = _make_mock_engine("Текст без перевода")
+        translator = MagicMock()
+        translator.translate.side_effect = ConnectionError("offline")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertIsNone(ctx.translation)
+
+    def test_final_text_still_set_when_translation_fails(self):
+        """final_text falls back to cleaned/raw even if translation errors."""
+        engine = _make_mock_engine("Финальный при ошибке")
+        translator = MagicMock()
+        translator.translate.side_effect = TimeoutError("timeout")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        self.assertTrue(len(ctx.final_text) > 0)
+
+
+# ---------------------------------------------------------------------------
+# 15. NEW: Stage bypass via settings — translation_enabled=False skips stage
+# ---------------------------------------------------------------------------
+
+class TestE2ETranslationBypassSetting(unittest.TestCase):
+    """Scenario 5: translation_enabled=False in settings → TranslationStage skipped."""
+
+    def setUp(self):
+        self.audio = np.zeros(16000, dtype=np.float32)
+
+    def test_translation_skipped_when_mode_off_setting(self):
+        """translation_mode='off' in settings → stage skipped, translator not called."""
+        engine = _make_mock_engine("Bypass test")
+        translator = MagicMock()
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "off"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="off")
+        ctx = pipeline.run(ctx)
+
+        tr_metric = next(m for m in ctx.stage_metrics if m.stage == "translation")
+        self.assertTrue(tr_metric.skipped)
+        translator.translate.assert_not_called()
+
+    def test_translation_skipped_translation_field_is_none(self):
+        """When translation is bypassed, ctx.translation stays None."""
+        engine = _make_mock_engine("No translation")
+        translator = MagicMock()
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "off"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="off")
+        ctx = pipeline.run(ctx)
+
+        self.assertIsNone(ctx.translation)
+
+    def test_translation_active_when_mode_set(self):
+        """Contrast: mode='es' → stage runs and translation is populated."""
+        engine = _make_mock_engine("Активный перевод")
+        translator = _make_mock_translator(ok=True, text="Traduccion activa")
+
+        pipeline = create_default_pipeline(
+            engine,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        tr_metric = next(m for m in ctx.stage_metrics if m.stage == "translation")
+        self.assertFalse(tr_metric.skipped)
+        self.assertEqual(ctx.translation, "Traduccion activa")
+
+
+# ---------------------------------------------------------------------------
+# 16. NEW: Diarization disabled — stage noop when setting off
+# ---------------------------------------------------------------------------
+
+class TestE2EDiarizationBypassSetting(unittest.TestCase):
+    """Scenario 6: diarization disabled via no diarization_fn → stage is noop."""
+
+    def setUp(self):
+        self.audio = np.zeros(16000, dtype=np.float32)
+
+    def test_diarization_noop_when_fn_none(self):
+        """DiarizationStage with diarization_fn=None is always skipped."""
+        engine = _make_mock_engine("Диаризация выключена")
+
+        pipeline = create_default_pipeline(engine, diarization_fn=None)
+        ctx = PipelineContext(audio_input=self.audio)
+        ctx = pipeline.run(ctx)
+
+        diar_metric = next(m for m in ctx.stage_metrics if m.stage == "diarization")
+        self.assertTrue(diar_metric.skipped)
+
+    def test_diarization_noop_context_has_empty_diarization(self):
+        """When skipped, ctx.diarization stays empty dict."""
+        engine = _make_mock_engine("No diarization")
+
+        pipeline = create_default_pipeline(engine, diarization_fn=None)
+        ctx = PipelineContext(audio_input=self.audio)
+        ctx = pipeline.run(ctx)
+
+        self.assertEqual(ctx.diarization, {})
+        self.assertEqual(ctx.num_speakers, 0)
+
+    def test_other_stages_unaffected_by_diarization_disabled(self):
+        """STT, cleanup, LLM, translation still execute when diarization is off."""
+        engine = _make_mock_engine("Без диаризации работает")
+        translator = _make_mock_translator(ok=True, text="Sin diarizacion funciona")
+
+        pipeline = create_default_pipeline(
+            engine,
+            diarization_fn=None,
+            translator=translator,
+            settings_get=_settings_with({"translation_mode": "es"}),
+        )
+        ctx = PipelineContext(audio_input=self.audio, translation_mode="es")
+        ctx = pipeline.run(ctx)
+
+        stt_metric = next(m for m in ctx.stage_metrics if m.stage == "stt")
+        cleanup_metric = next(m for m in ctx.stage_metrics if m.stage == "text_cleanup")
+        tr_metric = next(m for m in ctx.stage_metrics if m.stage == "translation")
+
+        self.assertFalse(stt_metric.skipped)
+        self.assertFalse(cleanup_metric.skipped)
+        self.assertFalse(tr_metric.skipped)
+        self.assertEqual(ctx.translation, "Sin diarizacion funciona")
+
+
 if __name__ == "__main__":
     unittest.main()
