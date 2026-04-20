@@ -67,7 +67,7 @@ private final class StageBadgeView: NSView {
 
     private func setupUI() {
         wantsLayer = true
-        layer?.cornerRadius = 4
+        layer?.cornerRadius = KrabEarTheme.Metrics.tight
 
         label.font = KrabEarTheme.Typography.captionMedium
         label.textColor = .secondaryLabelColor
@@ -350,14 +350,12 @@ public final class RealtimeOverlayController {
         tintView.tintColor = .clear
         tintView.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(tintView)
-        if let ev = effectView as NSView? {
-            NSLayoutConstraint.activate([
-                tintView.topAnchor.constraint(equalTo: ev.topAnchor),
-                tintView.leadingAnchor.constraint(equalTo: ev.leadingAnchor),
-                tintView.trailingAnchor.constraint(equalTo: ev.trailingAnchor),
-                tintView.bottomAnchor.constraint(equalTo: ev.bottomAnchor),
-            ])
-        }
+        NSLayoutConstraint.activate([
+            tintView.topAnchor.constraint(equalTo: effectView.topAnchor),
+            tintView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+            tintView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+            tintView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
+        ])
 
         statusLabel.font      = KrabEarTheme.Typography.captionMedium
         statusLabel.textColor = .tertiaryLabelColor
@@ -371,7 +369,7 @@ public final class RealtimeOverlayController {
 
         // 4a: Recording dot
         recordingDot.wantsLayer = true
-        recordingDot.layer?.cornerRadius = 4
+        recordingDot.layer?.cornerRadius = KrabEarTheme.Metrics.tight
         recordingDot.layer?.backgroundColor = NSColor.systemRed.cgColor
         recordingDot.isHidden = true
         recordingDot.translatesAutoresizingMaskIntoConstraints = false
@@ -476,10 +474,10 @@ public final class RealtimeOverlayController {
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 1.0
         pulse.toValue   = 0.2
-        pulse.duration  = 0.7
+        pulse.duration  = KrabEarTheme.Motion.Duration.long
         pulse.autoreverses  = true
         pulse.repeatCount   = .infinity
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
 
         recordingDot.layer?.add(pulse, forKey: dotPulseKey)
     }
@@ -501,10 +499,10 @@ public final class RealtimeOverlayController {
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 1.0
         pulse.toValue   = 0.65
-        pulse.duration  = 0.7
+        pulse.duration  = KrabEarTheme.Motion.Duration.long
         pulse.autoreverses  = true
         pulse.repeatCount   = .infinity
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
 
         primaryLabel.layer?.add(pulse, forKey: labelPulseKey)
     }
@@ -536,7 +534,8 @@ public final class RealtimeOverlayController {
             return
         }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.3
+            ctx.duration = KrabEarTheme.Motion.Duration.short
+            ctx.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
             ctx.allowsImplicitAnimation = true
             primaryLabel.animator().alphaValue = 0
             stageBadge.animator().alphaValue   = 0
@@ -548,7 +547,8 @@ public final class RealtimeOverlayController {
                 self.primaryLabel.stringValue  = text
                 self.adjustHeight()
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.3
+                    ctx.duration = KrabEarTheme.Motion.Duration.short
+                    ctx.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
                     ctx.allowsImplicitAnimation = true
                     self.primaryLabel.animator().alphaValue = 1.0
                     self.stageBadge.animator().alphaValue   = 1.0
