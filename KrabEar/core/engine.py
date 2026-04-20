@@ -642,57 +642,48 @@ class AudioEngine:
                     vx_insert_pos = i + 1
             candidates = candidates[:vx_insert_pos] + [self._VOXTRAL_MARKER] + candidates[vx_insert_pos:]
 
+        # Таблица маркеров адаптеров: marker → (span_prefix, model_setting, transcribe_fn)
+        _adapter_dispatch = [
+            (
+                self._PARAKEET_MARKER,
+                "stt_parakeet",
+                settings.PARAKEET_MODEL,
+                lambda: self._transcribe_parakeet(audio_data, language=language),
+            ),
+            (
+                self._SENSEVOICE_MARKER,
+                "stt_sensevoice",
+                settings.SENSEVOICE_MODEL,
+                lambda: self._transcribe_sensevoice(audio_data, language=language),
+            ),
+            (
+                self._WHISPERX_MARKER,
+                "stt_whisperx",
+                settings.WHISPERX_MODEL,
+                lambda: self._transcribe_whisperx(audio_data, language=language),
+            ),
+            (
+                self._VOXTRAL_MARKER,
+                "stt_voxtral",
+                settings.VOXTRAL_MODEL,
+                lambda: self._transcribe_voxtral(audio_data, language=language),
+            ),
+        ]
+        _adapter_map = {marker: (span_pfx, model, fn) for marker, span_pfx, model, fn in _adapter_dispatch}
+
         for model_name in candidates:
-            # Parakeet adapter — отдельная ветка (не whisper).
-            if model_name == self._PARAKEET_MARKER:
+            # Adapter ветки (не whisper).
+            if model_name in _adapter_map:
+                span_pfx, adapter_model, adapter_fn = _adapter_map[model_name]
                 try:
-                    span_name = f"stt_parakeet_{_short_model_name(settings.PARAKEET_MODEL)}"
+                    span_name = f"{span_pfx}_{_short_model_name(adapter_model)}"
                     with _profiler.start_span(span_name):
-                        pk_result = self._transcribe_parakeet(audio_data, language=language)
-                    pk_result["model_used"] = settings.PARAKEET_MODEL
-                    return pk_result
+                        adapter_result = adapter_fn()
+                    adapter_result["model_used"] = adapter_model
+                    return adapter_result
                 except Exception as exc:
-                    logger.warning("Parakeet adapter не сработал: %s — продолжаю chain", exc)
-                    self._unavailable_models.add(self._PARAKEET_MARKER)
-                    continue
-
-            # SenseVoice adapter — отдельная ветка (не whisper).
-            if model_name == self._SENSEVOICE_MARKER:
-                try:
-                    span_name = f"stt_sensevoice_{_short_model_name(settings.SENSEVOICE_MODEL)}"
-                    with _profiler.start_span(span_name):
-                        sv_result = self._transcribe_sensevoice(audio_data, language=language)
-                    sv_result["model_used"] = settings.SENSEVOICE_MODEL
-                    return sv_result
-                except Exception as exc:
-                    logger.warning("SenseVoice adapter не сработал: %s — продолжаю whisper chain", exc)
-                    self._unavailable_models.add(self._SENSEVOICE_MARKER)
-                    continue
-
-            # WhisperX adapter — отдельная ветка (word timestamps + diarization).
-            if model_name == self._WHISPERX_MARKER:
-                try:
-                    span_name = f"stt_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"
-                    with _profiler.start_span(span_name):
-                        wx_result = self._transcribe_whisperx(audio_data, language=language)
-                    wx_result["model_used"] = settings.WHISPERX_MODEL
-                    return wx_result
-                except Exception as exc:
-                    logger.warning("WhisperX adapter не сработал: %s — продолжаю whisper chain", exc)
-                    self._unavailable_models.add(self._WHISPERX_MARKER)
-                    continue
-
-            # Voxtral adapter — STT + reasoning (Phase 4.4).
-            if model_name == self._VOXTRAL_MARKER:
-                try:
-                    span_name = f"stt_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"
-                    with _profiler.start_span(span_name):
-                        vt_result = self._transcribe_voxtral(audio_data, language=language)
-                    vt_result["model_used"] = settings.VOXTRAL_MODEL
-                    return vt_result
-                except Exception as exc:
-                    logger.warning("Voxtral adapter не сработал: %s — продолжаю whisper chain", exc)
-                    self._unavailable_models.add(self._VOXTRAL_MARKER)
+                    logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
+                    self._unavailable_models.add(model_name)
                     continue
 
             if model_name in self._unavailable_models:

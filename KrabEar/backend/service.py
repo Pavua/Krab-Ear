@@ -238,7 +238,6 @@ class BackendService:
         self._audio_fingerprinter = AudioFingerprinter()
         self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
-        self._readability_scorer = ReadabilityScorer()
         self._transcription_scorer = TranscriptionScorer()
         self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._word_timing_analyzer = WordTimingAnalyzer()
@@ -801,6 +800,15 @@ class BackendService:
             self._start_preview_worker(quality_profile=quality_profile)
         return {"status": "recording"}
 
+    @staticmethod
+    def _safe_callback(fn: Callable | None, *args: Any) -> None:
+        """Вызывает опциональный callback, подавляя исключения (не должны ломать основной поток)."""
+        if fn is not None:
+            try:
+                fn(*args)
+            except Exception:
+                logger.exception("Callback %s упал с аргументами %s", fn, args[:1])
+
     def _build_empty_audio_response(
         self,
         duration_sec: float,
@@ -832,6 +840,59 @@ class BackendService:
             "background_guard_rejected": background_guard_rejected,
         }
 
+    def _load_stop_recording_settings(
+        self, params: dict[str, Any], settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Читает и нормализует все параметры stop_recording из params + settings."""
+        return {
+            "quality_profile": str(params.get("quality_profile") or settings.get("quality_profile", "balanced")),
+            "cleanup_profile": str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft")),
+            "lang_hint": params.get("lang_hint") or None,
+            "translation_mode": str(params.get("translation_mode") or settings.get("translation_mode", "off")),
+            "translation_style": str(params.get("translation_style") or settings.get("translation_style", "neutral")),
+            "translation_glossary": settings.get("translation_glossary", {}),
+            "translate_and_paste": bool(
+                params.get("translate_and_paste")
+                if "translate_and_paste" in params
+                else settings.get("translate_and_paste", False)
+            ),
+            "network_mode": str(settings.get("network_mode", "offline_default")),
+            "silence_guard_enabled": self._coerce_bool(settings.get("silence_guard_enabled", True), default=True),
+            "silence_rms_threshold": self._coerce_bounded(
+                value=settings.get("silence_guard_rms_threshold", 0.0020),
+                default=0.0020, min_value=0.0003, max_value=0.05,
+            ),
+            "silence_peak_threshold": self._coerce_bounded(
+                value=settings.get("silence_guard_peak_threshold", 0.0120),
+                default=0.0120, min_value=0.001, max_value=0.2,
+            ),
+            "silence_active_ratio_threshold": self._coerce_bounded(
+                value=settings.get("silence_guard_active_ratio_threshold", 0.015),
+                default=0.015, min_value=0.001, max_value=0.30,
+            ),
+            "background_guard_enabled": self._coerce_bool(settings.get("background_guard_enabled", True), default=True),
+            "background_guard_min_peak": self._coerce_bounded(
+                value=settings.get("background_guard_min_peak", 0.025),
+                default=0.025, min_value=0.003, max_value=0.25,
+            ),
+            "background_guard_min_rms": self._coerce_bounded(
+                value=settings.get("background_guard_min_rms", 0.0040),
+                default=0.0040, min_value=0.0008, max_value=0.08,
+            ),
+            "background_guard_uniform_frame_threshold": self._coerce_bounded(
+                value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
+                default=0.0060, min_value=0.001, max_value=0.20,
+            ),
+            "background_guard_max_uniform_active_ratio": self._coerce_bounded(
+                value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
+                default=0.92, min_value=0.40, max_value=0.99,
+            ),
+            "sample_rate": self._coerce_bounded(
+                value=getattr(self.recorder, "sample_rate", 16000),
+                default=16000, min_value=8000, max_value=192000,
+            ),
+        }
+
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
         settings = self._cached_settings()
@@ -856,76 +917,25 @@ class BackendService:
             }
 
         audio, duration_sec = stopped
-        quality_profile = str(
-            params.get("quality_profile") or settings.get("quality_profile", "balanced")
-        )
-        cleanup_profile = str(
-            params.get("cleanup_profile") or settings.get("cleanup_profile", "soft")
-        )
-        lang_hint: str | None = params.get("lang_hint") or None
-        translation_mode = str(
-            params.get("translation_mode") or settings.get("translation_mode", "off")
-        )
-        translation_style = str(
-            params.get("translation_style") or settings.get("translation_style", "neutral")
-        )
-        translation_glossary = settings.get("translation_glossary", {})
-        translate_and_paste = bool(
-            params.get("translate_and_paste")
-            if "translate_and_paste" in params
-            else settings.get("translate_and_paste", False)
-        )
-        network_mode = str(settings.get("network_mode", "offline_default"))
-        silence_guard_enabled = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
-        silence_rms_threshold = self._coerce_bounded(
-            value=settings.get("silence_guard_rms_threshold", 0.0020),
-            default=0.0020,
-            min_value=0.0003,
-            max_value=0.05,
-        )
-        silence_peak_threshold = self._coerce_bounded(
-            value=settings.get("silence_guard_peak_threshold", 0.0120),
-            default=0.0120,
-            min_value=0.001,
-            max_value=0.2,
-        )
-        silence_active_ratio_threshold = self._coerce_bounded(
-            value=settings.get("silence_guard_active_ratio_threshold", 0.015),
-            default=0.015,
-            min_value=0.001,
-            max_value=0.30,
-        )
-        background_guard_enabled = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
-        background_guard_min_peak = self._coerce_bounded(
-            value=settings.get("background_guard_min_peak", 0.025),
-            default=0.025,
-            min_value=0.003,
-            max_value=0.25,
-        )
-        background_guard_min_rms = self._coerce_bounded(
-            value=settings.get("background_guard_min_rms", 0.0040),
-            default=0.0040,
-            min_value=0.0008,
-            max_value=0.08,
-        )
-        background_guard_uniform_frame_threshold = self._coerce_bounded(
-            value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
-            default=0.0060,
-            min_value=0.001,
-            max_value=0.20,
-        )
-        background_guard_max_uniform_active_ratio = self._coerce_bounded(
-            value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
-            default=0.92,
-            min_value=0.40,
-            max_value=0.99,
-        )
-        sample_rate = self._coerce_bounded(
-            value=getattr(self.recorder, "sample_rate", 16000),
-            default=16000,
-            min_value=8000,
-            max_value=192000,
-        )
+        sr = self._load_stop_recording_settings(params, settings)
+        quality_profile = sr["quality_profile"]
+        cleanup_profile = sr["cleanup_profile"]
+        lang_hint: str | None = sr["lang_hint"]
+        translation_mode = sr["translation_mode"]
+        translation_style = sr["translation_style"]
+        translation_glossary = sr["translation_glossary"]
+        translate_and_paste = sr["translate_and_paste"]
+        network_mode = sr["network_mode"]
+        silence_guard_enabled = sr["silence_guard_enabled"]
+        silence_rms_threshold = sr["silence_rms_threshold"]
+        silence_peak_threshold = sr["silence_peak_threshold"]
+        silence_active_ratio_threshold = sr["silence_active_ratio_threshold"]
+        background_guard_enabled = sr["background_guard_enabled"]
+        background_guard_min_peak = sr["background_guard_min_peak"]
+        background_guard_min_rms = sr["background_guard_min_rms"]
+        background_guard_uniform_frame_threshold = sr["background_guard_uniform_frame_threshold"]
+        background_guard_max_uniform_active_ratio = sr["background_guard_max_uniform_active_ratio"]
+        sample_rate = sr["sample_rate"]
 
         if getattr(audio, "size", 0) == 0:
             return self._build_empty_audio_response(
@@ -1931,11 +1941,7 @@ class BackendService:
             # Cancel-between-files: если запрошена отмена, ровно прерываем цикл.
             if cancel_check is not None and cancel_check():
                 break
-            if on_file_start is not None:
-                try:
-                    on_file_start(file_index, audio_path)
-                except Exception:
-                    logger.exception("on_file_start callback упал для %s", audio_path)
+            self._safe_callback(on_file_start, file_index, audio_path)
             started_at = time.monotonic()
             try:
                 # Determine audio file duration before transcription
@@ -1974,16 +1980,9 @@ class BackendService:
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
                     err = self._extract_transcribed_error(transcribe_payload)
-                    if err:
-                        err_line = f"{audio_path}: {err}"
-                    else:
-                        err_line = f"{audio_path}: пустой результат"
+                    err_line = f"{audio_path}: {err}" if err else f"{audio_path}: пустой результат"
                     errors.append(err_line)
-                    if on_file_done is not None:
-                        try:
-                            on_file_done(file_index, None, err_line)
-                        except Exception:
-                            logger.exception("on_file_done callback упал для %s", audio_path)
+                    self._safe_callback(on_file_done, file_index, None, err_line)
                     continue
                 diarization_data = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
                 detected_lang = transcribe_payload.get("language", "?") if isinstance(transcribe_payload, dict) else "?"
@@ -2091,11 +2090,7 @@ class BackendService:
                 if summary:
                     item_result["summary"] = summary
                 items.append(item_result)
-                if on_file_done is not None:
-                    try:
-                        on_file_done(file_index, item_result, None)
-                    except Exception:
-                        logger.exception("on_file_done callback упал для %s", audio_path)
+                self._safe_callback(on_file_done, file_index, item_result, None)
             except Exception as exc:
                 err_msg = str(exc)
                 file_name = Path(audio_path).name
@@ -2118,11 +2113,7 @@ class BackendService:
                 else:
                     err_msg = f"{file_name}: {err_msg}"
                 errors.append(err_msg)
-                if on_file_done is not None:
-                    try:
-                        on_file_done(file_index, None, err_msg)
-                    except Exception:
-                        logger.exception("on_file_done callback упал для %s", audio_path)
+                self._safe_callback(on_file_done, file_index, None, err_msg)
 
         return {
             "items": items,
