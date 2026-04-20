@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.parsing_utils import safe_json_loads
+
 logger = logging.getLogger("KrabEar.Backend.FeatureFlags")
 
 _FLAGS_FILE = "feature_flags.json"
@@ -93,17 +95,18 @@ class FeatureFlags:
             return
         try:
             raw = self._flags_path.read_text(encoding="utf-8").strip()
-            if not raw:
-                return
-            stored: dict[str, Any] = json.loads(raw)
-            # Применяем только известные boolean-значения
-            for name, value in stored.items():
-                if isinstance(value, bool):
-                    self._flags[name] = value
-                else:
-                    logger.warning("FeatureFlags: нестандартное значение флага %s=%r, игнорируется", name, value)
         except Exception as exc:
             logger.warning("FeatureFlags: не удалось загрузить %s: %s", self._flags_path, exc)
+            return
+        if not raw:
+            return
+        stored: dict[str, Any] = safe_json_loads(raw, default={}, context="feature_flags.json")
+        # Применяем только известные boolean-значения
+        for name, value in stored.items():
+            if isinstance(value, bool):
+                self._flags[name] = value
+            else:
+                logger.warning("FeatureFlags: нестандартное значение флага %s=%r, игнорируется", name, value)
 
     def _save(self) -> None:
         """Сохраняет текущие значения флагов в файл."""
