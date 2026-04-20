@@ -106,8 +106,6 @@ final class HotkeyManager {
             isPressed = false
         }
     }
-}
-
 
     // MARK: - Тест-хук
 
@@ -137,3 +135,4 @@ final class HotkeyManager {
             isPressed = false
         }
     }
+}
