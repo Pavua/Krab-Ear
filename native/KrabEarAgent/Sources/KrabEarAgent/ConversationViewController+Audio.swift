@@ -8,6 +8,13 @@
 
  Opus-кодек будет подключён в Phase 1.4 (PR 1.4).
  Пока что: PCM-захват настроен, encode/decode — заглушки.
+
+ Swift 6 concurrency note:
+ AVAudioNode tap block is called on the Core Audio real-time thread — NOT on the
+ main actor. Accessing @MainActor-isolated properties directly from inside the
+ block triggers _swift_task_checkIsolatedSwift → EXC_BREAKPOINT.
+ Fix: use a nonisolated(unsafe) atomic mirror of isSessionActive for the RT guard,
+ then dispatch any main-actor work via Task { @MainActor in … }.
 */
 
 @preconcurrency import AVFoundation
@@ -18,6 +25,10 @@ extension ConversationViewController {
     // MARK: - Audio holder (same pattern as WSHolder)
 
     nonisolated(unsafe) private static var audioHolderKey: UInt8 = 0
+
+    /// Thread-safe mirror of `isSessionActive` for use inside the Core Audio
+    /// real-time tap block. Must be updated in lockstep with `isSessionActive`.
+    nonisolated(unsafe) static var _rtSessionActive: Bool = false
 
     private var audioHolder: AudioHolder {
         if let h = objc_getAssociatedObject(self, &ConversationViewController.audioHolderKey) as? AudioHolder {
@@ -33,6 +44,9 @@ extension ConversationViewController {
     /// Запустить захват микрофона.
     /// Реальный Opus-encode добавляется в PR 1.4; пока PCM-буфер захватывается, но не отправляется.
     func startAudioCapture() {
+        // Mirror session state for RT-thread access before starting engine.
+        ConversationViewController._rtSessionActive = isSessionActive
+
         let engine      = AVAudioEngine()
         let inputNode   = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -54,7 +68,9 @@ extension ConversationViewController {
         let bufferSize: AVAudioFrameCount = 1280
 
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
-            guard let self, self.isSessionActive else { return }
+            // ⚠️ Core Audio real-time thread — do NOT access @MainActor properties here.
+            // Use the nonisolated mirror _rtSessionActive instead of self.isSessionActive.
+            guard self != nil, ConversationViewController._rtSessionActive else { return }
             guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: bufferSize) else { return }
 
             var error: NSError?
@@ -66,8 +82,19 @@ extension ConversationViewController {
             let status = converter?.convert(to: converted, error: &error, withInputFrom: inputBlock)
             guard status == .haveData || status == .inputRanDry else { return }
 
-            // Stub: в Phase 1.4 здесь будет Opus-encode → sendAudioFrame(opusData).
-            _ = converted // encoder placeholder — consume to silence warning
+            // Extract raw samples on RT thread (safe: Float array copy, no actor crossing).
+            let frameLength = Int(converted.frameLength)
+            let samples: [Float]
+            if let channelData = converted.floatChannelData {
+                samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
+            } else {
+                samples = []
+            }
+
+            // Dispatch to main actor for any state mutations / Phase 1.4 encoding.
+            Task { @MainActor [weak self] in
+                self?.processAudioSamples(samples)
+            }
         }
 
         audioHolder.engine = engine
@@ -82,11 +109,21 @@ extension ConversationViewController {
 
     /// Остановить захват микрофона.
     func stopAudioCapture() {
+        // Clear RT mirror before removing tap so the in-flight block exits early.
+        ConversationViewController._rtSessionActive = false
         audioHolder.engine?.inputNode.removeTap(onBus: 0)
         audioHolder.engine?.stop()
         audioHolder.engine = nil
         audioHolder.playerNode = nil
         AgentLogger.shared.info("[Audio] Захват остановлен")
+    }
+
+    /// Обработать PCM-сэмплы на главном акторе.
+    /// Phase 1.3: заглушка. Phase 1.4: Opus-encode → sendAudioFrame(opusData).
+    /// Вызывается только из Task { @MainActor } внутри installTap-блока.
+    func processAudioSamples(_ samples: [Float]) {
+        // Stub: в Phase 1.4 здесь будет Opus-encode → sendAudioFrame(opusData).
+        _ = samples // encoder placeholder — consume to silence warning
     }
 
     // MARK: - Playback (downlink → speaker)
