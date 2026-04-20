@@ -6,6 +6,8 @@ from contracts.envelope import KrabEventEnvelope, parse_event, parse_and_validat
 from contracts.registry import EventType, EVENT_SCHEMA_MAP
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from contracts.stt_events import SttPartial, SttFinal, SttFailed
+from contracts.history_events import MarkdownExportEvent, AutoSummaryEvent
+from contracts.hotword_events import HotwordDetected, HotwordMatch
 from backend.event_bus import EventBus
 from datetime import datetime, timezone
 
@@ -244,6 +246,96 @@ class EventBusTypedEmitTest(unittest.TestCase):
         self.assertEqual(etype, EventType.STT_FINAL)
         self.assertEqual(parsed.text, "hello")
         bus.unsubscribe(q)
+
+
+class HistoryEventsTest(unittest.TestCase):
+    """Tests for history_events.py — MarkdownExportEvent + AutoSummaryEvent."""
+
+    def test_markdown_export_event_valid(self):
+        ev = MarkdownExportEvent(entries=5, chars=1024, copy_to_clipboard=True)
+        self.assertEqual(ev.entries, 5)
+        self.assertEqual(ev.chars, 1024)
+        self.assertTrue(ev.copy_to_clipboard)
+
+    def test_markdown_export_event_missing_chars_raises(self):
+        with self.assertRaises(ValidationError):
+            MarkdownExportEvent(entries=3, copy_to_clipboard=False)
+
+    def test_auto_summary_event_valid(self):
+        ev = AutoSummaryEvent(
+            items_processed=10,
+            total_words=500,
+            fallback=False,
+            summary="Session summary.",
+        )
+        self.assertEqual(ev.items_processed, 10)
+        self.assertFalse(ev.fallback)
+        self.assertEqual(ev.summary, "Session summary.")
+
+    def test_auto_summary_event_missing_summary_raises(self):
+        with self.assertRaises(ValidationError):
+            AutoSummaryEvent(items_processed=1, total_words=10, fallback=True)
+
+    def test_markdown_export_event_roundtrip(self):
+        """dict -> MarkdownExportEvent -> dict preserves values."""
+        ev = MarkdownExportEvent.model_validate(
+            {"entries": 2, "chars": 128, "copy_to_clipboard": False}
+        )
+        dumped = ev.model_dump()
+        self.assertEqual(dumped["entries"], 2)
+        self.assertFalse(dumped["copy_to_clipboard"])
+
+
+class HotwordEventsTest(unittest.TestCase):
+    """Tests for hotword_events.py — HotwordMatch + HotwordDetected."""
+
+    def test_hotword_match_valid(self):
+        m = HotwordMatch(word="краб", position=0, category="trigger", context="краб слышит")
+        self.assertEqual(m.word, "краб")
+        self.assertEqual(m.position, 0)
+        self.assertEqual(m.category, "trigger")
+
+    def test_hotword_match_missing_position_raises(self):
+        with self.assertRaises(ValidationError):
+            HotwordMatch(word="краб", category="trigger", context="ctx")
+
+    def test_hotword_detected_with_matches(self):
+        ev = HotwordDetected(
+            history_id="hid-42",
+            text="встреча в среду",
+            matches=[
+                HotwordMatch(word="встреча", position=0, category="meeting", context="встреча в среду"),
+            ],
+        )
+        self.assertEqual(len(ev.matches), 1)
+        self.assertEqual(ev.matches[0].category, "meeting")
+        self.assertEqual(ev.history_id, "hid-42")
+
+    def test_hotword_detected_empty_matches(self):
+        ev = HotwordDetected(history_id="hid-0", text="silence", matches=[])
+        self.assertEqual(ev.matches, [])
+
+    def test_hotword_detected_missing_text_raises(self):
+        with self.assertRaises(ValidationError):
+            HotwordDetected(history_id="hid-1", matches=[])
+
+    def test_hotword_detected_roundtrip(self):
+        """parse_and_validate works end-to-end for hotword.detected."""
+        raw = {
+            "type": "hotword.detected",
+            "ts": "2026-04-20T10:00:00+00:00",
+            "data": {
+                "history_id": "hid-99",
+                "text": "тест краб",
+                "matches": [
+                    {"word": "краб", "position": 5, "category": "trigger", "context": "тест краб"}
+                ],
+            },
+        }
+        etype, payload = parse_and_validate(raw)
+        self.assertIs(etype, EventType.HOTWORD_DETECTED)
+        self.assertIsInstance(payload, HotwordDetected)
+        self.assertEqual(payload.matches[0].word, "краб")
 
 
 class SchemaExportTest(unittest.TestCase):
