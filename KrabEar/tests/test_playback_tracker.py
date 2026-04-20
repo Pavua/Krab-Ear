@@ -345,5 +345,227 @@ class TestThreadSafety(unittest.TestCase):
         self.assertAlmostEqual(stats["total_listened_sec"], float(expected), places=1)
 
 
+# ===========================================================================
+# 7. Агрегированная статистика и расширенные сценарии
+# ===========================================================================
+
+class TestAggregatedStats(unittest.TestCase):
+    """Проверяет комплексные сценарии с агрегированной статистикой."""
+
+    def test_total_time_across_all_items(self):
+        tracker = PlaybackTracker()
+        tracker.record_playback("a", duration_listened_sec=10.0)
+        tracker.record_playback("b", duration_listened_sec=20.0)
+        tracker.record_playback("c", duration_listened_sec=30.0)
+        tracker.record_playback("a", duration_listened_sec=5.0)
+
+        stats_a = tracker.get_playback_stats("a")
+        stats_b = tracker.get_playback_stats("b")
+        stats_c = tracker.get_playback_stats("c")
+
+        total = (
+            stats_a["total_listened_sec"]
+            + stats_b["total_listened_sec"]
+            + stats_c["total_listened_sec"]
+        )
+        self.assertAlmostEqual(total, 65.0, places=2)
+
+    def test_most_replayed_ties_handled_correctly(self):
+        tracker = PlaybackTracker()
+        # Три элемента с одинаковым play_count но разными total_listened_sec
+        tracker.record_playback("a", duration_listened_sec=10.0)
+        tracker.record_playback("a", duration_listened_sec=10.0)
+        tracker.record_playback("b", duration_listened_sec=5.0)
+        tracker.record_playback("b", duration_listened_sec=5.0)
+        tracker.record_playback("c", duration_listened_sec=20.0)
+        tracker.record_playback("c", duration_listened_sec=20.0)
+
+        result = tracker.get_most_replayed(limit=3)
+        # c должен быть первым (больше total_listened_sec)
+        self.assertEqual(result[0]["item_id"], "c")
+        self.assertAlmostEqual(result[0]["total_listened_sec"], 40.0)
+
+    def test_persistence_with_multiple_updates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker1 = PlaybackTracker(data_dir=tmpdir)
+            tracker1.record_playback("item1", duration_listened_sec=5.0)
+            tracker1.record_playback("item2", duration_listened_sec=10.0)
+
+            # Создаём новый трекер — должен загрузить данные
+            tracker2 = PlaybackTracker(data_dir=tmpdir)
+            stats1 = tracker2.get_playback_stats("item1")
+            stats2 = tracker2.get_playback_stats("item2")
+
+            self.assertEqual(stats1["play_count"], 1)
+            self.assertAlmostEqual(stats1["total_listened_sec"], 5.0)
+            self.assertEqual(stats2["play_count"], 1)
+            self.assertAlmostEqual(stats2["total_listened_sec"], 10.0)
+
+    def test_item_id_normalization(self):
+        """Проверяет, что item_id нормализуется (trimmed)."""
+        tracker = PlaybackTracker()
+        tracker.record_playback("  item_with_spaces  ", duration_listened_sec=5.0)
+        stats = tracker.get_playback_stats("item_with_spaces")
+        self.assertEqual(stats["play_count"], 1)
+        # Проверяем что они рассматриваются как один и тот же ID
+        stats2 = tracker.get_playback_stats("  item_with_spaces  ")
+        self.assertEqual(stats2["play_count"], 1)
+
+    def test_large_number_of_items(self):
+        tracker = PlaybackTracker()
+        n_items = 100
+        for i in range(n_items):
+            tracker.record_playback(f"item_{i:03d}", duration_listened_sec=float(i))
+
+        # Проверяем что все записались
+        result = tracker.get_most_replayed(limit=n_items)
+        self.assertGreaterEqual(len(result), 50)
+
+    def test_empty_store_pagination(self):
+        store = FakeStore([])
+        tracker = PlaybackTracker()
+        result = tracker.get_never_played(store, limit=20)
+        self.assertEqual(result, [])
+
+    def test_partially_played_history(self):
+        store = FakeStore([f"id_{i}" for i in range(10)])
+        tracker = PlaybackTracker()
+        # Отметим только половину как воспроизведённые
+        for i in range(5):
+            tracker.record_playback(f"id_{i}")
+
+        never_played = tracker.get_never_played(store, limit=20)
+        never_played_ids = [item["id"] for item in never_played]
+
+        self.assertEqual(len(never_played), 5)
+        for i in range(5, 10):
+            self.assertIn(f"id_{i}", never_played_ids)
+
+
+# ===========================================================================
+# 8. Граничные случаи и ошибки
+# ===========================================================================
+
+class TestEdgeCases(unittest.TestCase):
+    """Проверяет граничные случаи и обработку ошибок."""
+
+    def test_very_large_duration(self):
+        tracker = PlaybackTracker()
+        huge_duration = 1e6  # 1 миллион секунд
+        tracker.record_playback("huge", duration_listened_sec=huge_duration)
+        stats = tracker.get_playback_stats("huge")
+        self.assertAlmostEqual(stats["total_listened_sec"], huge_duration, places=-2)
+
+    def test_fractional_durations(self):
+        tracker = PlaybackTracker()
+        tracker.record_playback("frac1", duration_listened_sec=0.001)
+        tracker.record_playback("frac1", duration_listened_sec=0.002)
+        stats = tracker.get_playback_stats("frac1")
+        self.assertAlmostEqual(stats["total_listened_sec"], 0.003, places=5)
+
+    def test_item_id_with_special_chars(self):
+        tracker = PlaybackTracker()
+        special_id = "item-_123@test"
+        tracker.record_playback(special_id, duration_listened_sec=5.0)
+        stats = tracker.get_playback_stats(special_id)
+        self.assertEqual(stats["item_id"], special_id)
+        self.assertEqual(stats["play_count"], 1)
+
+    def test_numeric_item_id_as_string(self):
+        tracker = PlaybackTracker()
+        tracker.record_playback("12345", duration_listened_sec=3.0)
+        stats = tracker.get_playback_stats("12345")
+        self.assertEqual(stats["play_count"], 1)
+
+    def test_unicode_item_id(self):
+        tracker = PlaybackTracker()
+        tracker.record_playback("предмет_тест", duration_listened_sec=2.0)
+        stats = tracker.get_playback_stats("предмет_тест")
+        self.assertEqual(stats["play_count"], 1)
+
+    def test_persistence_file_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker1 = PlaybackTracker(data_dir=tmpdir)
+            tracker1.record_playback("x", duration_listened_sec=10.0)
+
+            # Создаём новый с той же папкой — должен перезагрузить
+            tracker2 = PlaybackTracker(data_dir=tmpdir)
+            stats = tracker2.get_playback_stats("x")
+            self.assertEqual(stats["play_count"], 1)
+            self.assertAlmostEqual(stats["total_listened_sec"], 10.0)
+
+            # Добавляем ещё запись
+            tracker2.record_playback("x", duration_listened_sec=5.0)
+            tracker2.record_playback("y", duration_listened_sec=15.0)
+
+            # Проверяем что файл правильно обновлён
+            tracker3 = PlaybackTracker(data_dir=tmpdir)
+            stats_x = tracker3.get_playback_stats("x")
+            stats_y = tracker3.get_playback_stats("y")
+
+            self.assertEqual(stats_x["play_count"], 2)
+            self.assertAlmostEqual(stats_x["total_listened_sec"], 15.0)
+            self.assertEqual(stats_y["play_count"], 1)
+            self.assertAlmostEqual(stats_y["total_listened_sec"], 15.0)
+
+
+# ===========================================================================
+# 9. Последовательные операции (roundtrip)
+# ===========================================================================
+
+class TestRoundtripOperations(unittest.TestCase):
+    """Проверяет полный цикл сохранения/загрузки/обновления."""
+
+    def test_full_lifecycle(self):
+        """Полный цикл: создание → сохранение → загрузка → обновление."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Этап 1: создание и сохранение
+            t1 = PlaybackTracker(data_dir=tmpdir)
+            t1.record_playback("item_a", duration_listened_sec=10.0)
+            t1.record_playback("item_b", duration_listened_sec=20.0)
+
+            # Этап 2: загрузка в новом экземпляре
+            t2 = PlaybackTracker(data_dir=tmpdir)
+            self.assertEqual(t2.get_playback_stats("item_a")["play_count"], 1)
+            self.assertEqual(t2.get_playback_stats("item_b")["play_count"], 1)
+
+            # Этап 3: обновление
+            t2.record_playback("item_a", duration_listened_sec=5.0)
+
+            # Этап 4: повторная загрузка
+            t3 = PlaybackTracker(data_dir=tmpdir)
+            stats = t3.get_playback_stats("item_a")
+            self.assertEqual(stats["play_count"], 2)
+            self.assertAlmostEqual(stats["total_listened_sec"], 15.0)
+
+    def test_ipc_roundtrip(self):
+        """Проверяет IPC-операции в последовательности."""
+        tracker = PlaybackTracker()
+
+        # Запись через IPC
+        result1 = tracker.handle_record_playback({
+            "item_id": "ipc_test",
+            "duration_listened_sec": 10.0
+        })
+        self.assertEqual(result1["play_count"], 1)
+
+        # Получение статистики через IPC
+        result2 = tracker.handle_get_playback_stats({"item_id": "ipc_test"})
+        self.assertEqual(result2["play_count"], 1)
+        self.assertAlmostEqual(result2["total_listened_sec"], 10.0)
+
+        # Запись ещё раз
+        result3 = tracker.handle_record_playback({
+            "item_id": "ipc_test",
+            "duration_listened_sec": 5.0
+        })
+        self.assertEqual(result3["play_count"], 2)
+
+        # Проверяем топ-воспроизводимые
+        result4 = tracker.handle_get_most_replayed({"limit": 10})
+        self.assertGreater(result4["count"], 0)
+        self.assertEqual(result4["items"][0]["item_id"], "ipc_test")
+
+
 if __name__ == "__main__":
     unittest.main()
