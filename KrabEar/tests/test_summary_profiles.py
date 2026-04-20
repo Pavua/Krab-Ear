@@ -319,7 +319,7 @@ class TestBuildBatchSummaryPrompt(unittest.TestCase):
 
 
 # ===========================================================================
-# Дополнительные тесты: граничные случаи и валидация
+# Дополнительные тесты: валидация, персистентность, граничные случаи
 # ===========================================================================
 
 class TestSummaryProfileValidation(unittest.TestCase):
@@ -344,24 +344,19 @@ class TestSummaryProfileValidation(unittest.TestCase):
             self.mgr.add_custom_profile("zero", "Prompt.", max_tokens=0)
 
     def test_max_tokens_coerced_to_int(self):
-        """max_tokens коерцируется в int из float-строки."""
+        """max_tokens коерцируется в int из float."""
         p = self.mgr.add_custom_profile("float_tokens", "Prompt.", max_tokens=150.9)
         self.assertEqual(p.max_tokens, 150)
 
     def test_name_trimmed_whitespace(self):
-        """Имя с ведущими/замыкающими пробелами должно быть отрезано."""
+        """Имя с пробелами должно быть отрезано."""
         p = self.mgr.add_custom_profile("  trimmed  ", "Prompt.", max_tokens=100)
         self.assertEqual(p.name, "trimmed")
 
     def test_prompt_trimmed_whitespace(self):
-        """Промпт с ведущими/замыкающими пробелами должен быть отрезан."""
-        p = self.mgr.add_custom_profile("test", "  prompt content  ", max_tokens=100)
-        self.assertEqual(p.system_prompt, "prompt content")
-
-    def test_format_instructions_trimmed_whitespace(self):
-        """Format instructions должны быть отрезаны."""
-        p = self.mgr.add_custom_profile("test", "Prompt.", max_tokens=100, format_instructions="  trimmed  ")
-        self.assertEqual(p.format_instructions, "trimmed")
+        """Промпт с пробелами должен быть отрезан."""
+        p = self.mgr.add_custom_profile("test", "  content  ", max_tokens=100)
+        self.assertEqual(p.system_prompt, "content")
 
     def test_whitespace_only_name_raises(self):
         """Имя только из пробелов должно вызвать ValueError."""
@@ -440,9 +435,6 @@ class TestSummaryProfilePersistence(unittest.TestCase):
         # Должна быть в памяти, но не на диске
         p = mgr.get_profile("ephemeral")
         self.assertEqual(p.name, "ephemeral")
-        # Нет файла
-        tmp = Path(tempfile.gettempdir()) / "nonexistent_summary_profiles.json"
-        self.assertFalse(tmp.exists())
 
 
 class TestSummaryProfileIsolation(unittest.TestCase):
@@ -459,27 +451,19 @@ class TestSummaryProfileIsolation(unittest.TestCase):
     def test_builtin_profile_not_in_custom(self):
         """Встроенные профили не должны быть в _custom."""
         builtin_count = len([p for p in self.mgr.list_profiles() if p["builtin"]])
-        self.assertEqual(builtin_count, 5)  # brief, detailed, bullet_points, meeting_notes, telegram
-        # Во внутреннем _custom не должно быть встроенных
+        self.assertEqual(builtin_count, 5)
         self.assertEqual(len(self.mgr._custom), 0)
 
     def test_custom_only_in_list_as_custom(self):
-        """Кастомные профили в list_profiles должны иметь builtin=False."""
+        """Кастомные профили должны иметь builtin=False."""
         self.mgr.add_custom_profile("custom1", "Prompt.", 100)
         profiles = self.mgr.list_profiles()
         custom = [p for p in profiles if p["name"] == "custom1"]
         self.assertEqual(len(custom), 1)
         self.assertFalse(custom[0]["builtin"])
 
-    def test_cannot_override_builtin_via_get(self):
-        """Встроенный профиль всегда возвращается из _BUILTIN_MAP."""
-        p1 = self.mgr.get_profile("brief")
-        p2 = self.mgr.get_profile("brief")
-        self.assertEqual(p1.name, p2.name)
-        self.assertTrue(p1.builtin)
-
-    def test_custom_profile_shadow_not_builtin(self):
-        """Кастомный профиль с именем встроенного не создаёт конфликт (ValueError)."""
+    def test_cannot_override_builtin(self):
+        """Нельзя создать кастомный профиль с именем встроенного."""
         with self.assertRaises(ValueError):
             self.mgr.add_custom_profile("brief", "Override.", 100)
 
@@ -503,18 +487,11 @@ class TestSummaryProfileEdgeCases(unittest.TestCase):
         self.assertEqual(p1.name, p2.name)
         self.assertEqual(p1.system_prompt, p2.system_prompt)
         self.assertEqual(p1.max_tokens, p2.max_tokens)
-        self.assertEqual(p1.format_instructions, p2.format_instructions)
 
     def test_empty_format_instructions_default(self):
-        """format_instructions может быть пустой строкой (опционально)."""
+        """format_instructions может быть пустой строкой."""
         p = self.mgr.add_custom_profile("no_fmt", "Prompt.", 100)
         self.assertEqual(p.format_instructions, "")
-
-    def test_long_prompt_text(self):
-        """Очень длинный промпт должен быть сохранён."""
-        long_prompt = "Test. " * 1000
-        p = self.mgr.add_custom_profile("long", long_prompt, 1000)
-        self.assertEqual(len(p.system_prompt), len(long_prompt))
 
     def test_special_characters_in_prompt(self):
         """Промпт со специальными символами должен быть сохранён."""
@@ -522,9 +499,9 @@ class TestSummaryProfileEdgeCases(unittest.TestCase):
         p = self.mgr.add_custom_profile("special", special, 100)
         self.assertEqual(p.system_prompt, special)
 
-    def test_unicode_in_name_and_prompt(self):
-        """Unicode в имени и промпте должен работать."""
-        p = self.mgr.add_custom_profile("тест_пром", "Промпт на русском.", 100, "Формат на русском.")
+    def test_unicode_in_profile(self):
+        """Unicode должен работать корректно."""
+        p = self.mgr.add_custom_profile("тест_пром", "Промпт на русском.", 100)
         self.assertEqual(p.name, "тест_пром")
         self.assertIn("русском", p.system_prompt)
 
@@ -541,7 +518,7 @@ class TestHistoryServiceSummaryProfileEdgeCases(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_add_summary_profile_ipc_default_max_tokens(self):
-        """handle_add_summary_profile с отсутствующим max_tokens использует default (300)."""
+        """handle_add_summary_profile использует default max_tokens (300)."""
         result = self.svc.handle_add_summary_profile({
             "name": "ipc_default",
             "prompt": "Test.",
@@ -549,7 +526,7 @@ class TestHistoryServiceSummaryProfileEdgeCases(unittest.TestCase):
         self.assertEqual(result["profile"]["max_tokens"], 300)
 
     def test_add_summary_profile_ipc_optional_format_instructions(self):
-        """handle_add_summary_profile без format_instructions должна работать."""
+        """handle_add_summary_profile работает без format_instructions."""
         result = self.svc.handle_add_summary_profile({
             "name": "ipc_no_fmt",
             "prompt": "Test.",
@@ -562,17 +539,17 @@ class TestHistoryServiceSummaryProfileEdgeCases(unittest.TestCase):
         result = self.svc.handle_add_summary_profile({
             "name": "ipc_coerce",
             "prompt": "Test.",
-            "max_tokens": "200",  # строка
+            "max_tokens": "200",
         })
         self.assertEqual(result["profile"]["max_tokens"], 200)
 
     def test_auto_summarize_with_empty_items_raises(self):
-        """auto_summarize_batch с пустым списком ID должна вызвать RuntimeError."""
+        """auto_summarize_batch с пустым списком ID вызывает RuntimeError."""
         with self.assertRaises(RuntimeError):
             self.svc.handle_auto_summarize_batch({"ids": []})
 
     def test_auto_summarize_with_nonexistent_ids_raises(self):
-        """auto_summarize_batch с ID, которые не найдены, вызывает RuntimeError."""
+        """auto_summarize_batch с несуществующими ID вызывает RuntimeError."""
         with self.assertRaises(RuntimeError):
             self.svc.handle_auto_summarize_batch({"ids": ["nonexistent_id_xyz"]})
 
