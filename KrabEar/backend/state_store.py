@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 from typing import Any, Iterator
 
+from core.parsing_utils import safe_json_loads
+
 from .models import DEFAULT_SETTINGS, HistoryItem
 from core.search_index import SearchIndex
 
@@ -82,9 +84,12 @@ class StateStore:
             if not self.settings_path.exists():
                 return dict(DEFAULT_SETTINGS)
 
-            try:
-                payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
-            except Exception:
+            payload = safe_json_loads(
+                self.settings_path.read_text(encoding="utf-8"),
+                default=None,
+                context="settings.json",
+            )
+            if payload is None:
                 logger.warning("Файл настроек поврежден, возвращены дефолты")
                 return dict(DEFAULT_SETTINGS)
 
@@ -854,9 +859,8 @@ class StateStore:
                 raw = line.strip()
                 if not raw:
                     continue
-                try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
+                payload = safe_json_loads(raw)
+                if payload is None:
                     continue
                 if isinstance(payload, dict):
                     yield payload

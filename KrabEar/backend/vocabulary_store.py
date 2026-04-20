@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
+from core.parsing_utils import safe_json_loads
+
 logger = logging.getLogger("KrabEar.Backend.VocabularyStore")
 
 _VOCABULARY_FILENAME = "vocabulary.json"
@@ -45,9 +47,12 @@ class VocabularyStore:
 
         try:
             raw = self.path.read_text(encoding="utf-8")
-            payload = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as exc:
+        except OSError as exc:
             logger.warning("vocabulary.json повреждён, возвращаем пустой список: %s", exc)
+            return []
+        payload = safe_json_loads(raw, default=None, context="vocabulary.json")
+        if payload is None:
+            logger.warning("vocabulary.json повреждён, возвращаем пустой список")
             return []
 
         if not isinstance(payload, dict):

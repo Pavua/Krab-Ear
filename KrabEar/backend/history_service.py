@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from core.fuzzy_search import FuzzySearcher
+from core.parsing_utils import safe_json_loads
 from core.search_highlighter import SearchHighlighter
 
 from core.duplicate_detector import DuplicateDetector
@@ -2284,11 +2285,13 @@ class HistoryService:
         # Читаем метаданные
         backup_date = "unknown"
         if meta_file.exists():
-            try:
-                meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+            meta = safe_json_loads(
+                meta_file.read_text(encoding="utf-8"),
+                default=None,
+                context="backup_meta.json",
+            )
+            if meta:
                 backup_date = meta.get("backup_ts", "unknown")
-            except Exception:
-                pass
 
         restore_settings = self._coerce_bool(params.get("restore_settings", False), default=False)
 
@@ -2339,14 +2342,16 @@ class HistoryService:
                 "size_mb": None,
             }
             if meta_file.exists():
-                try:
-                    meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+                meta = safe_json_loads(
+                    meta_file.read_text(encoding="utf-8"),
+                    default=None,
+                    context="backup_meta.json",
+                )
+                if meta:
                     entry["backup_date"] = meta.get("backup_ts", backup_dir.name)
                     entry["entries"] = meta.get("entries")
                     size_bytes = meta.get("size_bytes", 0)
                     entry["size_mb"] = round(size_bytes / (1024 * 1024), 3)
-                except Exception:
-                    pass
             result.append(entry)
 
         return {"backups": result}
