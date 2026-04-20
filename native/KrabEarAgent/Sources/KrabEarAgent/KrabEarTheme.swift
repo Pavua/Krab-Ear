@@ -298,10 +298,11 @@ public class ThemeCardView: NSVisualEffectView {
         // (squircle, а не простой rounded rect)
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1.0
-        // Чуть более заметный edge — карточка visible как distinct element
-        // на фоне window same material. Alpha 0.18 даёт subtle но чёткую
-        // границу (user feedback: карточки должны быть «более выделяющимися»).
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        // Dynamic semantic border token — adapts to light/dark mode automatically.
+        // Replaced hardcoded white@0.18 (was overridden by viewDidChangeEffectiveAppearance
+        // with NSColor.separatorColor, causing Figma↔Swift drift). Now uses a single
+        // dynamic color that matches the Figma `border` token in both appearances.
+        layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         layer?.masksToBounds = true
         // Note: drop shadow не применён сознательно — при masksToBounds=true
         // (нужно для rounded corners clipping) layer shadow не рендерится.
@@ -337,7 +338,10 @@ public class ThemeCardView: NSVisualEffectView {
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        // KrabEarTheme.Colors.border is a dynamic NSColor provider — it resolves
+        // correctly for both dark/light mode without a manual override. Reassign to
+        // re-trigger CGColor resolution in the new appearance context.
+        layer?.borderColor = KrabEarTheme.Colors.border.cgColor
     }
 }
 
