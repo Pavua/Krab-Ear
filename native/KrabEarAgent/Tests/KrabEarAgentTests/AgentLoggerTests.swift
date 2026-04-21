@@ -125,4 +125,34 @@ final class AgentLoggerTests: XCTestCase {
         XCTAssertNotNil(shared)
         // Не пишем в shared — его logFile живёт в реальном Application Support
     }
+
+    /// После удаления лог-файла (симуляция stale handle) логгер восстанавливается
+    /// и продолжает писать без потери следующего сообщения.
+    func test_resilience_afterLogFileRemoved() {
+        let logger = AgentLogger(dataDirPath: tmpDir.path)
+        // Даём init создать директорию и открыть хэндл.
+        Thread.sleep(forTimeInterval: 0.3)
+
+        logger.info("before removal")
+        waitForLog()
+        XCTAssertTrue(logContents().contains("before removal"))
+
+        // Удаляем файл — симулируем stale handle (аналог пересоздания файла извне).
+        try? FileManager.default.removeItem(at: logFile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: logFile.path))
+
+        // Пишем снова — логгер должен пересоздать файл и записать.
+        logger.info("after removal")
+
+        let deadline = Date().addingTimeInterval(3.0)
+        while Date() < deadline {
+            if let c = try? String(contentsOf: logFile, encoding: .utf8),
+               c.contains("after removal") { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logFile.path),
+                      "Лог-файл должен быть пересоздан после удаления")
+        XCTAssertTrue(logContents().contains("after removal"),
+                      "Сообщение после восстановления должно быть в файле")
+    }
 }
