@@ -4,6 +4,13 @@
  Связи модуля:
  1) main.swift: пишет диагностику жизненного цикла записи/вставки/истории.
  2) Логи сохраняются в ~/Library/Application Support/KrabEar/agent.log.
+
+ Архитектура (после fix/agent-logger-resilience):
+ - Хранит persistent FileHandle, открытый один раз при инициализации.
+ - При ошибке записи: логирует в stderr через NSLog, обнуляет хэндл, делает
+   одну попытку переоткрыть + повторить запись (reopen-on-failure).
+ - Serial queue гарантирует thread-safety без дополнительных блокировок.
+ - Disk-full / permission-denied ловятся явно; агент продолжает работу.
 */
 
 import Foundation
@@ -16,6 +23,9 @@ final class AgentLogger: @unchecked Sendable {
     private let fileURL: URL
     private let formatter: DateFormatter
 
+    // Persistent handle — открывается один раз, переоткрывается при сбое.
+    private var handle: FileHandle?
+
     init(dataDirPath: String = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath) {
         let dataDirURL = URL(fileURLWithPath: dataDirPath, isDirectory: true)
         self.fileURL = dataDirURL.appendingPathComponent("agent.log")
@@ -25,17 +35,25 @@ final class AgentLogger: @unchecked Sendable {
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         self.formatter = dateFormatter
 
+        // Создаём директорию и открываем хэндл на serial queue.
         queue.async {
             do {
                 try FileManager.default.createDirectory(at: dataDirURL, withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: self.fileURL.path) {
-                    FileManager.default.createFile(atPath: self.fileURL.path, contents: nil)
-                }
             } catch {
-                // Безопасный no-op: отсутствие лога не должно ломать агент.
+                NSLog("[AgentLogger] createDirectory fail: %@", "\(error)")
             }
+            self.openHandle()
         }
     }
+
+    deinit {
+        queue.sync {
+            try? self.handle?.close()
+            self.handle = nil
+        }
+    }
+
+    // MARK: - Public API
 
     func info(_ message: String) {
         write(level: "INFO", message: message)
@@ -49,19 +67,57 @@ final class AgentLogger: @unchecked Sendable {
         write(level: "ERROR", message: message)
     }
 
+    // MARK: - Private
+
+    /// Открывает (или пересоздаёт) лог-файл и сохраняет persistent handle.
+    /// Должна вызываться только внутри serial queue.
+    private func openHandle() {
+        // Убедимся что файл существует перед открытием хэндла.
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        }
+        do {
+            let h = try FileHandle(forWritingTo: fileURL)
+            try h.seekToEnd()
+            self.handle = h
+        } catch {
+            NSLog("[AgentLogger] openHandle fail (%@): %@", fileURL.lastPathComponent, "\(error)")
+            self.handle = nil
+        }
+    }
+
+    /// Форматирует и пишет строку лога. Вызывает reopen + одну повторную попытку при сбое.
     private func write(level: String, message: String) {
         queue.async {
             let ts = self.formatter.string(from: Date())
             let line = "\(ts) [\(level)] \(message)\n"
             guard let data = line.data(using: .utf8) else { return }
 
+            // Ленивое открытие: если хэндл ещё не готов — пробуем открыть.
+            if self.handle == nil {
+                self.openHandle()
+            }
+
+            guard let h = self.handle else {
+                // Нет хэндла — fallback в stderr, чтобы debug это увидел.
+                NSLog("[AgentLogger] write skip (no handle) — [%@] %@", level, message)
+                return
+            }
+
             do {
-                let handle = try FileHandle(forWritingTo: self.fileURL)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
+                try h.write(contentsOf: data)
             } catch {
-                // Безопасный no-op: логгер не должен прерывать основной поток.
+                // Запись упала (disk full, SIGPIPE, stale handle после rebuild…).
+                // Сигнализируем в stderr, переоткрываем, одна повторная попытка.
+                NSLog("[AgentLogger] write fail (reopening) — [%@] %@: %@", level, message, "\(error)")
+                try? h.close()
+                self.handle = nil
+                self.openHandle()
+                if let fresh = self.handle {
+                    try? fresh.write(contentsOf: data)
+                } else {
+                    NSLog("[AgentLogger] reopen failed — message lost: [%@] %@", level, message)
+                }
             }
         }
     }
