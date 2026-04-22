@@ -327,5 +327,144 @@ class TestMinWordLength(unittest.TestCase):
         self.assertIn("собака", words)  # 6 символов — ок
 
 
+class TestWeightFontMonotonicity(unittest.TestCase):
+    """weight и font_size монотонно возрастают вместе с count."""
+
+    def setUp(self) -> None:
+        self.gen = KeywordCloudGenerator()
+
+    def test_weight_monotonic_with_count(self) -> None:
+        """Слова с большим count имеют больший или равный weight."""
+        text = "кошка " * 10 + "собака " * 5 + "птица " * 2
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items)
+        # Результат отсортирован по убыванию count
+        for i in range(len(result) - 1):
+            self.assertGreaterEqual(result[i].count, result[i + 1].count)
+            self.assertGreaterEqual(result[i].weight, result[i + 1].weight)
+
+    def test_font_size_monotonic_with_count(self) -> None:
+        """Слова с большим count имеют больший или равный font_size."""
+        text = "кошка " * 8 + "собака " * 4 + "птица " * 1
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items)
+        for i in range(len(result) - 1):
+            self.assertGreaterEqual(result[i].font_size, result[i + 1].font_size)
+
+    def test_higher_count_never_has_smaller_weight(self) -> None:
+        """Слово с большим count никогда не имеет меньший weight."""
+        text = "альфа " * 20 + "бета " * 10 + "гамма " * 3
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items)
+        if len(result) >= 2:
+            self.assertGreater(result[0].weight, result[-1].weight)
+
+    def test_second_word_weight_less_than_first(self) -> None:
+        """Второе слово (меньший count) имеет weight < 1.0."""
+        text = "кошка " * 5 + "собака " * 2
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items)
+        self.assertAlmostEqual(result[0].weight, 1.0)
+        if len(result) > 1:
+            self.assertLess(result[1].weight, 1.0)
+
+
+class TestSingleRepeatedWord(unittest.TestCase):
+    """Граничный случай: единственное повторяющееся слово."""
+
+    def setUp(self) -> None:
+        self.gen = KeywordCloudGenerator()
+
+    def test_single_word_repeated_weight_is_one(self) -> None:
+        items = [_dict_item("кошка кошка кошка кошка")]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0].weight, 1.0)
+        self.assertEqual(result[0].font_size, 72)
+
+    def test_single_word_repeated_count_correct(self) -> None:
+        items = [_dict_item("собака собака собака")]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(result[0].count, 3)
+
+    def test_single_unique_word_still_has_max_weight(self) -> None:
+        items = [_dict_item("уникальность")]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(result[0].weight, 1.0)
+        self.assertEqual(result[0].font_size, 72)
+
+    def test_single_word_across_multiple_items(self) -> None:
+        """Одно слово в нескольких items суммируется."""
+        items = [_dict_item("кошка") for _ in range(5)]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].count, 5)
+        self.assertAlmostEqual(result[0].weight, 1.0)
+
+
+class TestTopN(unittest.TestCase):
+    """Тест max_words (аналог top_n=20)."""
+
+    def setUp(self) -> None:
+        self.gen = KeywordCloudGenerator()
+
+    def test_max_words_20_limits_to_20(self) -> None:
+        # 30 уникальных слов
+        words = [f"слово{i}" for i in range(30)]
+        items = [_dict_item(" ".join(words))]
+        result = self.gen.generate_cloud(items, max_words=20)
+        self.assertLessEqual(len(result), 20)
+
+    def test_max_words_1_returns_single_top_word(self) -> None:
+        text = "кошка " * 5 + "собака " * 3 + "птица"
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items, max_words=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].word, "кошка")
+
+    def test_max_words_default_100_applied(self) -> None:
+        # 5 уникальных слов (исключительно буквы, не попадают в стоп-слова)
+        unique_words = ["кошка", "собака", "птица", "рыба", "лиса"]
+        items = [_dict_item(" ".join(unique_words))]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(len(result), 5)
+
+    def test_result_sorted_by_count_descending(self) -> None:
+        text = "альфа " * 9 + "бета " * 6 + "гамма " * 3
+        items = [_dict_item(text)]
+        result = self.gen.generate_cloud(items, max_words=20)
+        counts = [cw.count for cw in result]
+        self.assertEqual(counts, sorted(counts, reverse=True))
+
+
+class TestCloudWordWeightEdge(unittest.TestCase):
+    """Дополнительные граничные случаи weight/font_size."""
+
+    def test_all_equal_counts_same_weight(self) -> None:
+        """Все слова с одинаковым count → одинаковые weight и font_size."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        # Каждое слово встречается ровно 1 раз
+        text = "альфа бета гамма дельта"
+        items = [_dict_item(text)]
+        result = gen.generate_cloud(items)
+        # Все веса должны быть 1.0 (count/max_count = 1/1)
+        for cw in result:
+            self.assertAlmostEqual(cw.weight, 1.0)
+            self.assertEqual(cw.font_size, 72)
+
+    def test_font_size_min_for_lowest_weight(self) -> None:
+        """Слово с наименьшим count (weight ≈ 0) имеет font_size близкий к 12."""
+        # Одно слово с count=100, другое с count=1
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        text = "кошка " * 100 + "собака"
+        items = [_dict_item(text)]
+        result = gen.generate_cloud(items, max_words=100)
+        last = result[-1]
+        # font_size для weight=0.01 → 12 + 0.01*60 ≈ 12
+        self.assertGreaterEqual(last.font_size, 12)
+        self.assertLessEqual(last.font_size, 72)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

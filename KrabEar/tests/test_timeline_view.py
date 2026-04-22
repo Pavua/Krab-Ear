@@ -9,7 +9,7 @@ from backend.timeline_view import TimelineViewGenerator
 
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +271,6 @@ class ActivityHeatmapTestCase(unittest.TestCase):
         d1 = now.replace(hour=10, minute=0, second=0, microsecond=0)
         d2 = now.replace(hour=12, minute=0, second=0, microsecond=0)
         # Используем datetime двухдневной давности для второго дня
-        from datetime import timedelta
         d3 = (now - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
         items = [
             _make_item(d1.isoformat()),
@@ -280,6 +279,199 @@ class ActivityHeatmapTestCase(unittest.TestCase):
         ]
         result = self.gen.generate_activity_heatmap(items, days=30)
         self.assertEqual(result["days_covered"], 2)
+
+
+class TimelineTopicSummaryTestCase(unittest.TestCase):
+    """Тесты summary_text — тематические сдвиги через разные summary_text в блоках."""
+
+    def setUp(self) -> None:
+        self.gen = TimelineViewGenerator()
+
+    def test_single_topic_same_summary_across_items(self) -> None:
+        """Все записи об одной теме → summary_text содержит доминирующее слово."""
+        items = [
+            _make_item("2026-04-10T14:00:00", text="программа программа программа код"),
+            _make_item("2026-04-10T14:20:00", text="программа код система система"),
+        ]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(len(blocks), 1)
+        # Одна тема — summary содержит доминирующие слова
+        self.assertIn("программа", blocks[0].summary_text)
+
+    def test_multiple_topics_different_blocks_have_different_summaries(self) -> None:
+        """Разные темы в разных блоках → summary_text различается."""
+        # Блок 1 — технологии
+        tech_item = _make_item(
+            "2026-04-10T10:00:00",
+            text="программа программа программа сервер",
+        )
+        # Блок 2 — здоровье
+        health_item = _make_item(
+            "2026-04-10T15:00:00",
+            text="здоровье здоровье врач больница лечение",
+        )
+        blocks = self.gen.generate_timeline([tech_item, health_item], group_by="hour")
+        self.assertEqual(len(blocks), 2)
+        # summary_text разных блоков — разные ключевые слова
+        self.assertNotEqual(blocks[0].summary_text, blocks[1].summary_text)
+
+    def test_empty_text_gives_empty_summary(self) -> None:
+        """Записи с пустым text → summary_text пустой."""
+        items = [_make_item("2026-04-10T14:00:00", text="")]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(blocks[0].summary_text, "")
+
+    def test_summary_text_is_comma_separated(self) -> None:
+        """summary_text разделён запятыми (топ-5 слов)."""
+        items = [
+            _make_item(
+                "2026-04-10T14:00:00",
+                text="программа сервер база данные система приложение функция модель",
+            ),
+        ]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        summary = blocks[0].summary_text
+        if summary:
+            # Если больше одного слова — между ними запятая
+            parts = [p.strip() for p in summary.split(",")]
+            self.assertLessEqual(len(parts), 5)
+
+    def test_single_item_single_block(self) -> None:
+        """Одна запись → один блок, никаких сдвигов."""
+        items = [_make_item("2026-04-10T09:00:00", text="кошка кошка кошка")]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].items_count, 1)
+
+    def test_no_shifts_single_block_one_summary_word(self) -> None:
+        """Одна тема в одном блоке: топ-слово в summary, нет смены тем."""
+        items = [_make_item(f"2026-04-10T10:0{i}:00", text="кошка кошка кошка") for i in range(5)]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("кошка", blocks[0].summary_text)
+
+
+class TimelineWeekGroupTestCase(unittest.TestCase):
+    """Тесты group_by='week': записи в разных неделях."""
+
+    def setUp(self) -> None:
+        self.gen = TimelineViewGenerator()
+
+    def test_two_different_weeks_two_blocks(self) -> None:
+        items = [
+            _make_item("2026-04-06T10:00:00"),  # неделя 1 (Mon)
+            _make_item("2026-04-13T10:00:00"),  # неделя 2 (Mon+7)
+        ]
+        blocks = self.gen.generate_timeline(items, group_by="week")
+        self.assertEqual(len(blocks), 2)
+
+    def test_week_block_end_is_plus_7_days(self) -> None:
+        items = [_make_item("2026-04-06T12:00:00")]  # понедельник
+        blocks = self.gen.generate_timeline(items, group_by="week")
+        start = datetime.fromisoformat(blocks[0].start_time)
+        end = datetime.fromisoformat(blocks[0].end_time)
+        self.assertEqual(end - start, timedelta(weeks=1))
+
+
+class TimelineBlockAggregatesTestCase(unittest.TestCase):
+    """Расширенные тесты агрегатов TimelineBlock."""
+
+    def setUp(self) -> None:
+        self.gen = TimelineViewGenerator()
+
+    def test_zero_duration_when_no_audio_duration_sec(self) -> None:
+        items = [_make_item("2026-04-10T14:00:00", audio_duration_sec=None)]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertAlmostEqual(blocks[0].total_duration_sec, 0.0)
+
+    def test_total_words_correct_with_multiple_items(self) -> None:
+        items = [
+            _make_item("2026-04-10T14:00:00", text="один два три"),       # 3 слова
+            _make_item("2026-04-10T14:10:00", text="четыре пять"),         # 2 слова
+            _make_item("2026-04-10T14:20:00", text="шесть семь восемь девять"),  # 4 слова
+        ]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(blocks[0].total_words, 9)
+
+    def test_languages_empty_when_no_source_lang(self) -> None:
+        items = [_make_item("2026-04-10T14:00:00", source_lang="")]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(blocks[0].languages, [])
+
+    def test_multiple_languages_most_frequent_first(self) -> None:
+        items = [
+            _make_item("2026-04-10T14:00:00", source_lang="ru"),
+            _make_item("2026-04-10T14:05:00", source_lang="ru"),
+            _make_item("2026-04-10T14:10:00", source_lang="ru"),
+            _make_item("2026-04-10T14:15:00", source_lang="es"),
+        ]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(blocks[0].languages[0], "ru")
+
+    def test_day_block_start_time_is_midnight(self) -> None:
+        items = [_make_item("2026-04-10T17:45:00")]
+        blocks = self.gen.generate_timeline(items, group_by="day")
+        self.assertIn("T00:00:00", blocks[0].start_time)
+
+    def test_duration_rounded_to_3_decimals(self) -> None:
+        items = [_make_item("2026-04-10T14:00:00", audio_duration_sec=3.14159)]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        dur = blocks[0].total_duration_sec
+        self.assertEqual(dur, round(dur, 3))
+
+    def test_items_count_matches_number_of_items(self) -> None:
+        items = [_make_item(f"2026-04-10T14:0{i}:00") for i in range(4)]
+        blocks = self.gen.generate_timeline(items, group_by="hour")
+        self.assertEqual(blocks[0].items_count, 4)
+
+
+class TimelineHeatmapExtendedTestCase(unittest.TestCase):
+    """Расширенные тесты generate_activity_heatmap."""
+
+    def setUp(self) -> None:
+        self.gen = TimelineViewGenerator()
+
+    def test_peak_dow_correct(self) -> None:
+        """peak_dow соответствует дню с наибольшим числом записей."""
+        now = datetime.now(tz=timezone.utc)
+        today = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        today_dow = today.weekday()
+        items = [
+            _make_item(today.isoformat()),
+            _make_item(today.replace(hour=12).isoformat()),
+            _make_item(today.replace(hour=14).isoformat()),
+        ]
+        result = self.gen.generate_activity_heatmap(items, days=7)
+        self.assertEqual(result["peak_dow"], today_dow)
+
+    def test_matrix_keys_are_strings(self) -> None:
+        """Ключи матрицы — строки (JSON-совместимость)."""
+        result = self.gen.generate_activity_heatmap([], days=30)
+        matrix = result["matrix"]
+        for h_key in matrix:
+            self.assertIsInstance(h_key, str)
+            for d_key in matrix[h_key]:
+                self.assertIsInstance(d_key, str)
+
+    def test_matrix_covers_all_24_hours(self) -> None:
+        result = self.gen.generate_activity_heatmap([], days=7)
+        self.assertEqual(len(result["matrix"]), 24)
+
+    def test_matrix_covers_all_7_days_of_week(self) -> None:
+        result = self.gen.generate_activity_heatmap([], days=7)
+        for h in range(24):
+            self.assertEqual(len(result["matrix"][str(h)]), 7)
+
+    def test_item_counted_in_correct_hour_and_dow(self) -> None:
+        """Запись считается в правильной ячейке матрицы."""
+        # Используем конкретную дату/время в пределах 30 дней
+        now = datetime.now(tz=timezone.utc)
+        fixed = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        items = [_make_item(fixed.isoformat())]
+        result = self.gen.generate_activity_heatmap(items, days=30)
+        h = str(fixed.hour)
+        d = str(fixed.weekday())
+        self.assertEqual(result["matrix"][h][d], 1)
 
 
 if __name__ == "__main__":
