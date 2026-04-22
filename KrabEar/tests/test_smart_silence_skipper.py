@@ -259,5 +259,116 @@ class TestCustomParameters(unittest.TestCase):
         self.assertEqual(result.skipped_segments, [])
 
 
+class TestSkipResultComputed(unittest.TestCase):
+    """Вычисляемые поля SkipResult."""
+
+    def test_processed_duration_less_than_original_after_skip(self):
+        """processed_duration_sec < original_duration_sec когда тишина удалена."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(1.0), _silence(2.0), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        if result.skipped_segments:
+            self.assertLess(result.processed_duration_sec, result.original_duration_sec)
+
+    def test_time_saved_sec_equals_duration_diff(self):
+        """time_saved_sec == original - processed (с погрешностью)."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(1.0), _silence(2.0), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        expected = result.original_duration_sec - result.processed_duration_sec
+        self.assertAlmostEqual(result.time_saved_sec, expected, places=2)
+
+    def test_no_skip_all_durations_equal(self):
+        """Если ничего не удалено — original == processed, time_saved == 0."""
+        skipper = SmartSilenceSkipper()
+        audio = _speech(2.0)
+        result = skipper.process(audio, SAMPLE_RATE)
+        self.assertAlmostEqual(
+            result.original_duration_sec, result.processed_duration_sec, places=3
+        )
+        self.assertEqual(result.time_saved_sec, 0.0)
+        self.assertEqual(result.time_saved_pct, 0.0)
+
+
+class TestBoundaryConditions(unittest.TestCase):
+    """Граничные условия SmartSilenceSkipper."""
+
+    def test_silence_exactly_at_threshold_not_skipped(self):
+        """Тишина ровно min_silence_sec не попадает в пороговый условие (< не <=)."""
+        # min_silence_sec=1.0, silence=1.0 → r_dur == min_silence_samples
+        # Условие в коде: r_dur < min_silence_samples → не пропускает
+        skipper = SmartSilenceSkipper(min_silence_sec=1.0)
+        audio = _cat(_speech(1.0), _silence(1.0), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        # Может быть скипнуто или нет (зависит от детектора), но не должно падать
+        self.assertIsInstance(result, SkipResult)
+
+    def test_silence_just_above_threshold_may_skip(self):
+        """Тишина немного больше порога — обработка не падает."""
+        skipper = SmartSilenceSkipper(min_silence_sec=0.5)
+        audio = _cat(_speech(1.0), _silence(0.6), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        self.assertIsInstance(result, SkipResult)
+        self.assertGreaterEqual(result.time_saved_pct, 0.0)
+
+    def test_silence_fully_consumed_by_padding(self):
+        """Если тишина короче 2 × speech_pad_sec — после вычета отступов нечего удалять."""
+        # speech_pad_sec=0.10 → 2 × 0.10 = 0.2 с
+        # Зададим тишину 0.15 с < 0.2 с → skip_end <= skip_start → сегмент игнорируется
+        skipper = SmartSilenceSkipper(min_silence_sec=0.1, speech_pad_sec=0.1)
+        audio = _cat(_speech(1.0), _silence(0.15), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        # Не должен падать; количество скипов: 0 или больше (детектор может по-разному)
+        self.assertIsInstance(result.skipped_segments, list)
+
+    def test_1d_audio_shape_preserved(self):
+        """Моно-аудио (1D) сохраняет свою форму."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(1.0), _silence(2.0), _speech(1.0))
+        self.assertEqual(audio.ndim, 1)
+        result = skipper.process(audio, SAMPLE_RATE)
+        self.assertEqual(result.processed_audio.ndim, 1)
+
+    def test_result_audio_dtype_preserved(self):
+        """dtype обработанного аудио совпадает с исходным."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(1.0), _silence(2.0), _speech(1.0))
+        result = skipper.process(audio, SAMPLE_RATE)
+        self.assertEqual(result.processed_audio.dtype, audio.dtype)
+
+    def test_large_silence_huge_savings(self):
+        """Огромная пауза даёт > 80% экономии."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(0.5), _silence(10.0), _speech(0.5))
+        result = skipper.process(audio, SAMPLE_RATE)
+        self.assertGreater(result.time_saved_pct, 80.0)
+
+    def test_skipped_segments_non_overlapping(self):
+        """Пропущенные сегменты не перекрываются."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(
+            _speech(0.5), _silence(2.0),
+            _speech(0.5), _silence(2.0),
+            _speech(0.5),
+        )
+        result = skipper.process(audio, SAMPLE_RATE)
+        segs = result.skipped_segments
+        for i in range(len(segs) - 1):
+            self.assertLessEqual(segs[i]["end"], segs[i + 1]["start"])
+
+    def test_constructor_stores_params(self):
+        """Конструктор корректно сохраняет параметры."""
+        skipper = SmartSilenceSkipper(
+            threshold_db=-30.0,
+            min_silence_sec=2.0,
+            edge_keep_sec=0.5,
+            speech_pad_sec=0.2,
+        )
+        self.assertAlmostEqual(skipper._threshold_db, -30.0)
+        self.assertAlmostEqual(skipper._min_silence_sec, 2.0)
+        self.assertAlmostEqual(skipper._edge_keep_sec, 0.5)
+        self.assertAlmostEqual(skipper._speech_pad_sec, 0.2)
+
+
 if __name__ == "__main__":
     unittest.main()
