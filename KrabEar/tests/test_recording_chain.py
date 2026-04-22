@@ -188,5 +188,120 @@ class RecordingChainIPCHandlersTestCase(unittest.TestCase):
             self._mgr.handle_add_to_chain({"chain_id": chain_id})
 
 
+class RecordingChainExtendedTestCase(unittest.TestCase):
+    """Дополнительные тесты для покрытия граничных случаев."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = RecordingChainManager(store=self._store)
+
+    # --- end_chain edge cases ---
+
+    def test_end_chain_idempotent(self) -> None:
+        """Повторный вызов end_chain не выбрасывает ошибки."""
+        chain_id = self._mgr.start_chain("Идемпотентность")
+        self._mgr.end_chain(chain_id)
+        # второй вызов должен пройти без исключения
+        self._mgr.end_chain(chain_id)
+        data = self._mgr.get_chain(chain_id)
+        self.assertIsNotNone(data["ended_at"])
+
+    def test_end_chain_unknown_raises(self) -> None:
+        """end_chain для несуществующей цепочки выбрасывает KeyError."""
+        with self.assertRaises(KeyError):
+            self._mgr.end_chain("non-existent-chain")
+
+    # --- add_to_chain edge cases ---
+
+    def test_add_to_chain_unknown_chain_raises(self) -> None:
+        """add_to_chain с неизвестным chain_id выбрасывает KeyError."""
+        with self.assertRaises(KeyError):
+            self._mgr.add_to_chain("unknown-chain-id", "item-1")
+
+    def test_add_to_chain_empty_item_id_raises(self) -> None:
+        """add_to_chain с пустым item_id выбрасывает ValueError."""
+        chain_id = self._mgr.start_chain("Пустой ID")
+        with self.assertRaises(ValueError):
+            self._mgr.add_to_chain(chain_id, "   ")
+
+    def test_add_multiple_items_order_preserved(self) -> None:
+        """Порядок добавления item_ids сохраняется."""
+        chain_id = self._mgr.start_chain("Порядок")
+        for i in range(5):
+            self._mgr.add_to_chain(chain_id, f"item-{i}")
+        data = self._mgr.get_chain(chain_id)
+        self.assertEqual(data["item_ids"], [f"item-{i}" for i in range(5)])
+
+    # --- list_chains ordering ---
+
+    def test_list_chains_sorted_newest_first(self) -> None:
+        """list_chains возвращает цепочки от новых к старым."""
+        id_a = self._mgr.start_chain("Первая")
+        id_b = self._mgr.start_chain("Вторая")
+        chains = self._mgr.list_chains()
+        # Последняя созданная должна быть первой в списке
+        self.assertEqual(chains[0]["chain_id"], id_b)
+        self.assertEqual(chains[1]["chain_id"], id_a)
+
+    def test_list_chains_summary_fields(self) -> None:
+        """Краткая форма цепочки содержит нужные поля."""
+        chain_id = self._mgr.start_chain("Поля")
+        self._mgr.add_to_chain(chain_id, "item-x")
+        chains = self._mgr.list_chains()
+        self.assertEqual(len(chains), 1)
+        c = chains[0]
+        for key in ("chain_id", "name", "created_at", "ended_at", "item_count"):
+            self.assertIn(key, c)
+        self.assertEqual(c["item_count"], 1)
+
+    # --- get_chain with missing store items ---
+
+    def test_get_chain_missing_store_items_fallback(self) -> None:
+        """get_chain возвращает fallback {id: iid} для несуществующих в store ID."""
+        chain_id = self._mgr.start_chain("Отсутствующие")
+        self._mgr.add_to_chain(chain_id, "ghost-item-id")
+        data = self._mgr.get_chain(chain_id)
+        # items должен содержать fallback
+        self.assertEqual(len(data["items"]), 1)
+        self.assertEqual(data["items"][0], {"id": "ghost-item-id"})
+
+    def test_get_chain_totals_zero_when_no_duration_key(self) -> None:
+        """Записи без поля duration_sec не влияют на total_duration_sec."""
+        # FakeHistoryItem.to_dict() возвращает "duration_sec", но RecordingChainManager
+        # ищет "duration_sec" через d.get("duration_sec", 0). Проверяем агрегацию.
+        self._store.add_fake_item("no-dur", "текст без длины", duration_sec=0.0)
+        chain_id = self._mgr.start_chain("Нулевая длина")
+        self._mgr.add_to_chain(chain_id, "no-dur")
+        data = self._mgr.get_chain(chain_id)
+        self.assertAlmostEqual(data["total_duration_sec"], 0.0)
+
+    # --- merge_chain_text ---
+
+    def test_merge_chain_text_skips_empty_texts(self) -> None:
+        """merge_chain_text не включает пустые строки в результат."""
+        self._store.add_fake_item("has-text", "Реальный текст")
+        self._store.add_fake_item("no-text", "")
+        chain_id = self._mgr.start_chain("Пропуск пустых")
+        self._mgr.add_to_chain(chain_id, "has-text")
+        self._mgr.add_to_chain(chain_id, "no-text")
+        text = self._mgr.merge_chain_text(chain_id)
+        self.assertIn("Реальный текст", text)
+        # двойного разделителя быть не должно (пустой пропущен)
+        self.assertNotIn("\n\n\n\n", text)
+
+    # --- IPC handle_end_chain ---
+
+    def test_handle_end_chain_missing_chain_id_raises(self) -> None:
+        """handle_end_chain без chain_id выбрасывает ValueError."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_end_chain({})
+
+    def test_handle_get_chain_missing_chain_id_raises(self) -> None:
+        """handle_get_chain без chain_id выбрасывает ValueError."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_get_chain({})
+
+
 if __name__ == "__main__":
     unittest.main()

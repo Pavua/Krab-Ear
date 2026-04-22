@@ -426,6 +426,104 @@ class TestMergeEdgeCases(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError)):
             self.merger.handle_merge_recordings({}, self.store)
 
+    # 31. merge_items с пустым списком (прямой вызов)
+    def test_merge_items_empty_list_raises(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self.merger.merge_items([], self.store)
+        self.assertIn("минимум 2", str(ctx.exception))
+
+    # 32. preview_merge с одним элементом тоже выбрасывает ValueError
+    def test_preview_merge_single_item_raises(self) -> None:
+        self._add("solo", "Единственный")
+        with self.assertRaises(ValueError):
+            self.merger.preview_merge(["solo"], self.store)
+
+    # 33. preview_merge с пустым списком выбрасывает ValueError
+    def test_preview_merge_empty_list_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.merger.preview_merge([], self.store)
+
+
+class TestMergeDiarizationExtended(unittest.TestCase):
+    """Расширенные тесты для _merge_diarization."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    # 34. Только один из двух имеет diarization: merged — False, возврат первого
+    def test_merge_diarization_one_none_one_valid(self) -> None:
+        d2 = {"speaker_segments": [{"speaker": "X", "start": 0.0, "end": 2.0}]}
+        self._add("md1", "No diag", ts="2026-04-12T10:00:00")
+        self._add("md2", "Has diag", ts="2026-04-12T10:01:00", diarization=d2)
+        result = self.merger.merge_items(["md1", "md2"], self.store)
+        merged_diag = result.get("diarization")
+        self.assertIsNotNone(merged_diag)
+        # должен вернуть объединённую структуру с merged=True (1 сегмент)
+        self.assertTrue(merged_diag.get("merged"))
+        self.assertEqual(len(merged_diag["speaker_segments"]), 1)
+
+    # 35. diarization без ключа speaker_segments (используется segments)
+    def test_merge_diarization_uses_segments_fallback_key(self) -> None:
+        d1 = {"segments": [{"speaker": "A", "start": 0.0, "end": 1.0}]}
+        d2 = {"segments": [{"speaker": "B", "start": 0.0, "end": 1.0}]}
+        self._add("seg1", "Text A", ts="2026-04-12T10:00:00", diarization=d1)
+        self._add("seg2", "Text B", ts="2026-04-12T10:01:00", diarization=d2)
+        result = self.merger.merge_items(["seg1", "seg2"], self.store)
+        merged_diag = result.get("diarization")
+        self.assertIsNotNone(merged_diag)
+        self.assertEqual(len(merged_diag["speaker_segments"]), 2)
+
+
+class TestMergeMetadataEdgeCases(unittest.TestCase):
+    """Edge cases для метаданных объединённой записи."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    # 36. Все элементы без confidence → confidence=None в результате
+    def test_merge_all_none_confidence_returns_none(self) -> None:
+        self._add("nc1", "A", ts="2026-04-12T10:00:00", confidence=None)
+        self._add("nc2", "B", ts="2026-04-12T10:01:00", confidence=None)
+        result = self.merger.merge_items(["nc1", "nc2"], self.store)
+        self.assertIsNone(result["confidence"])
+
+    # 37. Все элементы без duration → audio_duration_sec=None в результате
+    def test_merge_all_none_duration_returns_none(self) -> None:
+        self._add("nd1", "A", ts="2026-04-12T10:00:00", audio_duration_sec=None)
+        self._add("nd2", "B", ts="2026-04-12T10:01:00", audio_duration_sec=None)
+        result = self.merger.merge_items(["nd1", "nd2"], self.store)
+        self.assertIsNone(result["audio_duration_sec"])
+
+    # 38. Нет переведённых текстов → translated_text пустая строка
+    def test_merge_no_translated_text_is_empty(self) -> None:
+        self._add("nt1", "Hello", ts="2026-04-12T10:00:00")
+        self._add("nt2", "World", ts="2026-04-12T10:01:00")
+        result = self.merger.merge_items(["nt1", "nt2"], self.store)
+        self.assertEqual(result["translated_text"], "")
+
+    # 39. translation_mode='off' у всех → 'off' в результате
+    def test_merge_translation_mode_off_when_all_off(self) -> None:
+        self._add("tm1", "A", ts="2026-04-12T10:00:00", translation_mode="off")
+        self._add("tm2", "B", ts="2026-04-12T10:01:00", translation_mode="off")
+        result = self.merger.merge_items(["tm1", "tm2"], self.store)
+        self.assertEqual(result["translation_mode"], "off")
+
+    # 40. Результат содержит поле deleted_originals=False по умолчанию
+    def test_merge_result_has_deleted_originals_false(self) -> None:
+        self._add("del1", "First", ts="2026-04-12T10:00:00")
+        self._add("del2", "Second", ts="2026-04-12T10:01:00")
+        result = self.merger.merge_items(["del1", "del2"], self.store)
+        self.assertIn("deleted_originals", result)
+        self.assertFalse(result["deleted_originals"])
+
 
 if __name__ == "__main__":
     unittest.main()
