@@ -252,3 +252,104 @@ class TestAudioNormEdgeCases(unittest.TestCase):
         result = self.stage.process(ctx)
         # Should handle infinity gracefully
         self.assertIsNotNone(result.normalized_audio)
+
+
+class TestNoneAudioInput(unittest.TestCase):
+    """None audio_input — stage должна сделать soft-fail, не бросать исключений."""
+
+    def setUp(self):
+        self.stage = AudioNormalizationStage()
+
+    def test_none_input_does_not_raise(self):
+        ctx = _make_ctx(None)
+        try:
+            self.stage.process(ctx)
+        except Exception as exc:
+            self.fail(f"process(None) raised {exc!r}")
+
+    def test_none_input_appends_error(self):
+        ctx = _make_ctx(None)
+        result = self.stage.process(ctx)
+        self.assertTrue(len(result.errors) > 0)
+        self.assertIn("audio_normalization", result.errors[0])
+
+    def test_none_input_normalized_audio_passthrough(self):
+        ctx = _make_ctx(None)
+        result = self.stage.process(ctx)
+        self.assertIsNone(result.normalized_audio)
+
+    def test_should_run_returns_true_for_none(self):
+        ctx = _make_ctx(None)
+        self.assertTrue(self.stage.should_run(ctx))
+
+
+class TestMetadataPreservation(unittest.TestCase):
+    """Проверяем, что стадия не затирает поля контекста, не связанные с нормализацией."""
+
+    def setUp(self):
+        self.stage = AudioNormalizationStage()
+
+    def test_raw_text_preserved(self):
+        ctx = PipelineContext(audio_input=np.zeros(64, dtype=np.float32))
+        ctx.raw_text = "previous text"
+        result = self.stage.process(ctx)
+        self.assertEqual(result.raw_text, "previous text")
+
+    def test_session_id_preserved(self):
+        ctx = PipelineContext(audio_input=np.zeros(64, dtype=np.float32))
+        sid = ctx.session_id
+        result = self.stage.process(ctx)
+        self.assertEqual(result.session_id, sid)
+
+    def test_lang_hint_preserved(self):
+        ctx = PipelineContext(
+            audio_input=np.zeros(64, dtype=np.float32),
+            lang_hint="ru",
+        )
+        result = self.stage.process(ctx)
+        self.assertEqual(result.lang_hint, "ru")
+
+    def test_extra_vocabulary_preserved(self):
+        ctx = PipelineContext(
+            audio_input=np.zeros(64, dtype=np.float32),
+            extra_vocabulary=["краб", "уши"],
+        )
+        result = self.stage.process(ctx)
+        self.assertEqual(result.extra_vocabulary, ["краб", "уши"])
+
+    def test_is_preview_preserved(self):
+        ctx = PipelineContext(
+            audio_input=np.zeros(64, dtype=np.float32),
+            is_preview=True,
+        )
+        result = self.stage.process(ctx)
+        self.assertTrue(result.is_preview)
+
+    def test_cleanup_profile_preserved(self):
+        ctx = PipelineContext(
+            audio_input=np.zeros(64, dtype=np.float32),
+            cleanup_profile="strict",
+        )
+        result = self.stage.process(ctx)
+        self.assertEqual(result.cleanup_profile, "strict")
+
+    def test_existing_errors_preserved(self):
+        ctx = PipelineContext(audio_input=np.zeros(64, dtype=np.float32))
+        ctx.errors.append("prior_error")
+        result = self.stage.process(ctx)
+        self.assertIn("prior_error", result.errors)
+
+    def test_confidence_preserved(self):
+        ctx = PipelineContext(audio_input=np.zeros(64, dtype=np.float32))
+        ctx.confidence = 0.87
+        result = self.stage.process(ctx)
+        self.assertAlmostEqual(result.confidence, 0.87)
+
+    def test_stage_returns_same_context_object(self):
+        ctx = PipelineContext(audio_input=np.zeros(64, dtype=np.float32))
+        result = self.stage.process(ctx)
+        self.assertIs(result, ctx)
+
+
+if __name__ == "__main__":
+    unittest.main()
