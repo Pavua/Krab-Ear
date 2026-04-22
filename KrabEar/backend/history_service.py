@@ -2264,7 +2264,6 @@ class HistoryService:
             backup_date (str): timestamp резервной копии
         """
         import shutil
-        import json as _json
 
         raw_path = str(params.get("backup_path", "")).strip()
         if not raw_path:
@@ -2324,8 +2323,6 @@ class HistoryService:
         Возвращает:
             backups (list): список объектов с полями path, backup_date, entries, size_mb
         """
-        import json as _json
-
         backups_dir = Path(self.store.data_dir) / "backups"
         if not backups_dir.exists():
             return {"backups": []}

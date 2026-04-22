@@ -196,7 +196,7 @@ class TestTranslationEdgeCases(unittest.TestCase):
         translator = FakeTranslator(FakeTranslationResult("", "ok"))
         stage = TranslationStage(translator=translator)
         ctx = make_ctx(translation_mode="ru_to_es", final_text="", cleaned_text="", raw_text="")
-        result = stage.process(ctx)
+        stage.process(ctx)
         # Should translate empty string, result is None
         translator.calls[0]["text"] == ""
 

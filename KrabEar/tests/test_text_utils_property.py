@@ -9,7 +9,6 @@
 
 import sys
 import os
-import re
 import unicodedata
 
 # Убеждаемся, что KrabEar/ в PYTHONPATH

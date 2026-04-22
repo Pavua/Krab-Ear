@@ -146,7 +146,7 @@ class PhraseDedupTestCase(unittest.TestCase):
         """Phrases longer than 8 words are NOT deduplicated (max_words guard)."""
         long_phrase = "Это очень длинная фраза с девятью отдельными словами которая не должна"
         raw = f"{long_phrase}. {long_phrase}."
-        cleaned = TextUtils.cleanup_transcript(raw)
+        TextUtils.cleanup_transcript(raw)
         # Long phrases are outside the dedup range (max_words=8)
         # so the repeat should be kept
         word_count = len(long_phrase.split())
