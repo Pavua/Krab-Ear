@@ -137,6 +137,124 @@ class TestSupportedLanguages(unittest.TestCase):
             self.assertIn(lang, langs)
 
 
+class TestGetStopWordsExtra(unittest.TestCase):
+    """Дополнительные тесты get_stop_words."""
+
+    def test_lang_code_uppercase_accepted(self):
+        words = StopWords.get_stop_words("RU")
+        self.assertGreater(len(words), 100)
+
+    def test_lang_code_with_whitespace(self):
+        words = StopWords.get_stop_words("  en  ")
+        self.assertGreater(len(words), 100)
+
+    def test_result_is_frozenset_always(self):
+        for lang in ("ru", "es", "en", "uk", "zz"):
+            result = StopWords.get_stop_words(lang)
+            self.assertIsInstance(result, frozenset)
+
+    def test_all_languages_have_reasonable_size(self):
+        # Все языки должны иметь > 50 стоп-слов
+        for lang in ("ru", "es", "en", "uk"):
+            words = StopWords.get_stop_words(lang)
+            self.assertGreater(len(words), 50, msg=f"Too few stop words for {lang}")
+
+    def test_frozensets_are_immutable(self):
+        words = StopWords.get_stop_words("en")
+        with self.assertRaises((AttributeError, TypeError)):
+            words.add("newword")  # type: ignore[attr-defined]
+
+
+class TestIsStopWordExtra(unittest.TestCase):
+    """Дополнительные тесты is_stop_word."""
+
+    def test_empty_string_not_stop_word(self):
+        self.assertFalse(StopWords.is_stop_word(""))
+
+    def test_whitespace_only_not_stop_word(self):
+        self.assertFalse(StopWords.is_stop_word("   "))
+
+    def test_word_with_leading_trailing_spaces(self):
+        # strip() применяется внутри is_stop_word
+        self.assertTrue(StopWords.is_stop_word("  в  "))
+
+    def test_unknown_lang_returns_false(self):
+        self.assertFalse(StopWords.is_stop_word("в", "zz"))
+
+    def test_lang_uppercase_accepted(self):
+        self.assertTrue(StopWords.is_stop_word("the", "EN"))
+
+    def test_mixed_case_word(self):
+        self.assertTrue(StopWords.is_stop_word("THE", "en"))
+        self.assertTrue(StopWords.is_stop_word("И", "ru"))
+
+
+class TestFilterTextExtra(unittest.TestCase):
+    """Дополнительные тесты filter_text."""
+
+    def test_preserves_order(self):
+        tokens = ["быстрый", "лиса", "прыгает", "над", "ленивым", "псом"]
+        result = StopWords.filter_text(tokens, "ru")
+        # Порядок сохраняется
+        expected = [t for t in tokens if t not in StopWords.get_stop_words("ru")]
+        self.assertEqual(result, expected)
+
+    def test_min_length_default_is_2(self):
+        # Слово длиной 1 удаляется по умолчанию
+        tokens = ["a", "ok", "word"]
+        result = StopWords.filter_text(tokens, "en")
+        self.assertNotIn("a", result)
+
+    def test_min_length_1_keeps_short_non_stop_words(self):
+        tokens = ["a", "x", "ok"]
+        result = StopWords.filter_text(tokens, "en", min_length=1)
+        # "a" — стоп-слово en, поэтому удаляется; "x" — нет, остаётся
+        self.assertIn("x", result)
+        self.assertNotIn("a", result)
+
+    def test_min_length_0_keeps_everything_except_stop_words(self):
+        tokens = ["в", "кот"]
+        result = StopWords.filter_text(tokens, "ru", min_length=0)
+        self.assertNotIn("в", result)
+        self.assertIn("кот", result)
+
+    def test_duplicate_words_preserved(self):
+        tokens = ["слово", "слово", "кот"]
+        result = StopWords.filter_text(tokens, "ru")
+        self.assertEqual(result.count("слово"), 2)
+
+    def test_no_lang_and_min_length_combo(self):
+        tokens = ["в", "the", "el", "кот", "a"]
+        result = StopWords.filter_text(tokens, min_length=3)
+        self.assertNotIn("в", result)
+        self.assertNotIn("the", result)
+        # "кот" длиной 3 и не стоп-слово → должно остаться
+        self.assertIn("кот", result)
+
+    def test_returns_list(self):
+        result = StopWords.filter_text(["test", "и"])
+        self.assertIsInstance(result, list)
+
+
+class TestSupportedLanguagesExtra(unittest.TestCase):
+    def test_returns_list(self):
+        langs = StopWords.supported_languages()
+        self.assertIsInstance(langs, list)
+
+    def test_all_required_langs_present(self):
+        langs = StopWords.supported_languages()
+        for lang in ("ru", "es", "en", "uk"):
+            self.assertIn(lang, langs)
+
+    def test_no_duplicates(self):
+        langs = StopWords.supported_languages()
+        self.assertEqual(len(langs), len(set(langs)))
+
+    def test_all_codes_are_strings(self):
+        for lang in StopWords.supported_languages():
+            self.assertIsInstance(lang, str)
+
+
 class TestHistoryServiceUsesStopWords(unittest.TestCase):
     """Smoke-тест: _STOP_WORDS в HistoryService содержит слова из всех 4 языков."""
 

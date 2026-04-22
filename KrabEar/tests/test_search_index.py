@@ -158,5 +158,201 @@ class TestSearchIndex(unittest.TestCase):
         self.assertIsInstance(results, list)
 
 
+class TestTokenizeExtra(unittest.TestCase):
+    """Дополнительные тесты _tokenize."""
+
+    def test_empty_string_returns_empty_list(self):
+        self.assertEqual(_tokenize(""), [])
+
+    def test_digits_only(self):
+        tokens = _tokenize("2024")
+        self.assertIn("2024", tokens)
+
+    def test_only_punctuation_returns_empty(self):
+        tokens = _tokenize("!!! ???")
+        self.assertEqual(tokens, [])
+
+    def test_spanish_characters(self):
+        # Символы вне [а-яёa-z0-9] не токенизируются как отдельные токены
+        tokens = _tokenize("hola")
+        self.assertIn("hola", tokens)
+
+    def test_newlines_and_tabs(self):
+        tokens = _tokenize("hello\tworld\ntest")
+        self.assertIn("hello", tokens)
+        self.assertIn("world", tokens)
+        self.assertIn("test", tokens)
+
+
+class TestStemRuExtra(unittest.TestCase):
+    """Дополнительные тесты _stem_ru."""
+
+    def test_verbal_suffix_ать(self):
+        # "писать" → стемминг убирает суффикс
+        result = _stem_ru("писать")
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) >= 3)
+
+    def test_verbal_suffix_ться(self):
+        result = _stem_ru("бороться")
+        self.assertLess(len(result), len("бороться"))
+
+    def test_noun_suffix_ами(self):
+        result = _stem_ru("столами")
+        self.assertLess(len(result), len("столами"))
+
+    def test_adjective_suffix_ого(self):
+        result = _stem_ru("красного")
+        self.assertLess(len(result), len("красного"))
+
+    def test_exactly_min_length(self):
+        # слово длиной ровно 3 → возвращается без изменений
+        self.assertEqual(_stem_ru("кот"), "кот")
+
+    def test_stem_is_string(self):
+        self.assertIsInstance(_stem_ru("тестирование"), str)
+
+
+class TestSearchIndexExtra(unittest.TestCase):
+    """Дополнительные тесты SearchIndex."""
+
+    def _build_default(self) -> SearchIndex:
+        idx = SearchIndex()
+        idx.build_index([
+            {"id": "1", "text": "Добрый день коллеги", "source_text": "", "translated_text": ""},
+            {"id": "2", "text": "Всем привет как дела", "source_text": "", "translated_text": ""},
+            {"id": "3", "text": "Тестирование системы поиска", "source_text": "", "translated_text": ""},
+        ])
+        return idx
+
+    def test_whitespace_only_query_returns_empty(self):
+        idx = self._build_default()
+        self.assertEqual(idx.search("   "), [])
+
+    def test_build_empty_list(self):
+        idx = SearchIndex()
+        idx.build_index([])
+        stats = idx.get_index_stats()
+        self.assertEqual(stats["items_indexed"], 0)
+        self.assertEqual(stats["unique_words"], 0)
+        self.assertEqual(idx.search("hello"), [])
+
+    def test_item_without_id_skipped(self):
+        idx = SearchIndex()
+        idx.build_index([{"text": "orphan text"}])
+        # Документ без id должен игнорироваться
+        self.assertEqual(idx.get_index_stats()["items_indexed"], 0)
+
+    def test_stats_signature_not_none_after_build(self):
+        idx = self._build_default()
+        stats = idx.get_index_stats()
+        self.assertIsNotNone(stats["signature"])
+        self.assertIsInstance(stats["signature"], str)
+
+    def test_source_text_indexed(self):
+        idx = SearchIndex()
+        idx.build_index([
+            {"id": "s1", "text": "", "source_text": "уникальноеслово", "translated_text": ""}
+        ])
+        results = idx.search("уникальноеслово")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].item_id, "s1")
+
+    def test_item_text_static_all_fields(self):
+        item = {
+            "text": "главный",
+            "source_text": "дополнительный",
+            "translated_text": "translated",
+        }
+        text = SearchIndex._item_text(item)
+        self.assertIn("главный", text)
+        self.assertIn("дополнительный", text)
+        self.assertIn("translated", text)
+
+    def test_item_text_static_missing_fields(self):
+        # Если поля отсутствуют — не должно быть KeyError
+        text = SearchIndex._item_text({})
+        self.assertIsInstance(text, str)
+
+    def test_make_snippet_no_match_returns_prefix(self):
+        snippet = SearchIndex._make_snippet("some long text here", ["zzz"])
+        # Если совпадений нет — возвращает первые 60 символов
+        self.assertTrue(snippet.startswith("some"))
+
+    def test_make_snippet_match_at_start(self):
+        snippet = SearchIndex._make_snippet("hello world test", ["hello"])
+        self.assertIn("hello", snippet.lower())
+
+    def test_make_snippet_match_in_middle(self):
+        snippet = SearchIndex._make_snippet(
+            "aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo ppp qqq rrr sss ttt",
+            ["mmm"],
+        )
+        self.assertIn("mmm", snippet.lower())
+
+    def test_search_returns_sorted_by_score(self):
+        # Все документы имеют одинаковый score → сортировка по item_id
+        idx = SearchIndex()
+        idx.build_index([
+            {"id": "b", "text": "общий токен один", "source_text": "", "translated_text": ""},
+            {"id": "a", "text": "общий токен два", "source_text": "", "translated_text": ""},
+        ])
+        results = idx.search("общий")
+        ids = [r.item_id for r in results]
+        # Оба должны присутствовать; порядок: score desc, id asc
+        self.assertEqual(sorted(ids), ids)
+
+    def test_matched_terms_in_result(self):
+        idx = self._build_default()
+        results = idx.search("привет")
+        self.assertTrue(len(results) > 0)
+        # matched_terms — список строк
+        for term in results[0].matched_terms:
+            self.assertIsInstance(term, str)
+
+    def test_build_index_twice_same_data_stable_signature(self):
+        idx = self._build_default()
+        sig1 = idx._signature
+        idx.build_index([
+            {"id": "1", "text": "Добрый день коллеги", "source_text": "", "translated_text": ""},
+            {"id": "2", "text": "Всем привет как дела", "source_text": "", "translated_text": ""},
+            {"id": "3", "text": "Тестирование системы поиска", "source_text": "", "translated_text": ""},
+        ])
+        self.assertEqual(idx._signature, sig1)
+
+    def test_compute_signature_deterministic(self):
+        items = [{"id": "x", "text": "one two three", "translated_text": ""}]
+        s1 = SearchIndex._compute_signature(items)
+        s2 = SearchIndex._compute_signature(items)
+        self.assertEqual(s1, s2)
+
+    def test_compute_signature_changes_with_different_data(self):
+        items_a = [{"id": "x", "text": "aaa", "translated_text": ""}]
+        items_b = [{"id": "x", "text": "bbb", "translated_text": ""}]
+        self.assertNotEqual(
+            SearchIndex._compute_signature(items_a),
+            SearchIndex._compute_signature(items_b),
+        )
+
+    def test_limit_zero_returns_empty(self):
+        idx = self._build_default()
+        results = idx.search("привет", limit=0)
+        self.assertEqual(results, [])
+
+    def test_single_doc_index_search_hit(self):
+        idx = SearchIndex()
+        idx.build_index([{"id": "only", "text": "единственный документ", "source_text": "",
+                          "translated_text": ""}])
+        results = idx.search("единственный")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].item_id, "only")
+
+    def test_search_score_equals_query_token_count(self):
+        idx = self._build_default()
+        results = idx.search("привет")
+        # one query token → score = 1
+        self.assertEqual(results[0].score, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
