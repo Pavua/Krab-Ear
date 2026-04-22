@@ -214,5 +214,137 @@ class TestModelCacheManagerFolderToModelName(unittest.TestCase):
         self.assertEqual(result, folder)
 
 
+class TestModelCacheManagerGetCacheSizeBytes(unittest.TestCase):
+    """Тесты get_cache_size() — возвращает байты."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache_dir = Path(self.tmp)
+        self.mgr = ModelCacheManager(cache_dir=self.cache_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_empty_cache_returns_zero_bytes(self):
+        self.assertEqual(self.mgr.get_cache_size(), 0)
+
+    def test_returns_bytes_not_mb(self):
+        _make_model_dir(self.cache_dir, "openai/whisper-tiny", size_bytes=1024 * 1024)  # 1 MB
+        size = self.mgr.get_cache_size()
+        # 1 MB = 1 048 576 bytes — допускаем небольшую ФС погрешность
+        self.assertGreater(size, 1_000_000)
+
+    def test_sums_multiple_models_bytes(self):
+        _make_model_dir(self.cache_dir, "m/a", size_bytes=512 * 1024)
+        _make_model_dir(self.cache_dir, "m/b", size_bytes=512 * 1024)
+        size = self.mgr.get_cache_size()
+        self.assertGreater(size, 900_000)
+
+    def test_nonexistent_dir_returns_zero(self):
+        mgr = ModelCacheManager(cache_dir=Path(self.tmp) / "ghost")
+        self.assertEqual(mgr.get_cache_size(), 0)
+
+    def test_non_model_dirs_not_counted(self):
+        (self.cache_dir / "datasets--foo").mkdir()
+        (self.cache_dir / "datasets--foo" / "data.bin").write_bytes(b"\x00" * 1024 * 1024)
+        self.assertEqual(self.mgr.get_cache_size(), 0)
+
+
+class TestModelCacheManagerEvict(unittest.TestCase):
+    """Тесты evict() — удаление модели с диска."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache_dir = Path(self.tmp)
+        self.mgr = ModelCacheManager(cache_dir=self.cache_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_evict_existing_model_returns_true(self):
+        _make_model_dir(self.cache_dir, "openai/whisper-small")
+        result = self.mgr.evict("openai/whisper-small")
+        self.assertTrue(result)
+
+    def test_evict_removes_from_disk(self):
+        _make_model_dir(self.cache_dir, "openai/whisper-small")
+        self.mgr.evict("openai/whisper-small")
+        self.assertFalse(self.mgr.is_model_cached("openai/whisper-small"))
+
+    def test_evict_nonexistent_returns_false(self):
+        result = self.mgr.evict("nonexistent/model")
+        self.assertFalse(result)
+
+    def test_evict_by_folder_format(self):
+        _make_model_dir(self.cache_dir, "Helsinki-NLP/opus-mt-ru-es")
+        result = self.mgr.evict("models--Helsinki-NLP--opus-mt-ru-es")
+        self.assertTrue(result)
+        self.assertFalse(self.mgr.is_model_cached("Helsinki-NLP/opus-mt-ru-es"))
+
+    def test_evict_decreases_cache_size(self):
+        _make_model_dir(self.cache_dir, "big/model", size_bytes=1024 * 1024)
+        size_before = self.mgr.get_cache_size()
+        self.mgr.evict("big/model")
+        size_after = self.mgr.get_cache_size()
+        self.assertLess(size_after, size_before)
+
+    def test_evict_reduces_list_count(self):
+        _make_model_dir(self.cache_dir, "a/model")
+        _make_model_dir(self.cache_dir, "b/model")
+        self.mgr.evict("a/model")
+        models = self.mgr.list_cached_models()
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0].name, "b/model")
+
+
+class TestModelCacheManagerSizeLimit(unittest.TestCase):
+    """Тесты size_limit_mb и enforce_size_limit()."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache_dir = Path(self.tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_limit_is_over_size_limit_returns_false(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir)
+        _make_model_dir(self.cache_dir, "big/model", size_bytes=100 * 1024 * 1024)
+        self.assertFalse(mgr.is_over_size_limit())
+
+    def test_over_limit_returns_true(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir, size_limit_mb=0.1)
+        _make_model_dir(self.cache_dir, "big/model", size_bytes=2 * 1024 * 1024)
+        self.assertTrue(mgr.is_over_size_limit())
+
+    def test_under_limit_returns_false(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir, size_limit_mb=1000.0)
+        _make_model_dir(self.cache_dir, "small/model", size_bytes=1024)
+        self.assertFalse(mgr.is_over_size_limit())
+
+    def test_enforce_size_limit_evicts_when_over(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir, size_limit_mb=0.1)
+        _make_model_dir(self.cache_dir, "model/a", size_bytes=2 * 1024 * 1024)
+        evicted = mgr.enforce_size_limit()
+        self.assertTrue(len(evicted) > 0)
+        self.assertFalse(mgr.is_over_size_limit())
+
+    def test_enforce_size_limit_noop_when_under(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir, size_limit_mb=1000.0)
+        _make_model_dir(self.cache_dir, "model/a", size_bytes=1024)
+        evicted = mgr.enforce_size_limit()
+        self.assertEqual(evicted, [])
+        self.assertEqual(len(mgr.list_cached_models()), 1)
+
+    def test_enforce_size_limit_no_limit_set(self):
+        mgr = ModelCacheManager(cache_dir=self.cache_dir)
+        _make_model_dir(self.cache_dir, "model/a", size_bytes=1024)
+        evicted = mgr.enforce_size_limit()
+        self.assertEqual(evicted, [])
+
+
 if __name__ == "__main__":
     unittest.main()

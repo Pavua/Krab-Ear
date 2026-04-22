@@ -120,6 +120,60 @@ class UsageTracker:
             "peak_day": peak_day,
         }
 
+    def get_daily_stats(self, for_date: date) -> dict[str, Any]:
+        """Возвращает статистику за конкретный день.
+
+        Returns:
+            {"recordings": int, "duration_sec": float, "words": int}
+        """
+        with self._lock:
+            entry = self._daily.get(for_date.isoformat(), {})
+        return {
+            "recordings": entry.get("recordings", 0),
+            "duration_sec": round(entry.get("duration_sec", 0.0), 2),
+            "words": entry.get("words", 0),
+        }
+
+    def get_weekly(self) -> dict[str, Any]:
+        """Возвращает агрегированную статистику за последние 7 дней (включая сегодня)."""
+        today = date.today()
+        with self._lock:
+            daily_copy = dict(self._daily)
+        recordings = 0
+        duration = 0.0
+        words = 0
+        for i in range(7):
+            d = (today - timedelta(days=i)).isoformat()
+            entry = daily_copy.get(d, {})
+            recordings += entry.get("recordings", 0)
+            duration += entry.get("duration_sec", 0.0)
+            words += entry.get("words", 0)
+        return {
+            "recordings": recordings,
+            "total_duration_sec": round(duration, 2),
+            "total_words": words,
+        }
+
+    def get_monthly(self) -> dict[str, Any]:
+        """Возвращает агрегированную статистику за последние 30 дней (включая сегодня)."""
+        today = date.today()
+        with self._lock:
+            daily_copy = dict(self._daily)
+        recordings = 0
+        duration = 0.0
+        words = 0
+        for i in range(30):
+            d = (today - timedelta(days=i)).isoformat()
+            entry = daily_copy.get(d, {})
+            recordings += entry.get("recordings", 0)
+            duration += entry.get("duration_sec", 0.0)
+            words += entry.get("words", 0)
+        return {
+            "recordings": recordings,
+            "total_duration_sec": round(duration, 2),
+            "total_words": words,
+        }
+
     # ------------------------------------------------------------------
     # Внутренние методы
     # ------------------------------------------------------------------
