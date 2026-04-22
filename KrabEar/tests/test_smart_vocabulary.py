@@ -314,5 +314,86 @@ class TestVocabularyStoreIntegration(unittest.TestCase):
         self.assertEqual(len(loaded), len(set(loaded)))
 
 
+class TestSuggestFromHistoryFormat(unittest.TestCase):
+    """get_vocabulary_suggestions возвращает dict с полями word/frequency/confidence."""
+
+    def setUp(self) -> None:
+        self.builder = SmartVocabularyBuilder()
+
+    def test_suggestion_word_field_is_string(self) -> None:
+        items = [_make_item("Метод MachineLearning применяется") for _ in range(3)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=2)
+        for s in suggestions:
+            self.assertIsInstance(s["word"], str)
+
+    def test_suggestion_frequency_is_int(self) -> None:
+        items = [_make_item("Метод MachineLearning применяется") for _ in range(3)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=2)
+        for s in suggestions:
+            self.assertIsInstance(s["frequency"], int)
+
+    def test_suggestion_confidence_is_float_in_range(self) -> None:
+        items = [_make_item("Метод MachineLearning применяется") for _ in range(4)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=2)
+        for s in suggestions:
+            self.assertIsInstance(s["confidence"], float)
+            self.assertGreaterEqual(s["confidence"], 0.0)
+            self.assertLessEqual(s["confidence"], 1.0)
+
+    def test_suggestion_source_field_is_string(self) -> None:
+        items = [_make_item("Технология DataPipeline применяется") for _ in range(3)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=2)
+        for s in suggestions:
+            self.assertIsInstance(s["source"], str)
+
+
+class TestThresholdFiltering(unittest.TestCase):
+    """Проверяет фильтрацию по min_frequency."""
+
+    def setUp(self) -> None:
+        self.builder = SmartVocabularyBuilder()
+
+    def test_word_below_threshold_excluded(self) -> None:
+        """Слово встречается 1 раз, threshold=3 → не попадает в результат."""
+        items = [_make_item("Используем MachineLearning для анализа")]  # 1 раз
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=3)
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertNotIn("machinelearning", words_lower)
+
+    def test_word_at_threshold_included(self) -> None:
+        """Слово встречается ровно threshold раз → попадает."""
+        items = [_make_item("Используем MachineLearning для анализа") for _ in range(3)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=3)
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertIn("machinelearning", words_lower)
+
+    def test_threshold_one_accepts_all_candidates(self) -> None:
+        """min_frequency=1 — все кандидаты, встречающиеся хотя бы раз."""
+        items = [_make_item("Метод SystemDesign применяется для анализа")]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=1)
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertIn("systemdesign", words_lower)
+
+    def test_build_vocabulary_threshold_filters_low_freq_words(self) -> None:
+        """build_vocabulary с min_frequency=5 исключает слова встречающиеся реже."""
+        # Одно слово встречается 3 раза, другое — 6
+        items_rare = [_make_item("Технология DataScience применяется") for _ in range(3)]
+        items_common = [_make_item("Метод MachineLearning применяется в задаче") for _ in range(6)]
+        items = items_common + items_rare
+        update = self.builder.build_vocabulary(items, min_frequency=5)
+        lower_words = [w.lower() for w in update.new_words]
+        # MachineLearning (6 раз) должен быть включён
+        self.assertIn("machinelearning", lower_words)
+        # DataScience (3 раза) при threshold=5 — не должен
+        self.assertNotIn("datascience", lower_words)
+
+    def test_no_duplicates_in_build_vocabulary(self) -> None:
+        """build_vocabulary не возвращает дублей."""
+        items = [_make_item(f"Метод MachineLearning применяется {i}") for i in range(5)]
+        update = self.builder.build_vocabulary(items, min_frequency=3)
+        lower_words = [w.lower() for w in update.new_words]
+        self.assertEqual(len(lower_words), len(set(lower_words)))
+
+
 if __name__ == "__main__":
     unittest.main()

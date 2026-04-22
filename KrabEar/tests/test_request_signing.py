@@ -303,6 +303,68 @@ class TestRoundTrip(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestEmptyPayloadEdgeCases(unittest.TestCase):
+    """Edge cases: пустые params, пустой метод, нестандартные входные данные."""
+
+    def setUp(self) -> None:
+        self.signer = RequestSigner()
+        self.secret = RequestSigner.generate_secret()
+
+    def test_empty_params_sign_and_verify(self) -> None:
+        """Пустой dict params — базовый случай."""
+        signed = self.signer.sign_request("ping", {}, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, {}, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertTrue(ok)
+
+    def test_nested_params_sign_and_verify(self) -> None:
+        """Вложенные params корректно сериализуются."""
+        params = {"nested": {"key": [1, 2, 3]}, "flag": True}
+        signed = self.signer.sign_request("update_settings", params, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, params, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertTrue(ok)
+
+    def test_unicode_params_sign_and_verify(self) -> None:
+        """Unicode-значения в params."""
+        params = {"text": "Привет мир", "lang": "ru"}
+        signed = self.signer.sign_request("transcribe", params, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, params, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertTrue(ok)
+
+    def test_empty_params_tamper_detected(self) -> None:
+        """Добавление поля к изначально пустым params → подпись не проходит."""
+        signed = self.signer.sign_request("ping", {}, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, {"injected": True}, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertFalse(ok)
+
+    def test_signature_deterministic_same_inputs(self) -> None:
+        """Одни и те же входные данные → одна и та же подпись."""
+        ts = 1_700_000_000.0
+        nonce = "fixed_nonce_abc"
+        sig1 = RequestSigner._compute_signature("ping", {}, self.secret, ts, nonce)
+        sig2 = RequestSigner._compute_signature("ping", {}, self.secret, ts, nonce)
+        self.assertEqual(sig1, sig2)
+
+    def test_signature_differs_for_different_params(self) -> None:
+        """Разные params → разные подписи."""
+        ts = 1_700_000_000.0
+        nonce = "fixed_nonce_abc"
+        sig_empty = RequestSigner._compute_signature("ping", {}, self.secret, ts, nonce)
+        sig_with_data = RequestSigner._compute_signature("ping", {"x": 1}, self.secret, ts, nonce)
+        self.assertNotEqual(sig_empty, sig_with_data)
+
+
 # ---------------------------------------------------------------------------
 # Вспомогательный метод для тестов — добавляем к RequestSigner через monkey-patch
 # ---------------------------------------------------------------------------
