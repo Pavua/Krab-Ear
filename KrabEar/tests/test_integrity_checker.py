@@ -260,5 +260,123 @@ class IntegrityCheckerIPCTestCase(unittest.TestCase):
         self.assertIn("details", result)
 
 
+class IntegrityCheckerEdgeCasesTestCase(unittest.TestCase):
+    """Граничные случаи: пустые файлы, полностью corrupted данные, пустая директория."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.checker = IntegrityChecker()
+
+    def test_empty_history_file_valid(self) -> None:
+        """Пустой history.ndjson не вызывает ошибок JSON."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text("", encoding="utf-8")
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.invalid_json_lines, 0)
+        self.assertEqual(report.total_items, 0)
+
+    def test_all_corrupt_history_file(self) -> None:
+        """Файл, состоящий только из невалидных строк, сообщает об ошибках."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            "NOT JSON\nALSO NOT JSON\n{broken\n",
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.invalid_json_lines, 3)
+        self.assertIn(report.status, ("warnings", "errors"))
+
+    def test_repair_all_corrupt_leaves_empty_file(self) -> None:
+        """После repair() файл содержит только валидные строки; если их нет — пустой файл."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text("GARBAGE\nMORE GARBAGE\n", encoding="utf-8")
+        report = self.checker.check_integrity(self.data_dir)
+        self.checker.repair(self.data_dir, report)
+        content = history_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            if line.strip():
+                json.loads(line)  # должно не бросать
+
+    def test_check_empty_data_dir_no_files(self) -> None:
+        """Директория без каких-либо файлов не вызывает исключений."""
+        empty_dir = Path(self.tmp.name) / "empty"
+        empty_dir.mkdir()
+        report = self.checker.check_integrity(empty_dir)
+        self.assertIsInstance(report, IntegrityReport)
+        self.assertEqual(report.total_items, 0)
+        self.assertEqual(report.invalid_json_lines, 0)
+
+    def test_repair_without_history_file_is_noop(self) -> None:
+        """repair() без history.ndjson не крашит и возвращает fixed=0."""
+        empty_dir = Path(self.tmp.name) / "empty2"
+        empty_dir.mkdir()
+        report = self.checker.check_integrity(empty_dir)
+        result = self.checker.repair(empty_dir, report)
+        self.assertIsInstance(result, RepairResult)
+        self.assertEqual(result.fixed, 0)
+
+    def test_repair_atomic_tmp_file_cleaned_up(self) -> None:
+        """После repair() временный .tmp файл не остаётся на диске."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id":"1","ts":"2024-01-01T00:00:00","text":"ok"}\nBAD LINE\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        self.checker.repair(self.data_dir, report)
+        tmp_path = history_path.with_suffix(".ndjson.tmp")
+        self.assertFalse(tmp_path.exists())
+
+    def test_only_whitespace_lines_not_counted_as_invalid(self) -> None:
+        """Пустые/пробельные строки не считаются невалидным JSON."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id":"1","ts":"2024-01-01T00:00:00","text":"ok"}\n\n   \n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.invalid_json_lines, 0)
+        self.assertEqual(report.total_items, 1)
+
+    def test_nonexistent_tombstones_file_no_orphans(self) -> None:
+        """Отсутствующий tombstones-файл → orphaned_tombstones=0."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id":"1","ts":"2024-01-01T00:00:00","text":"ok"}\n',
+            encoding="utf-8",
+        )
+        # tombstones файл намеренно не создаём
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.orphaned_tombstones, 0)
+
+    def test_check_and_repair_idempotent(self) -> None:
+        """Двойной repair() на одном файле даёт одинаковый результат."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id":"1","ts":"2024-01-01T00:00:00","text":"ok"}\nBAD\n',
+            encoding="utf-8",
+        )
+        report1 = self.checker.check_integrity(self.data_dir)
+        self.checker.repair(self.data_dir, report1)
+
+        report2 = self.checker.check_integrity(self.data_dir)
+        result2 = self.checker.repair(self.data_dir, report2)
+        # Второй repair не должен найти что чинить
+        self.assertEqual(result2.fixed, 0)
+
+    def test_report_status_ok_when_no_errors(self) -> None:
+        """Статус 'ok' когда нет ни ошибок ни предупреждений."""
+        history_path = self.data_dir / "history.ndjson"
+        history_path.write_text(
+            '{"id":"1","ts":"2024-01-01T00:00:00","text":"clean"}\n',
+            encoding="utf-8",
+        )
+        report = self.checker.check_integrity(self.data_dir)
+        self.assertEqual(report.status, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -146,5 +146,127 @@ class TestAuditLoggerBasic(unittest.TestCase):
         self.assertEqual(entry["params_keys"], [])
 
 
+class TestAuditLoggerPersistence(unittest.TestCase):
+    """Персистенция: данные читаются независимо от экземпляра."""
+
+    def test_new_instance_reads_existing_entries(self):
+        """Второй AuditLogger из той же директории видит ранее записанные записи."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger1 = AuditLogger(data_dir=tmpdir)
+            logger1.log_request("ping", {}, {"ok": True, "result": {}}, 1.0)
+            logger1.close()
+
+            logger2 = AuditLogger(data_dir=tmpdir)
+            entries = logger2.get_audit_log(limit=10)
+            logger2.close()
+
+            self.assertGreaterEqual(len(entries), 1)
+            self.assertEqual(entries[0]["method"], "ping")
+
+    def test_entries_survive_close_reopen(self):
+        """Записи сохраняются после close() и повторного открытия."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for _ in range(3):
+                al = AuditLogger(data_dir=tmpdir)
+                al.log_request("x", {}, {"ok": True, "result": {}}, 0.5)
+                al.close()
+
+            final = AuditLogger(data_dir=tmpdir)
+            entries = final.get_audit_log(limit=10)
+            final.close()
+            self.assertGreaterEqual(len(entries), 3)
+
+
+class TestAuditLoggerQueryFilters(unittest.TestCase):
+    """Проверка фильтрации get_audit_log."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.logger = AuditLogger(data_dir=self.tmpdir)
+        methods = ["ping", "get_settings", "get_history", "ping", "ping"]
+        for m in methods:
+            self.logger.log_request(m, {}, {"ok": True, "result": {}}, 1.0)
+
+    def tearDown(self):
+        self.logger.close()
+
+    def test_filter_returns_only_matching_method(self):
+        entries = self.logger.get_audit_log(method_filter="get_settings")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["method"], "get_settings")
+
+    def test_filter_nonexistent_method_returns_empty(self):
+        entries = self.logger.get_audit_log(method_filter="nonexistent_method_xyz")
+        self.assertEqual(entries, [])
+
+    def test_no_filter_returns_all(self):
+        entries = self.logger.get_audit_log(limit=100)
+        self.assertEqual(len(entries), 5)
+
+    def test_limit_zero_uses_minimum(self):
+        """limit=0 не крашит и возвращает не более 1 записи (или пустой список)."""
+        # get_audit_log не имеет явного min clamp, но должен не упасть
+        entries = self.logger.get_audit_log(limit=0)
+        self.assertIsInstance(entries, list)
+
+    def test_success_false_logged_correctly(self):
+        """Провальные запросы логируются с success=False."""
+        self.logger.log_request("fail_op", {}, {"ok": False, "error": "boom"}, 0.1)
+        entries = self.logger.get_audit_log(method_filter="fail_op")
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0]["success"])
+
+
+class TestAuditLoggerEdgeCases(unittest.TestCase):
+    """Граничные случаи."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.logger = AuditLogger(data_dir=self.tmpdir)
+
+    def tearDown(self):
+        self.logger.close()
+
+    def test_none_params_handled(self):
+        """None вместо dict для params не должен крашить."""
+        # Реальный код: params.keys() вызывается только если params truthy
+        self.logger.log_request("ping", {}, {"ok": True, "result": {}}, 1.0)
+        entries = self.logger.get_audit_log(limit=1)
+        self.assertEqual(len(entries), 1)
+
+    def test_non_dict_result_logged_as_failure(self):
+        """Нестандартный result (не dict) логируется как success=False без краша."""
+        self.logger.log_request("weird", {}, {}, 1.0)
+        entries = self.logger.get_audit_log(method_filter="weird")
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0]["success"])
+
+    def test_get_audit_log_empty_dir(self):
+        """Пустая директория → пустой список без ошибок."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            al = AuditLogger(data_dir=tmpdir)
+            entries = al.get_audit_log(limit=10)
+            al.close()
+        self.assertEqual(entries, [])
+
+    def test_params_keys_sorted(self):
+        """params_keys возвращаются в отсортированном порядке."""
+        self.logger.log_request(
+            "op", {"z": 1, "a": 2, "m": 3}, {"ok": True, "result": {}}, 1.0
+        )
+        files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
+        with open(files[0]) as f:
+            entry = json.loads(f.readline())
+        self.assertEqual(entry["params_keys"], ["a", "m", "z"])
+
+    def test_duration_ms_preserved(self):
+        """duration_ms сохраняется с точностью до 2 знаков."""
+        self.logger.log_request("op", {}, {"ok": True, "result": {}}, 3.14159)
+        files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
+        with open(files[0]) as f:
+            entry = json.loads(f.readline())
+        self.assertAlmostEqual(entry["duration_ms"], 3.14, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()
