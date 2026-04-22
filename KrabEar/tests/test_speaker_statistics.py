@@ -361,5 +361,118 @@ class TestIPCHandler(unittest.TestCase):
         self.assertEqual(result["total_speakers"], 0)
 
 
+# ---------------------------------------------------------------------------
+# Тест 9: явная проверка имён полей и базовых сценариев из задания
+# ---------------------------------------------------------------------------
+
+class TestFieldNamesAndScenarios(unittest.TestCase):
+    """Явная проверка имён полей result dict и сценариев без диаризации."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeakerStatisticsAnalyzer()
+
+    def test_no_diarization_returns_empty_dict(self) -> None:
+        """Записи без поля diarization → speakers пустой dict, total_speakers=0."""
+        items = [
+            {"text": "hello world", "confidence": 0.9, "source_lang": "en"},
+            {"text": "another item", "confidence": 0.8},
+        ]
+        result = self.analyzer.analyze_speakers(items)
+        self.assertEqual(result["speakers"], {})
+        self.assertEqual(result["total_speakers"], 0)
+        self.assertIsNone(result["most_active_speaker"])
+
+    def test_single_speaker_result_field_names(self) -> None:
+        """Один спикер → все ожидаемые поля присутствуют с правильными именами."""
+        item = _make_diar_item(
+            turns=[_turn("SPEAKER_00", 0.0, 30.0, "слово раз два")],
+            confidence=0.91,
+            source_lang="ru",
+        )
+        result = self.analyzer.analyze_speakers([item])
+
+        self.assertIn("SPEAKER_00", result["speakers"])
+        s = result["speakers"]["SPEAKER_00"]
+
+        # Проверяем ключевые имена полей из задания
+        self.assertIn("total_words", s)
+        self.assertIn("total_speaking_time_sec", s)
+        self.assertIn("avg_confidence", s)
+
+        # Значения корректны
+        self.assertEqual(s["total_words"], 3)
+        self.assertAlmostEqual(s["total_speaking_time_sec"], 30.0, places=2)
+        self.assertAlmostEqual(s["avg_confidence"], 0.91, places=4)
+
+    def test_multi_speaker_all_represented(self) -> None:
+        """Два разных спикера → оба присутствуют в result['speakers']."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_A", 0.0, 40.0, "alpha beta gamma"),
+                _turn("SPEAKER_B", 40.0, 60.0, "delta"),
+            ],
+            confidence=0.85,
+        )
+        result = self.analyzer.analyze_speakers([item])
+
+        self.assertEqual(result["total_speakers"], 2)
+        self.assertIn("SPEAKER_A", result["speakers"])
+        self.assertIn("SPEAKER_B", result["speakers"])
+
+    def test_multi_speaker_word_count_per_speaker(self) -> None:
+        """word_count распределяется по спикерам из текста turn."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_00", 0.0, 30.0, "один два три"),      # 3 слова
+                _turn("SPEAKER_01", 30.0, 60.0, "four five six seven"),  # 4 слова
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+
+        self.assertEqual(result["speakers"]["SPEAKER_00"]["total_words"], 3)
+        self.assertEqual(result["speakers"]["SPEAKER_01"]["total_words"], 4)
+
+    def test_multi_speaker_duration_per_speaker(self) -> None:
+        """duration распределяется по спикерам из временных меток turn."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_00", 0.0, 50.0),   # 50 сек
+                _turn("SPEAKER_01", 50.0, 65.0),  # 15 сек
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_00"]["total_speaking_time_sec"], 50.0, places=2
+        )
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_01"]["total_speaking_time_sec"], 15.0, places=2
+        )
+
+    def test_confidence_avg_per_speaker_from_item_level(self) -> None:
+        """avg_confidence берётся из поля confidence записи (item-level), не turn."""
+        items = [
+            _make_diar_item([_turn("SPEAKER_00", 0, 10)], confidence=0.80),
+            _make_diar_item([_turn("SPEAKER_00", 0, 10)], confidence=0.90),
+        ]
+        result = self.analyzer.analyze_speakers(items)
+
+        # avg = (0.80 + 0.90) / 2 = 0.85
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_00"]["avg_confidence"], 0.85, places=4
+        )
+
+    def test_no_confidence_data_avg_is_none(self) -> None:
+        """Если confidence не задан → avg_confidence is None."""
+        item = {
+            "diarization": {
+                "enabled": True,
+                "speaker_turns": [_turn("SPEAKER_00", 0.0, 10.0)],
+            }
+        }
+        result = self.analyzer.analyze_speakers([item])
+        self.assertIsNone(result["speakers"]["SPEAKER_00"]["avg_confidence"])
+
+
 if __name__ == "__main__":
     unittest.main()

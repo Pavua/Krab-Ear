@@ -414,6 +414,96 @@ class ComparisonReportStructureTestCase(unittest.TestCase):
         self.assertGreater(len(report.summary), 0)
 
 
+class SamePeriodZeroDeltaTestCase(unittest.TestCase):
+    """Тесты сравнения одинакового периода с самим собой → нулевые дельты."""
+
+    def setUp(self) -> None:
+        self.mock_store = MagicMock()
+
+    def _same_data(self) -> list[dict]:
+        return [
+            {
+                "audio_duration_sec": 120.0,
+                "text": "один два три",
+                "confidence": 0.88,
+                "source_lang": "RU",
+            }
+            for _ in range(5)
+        ]
+
+    def test_same_period_zero_recordings_delta(self) -> None:
+        """Одинаковые периоды → recordings_change_pct == 0.0."""
+        data = self._same_data()
+        self.mock_store.get_history_page_filtered.side_effect = [
+            (data, None),
+            (data, None),
+        ]
+
+        report = compare_periods(
+            self.mock_store,
+            "2024-03-01",
+            "2024-03-07",
+            "2024-03-01",
+            "2024-03-07",
+        )
+
+        self.assertEqual(report.recordings_change_pct, 0.0)
+
+    def test_same_period_zero_duration_delta(self) -> None:
+        """Одинаковые периоды → duration_change_pct == 0.0."""
+        data = self._same_data()
+        self.mock_store.get_history_page_filtered.side_effect = [
+            (data, None),
+            (data, None),
+        ]
+
+        report = compare_periods(
+            self.mock_store,
+            "2024-03-01",
+            "2024-03-07",
+            "2024-03-01",
+            "2024-03-07",
+        )
+
+        self.assertEqual(report.duration_change_pct, 0.0)
+
+    def test_same_period_zero_confidence_delta(self) -> None:
+        """Одинаковые периоды → confidence_change == 0.0."""
+        data = self._same_data()
+        self.mock_store.get_history_page_filtered.side_effect = [
+            (data, None),
+            (data, None),
+        ]
+
+        report = compare_periods(
+            self.mock_store,
+            "2024-03-01",
+            "2024-03-07",
+            "2024-03-01",
+            "2024-03-07",
+        )
+
+        self.assertEqual(report.confidence_change, 0.0)
+
+    def test_same_period_no_new_languages(self) -> None:
+        """Одинаковые периоды → нет новых языков."""
+        data = self._same_data()
+        self.mock_store.get_history_page_filtered.side_effect = [
+            (data, None),
+            (data, None),
+        ]
+
+        report = compare_periods(
+            self.mock_store,
+            "2024-03-01",
+            "2024-03-07",
+            "2024-03-01",
+            "2024-03-07",
+        )
+
+        self.assertEqual(report.new_languages, [])
+
+
 class PeriodComparisonServiceTestCase(unittest.TestCase):
     """Тесты PeriodComparisonService IPC-обёртки."""
 
