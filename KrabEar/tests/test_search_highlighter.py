@@ -265,5 +265,89 @@ class HistoryServiceSearchWithHighlightsTests(unittest.TestCase):
             self.assertIn("ts", item)
 
 
+class SearchHighlighterHelperTests(unittest.TestCase):
+    """Тесты вспомогательных методов."""
+
+    def setUp(self) -> None:
+        self.h = SearchHighlighter()
+
+    def test_split_query_single_word(self) -> None:
+        result = self.h._split_query("hello")
+        self.assertEqual(result, ["hello"])
+
+    def test_split_query_multi_word(self) -> None:
+        result = self.h._split_query("hello world")
+        self.assertEqual(result, ["hello", "world"])
+
+    def test_split_query_empty(self) -> None:
+        result = self.h._split_query("")
+        self.assertEqual(result, [])
+
+    def test_split_query_extra_spaces(self) -> None:
+        result = self.h._split_query("  foo   bar  ")
+        self.assertEqual(result, ["foo", "bar"])
+
+    def test_build_pattern_returns_none_for_empty(self) -> None:
+        pattern = self.h._build_pattern("")
+        self.assertIsNone(pattern)
+
+    def test_build_pattern_returns_pattern_for_valid(self) -> None:
+        import re
+        pattern = self.h._build_pattern("hello")
+        self.assertIsNotNone(pattern)
+        self.assertIsInstance(pattern, re.Pattern)
+
+    def test_overlaps_true(self) -> None:
+        self.assertTrue(self.h._overlaps(5, 15, [(10, 20)]))
+
+    def test_overlaps_false_no_overlap(self) -> None:
+        self.assertFalse(self.h._overlaps(0, 5, [(10, 20)]))
+
+    def test_overlaps_empty_ranges(self) -> None:
+        self.assertFalse(self.h._overlaps(0, 10, []))
+
+    def test_highlight_whitespace_query(self) -> None:
+        """Запрос только из пробелов → текст без изменений."""
+        text = "some text here"
+        result = self.h.highlight(text, "   ")
+        self.assertEqual(result, text)
+
+    def test_highlight_none_text(self) -> None:
+        """Пустой текст (None-like) возвращается как есть."""
+        result = self.h.highlight("", "query")
+        self.assertEqual(result, "")
+
+    def test_highlight_html_empty_text(self) -> None:
+        """highlight_html с пустым текстом возвращает пустую строку."""
+        result = self.h.highlight_html("", "query")
+        self.assertEqual(result, "")
+
+    def test_highlight_preserves_surrounding_text(self) -> None:
+        """Текст вокруг совпадения не изменяется."""
+        result = self.h.highlight("before match after", "match")
+        self.assertIn("before", result)
+        self.assertIn("after", result)
+
+    def test_highlight_html_no_match(self) -> None:
+        """highlight_html без совпадения — нет тегов span."""
+        result = self.h.highlight_html("hello world", "notfound")
+        self.assertNotIn("<span", result)
+        self.assertIn("hello world", result)
+
+    def test_snippet_paginates_multiple_matches(self) -> None:
+        """Несколько совпадений возвращают несколько сниппетов."""
+        text = "A" * 200 + " target " + "B" * 200 + " target " + "C" * 200
+        snippets = self.h.extract_snippets(text, "target", context_chars=5, max_snippets=3)
+        self.assertGreaterEqual(len(snippets), 2)
+
+    def test_highlight_multi_word_each_highlighted(self) -> None:
+        """Каждое слово из многословного запроса подсвечивается отдельно."""
+        result = self.h.highlight("the cat sat on the mat", "cat mat")
+        self.assertIn("**cat**", result)
+        self.assertIn("**mat**", result)
+        self.assertNotIn("**the**", result)
+        self.assertNotIn("**on**", result)
+
+
 if __name__ == "__main__":
     unittest.main()
