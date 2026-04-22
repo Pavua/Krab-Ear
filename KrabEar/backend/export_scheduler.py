@@ -422,6 +422,18 @@ class ExportScheduler:
             "total_exports": len(schedule.get("exports", [])),
         }
 
+    def cancel(self) -> dict:
+        """Отключает авто-экспорт (устанавливает enabled=False).
+
+        Returns:
+            Обновлённый статус расписания.
+        """
+        with self._lock:
+            schedule = self._load_schedule()
+            schedule["enabled"] = False
+            self._save_schedule(schedule)
+        return self.get_schedule_status()
+
     def list_exports(self) -> list[dict]:
         """Возвращает список прошлых экспортов.
 

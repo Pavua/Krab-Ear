@@ -62,9 +62,9 @@ class TestEstimateCostBasic(unittest.TestCase):
         est_bal = self.estimator.estimate_cost(duration_sec=10.0, quality="balanced")
         self.assertEqual(est.compute_time_sec, est_bal.compute_time_sec)
 
-    def test_negative_duration_clamped_to_zero(self):
-        est = self.estimator.estimate_cost(duration_sec=-5.0)
-        self.assertEqual(est.compute_time_sec, 0.0)
+    def test_negative_duration_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.estimator.estimate_cost(duration_sec=-5.0)
 
 
 class TestEstimateCostFeatures(unittest.TestCase):
