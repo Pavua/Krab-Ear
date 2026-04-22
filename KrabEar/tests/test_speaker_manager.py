@@ -300,6 +300,64 @@ class TestSpeakerManagerEdgeCases(unittest.TestCase):
         self.assertEqual(self.mgr.get_alias("SPEAKER_01"), "Паша")
         self.assertEqual(len(self.mgr.get_all_aliases()), 2)
 
+    # ------------------------------------------------------------------
+    # apply_aliases after merge: segments of removed speaker reassigned
+    # ------------------------------------------------------------------
+
+    def test_apply_aliases_after_merge_segments_reassigned(self):
+        """После слияния apply_aliases применяет имя оставшегося спикера."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+        # Слияние: SPEAKER_01 → SPEAKER_00, SPEAKER_01 удаляется
+        self.mgr.remove_alias("SPEAKER_01")
+        # В тексте теги SPEAKER_01 остаются нетронутыми (merge = переименование сегментов
+        # в тексте остаётся задачей верхнего уровня), но псевдоним удалён
+        text = "[SPEAKER_00] Привет\n[SPEAKER_01] Я тоже Паша"
+        result = self.mgr.apply_aliases(text)
+        self.assertEqual(result, "[Паша] Привет\n[SPEAKER_01] Я тоже Паша")
+
+    # ------------------------------------------------------------------
+    # IPC: handle_set_speaker_alias whitespace-only name
+    # ------------------------------------------------------------------
+
+    def test_handle_set_alias_whitespace_name_raises(self):
+        """IPC: name из пробелов → ValueError (strip делает пустой строкой)."""
+        with self.assertRaises(ValueError):
+            self.mgr.handle_set_speaker_alias(
+                {"speaker_id": "SPEAKER_00", "name": "   "}
+            )
+
+    # ------------------------------------------------------------------
+    # Thread-safety: concurrent set_alias does not corrupt state
+    # ------------------------------------------------------------------
+
+    def test_concurrent_set_alias_no_corruption(self):
+        """Параллельные set_alias не приводят к race condition (базовая проверка)."""
+        import threading
+
+        errors: list[Exception] = []
+
+        def worker(spk: str, name: str) -> None:
+            try:
+                for _ in range(20):
+                    self.mgr.set_alias(spk, name)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(f"SPEAKER_{i:02d}", f"User{i}"))
+            for i in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки потоков: {errors}")
+        # Все 5 псевдонимов должны быть установлены
+        aliases = self.mgr.get_all_aliases()
+        self.assertEqual(len(aliases), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
