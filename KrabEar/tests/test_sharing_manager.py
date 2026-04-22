@@ -545,5 +545,163 @@ class EdgeCasesTestCase(unittest.TestCase):
         self.assertRegex(pkg.filename, r'^[\w\-\.]+\.(?:md|txt|json)$')
 
 
+class SharePackageIdentifierTestCase(unittest.TestCase):
+    """Тесты share_id и URL-совместимых идентификаторов пакетов."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._store.add_fake_item("item1", "текст пакета")
+
+    def test_create_share_package_returns_share_id(self) -> None:
+        """prepare_share возвращает пакет с непустым share_id."""
+        pkg = self._mgr.prepare_share(["item1"])
+        self.assertTrue(pkg.share_id, "share_id не должен быть пустым")
+
+    def test_share_id_is_alphanumeric_8_chars(self) -> None:
+        """share_id — 8 алфанумерных символов (URL-safe идентификатор)."""
+        pkg = self._mgr.prepare_share(["item1"])
+        self.assertEqual(len(pkg.share_id), 8)
+        self.assertTrue(pkg.share_id.isalnum(), f"share_id не алфанумерный: {pkg.share_id!r}")
+
+    def test_filename_contains_share_id(self) -> None:
+        """filename содержит share_id — позволяет формировать URL-путь."""
+        pkg = self._mgr.prepare_share(["item1"])
+        self.assertIn(pkg.share_id, pkg.filename)
+
+    def test_filename_is_url_safe(self) -> None:
+        """filename не содержит пробелов или спецсимволов опасных для URL."""
+        pkg = self._mgr.prepare_share(["item1"])
+        self.assertRegex(
+            pkg.filename,
+            r'^[\w\-\.]+\.(md|txt|json)$',
+            "filename должен быть URL-safe",
+        )
+
+    def test_each_share_gets_unique_id(self) -> None:
+        """Каждый вызов prepare_share создаёт уникальный share_id."""
+        for i in range(5):
+            self._store.add_fake_item(f"uniq_{i}", f"текст {i}")
+        ids = [self._mgr.prepare_share([f"uniq_{i}"]).share_id for i in range(5)]
+        self.assertEqual(len(set(ids)), 5, "share_id'ы должны быть уникальными")
+
+    def test_created_at_is_iso8601(self) -> None:
+        """created_at — валидная ISO-8601 дата."""
+        from datetime import datetime
+        pkg = self._mgr.prepare_share(["item1"])
+        # fromisoformat должен разобрать без исключения
+        dt = datetime.fromisoformat(pkg.created_at)
+        self.assertIsNotNone(dt)
+
+    def test_size_bytes_positive_for_non_empty_content(self) -> None:
+        """size_bytes > 0 для непустого контента."""
+        pkg = self._mgr.prepare_share(["item1"])
+        self.assertGreater(pkg.size_bytes, 0)
+
+
+class NoExpiryTestCase(unittest.TestCase):
+    """SharingManager не имеет TTL/expiry — пакеты сохраняются бессрочно."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._store.add_fake_item("e1", "вечный текст")
+
+    def test_share_package_has_no_expiry_field(self) -> None:
+        """SharePackage не содержит поля expiry / expires_at."""
+        pkg = self._mgr.prepare_share(["e1"])
+        d = pkg.to_dict()
+        self.assertNotIn("expiry", d)
+        self.assertNotIn("expires_at", d)
+        self.assertNotIn("expiry_sec", d)
+
+    def test_share_always_retrievable_after_multiple_gets(self) -> None:
+        """Повторные get_shared всегда возвращают тот же пакет."""
+        pkg = self._mgr.prepare_share(["e1"])
+        for _ in range(5):
+            found = self._mgr.get_shared(pkg.share_id)
+            self.assertIsNotNone(found)
+            self.assertEqual(found.share_id, pkg.share_id)
+
+    def test_share_survives_manager_reload_no_expiry(self) -> None:
+        """Пакет доступен после перезагрузки менеджера (нет TTL)."""
+        pkg = self._mgr.prepare_share(["e1"])
+        mgr2 = SharingManager(store=self._store)
+        found = mgr2.get_shared(pkg.share_id)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.content, pkg.content)
+
+
+class MultiBundleTestCase(unittest.TestCase):
+    """Тесты мульти-айтем бандла (bundle of items)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+        self._items = []
+        for i in range(4):
+            item = self._store.add_fake_item(
+                f"bundle_item_{i}",
+                f"текст элемента {i}",
+                translated_text=f"item text {i}",
+                ts=f"2024-0{i+1}-01T12:00:00+00:00",
+            )
+            self._items.append(item)
+
+    def test_bundle_json_contains_all_items(self) -> None:
+        """JSON-бандл содержит все запрошенные элементы."""
+        item_ids = [f"bundle_item_{i}" for i in range(4)]
+        pkg = self._mgr.prepare_share(item_ids, format="json")
+        data = json.loads(pkg.content)
+        self.assertEqual(len(data), 4)
+
+    def test_bundle_json_item_ids_match(self) -> None:
+        """ID элементов в JSON-бандле совпадают с запрошенными."""
+        item_ids = [f"bundle_item_{i}" for i in range(3)]
+        pkg = self._mgr.prepare_share(item_ids, format="json")
+        data = json.loads(pkg.content)
+        returned_ids = [d["id"] for d in data]
+        self.assertEqual(sorted(returned_ids), sorted(item_ids))
+
+    def test_bundle_markdown_contains_all_texts(self) -> None:
+        """Markdown-бандл содержит тексты всех элементов."""
+        item_ids = [f"bundle_item_{i}" for i in range(3)]
+        pkg = self._mgr.prepare_share(item_ids, format="markdown")
+        for i in range(3):
+            self.assertIn(f"текст элемента {i}", pkg.content)
+
+    def test_bundle_text_contains_all_texts(self) -> None:
+        """Text-бандл содержит тексты всех элементов."""
+        item_ids = [f"bundle_item_{i}" for i in range(4)]
+        pkg = self._mgr.prepare_share(item_ids, format="text")
+        for i in range(4):
+            self.assertIn(f"текст элемента {i}", pkg.content)
+
+    def test_bundle_with_partial_missing_ids(self) -> None:
+        """Бандл с частично несуществующими ID пропускает их без ошибки."""
+        item_ids = ["bundle_item_0", "nonexistent_1", "bundle_item_1", "nonexistent_2"]
+        pkg = self._mgr.prepare_share(item_ids, format="json")
+        data = json.loads(pkg.content)
+        # Только 2 реальных элемента
+        self.assertEqual(len(data), 2)
+
+    def test_bundle_single_item(self) -> None:
+        """Бандл из одного элемента работает корректно."""
+        pkg = self._mgr.prepare_share(["bundle_item_0"])
+        self.assertIsNotNone(pkg)
+        self.assertIn("текст элемента 0", pkg.content)
+
+    def test_bundle_size_bytes_grows_with_items(self) -> None:
+        """Размер бандла растёт с количеством элементов."""
+        pkg_single = self._mgr.prepare_share(["bundle_item_0"], format="text")
+        pkg_multi = self._mgr.prepare_share(
+            [f"bundle_item_{i}" for i in range(4)], format="text"
+        )
+        self.assertGreater(pkg_multi.size_bytes, pkg_single.size_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()
