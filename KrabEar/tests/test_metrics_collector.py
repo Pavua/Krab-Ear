@@ -200,5 +200,95 @@ class TestEmptySnapshot(unittest.TestCase):
         self.assertEqual(summary.get("status"), "waiting_data")
 
 
+class TestErrorsExcludedFromLatencyWindow(unittest.TestCase):
+    """Записи с is_error=True не попадают в окно latency/confidence."""
+
+    def test_error_records_not_in_latency(self):
+        mc = MetricsCollector()
+        mc.record(100.0, 0.9, is_error=False)
+        mc.record(9999.0, 0.0, is_error=True)   # ошибка — не должна влиять на p50
+        mc.record(100.0, 0.9, is_error=False)
+
+        summary = mc.get_summary()
+        lat = summary["stt_metrics"]["latency_ms"]
+        # Только два успешных: avg=100, p50=100; 9999 игнорируется
+        self.assertAlmostEqual(lat["avg"], 100.0, delta=0.1)
+        self.assertEqual(summary["window_size"], 2)
+        self.assertEqual(summary["total_requests"], 3)
+
+    def test_error_records_not_in_confidence(self):
+        mc = MetricsCollector()
+        mc.record(100.0, 0.8, is_error=False)
+        mc.record(0.0, 0.0, is_error=True)
+        mc.record(100.0, 0.6, is_error=False)
+
+        summary = mc.get_summary()
+        conf = summary["stt_metrics"]["confidence"]
+        # Только confidence 0.8 и 0.6 — avg=0.7, min=0.6
+        self.assertAlmostEqual(conf["avg"], 0.7, places=2)
+        self.assertAlmostEqual(conf["min"], 0.6, places=2)
+        self.assertAlmostEqual(conf["max"], 0.8, places=2)
+
+
+class TestConfidenceTracking(unittest.TestCase):
+    """Отдельная фиксация: запись confidence и получение статистики."""
+
+    def test_record_confidence_and_get_stats(self):
+        """record() принимает confidence; get_summary() возвращает avg/min/max."""
+        mc = MetricsCollector()
+        values = [0.60, 0.75, 0.90, 0.85, 0.70]
+        for v in values:
+            mc.record(50.0, v)
+
+        summary = mc.get_summary()
+        conf = summary["stt_metrics"]["confidence"]
+
+        self.assertAlmostEqual(conf["min"], 0.60, places=2)
+        self.assertAlmostEqual(conf["max"], 0.90, places=2)
+        expected_avg = sum(values) / len(values)
+        self.assertAlmostEqual(conf["avg"], expected_avg, delta=0.01)
+
+    def test_single_record_confidence(self):
+        mc = MetricsCollector()
+        mc.record(100.0, 0.77)
+
+        summary = mc.get_summary()
+        conf = summary["stt_metrics"]["confidence"]
+        self.assertAlmostEqual(conf["min"], 0.77, places=2)
+        self.assertAlmostEqual(conf["max"], 0.77, places=2)
+        self.assertAlmostEqual(conf["avg"], 0.77, places=2)
+
+
+class TestSlidingWindowTimeExpiry(unittest.TestCase):
+    """Скользящее окно: oldest samples выпадают при превышении maxsize."""
+
+    def test_old_samples_replaced_by_new(self):
+        """Деке с maxlen вытесняет старые записи при заполнении."""
+        mc = MetricsCollector(window_size=3)
+        # Три старых значения
+        for val in [10.0, 20.0, 30.0]:
+            mc.record(val, 0.9)
+        # Добавляем новое — вытесняет 10.0
+        mc.record(40.0, 0.9)
+
+        summary = mc.get_summary()
+        self.assertEqual(summary["window_size"], 3)
+        # Оставшиеся: 20, 30, 40 → avg=30
+        self.assertAlmostEqual(summary["stt_metrics"]["latency_ms"]["avg"], 30.0, delta=0.1)
+        # total_requests считает все 4
+        self.assertEqual(summary["total_requests"], 4)
+
+    def test_window_overflow_percentiles(self):
+        mc = MetricsCollector(window_size=10)
+        # Записываем 20 значений — в окне останутся 11..20
+        for i in range(1, 21):
+            mc.record(float(i), 0.9)
+
+        summary = mc.get_summary()
+        self.assertEqual(summary["window_size"], 10)
+        # avg(11..20) = 15.5
+        self.assertAlmostEqual(summary["stt_metrics"]["latency_ms"]["avg"], 15.5, delta=0.1)
+
+
 if __name__ == "__main__":
     unittest.main()

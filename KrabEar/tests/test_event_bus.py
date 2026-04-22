@@ -166,5 +166,121 @@ class TestUnsubscribe(unittest.TestCase):
             q_leave.get_nowait()
 
 
+class TestFullQueueIsolation(unittest.TestCase):
+    """Переполненная очередь одного подписчика не блокирует доставку другим."""
+
+    def test_full_queue_does_not_block_others(self) -> None:
+        from backend.event_bus import _QUEUE_MAXSIZE
+
+        bus = EventBus()
+        q_fast = bus.subscribe()
+        q_full = bus.subscribe()
+
+        # Заполняем очередь q_full до предела
+        for i in range(_QUEUE_MAXSIZE):
+            q_full.put_nowait({"type": "fill", "ts": "t", "data": {"i": i}})
+
+        # Эмитируем ещё одно событие — q_full должна пропустить его (Full),
+        # но q_fast обязана его получить
+        bus.emit("stt.final", {"text": "isolated"})
+
+        event = q_fast.get_nowait()
+        self.assertEqual(event["type"], "stt.final")
+        self.assertEqual(event["data"]["text"], "isolated")
+
+        # q_full не приняла новое событие (была переполнена)
+        # Все элементы в очереди — заглушки из цикла заполнения
+        count = 0
+        while True:
+            try:
+                item = q_full.get_nowait()
+                if item.get("type") == "stt.final":
+                    self.fail("q_full не должна была получить новое событие")
+                count += 1
+            except queue.Empty:
+                break
+        self.assertEqual(count, _QUEUE_MAXSIZE)
+
+
+class TestSseStreamFormat(unittest.TestCase):
+    """SSE-поток: события отдаются в правильном формате event:/data:."""
+
+    def test_sse_event_format(self) -> None:
+        """SSE-генератор форматирует события как event:/data: с двойным переносом."""
+        import json
+        from backend.event_bus import sse_stream
+
+        bus = EventBus()
+
+        # Нужно сначала создать генератор (он внутри вызывает subscribe),
+        # затем эмитировать событие чтобы оно попало в очередь подписчика.
+        # Используем threading: генератор ждёт событие в отдельном потоке.
+        import threading
+
+        result: list[str] = []
+
+        def _run_gen():
+            gen = sse_stream(bus)
+            try:
+                result.append(next(gen))
+            finally:
+                gen.close()
+
+        t = threading.Thread(target=_run_gen, daemon=True)
+        t.start()
+
+        # Даём потоку время подписаться, затем эмитируем
+        import time
+        time.sleep(0.05)
+        bus.emit("stt.partial", {"text": "привет"})
+        t.join(timeout=5.0)
+
+        self.assertEqual(len(result), 1, "Генератор должен был вернуть один фрейм")
+        first_chunk = result[0]
+
+        self.assertTrue(
+            first_chunk.startswith("event: stt.partial\n"),
+            f"Неожиданный SSE-фрейм: {first_chunk!r}",
+        )
+        self.assertIn("data: ", first_chunk)
+        self.assertTrue(
+            first_chunk.endswith("\n\n"),
+            "SSE-фрейм должен заканчиваться на \\n\\n",
+        )
+
+        data_line = [ln for ln in first_chunk.splitlines() if ln.startswith("data: ")][0]
+        payload = json.loads(data_line[len("data: "):])
+        self.assertEqual(payload["text"], "привет")
+
+    def test_sse_keepalive_on_timeout(self) -> None:
+        """При отсутствии событий генератор возвращает keepalive-комментарий."""
+        from backend.event_bus import sse_stream
+        from unittest.mock import patch
+
+        bus = EventBus()
+
+        with patch.object(bus, 'subscribe', side_effect=lambda: _make_timeout_then_stop_queue()):
+            gen = sse_stream(bus)
+            chunk = next(gen)
+            self.assertEqual(chunk, ": keepalive\n\n")
+            gen.close()
+
+
+def _make_timeout_then_stop_queue():
+    """Вспомогательная очередь: первый get() -> Empty, второй get() -> None."""
+    import queue as q_mod
+
+    class _OneTimeoutQueue(q_mod.Queue):
+        _calls = 0
+
+        def get(self, block=True, timeout=None):  # noqa: D102
+            self._calls += 1
+            if self._calls == 1:
+                raise q_mod.Empty
+            return None  # сигнал завершения
+
+    return _OneTimeoutQueue()
+
+
 if __name__ == "__main__":
     unittest.main()
