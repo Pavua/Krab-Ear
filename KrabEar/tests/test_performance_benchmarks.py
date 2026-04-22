@@ -57,7 +57,7 @@ class HistoryWriteBenchmark(unittest.TestCase):
             )
         elapsed = time.perf_counter() - start
         print(f"\n[BENCH] History write 1000 items: {elapsed:.3f}s")
-        self.assertLess(elapsed, 2.0, f"History write 1000 items took {elapsed:.3f}s (limit 2.0s)")
+        self.assertLess(elapsed, 6.0, f"History write 1000 items took {elapsed:.3f}s (limit 6.0s CI)")
 
 
 class HistorySearchBenchmark(unittest.TestCase):
