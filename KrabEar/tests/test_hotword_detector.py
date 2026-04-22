@@ -234,5 +234,77 @@ class TestHotwordDetectorExtended(unittest.TestCase):
         self.assertEqual(len(matches_partial), 0)
 
 
+class TestHotwordDetectorUnicode(unittest.TestCase):
+    """Tests for unicode/accented chars and multiple occurrences of same word."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.detector = HotwordDetector(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # 27. Multiple occurrences of the same hotword in a single text
+    def test_multiple_occurrences_same_hotword(self):
+        """check_text returns one match per occurrence of the same hotword."""
+        self.detector.add_hotword("error")
+        text = "error occurred: error in module, error logged"
+        matches = self.detector.check_text(text)
+        self.assertEqual(len(matches), 3)
+        self.assertTrue(all(m.word == "error" for m in matches))
+        # Positions should be strictly increasing
+        positions = [m.position for m in matches]
+        self.assertEqual(positions, sorted(positions))
+
+    # 28. Unicode hotword (Cyrillic)
+    def test_unicode_cyrillic_hotword(self):
+        """Detector correctly matches Cyrillic hotwords."""
+        self.detector.add_hotword("ошибка")
+        matches = self.detector.check_text("Произошла ошибка в системе.")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].word, "ошибка")
+
+    # 29. Unicode hotword (Spanish accented)
+    def test_unicode_accented_spanish_hotword(self):
+        """Detector correctly matches Spanish words with accents."""
+        self.detector.add_hotword("atención")
+        matches = self.detector.check_text("¡Atención! Se requiere atención inmediata.")
+        # case-insensitive → both should match
+        self.assertEqual(len(matches), 2)
+        self.assertTrue(all(m.word == "atención" for m in matches))
+
+    # 30. Unicode hotword case-insensitive (Cyrillic mixed case)
+    def test_unicode_cyrillic_case_insensitive(self):
+        """Case-insensitive matching works for Cyrillic."""
+        self.detector.add_hotword("КРИТИЧНО", case_sensitive=False)
+        matches = self.detector.check_text("критично важно действовать сейчас")
+        self.assertEqual(len(matches), 1)
+
+    # 31. Same hotword appears at start and end of text
+    def test_same_hotword_at_start_and_end(self):
+        """Detects the same hotword at both the start and end of a sentence."""
+        self.detector.add_hotword("start")
+        text = "start of the process and end at start"
+        matches = self.detector.check_text(text)
+        self.assertEqual(len(matches), 2)
+        self.assertEqual(matches[0].position, 0)
+
+    # 32. Unicode hotword with no match returns empty list
+    def test_unicode_hotword_no_match(self):
+        """Returns empty list when unicode hotword is absent."""
+        self.detector.add_hotword("предупреждение")
+        matches = self.detector.check_text("Всё в порядке, проблем нет.")
+        self.assertEqual(matches, [])
+
+    # 33. Position is correct for unicode text
+    def test_position_correct_for_unicode_text(self):
+        """Match position is byte-index into the unicode string."""
+        self.detector.add_hotword("мир")
+        text = "Привет мир сегодня"
+        matches = self.detector.check_text(text)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(text[matches[0].position:matches[0].position + 3], "мир")
+
+
 if __name__ == "__main__":
     unittest.main()
