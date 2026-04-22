@@ -363,6 +363,42 @@ class TestIpcHandlers(unittest.TestCase):
             })
 
 
+class TestRollbackMigration(unittest.TestCase):
+    """Тесты DataMigrator.rollback_migration — откат после миграции."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+
+    def test_rollback_restores_history_file(self) -> None:
+        """После отката history.ndjson соответствует состоянию до миграции."""
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("id1"), _make_v1_item("id2")])
+        original_content = history_path.read_text(encoding="utf-8")
+
+        result = self._migrator.migrate(self._tmpdir)
+        # Убеждаемся, что миграция изменила файл
+        self.assertNotEqual(history_path.read_text(encoding="utf-8"), original_content)
+
+        # Откат
+        rollback = self._migrator.rollback_migration(self._tmpdir, result.backup_path)
+        self.assertIn("history.ndjson", rollback["restored_files"])
+        self.assertEqual(history_path.read_text(encoding="utf-8"), original_content)
+
+    def test_rollback_invalid_backup_raises(self) -> None:
+        """rollback_migration с несуществующим backup_path → ValueError."""
+        with self.assertRaises(ValueError):
+            self._migrator.rollback_migration(self._tmpdir, "/nonexistent/backup")
+
+    def test_rollback_returns_expected_keys(self) -> None:
+        """rollback_migration возвращает restored_files и backup_path."""
+        result = self._migrator.migrate(self._tmpdir)
+        rollback = self._migrator.rollback_migration(self._tmpdir, result.backup_path)
+        self.assertIn("restored_files", rollback)
+        self.assertIn("backup_path", rollback)
+        self.assertIsInstance(rollback["restored_files"], list)
+
+
 class TestReadNdjson(unittest.TestCase):
     """Тесты вспомогательной функции _read_ndjson."""
 

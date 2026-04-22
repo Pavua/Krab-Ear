@@ -103,7 +103,9 @@ class CostEstimator:
             CostEstimate с полями compute_time_sec, memory_mb, disk_mb,
             features_cost, total_relative_cost.
         """
-        duration_sec = max(0.0, float(duration_sec))
+        duration_sec = float(duration_sec)
+        if duration_sec < 0:
+            raise ValueError(f"duration_sec must be >= 0, got {duration_sec}")
         quality = quality if quality in _STT_RATES else "balanced"
         features = features or {}
 

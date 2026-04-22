@@ -265,6 +265,37 @@ class DataMigrator:
             "backup_path": result.backup_path,
         }
 
+    def rollback_migration(self, data_dir: Path, backup_path: str) -> dict[str, Any]:
+        """Откатывает последнюю миграцию, восстанавливая файлы из резервной копии.
+
+        Args:
+            data_dir: путь к директории данных Krab Ear.
+            backup_path: путь к резервной копии (из MigrationResult.backup_path).
+
+        Returns:
+            dict с ключами: restored_files (list[str]), backup_path (str).
+
+        Raises:
+            ValueError: если backup_path не существует или не является директорией.
+        """
+        backup_dir = Path(backup_path)
+        if not backup_dir.is_dir():
+            raise ValueError(f"Директория резервной копии не найдена: {backup_path!r}")
+
+        data_dir = Path(data_dir)
+        restored: list[str] = []
+
+        for src in backup_dir.iterdir():
+            if src.name == "migration_meta.json":
+                continue
+            dest = data_dir / src.name
+            shutil.copy2(src, dest)
+            restored.append(src.name)
+            logger.info("Откат: восстановлен файл %s", src.name)
+
+        logger.info("Откат миграции завершён: восстановлено %d файлов из %s", len(restored), backup_dir)
+        return {"restored_files": restored, "backup_path": str(backup_dir)}
+
     # ------------------------------------------------------------------
     # Вспомогательные методы
     # ------------------------------------------------------------------

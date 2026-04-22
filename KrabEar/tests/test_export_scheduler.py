@@ -381,6 +381,38 @@ class TestPruneOldExports(unittest.TestCase):
 # Тесты DEFAULT_SETTINGS присутствия AUTO_EXPORT_ENABLED
 # ---------------------------------------------------------------------------
 
+class TestCancel(unittest.TestCase):
+    """Тесты ExportScheduler.cancel — отключение расписания."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmpdir.name)
+        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.store = _make_store()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_cancel_disables_scheduler(self):
+        self.scheduler.configure(fmt="json", enabled=True)
+        self.assertTrue(self.scheduler.get_schedule_status()["enabled"])
+        result = self.scheduler.cancel()
+        self.assertFalse(result["enabled"])
+
+    def test_cancel_prevents_export(self):
+        self.scheduler.configure(fmt="json", enabled=True)
+        self.scheduler.cancel()
+        result = self.scheduler.check_and_export(self.store)
+        self.assertIsNone(result)
+
+    def test_cancel_persists(self):
+        self.scheduler.configure(fmt="json", enabled=True)
+        self.scheduler.cancel()
+        # Reload scheduler from disk — state must persist
+        new_sched = ExportScheduler(data_dir=self.data_dir)
+        self.assertFalse(new_sched.get_schedule_status()["enabled"])
+
+
 class TestAutoExportEnabledSetting(unittest.TestCase):
 
     def test_setting_exists_in_config(self):
