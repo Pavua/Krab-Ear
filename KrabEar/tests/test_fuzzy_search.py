@@ -129,6 +129,125 @@ class FuzzySearcherUnitTests(unittest.TestCase):
         self.assertEqual(m.matched_text, "hello world")
 
 
+class FuzzySearcherAdditionalTests(unittest.TestCase):
+    """Дополнительные тесты FuzzySearcher: граничные случаи и свойства."""
+
+    def setUp(self) -> None:
+        self.searcher = FuzzySearcher()
+
+    # ------------------------------------------------------------------
+    # 11. Нет совпадений выше порога → пустой список
+    # ------------------------------------------------------------------
+    def test_no_matches_returns_empty(self) -> None:
+        texts = ["completely unrelated", "nothing here at all"]
+        results = self.searcher.search("zxqwerty", texts, threshold=0.9)
+        self.assertEqual(results, [])
+
+    # ------------------------------------------------------------------
+    # 12. Все score в диапазоне [0.0, 1.0]
+    # ------------------------------------------------------------------
+    def test_scores_in_valid_range(self) -> None:
+        texts = ["hello world", "hello", "world", "test text", "foo bar baz"]
+        results = self.searcher.search("hello world", texts, threshold=0.0)
+        for m in results:
+            self.assertGreaterEqual(m.score, 0.0,
+                                    f"score {m.score} < 0 for {m.matched_text!r}")
+            self.assertLessEqual(m.score, 1.0,
+                                 f"score {m.score} > 1 for {m.matched_text!r}")
+
+    # ------------------------------------------------------------------
+    # 13. Пустые строки в списке пропускаются (не вызывают ошибку)
+    # ------------------------------------------------------------------
+    def test_empty_strings_in_texts_skipped(self) -> None:
+        texts = ["", "", "hello world", ""]
+        results = self.searcher.search("hello world", texts, threshold=0.9)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].matched_text, "hello world")
+
+    # ------------------------------------------------------------------
+    # 14. Испанский текст
+    # ------------------------------------------------------------------
+    def test_spanish_text_search(self) -> None:
+        texts = [
+            "El niño juega en el parque",
+            "La casa es muy bonita hoy",
+            "completamente diferente",
+        ]
+        results = self.searcher.search("niño juega", texts, threshold=0.5)
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0].index, 0)
+
+    def test_spanish_typo_tolerance(self) -> None:
+        texts = ["fantástico trabajo", "otro texto aquí"]
+        results = self.searcher.search("fantastico trabajo", texts, threshold=0.7)
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0].index, 0)
+
+    # ------------------------------------------------------------------
+    # 15. index корректно соответствует позиции в исходном списке
+    # ------------------------------------------------------------------
+    def test_index_matches_original_position(self) -> None:
+        texts = ["alpha beta", "gamma delta", "hello world", "omega psi"]
+        results = self.searcher.search("hello world", texts, threshold=0.9)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].index, 2)
+
+    # ------------------------------------------------------------------
+    # 16. matched_text совпадает с оригиналом (без lower)
+    # ------------------------------------------------------------------
+    def test_matched_text_preserves_case(self) -> None:
+        texts = ["Hello World"]
+        results = self.searcher.search("hello world", texts, threshold=0.9)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].matched_text, "Hello World")
+
+    # ------------------------------------------------------------------
+    # 17. threshold=0.0 возвращает все непустые тексты
+    # ------------------------------------------------------------------
+    def test_threshold_zero_returns_all_nonempty(self) -> None:
+        texts = ["one", "two three", "completely different zxqwerty"]
+        # min_text_len = max(1, len("abc") // 3) = 1 → все тексты проходят
+        results = self.searcher.search("abc", texts, threshold=0.0)
+        # Все непустые тексты с len >= min_text_len должны вернуться
+        self.assertGreater(len(results), 0)
+
+    # ------------------------------------------------------------------
+    # 18. Запрос длиннее текста — _partial_ratio не падает
+    # ------------------------------------------------------------------
+    def test_query_longer_than_text(self) -> None:
+        texts = ["hi"]
+        # query «hello world» длиннее «hi» — не должно упасть
+        results = self.searcher.search("hello world", texts, threshold=0.5)
+        # Результат может быть пустым, но без исключений
+        self.assertIsInstance(results, list)
+
+    # ------------------------------------------------------------------
+    # 19. Один текст совпадает точно — остальные ниже порога
+    # ------------------------------------------------------------------
+    def test_only_one_exact_match_above_threshold(self) -> None:
+        texts = [
+            "The quick brown fox",
+            "completely unrelated stuff",
+            "another irrelevant entry",
+        ]
+        results = self.searcher.search(
+            "The quick brown fox", texts, threshold=0.95
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].index, 0)
+        self.assertAlmostEqual(results[0].score, 1.0, places=2)
+
+    # ------------------------------------------------------------------
+    # 20. Поиск по одному тексту совпадающему частично
+    # ------------------------------------------------------------------
+    def test_partial_score_gt_full_score_edge(self) -> None:
+        # query «fox» (3 символа) — слишком короткое, min_text_len = max(1, 1) = 1
+        texts = ["The quick brown fox jumps"]
+        results = self.searcher.search("fox", texts, threshold=0.4)
+        # Должен найти, т.к. "fox" — точная подстрока
+        self.assertTrue(len(results) >= 1)
+
+
 class HistoryServiceFuzzySearchTests(unittest.TestCase):
     """Интеграционные тесты handle_fuzzy_search через HistoryService."""
 

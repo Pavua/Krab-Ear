@@ -173,5 +173,109 @@ class TestLanguageDetectorBatch(unittest.TestCase):
         self.assertEqual(results[2].language, "und")
 
 
+class TestLanguageDetectorMixedDominance(unittest.TestCase):
+    """Смешанный скрипт — доминирующий скрипт определяет язык."""
+
+    def setUp(self):
+        self.detector = LanguageDetector()
+
+    def test_more_cyrillic_than_latin_returns_ru(self):
+        # «Привет мир» (10 кир) vs «hi» (2 лат) → кириллица доминирует
+        result = self.detector.detect("Привет мир hi")
+        self.assertEqual(result.language, "ru")
+        self.assertEqual(result.script, "mixed")
+
+    def test_more_latin_than_cyrillic_returns_en(self):
+        # «hello world» (10 лат) vs «Да» (2 кир) → латиница доминирует
+        result = self.detector.detect("hello world Да")
+        self.assertEqual(result.language, "en")
+        self.assertEqual(result.script, "mixed")
+
+    def test_more_latin_with_spanish_marker_returns_es(self):
+        # «hola cómo» + небольшой блок кириллицы
+        result = self.detector.detect("hola cómo estás тут")
+        # Латиница доминирует + испанский маркер → es
+        self.assertEqual(result.language, "es")
+        self.assertEqual(result.script, "mixed")
+
+    def test_fifty_fifty_script_latin_wins(self):
+        # Точно 50/50 — по логике детектора латиница берёт приоритет
+        result = self.detector.detect("ab Вб")
+        self.assertEqual(result.script, "mixed")
+        # language определяется по латинской ветке
+        self.assertIn(result.language, ("en", "es"))
+
+    def test_confidence_mixed_less_than_pure(self):
+        pure = self.detector.detect("Привет мир солнце светит")
+        mixed = self.detector.detect("Привет мир hello world")
+        # Смешанный текст должен давать меньшую уверенность
+        self.assertLessEqual(mixed.confidence, pure.confidence)
+
+
+class TestLanguageDetectorShortTexts(unittest.TestCase):
+    """Короткие тексты — низкая уверенность, но корректный скрипт."""
+
+    def setUp(self):
+        self.detector = LanguageDetector()
+
+    def test_single_cyrillic_letter(self):
+        result = self.detector.detect("А")
+        self.assertIn(result.language, ("ru", "uk"))
+
+    def test_single_latin_letter(self):
+        result = self.detector.detect("A")
+        self.assertIn(result.language, ("en", "es"))
+
+    def test_two_cyrillic_letters_low_confidence(self):
+        result = self.detector.detect("ну")
+        self.assertLessEqual(result.confidence, 0.5)
+        self.assertIn(result.language, ("ru", "uk"))
+
+    def test_two_latin_letters_low_confidence(self):
+        result = self.detector.detect("ok")
+        self.assertLessEqual(result.confidence, 0.5)
+
+    def test_exactly_three_letters_normal_confidence(self):
+        # 3 буквы — уже не короткий (>= _MIN_LETTERS)
+        result = self.detector.detect("abc")
+        self.assertGreater(result.confidence, 0.4)
+
+    def test_spanish_inverted_exclamation(self):
+        # ¡ — ES-маркер, должен определить es
+        result = self.detector.detect("¡Hola amigo querido!")
+        self.assertEqual(result.language, "es")
+
+    def test_spanish_inverted_question(self):
+        # ¿ — ES-маркер
+        result = self.detector.detect("¿Qué pasa contigo hoy?")
+        self.assertEqual(result.language, "es")
+
+    def test_spanish_n_tilde(self):
+        result = self.detector.detect("El niño juega")
+        self.assertEqual(result.language, "es")
+
+    def test_ukrainian_explicit(self):
+        result = self.detector.detect("Він їде до Львова")
+        self.assertEqual(result.language, "uk")
+
+    def test_confidence_always_in_range(self):
+        cases = [
+            "а",           # 1 кир
+            "ab",          # 2 лат
+            "abc",         # 3 лат
+            "hello world",
+            "привет мир",
+            "¿cómo?",
+            "",
+            "123",
+        ]
+        for text in cases:
+            result = self.detector.detect(text)
+            self.assertGreaterEqual(result.confidence, 0.0,
+                                    f"confidence < 0 for {text!r}")
+            self.assertLessEqual(result.confidence, 1.0,
+                                 f"confidence > 1 for {text!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
