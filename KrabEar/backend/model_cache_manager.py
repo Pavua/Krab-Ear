@@ -42,8 +42,13 @@ class ModelCacheManager:
 
     _HF_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub"
 
-    def __init__(self, cache_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        cache_dir: Optional[Path] = None,
+        size_limit_mb: Optional[float] = None,
+    ) -> None:
         self._cache_dir = Path(cache_dir) if cache_dir is not None else self._HF_CACHE_DIR
+        self._size_limit_mb = size_limit_mb
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -81,10 +86,67 @@ class ModelCacheManager:
             models.append(info)
         return models
 
+    def get_cache_size(self) -> int:
+        """Возвращает суммарный размер всех кэшированных моделей в байтах."""
+        total = 0
+        if not self._cache_dir.exists():
+            return 0
+        for entry in self._cache_dir.iterdir():
+            if entry.is_dir() and entry.name.startswith("models--"):
+                total += int(self._folder_size_mb(entry) * 1024 * 1024)
+        return total
+
     def get_cache_size_total(self) -> float:
         """Возвращает суммарный размер всех кэшированных моделей в МБ."""
         models = self.list_cached_models()
         return sum(m.size_mb for m in models)
+
+    def evict(self, model_id: str) -> bool:
+        """Удаляет модель из кэша.
+
+        Args:
+            model_id: Имя модели 'owner/repo' или точное имя папки.
+
+        Returns:
+            True, если модель была удалена; False, если не найдена.
+        """
+        import shutil
+
+        folder = self._model_folder_name(model_id)
+        model_path = self._cache_dir / folder
+        if model_path.exists():
+            shutil.rmtree(model_path)
+            return True
+        return False
+
+    def is_over_size_limit(self) -> bool:
+        """Возвращает True, если кэш превышает установленный лимит (size_limit_mb).
+
+        Если лимит не задан — всегда False.
+        """
+        if self._size_limit_mb is None:
+            return False
+        return self.get_cache_size_total() > self._size_limit_mb
+
+    def enforce_size_limit(self) -> list[str]:
+        """Удаляет модели (по порядку последнего доступа) пока не уложимся в лимит.
+
+        Returns:
+            Список имён удалённых моделей.
+        """
+        if self._size_limit_mb is None or not self.is_over_size_limit():
+            return []
+        models = sorted(
+            self.list_cached_models(),
+            key=lambda m: m.last_accessed or "",
+        )
+        evicted = []
+        for m in models:
+            if not self.is_over_size_limit():
+                break
+            self.evict(m.name)
+            evicted.append(m.name)
+        return evicted
 
     def get_cache_info(self) -> dict:
         """Возвращает сводку по кэшу: путь, число моделей, суммарный размер."""

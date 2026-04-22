@@ -12,6 +12,7 @@ import resource
 import subprocess
 import time
 import logging
+from typing import Optional
 
 logger = logging.getLogger("KrabEar.Backend.SystemMonitor")
 
@@ -203,6 +204,37 @@ class SystemMonitor:
         except Exception:
             pass
         return 0.0
+
+    def snapshot(self) -> dict:
+        """Возвращает компактный снимок ресурсов: cpu/ram/disk/gpu percent (0-100).
+
+        ``gpu_percent`` равен None, если GPU-мониторинг недоступен.
+        """
+        info = self.get_system_info()
+        cpu = info.get("cpu_percent", 0.0)
+        ram = info.get("memory_percent", 0.0)
+        # Диск: используем (total - free) / total * 100
+        disk_total = info.get("disk_total_gb", 0.0)
+        disk_free = info.get("disk_free_gb", 0.0)
+        if disk_total > 0:
+            disk = round((disk_total - disk_free) / disk_total * 100, 1)
+        else:
+            disk = 0.0
+
+        # GPU: на Apple Silicon нет прямого счётчика без сторонних библиотек
+        gpu: Optional[float]
+        try:
+            import psutil  # type: ignore[import]
+            gpu = None  # psutil не предоставляет GPU percent
+        except ImportError:
+            gpu = None
+
+        return {
+            "cpu_percent": cpu,
+            "ram_percent": ram,
+            "disk_percent": disk,
+            "gpu_percent": gpu,
+        }
 
     def is_resource_constrained(self) -> bool:
         """Возвращает True, если память > 80% или свободного диска < 1 ГБ."""

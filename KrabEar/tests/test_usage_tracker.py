@@ -357,5 +357,204 @@ class TestUsageTrackerEdgeCases(unittest.TestCase):
         self.assertIn(today.isoformat(), self.tracker._daily)
 
 
+class TestUsageTrackerGetDailyStats(unittest.TestCase):
+    """Тесты для get_daily_stats(date)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_today_after_recording(self):
+        self.tracker.record_usage(30.0, 100)
+        stats = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(stats["recordings"], 1)
+        self.assertAlmostEqual(stats["duration_sec"], 30.0)
+        self.assertEqual(stats["words"], 100)
+
+    def test_day_with_no_recordings_returns_zeros(self):
+        yesterday = date.today() - timedelta(days=1)
+        stats = self.tracker.get_daily_stats(yesterday)
+        self.assertEqual(stats["recordings"], 0)
+        self.assertEqual(stats["duration_sec"], 0.0)
+        self.assertEqual(stats["words"], 0)
+
+    def test_specific_historical_day(self):
+        three_days_ago = (date.today() - timedelta(days=3)).isoformat()
+        self.tracker._daily[three_days_ago] = {"recordings": 5, "duration_sec": 150.0, "words": 800}
+        stats = self.tracker.get_daily_stats(date.today() - timedelta(days=3))
+        self.assertEqual(stats["recordings"], 5)
+        self.assertAlmostEqual(stats["duration_sec"], 150.0)
+        self.assertEqual(stats["words"], 800)
+
+    def test_returns_dict_with_all_required_keys(self):
+        stats = self.tracker.get_daily_stats(date.today())
+        self.assertIn("recordings", stats)
+        self.assertIn("duration_sec", stats)
+        self.assertIn("words", stats)
+
+    def test_multiple_recordings_same_day_accumulated(self):
+        self.tracker.record_usage(10.0, 50)
+        self.tracker.record_usage(20.0, 100)
+        stats = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(stats["recordings"], 2)
+        self.assertAlmostEqual(stats["duration_sec"], 30.0)
+        self.assertEqual(stats["words"], 150)
+
+    def test_duration_rounded_to_2_decimals(self):
+        self.tracker.record_usage(10.123456, 50)
+        stats = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(stats["duration_sec"], 10.12)
+
+    def test_future_date_returns_zeros(self):
+        future = date.today() + timedelta(days=10)
+        stats = self.tracker.get_daily_stats(future)
+        self.assertEqual(stats["recordings"], 0)
+
+
+class TestUsageTrackerGetWeekly(unittest.TestCase):
+    """Тесты для get_weekly()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_empty_returns_zeros(self):
+        result = self.tracker.get_weekly()
+        self.assertEqual(result["recordings"], 0)
+        self.assertEqual(result["total_duration_sec"], 0.0)
+        self.assertEqual(result["total_words"], 0)
+
+    def test_includes_today(self):
+        self.tracker.record_usage(15.0, 75)
+        result = self.tracker.get_weekly()
+        self.assertEqual(result["recordings"], 1)
+
+    def test_sums_7_days(self):
+        today = date.today()
+        for i in range(7):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 10.0, "words": 30}
+        result = self.tracker.get_weekly()
+        self.assertEqual(result["recordings"], 7)
+        self.assertAlmostEqual(result["total_duration_sec"], 70.0)
+        self.assertEqual(result["total_words"], 210)
+
+    def test_does_not_include_day_8(self):
+        today = date.today()
+        day8 = (today - timedelta(days=7)).isoformat()
+        self.tracker._daily[day8] = {"recordings": 99, "duration_sec": 999.0, "words": 9999}
+        result = self.tracker.get_weekly()
+        self.assertEqual(result["recordings"], 0)
+
+    def test_returns_required_keys(self):
+        result = self.tracker.get_weekly()
+        for key in ("recordings", "total_duration_sec", "total_words"):
+            self.assertIn(key, result)
+
+    def test_partial_week(self):
+        """Только 3 дня из 7 имеют данные."""
+        today = date.today()
+        for i in (0, 2, 4):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 2, "duration_sec": 20.0, "words": 60}
+        result = self.tracker.get_weekly()
+        self.assertEqual(result["recordings"], 6)
+        self.assertAlmostEqual(result["total_duration_sec"], 60.0)
+
+    def test_matches_this_week_in_get_usage_stats(self):
+        """get_weekly() должен совпадать с this_week из get_usage_stats()."""
+        today = date.today()
+        for i in range(5):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 10.0, "words": 25}
+        weekly = self.tracker.get_weekly()
+        stats_week = self.tracker.get_usage_stats()["this_week"]
+        self.assertEqual(weekly["recordings"], stats_week["recordings"])
+        self.assertAlmostEqual(weekly["total_duration_sec"], stats_week["total_duration_sec"])
+        self.assertEqual(weekly["total_words"], stats_week["total_words"])
+
+
+class TestUsageTrackerGetMonthly(unittest.TestCase):
+    """Тесты для get_monthly()."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_empty_returns_zeros(self):
+        result = self.tracker.get_monthly()
+        self.assertEqual(result["recordings"], 0)
+        self.assertEqual(result["total_duration_sec"], 0.0)
+        self.assertEqual(result["total_words"], 0)
+
+    def test_includes_today(self):
+        self.tracker.record_usage(20.0, 100)
+        result = self.tracker.get_monthly()
+        self.assertEqual(result["recordings"], 1)
+
+    def test_sums_30_days(self):
+        today = date.today()
+        for i in range(30):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 5.0, "words": 20}
+        result = self.tracker.get_monthly()
+        self.assertEqual(result["recordings"], 30)
+        self.assertAlmostEqual(result["total_duration_sec"], 150.0)
+        self.assertEqual(result["total_words"], 600)
+
+    def test_does_not_include_day_31(self):
+        today = date.today()
+        day31 = (today - timedelta(days=30)).isoformat()
+        self.tracker._daily[day31] = {"recordings": 99, "duration_sec": 999.0, "words": 9999}
+        result = self.tracker.get_monthly()
+        self.assertEqual(result["recordings"], 0)
+
+    def test_returns_required_keys(self):
+        result = self.tracker.get_monthly()
+        for key in ("recordings", "total_duration_sec", "total_words"):
+            self.assertIn(key, result)
+
+    def test_matches_this_month_in_get_usage_stats(self):
+        """get_monthly() должен совпадать с this_month из get_usage_stats()."""
+        today = date.today()
+        for i in range(20):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 2, "duration_sec": 15.0, "words": 50}
+        monthly = self.tracker.get_monthly()
+        stats_month = self.tracker.get_usage_stats()["this_month"]
+        self.assertEqual(monthly["recordings"], stats_month["recordings"])
+        self.assertAlmostEqual(monthly["total_duration_sec"], stats_month["total_duration_sec"])
+        self.assertEqual(monthly["total_words"], stats_month["total_words"])
+
+    def test_monthly_gt_weekly(self):
+        """Месячная статистика >= недельной при данных в обоих периодах."""
+        today = date.today()
+        for i in range(25):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 10.0, "words": 30}
+        weekly = self.tracker.get_weekly()
+        monthly = self.tracker.get_monthly()
+        self.assertGreaterEqual(monthly["recordings"], weekly["recordings"])
+
+    def test_rollover_new_day(self):
+        """Запись в 'вчера' и сегодня оба попадают в monthly."""
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.tracker._daily[yesterday] = {"recordings": 3, "duration_sec": 30.0, "words": 90}
+        self.tracker.record_usage(10.0, 40)
+        result = self.tracker.get_monthly()
+        self.assertEqual(result["recordings"], 4)
+        self.assertAlmostEqual(result["total_duration_sec"], 40.0)
+        self.assertEqual(result["total_words"], 130)
+
+
 if __name__ == "__main__":
     unittest.main()
