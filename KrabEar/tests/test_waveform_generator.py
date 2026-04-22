@@ -209,6 +209,64 @@ class TestNumPoints(unittest.TestCase):
 # ── Тест 6: generate_from_file ────────────────────────────────────────────
 
 
+class TestAlreadySmallAudio(unittest.TestCase):
+    """Fewer samples than num_points: output still has num_points values."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_tiny_audio_output_length_matches_num_points(self):
+        """10 samples, 200 points — output still has 200 points."""
+        tiny = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.5, 0.4, -0.3, 0.2, -0.1],
+                        dtype=np.float32)
+        result = self.gen.generate_waveform(tiny, 16000, num_points=200)
+        self.assertEqual(len(result.points), 200)
+
+    def test_tiny_audio_points_in_range(self):
+        tiny = np.linspace(-0.8, 0.8, 5, dtype=np.float32)
+        result = self.gen.generate_waveform(tiny, 16000, num_points=50)
+        for p in result.points:
+            self.assertGreaterEqual(p, 0.0)
+            self.assertLessEqual(p, 1.0)
+
+    def test_single_sample_returns_num_points(self):
+        single = np.array([0.7], dtype=np.float32)
+        result = self.gen.generate_waveform(single, 16000, num_points=10)
+        self.assertEqual(len(result.points), 10)
+        # single sample: every point should be peak-normalised → 1.0
+        self.assertTrue(all(abs(p - 1.0) < 1e-5 for p in result.points))
+
+
+class TestEnvelopePreservation(unittest.TestCase):
+    """Downsampled waveform preserves the amplitude envelope."""
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_silent_region_reflected_in_low_points(self):
+        """Second half silent → second half of waveform should be near zero."""
+        sr = 16000
+        half = sr // 2
+        audio = np.concatenate([
+            np.ones(half, dtype=np.float32),
+            np.zeros(half, dtype=np.float32),
+        ])
+        result = self.gen.generate_waveform(audio, sr, num_points=100)
+        first_half = result.points[:50]
+        second_half = result.points[50:]
+        # first half should average much higher than second half
+        self.assertGreater(sum(first_half) / 50, sum(second_half) / 50 + 0.4)
+
+    def test_increasing_amplitude_envelope(self):
+        """Linearly increasing amplitude → later bins larger than earlier bins."""
+        sr = 16000
+        ramp = np.linspace(0.0, 1.0, sr, dtype=np.float32)
+        result = self.gen.generate_waveform(ramp, sr, num_points=100)
+        first_quarter_avg = sum(result.points[:25]) / 25
+        last_quarter_avg = sum(result.points[75:]) / 25
+        self.assertGreater(last_quarter_avg, first_quarter_avg)
+
+
 class TestGenerateFromFile(unittest.TestCase):
     """Чтение waveform из файла."""
 

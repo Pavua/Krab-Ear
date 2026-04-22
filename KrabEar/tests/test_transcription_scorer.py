@@ -252,6 +252,42 @@ class TestTranscriptionScorerRecommendations(unittest.TestCase):
             self.assertIsInstance(rec, str)
 
 
+class TestTranscriptionScorerMissingFields(unittest.TestCase):
+    """Graceful handling of missing/default fields."""
+
+    def setUp(self) -> None:
+        self.scorer = TranscriptionScorer()
+
+    def test_whitespace_only_text_treated_as_empty(self) -> None:
+        result = self.scorer.score(text="   ", confidence=0.5, duration_sec=5.0)
+        self.assertEqual(result.factors["text_completeness"], 0.0)
+        self.assertIsInstance(result.grade, str)
+
+    def test_negative_duration_clamped_to_zero(self) -> None:
+        result = self.scorer.score(text="Тест", confidence=0.8, duration_sec=-1.0)
+        # duration clamped to 0 → neutral duration_appropriateness (10.0)
+        self.assertAlmostEqual(result.factors["duration_appropriateness"], 10.0)
+
+    def test_returns_quality_score_type(self) -> None:
+        result = self.scorer.score(text="", confidence=0.0, duration_sec=0.0)
+        self.assertIsInstance(result, QualityScore)
+        self.assertIn(result.grade, ("A", "B", "C", "D", "F"))
+        self.assertGreaterEqual(result.overall_score, 0.0)
+        self.assertLessEqual(result.overall_score, 100.0)
+
+    def test_factors_always_present(self) -> None:
+        """factors dict always has all 5 keys even for degenerate inputs."""
+        result = self.scorer.score(text="", confidence=0.0, duration_sec=0.0)
+        for key in (
+            "confidence",
+            "text_completeness",
+            "duration_appropriateness",
+            "diarization_bonus",
+            "llm_enhancement_bonus",
+        ):
+            self.assertIn(key, result.factors)
+
+
 class TestIPCHandlerScoreTranscription(unittest.TestCase):
     """Проверяет IPC-обработчик _handle_score_transcription в BackendService."""
 
