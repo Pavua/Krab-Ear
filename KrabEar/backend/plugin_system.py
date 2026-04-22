@@ -119,6 +119,10 @@ class PluginManager:
             logger.warning("Ошибка чтения манифеста %s: %s", manifest_path, exc)
             return None
 
+        if not isinstance(data, dict):
+            logger.warning("Манифест %s не является объектом JSON", manifest_path)
+            return None
+
         for field_name in _REQUIRED_MANIFEST_FIELDS:
             if not data.get(field_name):
                 logger.warning(
