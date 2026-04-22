@@ -357,5 +357,33 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
                 )
 
 
+class TestUnknownMethodBehavior(unittest.TestCase):
+    """Неизвестные методы классифицируются как 'light' и разрешаются по умолчанию."""
+
+    def test_unknown_method_classified_as_light(self) -> None:
+        self.assertEqual(_classify_method("completely_unknown_method"), "light")
+
+    def test_unknown_method_allowed_within_light_limit(self) -> None:
+        # Дефолтный light лимит = 120; первые 120 вызовов должны быть разрешены
+        throttle = IPCThrottle()
+        allowed = sum(1 for _ in range(120) if throttle.check_rate("completely_unknown_xyz"))
+        self.assertEqual(allowed, 120)
+
+    def test_unknown_method_rejected_after_light_limit(self) -> None:
+        throttle = IPCThrottle(limits={"light": 3, "medium": 30, "heavy": 5})
+        for _ in range(3):
+            throttle.check_rate("new_method_abc")
+        self.assertFalse(throttle.check_rate("new_method_abc"))
+
+    def test_two_unknown_methods_have_independent_buckets(self) -> None:
+        throttle = IPCThrottle(limits={"light": 2, "medium": 30, "heavy": 5})
+        # Исчерпать первый метод
+        throttle.check_rate("method_one")
+        throttle.check_rate("method_one")
+        self.assertFalse(throttle.check_rate("method_one"))
+        # Второй метод не затронут
+        self.assertTrue(throttle.check_rate("method_two"))
+
+
 if __name__ == "__main__":
     unittest.main()

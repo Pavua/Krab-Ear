@@ -248,5 +248,35 @@ class TestFeatureFlagsIPC(unittest.TestCase):
         self.assertIn("ts", result)
 
 
+class TestFeatureFlagsListAll(unittest.TestCase):
+    """list_flags() включает и встроенные, и пользовательские флаги."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_list_all_includes_custom_flag(self) -> None:
+        self.ff.set_flag("custom_xyz", True)
+        flags = self.ff.list_flags()
+        self.assertIn("custom_xyz", flags)
+        self.assertTrue(flags["custom_xyz"])
+
+    def test_list_all_returns_copy_not_internal_dict(self) -> None:
+        """Изменение возвращённого словаря не должно влиять на внутреннее состояние."""
+        flags = self.ff.list_flags()
+        flags["pipeline_v2"] = True
+        # Внутреннее значение не изменилось
+        self.assertFalse(self.ff.is_enabled("pipeline_v2"))
+
+    def test_is_enabled_unknown_flag_always_false(self) -> None:
+        """Неизвестный флаг → False, никогда не KeyError."""
+        for name in ("totally_unknown", "", "  ", "UPPER_CASE"):
+            result = self.ff.is_enabled(name)
+            self.assertFalse(result, f"Expected False for unknown flag {name!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
