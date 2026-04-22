@@ -270,6 +270,24 @@ class TranscriptionQueue:
             raise ValueError("Параметр job_id обязателен")
         return self.get_status(job_id)
 
+    def peek(self) -> dict[str, Any] | None:
+        """Возвращает следующее pending-задание без изменения его статуса.
+
+        Returns:
+            Словарь задания (job.to_dict()) или None если нет pending заданий.
+        """
+        with self._lock:
+            pending = [j for j in self._jobs.values() if j.status == STATUS_PENDING]
+            if not pending:
+                return None
+            pending.sort(key=lambda j: (j.priority, j.created_at))
+            return pending[0].to_dict()
+
+    def handle_peek(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: peek_transcription_queue — следующее задание без снятия из очереди."""
+        job = self.peek()
+        return {"job": job}
+
     def handle_list_queue(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: list_transcription_queue — список всех заданий."""
         return {"jobs": self.list_queue(), "stats": self.get_queue_stats()}

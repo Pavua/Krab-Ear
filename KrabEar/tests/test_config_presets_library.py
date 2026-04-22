@@ -309,5 +309,55 @@ class ConfigPresetsLibraryIPCTestCase(unittest.TestCase):
             })
 
 
+class ConfigPresetsLibraryGetBuiltinTestCase(unittest.TestCase):
+    """Тесты метода get_built_in_presets()."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._lib = ConfigPresetsLibrary(data_dir=self._tmpdir)
+
+    def test_get_built_in_presets_returns_dict(self) -> None:
+        result = self._lib.get_built_in_presets()
+        self.assertIsInstance(result, dict)
+
+    def test_get_built_in_presets_contains_all_five(self) -> None:
+        result = self._lib.get_built_in_presets()
+        for name in ("interview", "meeting", "voice_memo", "language_practice", "podcast"):
+            self.assertIn(name, result)
+
+    def test_get_built_in_presets_count(self) -> None:
+        result = self._lib.get_built_in_presets()
+        self.assertEqual(len(result), 5)
+
+    def test_get_built_in_presets_returns_copy(self) -> None:
+        """Мутация результата не затрагивает оригинал."""
+        result = self._lib.get_built_in_presets()
+        result["interview"]["name"] = "mutated"
+        fresh = self._lib.get_built_in_presets()
+        self.assertEqual(fresh["interview"]["name"], "interview")
+
+    def test_get_built_in_presets_each_has_settings_patch(self) -> None:
+        result = self._lib.get_built_in_presets()
+        for name, preset in result.items():
+            self.assertIn("settings_patch", preset, f"Нет settings_patch в пресете '{name}'")
+            self.assertIsInstance(preset["settings_patch"], dict)
+
+    def test_get_built_in_presets_is_static(self) -> None:
+        """get_built_in_presets доступен как статический метод."""
+        result = ConfigPresetsLibrary.get_built_in_presets()
+        self.assertIsInstance(result, dict)
+        self.assertEqual(len(result), 5)
+
+    def test_get_built_in_presets_not_affected_by_custom(self) -> None:
+        """Кастомные пресеты не попадают в get_built_in_presets."""
+        self._lib.create_preset(
+            name="my_custom_extra",
+            description="Custom",
+            settings_patch={"quality_profile": "balanced"},
+        )
+        builtins = self._lib.get_built_in_presets()
+        self.assertNotIn("my_custom_extra", builtins)
+
+
 if __name__ == "__main__":
     unittest.main()

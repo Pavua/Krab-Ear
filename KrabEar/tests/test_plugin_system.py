@@ -439,5 +439,220 @@ class TestPluginInfoDataclass(unittest.TestCase):
         self.assertIsInstance(info.plugin_dir, Path)
 
 
+from backend.plugin_system import HOOK_ON_TRANSCRIBE, HOOK_ON_PASTE
+
+
+# ---------------------------------------------------------------------------
+# 7. enable_plugin / disable_plugin
+# ---------------------------------------------------------------------------
+
+class TestEnableDisablePlugin(unittest.TestCase):
+    """Тесты включения и отключения плагинов."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+        _make_plugin_dir(self._plugins_dir, name="toggle_plugin")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _loaded_mgr(self) -> "PluginManager":
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("toggle_plugin")
+        return mgr
+
+    def test_disable_plugin_returns_true(self) -> None:
+        mgr = self._loaded_mgr()
+        result = mgr.disable_plugin("toggle_plugin")
+        self.assertTrue(result)
+
+    def test_disable_plugin_sets_status_disabled(self) -> None:
+        mgr = self._loaded_mgr()
+        mgr.disable_plugin("toggle_plugin")
+        plugins = mgr.list_plugins()
+        entry = next(p for p in plugins if p["name"] == "toggle_plugin")
+        self.assertEqual(entry["status"], "disabled")
+        self.assertFalse(entry["enabled"])
+
+    def test_disable_already_disabled_returns_false(self) -> None:
+        mgr = self._loaded_mgr()
+        mgr.disable_plugin("toggle_plugin")
+        result = mgr.disable_plugin("toggle_plugin")
+        self.assertFalse(result)
+
+    def test_enable_plugin_restores_loaded_status(self) -> None:
+        mgr = self._loaded_mgr()
+        mgr.disable_plugin("toggle_plugin")
+        result = mgr.enable_plugin("toggle_plugin")
+        self.assertTrue(result)
+        plugins = mgr.list_plugins()
+        entry = next(p for p in plugins if p["name"] == "toggle_plugin")
+        self.assertEqual(entry["status"], "loaded")
+        self.assertTrue(entry["enabled"])
+
+    def test_enable_not_disabled_returns_false(self) -> None:
+        mgr = self._loaded_mgr()
+        result = mgr.enable_plugin("toggle_plugin")
+        self.assertFalse(result)
+
+    def test_disable_unknown_plugin_raises_key_error(self) -> None:
+        mgr = PluginManager()
+        with self.assertRaises(KeyError):
+            mgr.disable_plugin("nonexistent")
+
+    def test_enable_unknown_plugin_raises_key_error(self) -> None:
+        mgr = PluginManager()
+        with self.assertRaises(KeyError):
+            mgr.enable_plugin("nonexistent")
+
+    def test_enable_discovered_not_loaded(self) -> None:
+        """enable_plugin на discovered (не loaded) восстанавливает статус discovered."""
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.disable_plugin("toggle_plugin")
+        mgr.enable_plugin("toggle_plugin")
+        plugins = mgr.list_plugins()
+        entry = next(p for p in plugins if p["name"] == "toggle_plugin")
+        self.assertEqual(entry["status"], "discovered")
+
+
+# ---------------------------------------------------------------------------
+# 8. call_hook (on_transcribe / on_paste)
+# ---------------------------------------------------------------------------
+
+def _make_hook_plugin(
+    plugins_dir: Path,
+    name: str,
+    hooks: list[str],
+) -> Path:
+    """Создаёт плагин с реализованными хуками."""
+    hook_methods = "\n".join(
+        f"    def {hook}(self, payload):\n        return {{'hook': '{hook}', 'name': '{name}', 'payload': payload}}"
+        for hook in hooks
+    )
+    code = (
+        f'class Plugin:\n'
+        f'    name = "{name}"\n'
+        f'    version = "1.0"\n'
+        f'    def initialize(self, service): pass\n'
+        f'    def get_ipc_methods(self): return {{}}\n'
+        f'{hook_methods}\n'
+    )
+    return _make_plugin_dir(plugins_dir, name=name, plugin_code=code)
+
+
+class TestCallHook(unittest.TestCase):
+    """Тесты вызова хуков плагинов (on_transcribe, on_paste)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_on_transcribe_hook_called(self) -> None:
+        _make_hook_plugin(self._plugins_dir, "hook_a", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("hook_a")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "hello"})
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["hook"], HOOK_ON_TRANSCRIBE)
+        self.assertEqual(results[0]["payload"], {"text": "hello"})
+
+    def test_on_paste_hook_called(self) -> None:
+        _make_hook_plugin(self._plugins_dir, "hook_b", [HOOK_ON_PASTE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("hook_b")
+        results = mgr.call_hook(HOOK_ON_PASTE, {"text": "pasted"})
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["hook"], HOOK_ON_PASTE)
+
+    def test_hook_not_called_for_plugin_without_hook(self) -> None:
+        """Плагин без метода on_transcribe — хук не вызывается."""
+        _make_plugin_dir(self._plugins_dir, name="no_hook")
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("no_hook")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "x"})
+        self.assertEqual(results, [])
+
+    def test_hook_not_called_for_unloaded_plugin(self) -> None:
+        """Хук не вызывается для обнаруженного, но не загруженного плагина."""
+        _make_hook_plugin(self._plugins_dir, "unloaded_hook", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        # Намеренно не вызываем load_plugin
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {})
+        self.assertEqual(results, [])
+
+    def test_hook_not_called_for_disabled_plugin(self) -> None:
+        """Хук не вызывается у отключённого плагина."""
+        _make_hook_plugin(self._plugins_dir, "disabled_hook", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("disabled_hook")
+        mgr.disable_plugin("disabled_hook")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "x"})
+        self.assertEqual(results, [])
+
+    def test_hook_called_after_reenable(self) -> None:
+        """После enable_plugin хук снова вызывается."""
+        _make_hook_plugin(self._plugins_dir, "reenable_hook", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("reenable_hook")
+        mgr.disable_plugin("reenable_hook")
+        mgr.enable_plugin("reenable_hook")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "y"})
+        self.assertEqual(len(results), 1)
+
+    def test_hook_error_in_one_plugin_does_not_break_others(self) -> None:
+        """Ошибка в хуке одного плагина не прерывает вызов остальных."""
+        # Плагин с падающим on_transcribe
+        bad_code = textwrap.dedent("""\
+            class Plugin:
+                name = "bad_hook_plugin"
+                version = "1.0"
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {}
+                def on_transcribe(self, payload):
+                    raise RuntimeError("hook error!")
+        """)
+        _make_plugin_dir(self._plugins_dir, name="bad_hook_plugin", plugin_code=bad_code)
+        _make_hook_plugin(self._plugins_dir, "good_hook_plugin", [HOOK_ON_TRANSCRIBE])
+
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("bad_hook_plugin")
+        mgr.load_plugin("good_hook_plugin")
+
+        # Должен вернуть результат только от good_hook_plugin (bad — пропущен из-за ошибки)
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "test"})
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "good_hook_plugin")
+
+    def test_multiple_plugins_all_receive_hook(self) -> None:
+        """Несколько плагинов с on_paste — все получают вызов."""
+        for name in ("paste_a", "paste_b", "paste_c"):
+            _make_hook_plugin(self._plugins_dir, name, [HOOK_ON_PASTE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        for name in ("paste_a", "paste_b", "paste_c"):
+            mgr.load_plugin(name)
+        results = mgr.call_hook(HOOK_ON_PASTE, {"text": "multi"})
+        self.assertEqual(len(results), 3)
+        names = {r["name"] for r in results}
+        self.assertEqual(names, {"paste_a", "paste_b", "paste_c"})
+
+
 if __name__ == "__main__":
     unittest.main()

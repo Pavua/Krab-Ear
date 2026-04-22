@@ -493,5 +493,81 @@ class TestTranscriptionQueueThreadSafety(unittest.TestCase):
         self.assertEqual(len(set(processed)), 5)  # Все уникальны
 
 
+class TestTranscriptionQueuePeek(unittest.TestCase):
+    """Тесты метода peek() — просмотр без удаления."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_peek_empty_queue_returns_none(self):
+        """peek() на пустой очереди возвращает None."""
+        result = self.queue.peek()
+        self.assertIsNone(result)
+
+    def test_peek_returns_highest_priority_job(self):
+        """peek() возвращает задание с наибольшим приоритетом."""
+        self.queue.enqueue("/path/to/audio1.mp3", priority=7)
+        job_id_2 = self.queue.enqueue("/path/to/audio2.mp3", priority=2)
+        result = self.queue.peek()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["job_id"], job_id_2)
+
+    def test_peek_does_not_change_status(self):
+        """peek() не меняет статус задания."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3", priority=3)
+        self.queue.peek()
+        status = self.queue.get_status(job_id)
+        self.assertEqual(status["status"], STATUS_PENDING)
+
+    def test_peek_does_not_remove_job_from_queue(self):
+        """После peek() задание остаётся в очереди."""
+        self.queue.enqueue("/path/to/audio.mp3", priority=3)
+        self.queue.peek()
+        self.queue.peek()  # Второй peek — то же самое задание
+        stats = self.queue.get_queue_stats()
+        self.assertEqual(stats["pending"], 1)
+
+    def test_peek_after_all_processed_returns_none(self):
+        """peek() возвращает None когда все задания обработаны."""
+        self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.process_next()
+        result = self.queue.peek()
+        self.assertIsNone(result)
+
+    def test_peek_skips_non_pending_jobs(self):
+        """peek() пропускает задания не в статусе pending."""
+        self.queue.enqueue("/path/to/audio1.mp3", priority=2)
+        job_id_2 = self.queue.enqueue("/path/to/audio2.mp3", priority=5)
+        # Переводим job_id_1 в processing
+        self.queue.process_next()
+        # peek должен вернуть job_id_2 (единственное pending)
+        result = self.queue.peek()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["job_id"], job_id_2)
+
+    def test_handle_peek_returns_job_dict(self):
+        """handle_peek() возвращает словарь с ключом job."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3", priority=3)
+        result = self.queue.handle_peek({})
+        self.assertIn("job", result)
+        self.assertIsNotNone(result["job"])
+        self.assertEqual(result["job"]["job_id"], job_id)
+        self.assertEqual(result["job"]["status"], STATUS_PENDING)
+
+    def test_handle_peek_empty_queue(self):
+        """handle_peek() на пустой очереди возвращает job=None."""
+        result = self.queue.handle_peek({})
+        self.assertIn("job", result)
+        self.assertIsNone(result["job"])
+
+    def test_peek_fifo_same_priority(self):
+        """peek() при одинаковом приоритете возвращает первое добавленное задание."""
+        job_id_1 = self.queue.enqueue("/path/to/audio1.mp3", priority=5)
+        time.sleep(0.01)
+        self.queue.enqueue("/path/to/audio2.mp3", priority=5)
+        result = self.queue.peek()
+        self.assertEqual(result["job_id"], job_id_1)
+
+
 if __name__ == "__main__":
     unittest.main()
