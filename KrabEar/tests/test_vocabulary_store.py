@@ -203,5 +203,114 @@ class TestVocabularyUpdatedAt(unittest.TestCase):
         self.assertIn("updated_at", payload2)
 
 
+class TestVocabularyUnicode(unittest.TestCase):
+    """Тест работы с юникод-словами (кириллица, латинница, спецсимволы)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = VocabularyStore(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_save_and_load_cyrillic_words(self):
+        words = ["привет", "мир", "Краб", "аудио"]
+        self.store.save(words)
+        loaded = self.store.load()
+        self.assertEqual(sorted(loaded), sorted(words))
+
+    def test_save_and_load_mixed_scripts(self):
+        words = ["hello", "привет", "hola", "мир"]
+        self.store.save(words)
+        loaded = self.store.load()
+        self.assertEqual(sorted(loaded), sorted(words))
+
+    def test_save_unicode_no_data_loss(self):
+        # Слова с диакритикой и акцентами
+        words = ["café", "naïve", "résumé", "über"]
+        self.store.save(words)
+        payload = json.loads(self.store.path.read_text(encoding="utf-8"))
+        for w in words:
+            self.assertIn(w, payload["words"])
+
+    def test_add_words_unicode(self):
+        self.store.save(["alpha"])
+        self.store.add_words(["бета", "гамма"])
+        loaded = self.store.load()
+        self.assertIn("бета", loaded)
+        self.assertIn("гамма", loaded)
+        self.assertIn("alpha", loaded)
+
+    def test_remove_words_unicode(self):
+        self.store.save(["alpha", "привет", "мир"])
+        self.store.remove_words(["привет"])
+        loaded = self.store.load()
+        self.assertNotIn("привет", loaded)
+        self.assertIn("мир", loaded)
+        self.assertIn("alpha", loaded)
+
+    def test_dedup_unicode(self):
+        self.store.save(["краб", "краб", "КРАБ"])
+        loaded = self.store.load()
+        # "краб" != "КРАБ" — case-sensitive
+        self.assertEqual(len(loaded), 2)
+
+    def test_empty_string_and_whitespace_filtered(self):
+        self.store.save(["", "   ", "valid", "\t"])
+        loaded = self.store.load()
+        self.assertEqual(loaded, ["valid"])
+
+
+class TestVocabularyListAll(unittest.TestCase):
+    """Тест list_all / load как публичного API перечисления слов."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = VocabularyStore(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_load_returns_list(self):
+        self.store.save(["x", "y", "z"])
+        result = self.store.load()
+        self.assertIsInstance(result, list)
+
+    def test_load_after_multiple_saves_returns_latest(self):
+        self.store.save(["alpha", "beta"])
+        self.store.save(["gamma", "delta"])
+        loaded = self.store.load()
+        self.assertNotIn("alpha", loaded)
+        self.assertIn("gamma", loaded)
+        self.assertIn("delta", loaded)
+
+    def test_add_words_returns_full_list(self):
+        self.store.save(["a", "b"])
+        result = self.store.add_words(["c", "d"])
+        self.assertEqual(sorted(result), ["a", "b", "c", "d"])
+
+    def test_remove_words_returns_remaining_list(self):
+        self.store.save(["a", "b", "c"])
+        result = self.store.remove_words(["b"])
+        self.assertEqual(sorted(result), ["a", "c"])
+
+    def test_add_empty_list_returns_existing(self):
+        self.store.save(["existing"])
+        result = self.store.add_words([])
+        self.assertEqual(result, ["existing"])
+
+    def test_remove_all_words_leaves_empty(self):
+        self.store.save(["only"])
+        result = self.store.remove_words(["only"])
+        self.assertEqual(result, [])
+        loaded = self.store.load()
+        self.assertEqual(loaded, [])
+
+    def test_add_duplicate_of_existing_no_double(self):
+        self.store.save(["alpha"])
+        result = self.store.add_words(["alpha"])
+        self.assertEqual(result.count("alpha"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
