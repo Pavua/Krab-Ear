@@ -494,6 +494,79 @@ class TestQualityTrendAnalyzerSerialization(unittest.TestCase):
         self.assertLessEqual(decimal_places, 6)
 
 
+class TestQualityTrendAnalyzerMultiWeek(unittest.TestCase):
+    """Тесты multi-week (несколько недель) сценариев."""
+
+    def setUp(self) -> None:
+        self.analyzer = QualityTrendAnalyzer()
+
+    def test_multi_week_improving_trend(self) -> None:
+        """Качество улучшается на протяжении нескольких недель."""
+        base = datetime.now(timezone.utc) - timedelta(days=28)
+        items = []
+        # Каждые 7 дней confidence растёт: 0.70 → 0.78 → 0.86 → 0.94
+        for week in range(4):
+            day = base + timedelta(days=week * 7)
+            for _ in range(3):
+                items.append({"ts": day.isoformat(), "confidence": 0.70 + week * 0.08})
+
+        report = self.analyzer.analyze_trends(items, days=30)
+
+        self.assertEqual(report.overall_trend, "improving")
+        self.assertGreater(report.trend_slope, 0.001)
+        self.assertGreater(len(report.daily_confidence), 1)
+
+    def test_multi_week_declining_trend(self) -> None:
+        """Качество ухудшается на протяжении нескольких недель."""
+        base = datetime.now(timezone.utc) - timedelta(days=21)
+        items = []
+        # 3 недели с падением: 0.95 → 0.87 → 0.79
+        for week in range(3):
+            day = base + timedelta(days=week * 7)
+            items.append({"ts": day.isoformat(), "confidence": 0.95 - week * 0.08})
+
+        report = self.analyzer.analyze_trends(items, days=30)
+
+        self.assertEqual(report.overall_trend, "declining")
+        self.assertLess(report.trend_slope, -0.001)
+
+    def test_multi_week_spans_multiple_days_each_week(self) -> None:
+        """Multi-week данные с несколькими записями в каждом дне."""
+        base = datetime.now(timezone.utc) - timedelta(days=14)
+        items = []
+        for week in range(2):
+            for day_offset in range(5):  # пн–пт
+                day = base + timedelta(days=week * 7 + day_offset)
+                for _ in range(4):  # 4 записи в день
+                    items.append({
+                        "ts": day.isoformat(),
+                        "confidence": 0.85 + week * 0.05,
+                    })
+
+        report = self.analyzer.analyze_trends(items, days=30)
+
+        # 10 дней с данными (5 дней x 2 недели)
+        self.assertEqual(len(report.daily_confidence), 10)
+        # Каждый день имеет ровно 4 записи
+        for day_data in report.daily_confidence:
+            self.assertEqual(day_data["count"], 4)
+
+    def test_single_day_all_records(self) -> None:
+        """Все записи в один день → один дневной агрегат, trend=stable."""
+        today = datetime.now(timezone.utc)
+        items = [
+            {"ts": today.replace(hour=h).isoformat(), "confidence": 0.85}
+            for h in range(8)
+        ]
+
+        report = self.analyzer.analyze_trends(items, days=30)
+
+        self.assertEqual(len(report.daily_confidence), 1)
+        self.assertEqual(report.daily_confidence[0]["count"], 8)
+        self.assertEqual(report.overall_trend, "stable")
+        self.assertEqual(report.trend_slope, 0.0)
+
+
 class TestQualityTrendAnalyzerWindowSize(unittest.TestCase):
     """Тесты параметра window size (days)."""
 
