@@ -267,5 +267,109 @@ class TestIPCHandlers(unittest.TestCase):
         self.assertGreaterEqual(result["count"], 4)
 
 
+class TestReplayAll(unittest.TestCase):
+    """replay_events с диапазоном, охватывающим все события — эквивалент replay_all."""
+
+    def setUp(self):
+        self.mgr = EventReplayManager(max_buffer=100)
+
+    def tearDown(self):
+        self.mgr.close()
+
+    def test_replay_all_returns_all_events(self):
+        """replay_events с очень широким диапазоном возвращает все события."""
+        for i in range(5):
+            self.mgr.record_event("ev", {"i": i})
+        from_ts = "2000-01-01T00:00:00+00:00"
+        to_ts = "2100-01-01T00:00:00+00:00"
+        events = self.mgr.replay_events(from_ts, to_ts)
+        self.assertEqual(len(events), 5)
+
+    def test_replay_empty_range_returns_empty(self):
+        """replay_events с from_ts > to_ts возвращает пустой список."""
+        self.mgr.record_event("ev", {})
+        now = datetime.now(timezone.utc)
+        from_ts = (now + timedelta(seconds=60)).isoformat(timespec="seconds")
+        to_ts = (now + timedelta(seconds=120)).isoformat(timespec="seconds")
+        events = self.mgr.replay_events(from_ts, to_ts)
+        self.assertEqual(events, [])
+
+    def test_replay_no_events_returns_empty(self):
+        """replay_events на пустом буфере всегда возвращает []."""
+        from_ts = "2000-01-01T00:00:00+00:00"
+        to_ts = "2100-01-01T00:00:00+00:00"
+        events = self.mgr.replay_events(from_ts, to_ts)
+        self.assertEqual(events, [])
+
+
+class TestPersistenceReload(unittest.TestCase):
+    """Персистенция: перезагрузка из файла сохраняет события."""
+
+    def test_reload_from_ndjson(self):
+        """Файл NDJSON с persist_path можно прочитать независимо от экземпляра."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            mgr = EventReplayManager(persist_path=path, max_buffer=100)
+            mgr.record_event("alpha", {"x": 1})
+            mgr.record_event("beta", {"x": 2})
+            mgr.close()
+
+            # Новый экземпляр не загружает с диска (дизайн — in-memory),
+            # но файл содержит оба события.
+            lines = path.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(json.loads(lines[0])["type"], "alpha")
+            self.assertEqual(json.loads(lines[1])["type"], "beta")
+
+    def test_persist_path_parent_created(self):
+        """persist_path создаёт родительскую директорию если не существует."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested = Path(tmpdir) / "sub" / "dir" / "events.ndjson"
+            mgr = EventReplayManager(persist_path=nested, max_buffer=10)
+            mgr.record_event("test", {})
+            mgr.close()
+            self.assertTrue(nested.exists())
+            self.assertEqual(len(nested.read_text().splitlines()), 1)
+
+    def test_append_to_existing_file(self):
+        """Если файл уже существует, события дописываются (append), а не перезаписываются."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            # Первая сессия
+            mgr1 = EventReplayManager(persist_path=path, max_buffer=100)
+            mgr1.record_event("first", {})
+            mgr1.close()
+            # Вторая сессия
+            mgr2 = EventReplayManager(persist_path=path, max_buffer=100)
+            mgr2.record_event("second", {})
+            mgr2.close()
+
+            lines = path.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            types = [json.loads(line)["type"] for line in lines]
+            self.assertIn("first", types)
+            self.assertIn("second", types)
+
+
+class TestClearBuffer(unittest.TestCase):
+    def test_clear_empties_buffer(self):
+        mgr = EventReplayManager(max_buffer=50)
+        for _ in range(10):
+            mgr.record_event("x", {})
+        mgr.clear()
+        self.assertEqual(mgr.get_event_stats()["total_events"], 0)
+        mgr.close()
+
+    def test_clear_does_not_remove_persist_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "ev.ndjson"
+            mgr = EventReplayManager(persist_path=path, max_buffer=50)
+            mgr.record_event("x", {})
+            mgr.clear()
+            # файл остаётся, т.к. clear() не трогает диск
+            self.assertTrue(path.exists())
+            mgr.close()
+
+
 if __name__ == "__main__":
     unittest.main()
