@@ -51,6 +51,12 @@ _REQUIRED_MANIFEST_FIELDS = ("name", "version", "entry_point")
 _STATUS_DISCOVERED = "discovered"
 _STATUS_LOADED = "loaded"
 _STATUS_ERROR = "error"
+_STATUS_DISABLED = "disabled"
+
+# Имена поддерживаемых хуков.
+HOOK_ON_TRANSCRIBE = "on_transcribe"
+HOOK_ON_PASTE = "on_paste"
+_SUPPORTED_HOOKS = (HOOK_ON_TRANSCRIBE, HOOK_ON_PASTE)
 
 
 class PluginManager:
@@ -63,10 +69,12 @@ class PluginManager:
         self._discovered: dict[str, PluginInfo] = {}
         # Загруженные экземпляры плагинов.
         self._loaded: dict[str, Plugin] = {}
-        # Статусы (discovered / loaded / error).
+        # Статусы (discovered / loaded / error / disabled).
         self._statuses: dict[str, str] = {}
         # Тексты ошибок загрузки.
         self._errors: dict[str, str] = {}
+        # Отключённые вручную плагины.
+        self._disabled: set[str] = set()
 
     # ------------------------------------------------------------------
     # Обнаружение
@@ -209,6 +217,7 @@ class PluginManager:
                 "author": info.author,
                 "entry_point": info.entry_point,
                 "status": self._statuses.get(name, _STATUS_DISCOVERED),
+                "enabled": name not in self._disabled,
             }
             # Если загружен — добавляем список IPC-методов.
             if name in self._loaded:
@@ -253,6 +262,81 @@ class PluginManager:
             result["error"] = self._errors[name]
 
         return result
+
+    # ------------------------------------------------------------------
+    # Включение / отключение плагинов
+    # ------------------------------------------------------------------
+
+    def enable_plugin(self, name: str) -> bool:
+        """Включает ранее отключённый плагин.
+
+        Returns:
+            True если плагин был отключён и теперь включён, False если не был отключён.
+
+        Raises:
+            KeyError: если плагин не обнаружен.
+        """
+        if name not in self._discovered:
+            raise KeyError(f"Плагин '{name}' не найден")
+        if name not in self._disabled:
+            return False
+        self._disabled.discard(name)
+        # Восстанавливаем статус: loaded если был загружен, иначе discovered.
+        if name in self._loaded:
+            self._statuses[name] = _STATUS_LOADED
+        else:
+            self._statuses[name] = _STATUS_DISCOVERED
+        logger.info("Плагин '%s' включён", name)
+        return True
+
+    def disable_plugin(self, name: str) -> bool:
+        """Отключает плагин (не выгружает из памяти, но хуки не вызываются).
+
+        Returns:
+            True если плагин был включён и теперь отключён, False если уже был отключён.
+
+        Raises:
+            KeyError: если плагин не обнаружен.
+        """
+        if name not in self._discovered:
+            raise KeyError(f"Плагин '{name}' не найден")
+        if name in self._disabled:
+            return False
+        self._disabled.add(name)
+        self._statuses[name] = _STATUS_DISABLED
+        logger.info("Плагин '%s' отключён", name)
+        return True
+
+    # ------------------------------------------------------------------
+    # Хуки
+    # ------------------------------------------------------------------
+
+    def call_hook(self, hook_name: str, payload: Any) -> list[Any]:
+        """Вызывает хук у всех загруженных и включённых плагинов.
+
+        Хук вызывается только если соответствующий метод присутствует у плагина.
+        Ошибки в хуке изолированы — не прерывают обработку остальных плагинов.
+
+        Args:
+            hook_name: имя хука (HOOK_ON_TRANSCRIBE / HOOK_ON_PASTE).
+            payload: данные, передаваемые хуку.
+
+        Returns:
+            Список возвращаемых значений от каждого сработавшего хука.
+        """
+        results: list[Any] = []
+        for name, plugin in self._loaded.items():
+            if name in self._disabled:
+                continue
+            hook_fn = getattr(plugin, hook_name, None)
+            if hook_fn is None or not callable(hook_fn):
+                continue
+            try:
+                result = hook_fn(payload)
+                results.append(result)
+            except Exception as exc:
+                logger.error("Ошибка в хуке '%s' плагина '%s': %s", hook_name, name, exc)
+        return results
 
     # ------------------------------------------------------------------
     # IPC-обработчики (интегрируются в BackendService.handle_request)

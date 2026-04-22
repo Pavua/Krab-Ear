@@ -164,6 +164,11 @@ class ConfigPresetsLibrary:
     # Публичный API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def get_built_in_presets() -> dict[str, dict[str, Any]]:
+        """Возвращает словарь встроенных пресетов (копия)."""
+        return {name: dict(preset) for name, preset in _BUILTIN_PRESETS.items()}
+
     def list_presets(self) -> list[dict[str, Any]]:
         """Возвращает список всех пресетов (встроенные + кастомные).
 
