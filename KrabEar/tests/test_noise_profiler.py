@@ -311,5 +311,66 @@ class TestEdgeCases(unittest.TestCase):
                                   f"Ошибка при sample_rate={sr}")
 
 
+class TestSilenceAudio(unittest.TestCase):
+    """Тихое/нулевое аудио должно давать quiet-профиль."""
+
+    def test_zero_audio_classified_as_quiet(self):
+        audio = _silence(duration=2.0)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertIsInstance(result, NoiseProfile)
+        self.assertEqual(result.noise_type, "quiet")
+
+    def test_near_silence_noise_level_is_very_low(self):
+        # Очень тихий белый шум → noise_level_db близко к -120 dBFS
+        audio = _white_noise(duration=2.0, amplitude=1e-9)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertLess(result.noise_level_db, -80.0,
+                        "Почти тишина должна давать очень низкий noise_level_db")
+
+    def test_silent_profile_not_suitable_for_stt(self):
+        audio = np.array([], dtype=np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertFalse(result.suitable_for_stt)
+
+    def test_silent_profile_has_recommendation(self):
+        audio = np.array([], dtype=np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertGreater(len(result.recommendations), 0)
+
+
+class TestRmsToDbs(unittest.TestCase):
+    """Тесты статического метода _rms_to_dbfs."""
+
+    def test_full_scale_rms_returns_zero_db(self):
+        result = NoiseProfiler._rms_to_dbfs(1.0)
+        self.assertAlmostEqual(result, 0.0, places=5)
+
+    def test_very_small_rms_returns_minus_120(self):
+        result = NoiseProfiler._rms_to_dbfs(0.0)
+        self.assertEqual(result, -120.0)
+
+    def test_half_amplitude_is_minus_6_db(self):
+        result = NoiseProfiler._rms_to_dbfs(0.5)
+        self.assertAlmostEqual(result, 20.0 * math.log10(0.5), places=4)
+
+    def test_rms_below_threshold_clamped(self):
+        result = NoiseProfiler._rms_to_dbfs(1e-15)
+        self.assertEqual(result, -120.0)
+
+
+class TestNoiseProfileToDict(unittest.TestCase):
+    """to_dict() должен содержать все поля с правильными типами."""
+
+    def test_to_dict_types(self):
+        result = NoiseProfiler().profile(_speech_with_noise(), SR)
+        d = result.to_dict()
+        self.assertIsInstance(d["noise_type"], str)
+        self.assertIsInstance(d["noise_level_db"], float)
+        self.assertIsInstance(d["snr_db"], float)
+        self.assertIsInstance(d["frequency_profile"], str)
+        self.assertIsInstance(d["recommendations"], list)
+        self.assertIsInstance(d["suitable_for_stt"], bool)
+
+
 if __name__ == "__main__":
     unittest.main()
