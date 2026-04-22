@@ -163,5 +163,114 @@ class TestPerformanceProfilerBasic(unittest.TestCase):
         self.assertGreater(report["total_profiled_time_sec"], 0)
 
 
+class TestNestedOps(unittest.TestCase):
+    """Nested start_span calls must not interfere with each other."""
+
+    def setUp(self):
+        self.p = PerformanceProfiler(window_size=100)
+
+    def test_nested_different_ops_both_recorded(self):
+        """Outer and inner spans with different names both record independently."""
+        with self.p.start_span("outer"):
+            with self.p.start_span("inner"):
+                time.sleep(0.005)
+        report = self.p.get_profile_report()
+        self.assertIn("outer", report["methods"])
+        self.assertIn("inner", report["methods"])
+
+    def test_nested_ops_do_not_corrupt_each_other(self):
+        """Inner span timing must be less than outer span timing."""
+        with self.p.start_span("outer"):
+            time.sleep(0.005)
+            with self.p.start_span("inner"):
+                time.sleep(0.005)
+        methods = self.p.get_profile_report()["methods"]
+        outer_avg = methods["outer"]["avg_ms"]
+        inner_avg = methods["inner"]["avg_ms"]
+        # outer includes inner sleep + outer sleep so must be >= inner
+        self.assertGreaterEqual(outer_avg, inner_avg)
+
+    def test_same_name_nested_accumulates_twice(self):
+        """Two spans with same name record two separate entries in window."""
+        with self.p.start_span("op"):
+            with self.p.start_span("op"):
+                time.sleep(0.002)
+        report = self.p.get_profile_report()
+        self.assertEqual(report["methods"]["op"]["calls"], 2)
+
+    def test_deeply_nested_ops(self):
+        """Three levels of nesting all record correctly."""
+        with self.p.start_span("l1"):
+            with self.p.start_span("l2"):
+                with self.p.start_span("l3"):
+                    time.sleep(0.001)
+        methods = self.p.get_profile_report()["methods"]
+        for name in ("l1", "l2", "l3"):
+            self.assertIn(name, methods)
+            self.assertEqual(methods[name]["calls"], 1)
+
+
+class TestGetStats(unittest.TestCase):
+    """Tests for per-method stats: avg_ms, p50_ms, max_ms."""
+
+    def setUp(self):
+        self.p = PerformanceProfiler(window_size=200)
+
+    def test_avg_ms_reasonable_after_known_sleep(self):
+        """avg_ms should be >= 10ms after sleeping 10ms."""
+        for _ in range(5):
+            with self.p.start_span("sleeper"):
+                time.sleep(0.010)
+        stats = self.p.get_profile_report()["methods"]["sleeper"]
+        self.assertGreaterEqual(stats["avg_ms"], 9.0)
+
+    def test_p50_ms_between_min_and_max(self):
+        """p50 must be between the shortest and longest recorded times."""
+        for _ in range(20):
+            with self.p.start_span("varied"):
+                pass
+        stats = self.p.get_profile_report()["methods"]["varied"]
+        self.assertLessEqual(stats["p50_ms"], stats["max_ms"])
+        self.assertGreaterEqual(stats["p50_ms"], 0)
+
+    def test_max_ms_is_max(self):
+        """max_ms must be >= avg_ms."""
+        for _ in range(10):
+            with self.p.start_span("m"):
+                pass
+        stats = self.p.get_profile_report()["methods"]["m"]
+        self.assertGreaterEqual(stats["max_ms"], stats["avg_ms"])
+
+    def test_multiple_runs_accumulate_call_count(self):
+        """Running many times builds up the call counter correctly."""
+        n = 30
+        for _ in range(n):
+            with self.p.start_span("run"):
+                pass
+        stats = self.p.get_profile_report()["methods"]["run"]
+        self.assertEqual(stats["calls"], n)
+
+    def test_reset_then_re_profile(self):
+        """After reset, new timings start fresh with call count = 1."""
+        for _ in range(5):
+            with self.p.start_span("fresh"):
+                pass
+        self.p.reset()
+        with self.p.start_span("fresh"):
+            pass
+        stats = self.p.get_profile_report()["methods"]["fresh"]
+        self.assertEqual(stats["calls"], 1)
+
+    def test_stats_for_unknown_op_not_in_methods(self):
+        """Accessing stats for a never-profiled op: key absent in methods dict."""
+        report = self.p.get_profile_report()
+        self.assertNotIn("never_ran", report["methods"])
+
+    def test_global_singleton_exists(self):
+        """The module-level 'profiler' singleton should be a PerformanceProfiler."""
+        from backend.performance_profiler import profiler as global_profiler
+        self.assertIsInstance(global_profiler, PerformanceProfiler)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -201,5 +201,146 @@ class TestRecordingSchedulerIPCHandlers(unittest.TestCase):
         self.assertEqual(result["schedules"], [])
 
 
+class TestCheckAndTriggerAdvanced(unittest.TestCase):
+    """Advanced run_due (check_and_trigger) scenarios."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.sched = RecordingScheduler(data_dir=self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_trigger_only_fires_once_per_job(self):
+        """Once triggered, a job is completed and won't fire again."""
+        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        result1 = self.sched.check_and_trigger()
+        self.assertIsNotNone(result1)
+        result2 = self.sched.check_and_trigger()
+        self.assertIsNone(result2)
+
+    def test_trigger_returns_correct_duration_and_label(self):
+        self.sched.schedule_recording(
+            start_time=_past_iso(1), duration_sec=120, label="TestLabel"
+        )
+        result = self.sched.check_and_trigger()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["duration_sec"], 120)
+        self.assertEqual(result["label"], "TestLabel")
+
+    def test_trigger_returns_job_id(self):
+        entry = self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        result = self.sched.check_and_trigger()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], entry["id"])
+
+    def test_future_job_not_triggered(self):
+        self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=60)
+        result = self.sched.check_and_trigger()
+        self.assertIsNone(result)
+        # Status must remain pending
+        items = self.sched.list_scheduled()
+        self.assertEqual(items[0]["status"], STATUS_PENDING)
+
+    def test_cancelled_job_not_triggered(self):
+        entry = self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        self.sched.cancel_scheduled(entry["id"])
+        result = self.sched.check_and_trigger()
+        self.assertIsNone(result)
+
+    def test_multiple_jobs_only_due_one_triggered(self):
+        """When multiple jobs exist, only the due one is triggered."""
+        self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=30, label="future")
+        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60, label="due_now")
+        result = self.sched.check_and_trigger()
+        self.assertIsNotNone(result)
+        self.assertEqual(result["label"], "due_now")
+        # Future job still pending
+        items = self.sched.list_scheduled()
+        future_items = [i for i in items if i["label"] == "future"]
+        self.assertEqual(future_items[0]["status"], STATUS_PENDING)
+
+    def test_multiple_past_jobs_triggers_one_at_a_time(self):
+        """Multiple overdue jobs: each call triggers one, not all at once."""
+        self.sched.schedule_recording(start_time=_past_iso(2), duration_sec=30, label="a")
+        self.sched.schedule_recording(start_time=_past_iso(3), duration_sec=30, label="b")
+        r1 = self.sched.check_and_trigger()
+        r2 = self.sched.check_and_trigger()
+        r3 = self.sched.check_and_trigger()
+        self.assertIsNotNone(r1)
+        self.assertIsNotNone(r2)
+        self.assertIsNone(r3)
+
+    def test_completed_jobs_appear_in_list(self):
+        """Completed jobs remain in list_scheduled with completed status."""
+        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60)
+        self.sched.check_and_trigger()
+        items = self.sched.list_scheduled()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], STATUS_COMPLETED)
+
+
+class TestScheduleWithLabelAsProfile(unittest.TestCase):
+    """Test that label/profile field is stored and retrieved correctly."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.sched = RecordingScheduler(data_dir=self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_empty_label_stored(self):
+        entry = self.sched.schedule_recording(start_time=_future_iso(), duration_sec=60)
+        self.assertEqual(entry["label"], "")
+
+    def test_label_persisted(self):
+        self.sched.schedule_recording(
+            start_time=_future_iso(), duration_sec=60, label="meeting"
+        )
+        sched2 = RecordingScheduler(data_dir=self._tmpdir.name)
+        items = sched2.list_scheduled()
+        self.assertEqual(items[0]["label"], "meeting")
+
+    def test_list_includes_all_statuses(self):
+        """list_scheduled returns pending, cancelled, and completed jobs."""
+        self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=60, label="pending_job")
+        e2 = self.sched.schedule_recording(start_time=_future_iso(7200), duration_sec=60, label="cancel_job")
+        self.sched.schedule_recording(start_time=_past_iso(1), duration_sec=60, label="done_job")
+        self.sched.cancel_scheduled(e2["id"])
+        self.sched.check_and_trigger()
+
+        items = self.sched.list_scheduled()
+        self.assertEqual(len(items), 3)
+        statuses = {i["label"]: i["status"] for i in items}
+        self.assertEqual(statuses["pending_job"], STATUS_PENDING)
+        self.assertEqual(statuses["cancel_job"], STATUS_CANCELLED)
+        self.assertEqual(statuses["done_job"], STATUS_COMPLETED)
+
+    def test_created_at_is_set(self):
+        entry = self.sched.schedule_recording(start_time=_future_iso(), duration_sec=60)
+        self.assertIn("created_at", entry)
+        # Must parse as ISO8601
+        dt = datetime.fromisoformat(entry["created_at"].replace("Z", "+00:00"))
+        self.assertIsNotNone(dt)
+
+    def test_schedule_recording_returns_all_expected_fields(self):
+        entry = self.sched.schedule_recording(
+            start_time=_future_iso(), duration_sec=90, label="full_test"
+        )
+        for field in ("id", "start_time", "duration_sec", "label", "status", "created_at"):
+            self.assertIn(field, entry, f"Missing field: {field}")
+
+    def test_cancel_preserves_other_jobs(self):
+        e1 = self.sched.schedule_recording(start_time=_future_iso(1800), duration_sec=30, label="keep")
+        e2 = self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=60, label="cancel")
+        self.sched.cancel_scheduled(e2["id"])
+        items = self.sched.list_scheduled()
+        self.assertEqual(len(items), 2)
+        keep_items = [i for i in items if i["id"] == e1["id"]]
+        self.assertEqual(len(keep_items), 1)
+        self.assertEqual(keep_items[0]["status"], STATUS_PENDING)
+
+
 if __name__ == "__main__":
     unittest.main()
