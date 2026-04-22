@@ -240,5 +240,97 @@ class TestCustomThreshold(unittest.TestCase):
         self.assertGreater(ratio_loose, ratio_strict)
 
 
+class TestDetectSilenceEdgeCases(unittest.TestCase):
+    """Дополнительные граничные тесты detect_silence."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_zero_sample_rate_returns_empty(self):
+        """sample_rate=0 — безопасный возврат пустого списка."""
+        audio = _make_silence(1.0)
+        regions = self.detector.detect_silence(audio, sample_rate=0)
+        self.assertEqual(regions, [])
+
+    def test_all_loud_returns_no_regions(self):
+        """Полностью громкий сигнал → нет регионов тишины."""
+        audio = np.full(SAMPLE_RATE * 2, 0.8, dtype=np.float32)
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        self.assertEqual(len(regions), 0)
+
+    def test_all_silent_long_returns_one_region(self):
+        """Длинная тишина → один регион, покрывающий всё аудио."""
+        audio = _make_silence(3.0)
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        self.assertEqual(len(regions), 1)
+        self.assertAlmostEqual(regions[0].duration_sec, 3.0, delta=0.1)
+
+    def test_multichannel_detect_silence(self):
+        """Стерео аудио усредняется в моно перед анализом — нет исключений."""
+        mono = _concat(_make_speech(0.5), _make_silence(1.0), _make_speech(0.5))
+        stereo = np.stack([mono, mono], axis=1)
+        regions = self.detector.detect_silence(stereo, SAMPLE_RATE)
+        # Одна зона тишины в середине
+        self.assertEqual(len(regions), 1)
+
+    def test_silence_region_duration_consistency(self):
+        """duration_sec == end_sec - start_sec для каждого региона."""
+        audio = _concat(
+            _make_speech(0.4),
+            _make_silence(0.6),
+            _make_speech(0.4),
+            _make_silence(0.6),
+        )
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        for r in regions:
+            self.assertAlmostEqual(r.duration_sec, r.end_sec - r.start_sec, places=4)
+
+    def test_silence_region_to_dict_complete(self):
+        """to_dict() содержит все ожидаемые ключи и числовые значения."""
+        audio = _concat(_make_speech(0.3), _make_silence(0.5))
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        self.assertGreater(len(regions), 0)
+        d = regions[-1].to_dict()
+        self.assertIn("start_sec", d)
+        self.assertIn("end_sec", d)
+        self.assertIn("duration_sec", d)
+        self.assertIsInstance(d["start_sec"], float)
+        self.assertIsInstance(d["end_sec"], float)
+        self.assertIsInstance(d["duration_sec"], float)
+
+    def test_silence_start_end_ordering(self):
+        """start_sec < end_sec для каждого региона."""
+        audio = _concat(
+            _make_speech(0.3),
+            _make_silence(0.5),
+            _make_speech(0.3),
+        )
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        for r in regions:
+            self.assertLess(r.start_sec, r.end_sec)
+
+
+class TestGetSpeechRatioEdge(unittest.TestCase):
+    """Дополнительные граничные тесты get_speech_ratio."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_zero_sample_rate_returns_zero(self):
+        audio = _make_speech(1.0)
+        ratio = self.detector.get_speech_ratio(audio, sample_rate=0)
+        self.assertEqual(ratio, 0.0)
+
+    def test_all_zeros_returns_zero(self):
+        audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        ratio = self.detector.get_speech_ratio(audio, SAMPLE_RATE)
+        self.assertAlmostEqual(ratio, 0.0, places=2)
+
+    def test_all_loud_returns_one(self):
+        audio = np.full(SAMPLE_RATE, 0.8, dtype=np.float32)
+        ratio = self.detector.get_speech_ratio(audio, SAMPLE_RATE)
+        self.assertAlmostEqual(ratio, 1.0, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()
