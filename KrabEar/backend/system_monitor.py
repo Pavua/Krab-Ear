@@ -221,13 +221,8 @@ class SystemMonitor:
         else:
             disk = 0.0
 
-        # GPU: на Apple Silicon нет прямого счётчика без сторонних библиотек
-        gpu: Optional[float]
-        try:
-            import psutil  # type: ignore[import]
-            gpu = None  # psutil не предоставляет GPU percent
-        except ImportError:
-            gpu = None
+        # GPU: на Apple Silicon нет прямого счётчика; psutil тоже не экспортирует — всегда None
+        gpu: Optional[float] = None
 
         return {
             "cpu_percent": cpu,
