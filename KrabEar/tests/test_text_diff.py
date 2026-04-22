@@ -102,6 +102,27 @@ class TestTextDiffAnalyzerSimilarity(unittest.TestCase):
         self.assertGreaterEqual(result.similarity_ratio, 0.0)
         self.assertLessEqual(result.similarity_ratio, 1.0)
 
+    def test_completely_different_only_add_del(self):
+        """All words in the diff are added or removed — no unchanged ops."""
+        analyzer = TextDiffAnalyzer()
+        result = analyzer.compute_diff("alpha beta gamma", "one two three")
+        unchanged = [c for c in result.changes if c.type == "unchanged"]
+        self.assertEqual(unchanged, [])
+        removed = [c for c in result.changes if c.type == "removed"]
+        added = [c for c in result.changes if c.type == "added"]
+        self.assertEqual(result.words_removed, 3)
+        self.assertEqual(result.words_added, 3)
+        self.assertEqual(len(removed), 3)
+        self.assertEqual(len(added), 3)
+
+    def test_identical_all_equal_ops(self):
+        """All change ops are 'unchanged' for identical texts."""
+        analyzer = TextDiffAnalyzer()
+        result = analyzer.compute_diff("hello world foo", "hello world foo")
+        types = [c.type for c in result.changes]
+        self.assertTrue(all(t == "unchanged" for t in types))
+        self.assertEqual(len(types), 3)
+
     def test_similarity_decreases_with_more_changes(self):
         analyzer = TextDiffAnalyzer()
         r1 = analyzer.compute_diff("hello world foo bar", "hello world foo baz")
@@ -148,6 +169,30 @@ class TestDiffChangeDataclass(unittest.TestCase):
         self.assertEqual(r.changes, [])
         self.assertEqual(r.words_added, 0)
         self.assertEqual(r.similarity_ratio, 0.0)
+
+
+class TestTextDiffAnalyzerPartialEdit(unittest.TestCase):
+    """Partial edit: mix of equal + changed ops."""
+
+    def test_partial_edit_has_equal_and_changed(self):
+        """Single word swap keeps surrounding words as unchanged."""
+        analyzer = TextDiffAnalyzer()
+        result = analyzer.compute_diff("the quick brown fox", "the slow brown fox")
+        unchanged = [c for c in result.changes if c.type == "unchanged"]
+        removed = [c for c in result.changes if c.type == "removed"]
+        added = [c for c in result.changes if c.type == "added"]
+        # "the", "brown", "fox" stay unchanged
+        self.assertGreaterEqual(len(unchanged), 3)
+        self.assertEqual(result.words_removed, 1)
+        self.assertEqual(result.words_added, 1)
+        self.assertTrue(any(c.text == "quick" for c in removed))
+        self.assertTrue(any(c.text == "slow" for c in added))
+
+    def test_partial_edit_similarity_between_zero_and_one(self):
+        analyzer = TextDiffAnalyzer()
+        result = analyzer.compute_diff("the quick brown fox", "the slow brown fox")
+        self.assertGreater(result.similarity_ratio, 0.0)
+        self.assertLess(result.similarity_ratio, 1.0)
 
 
 class TestTextDiffAnalyzerRussian(unittest.TestCase):
