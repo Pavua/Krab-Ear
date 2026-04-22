@@ -374,5 +374,74 @@ class TestTranslationCacheEmptyAndBoundary(unittest.TestCase):
         self.assertEqual(result, long_result)
 
 
+class TestTranslationCacheKeyCollision(unittest.TestCase):
+    """Тесты коллизий ключей: одинаковый текст, разные параметры."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.cache = TranslationCache(data_dir=self._tmpdir)
+
+    def test_same_text_different_source_lang_is_cache_miss(self):
+        """Одинаковый текст с разными source lang — разные записи."""
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет_en")
+        # Другой source — кэш-промах, None
+        result = self.cache.get("hello", "es", "ru", "hf_marian")
+        self.assertIsNone(result)
+
+    def test_same_text_different_target_lang_is_cache_miss(self):
+        """Одинаковый текст с разными target lang — разные записи."""
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет")
+        # Другой target — кэш-промах
+        result = self.cache.get("hello", "en", "es", "hf_marian")
+        self.assertIsNone(result)
+
+    def test_same_text_different_source_and_target_stored_independently(self):
+        """Записи с разными source/target хранятся независимо."""
+        self.cache.put("text", "en", "ru", "e", "en→ru")
+        self.cache.put("text", "ru", "en", "e", "ru→en")
+        self.cache.put("text", "en", "es", "e", "en→es")
+
+        self.assertEqual(self.cache.get("text", "en", "ru", "e"), "en→ru")
+        self.assertEqual(self.cache.get("text", "ru", "en", "e"), "ru→en")
+        self.assertEqual(self.cache.get("text", "en", "es", "e"), "en→es")
+
+    def test_key_uniqueness_all_params_matter(self):
+        """Ключ уникален по всем четырём параметрам."""
+        from backend.translation_cache import _make_key
+        # Все четыре параметра отличаются на единственный символ
+        k1 = _make_key("text", "en", "ru", "engine_v1")
+        k2 = _make_key("text", "en", "ru", "engine_v2")
+        k3 = _make_key("text", "en", "de", "engine_v1")
+        k4 = _make_key("text", "fr", "ru", "engine_v1")
+        k5 = _make_key("Text", "en", "ru", "engine_v1")  # capital T
+        all_keys = [k1, k2, k3, k4, k5]
+        self.assertEqual(len(set(all_keys)), 5, "Все ключи должны быть уникальными")
+
+    def test_corrupt_cache_then_normal_operations_work(self):
+        """После загрузки повреждённого файла кэш работает нормально."""
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            fh.write("{bad json :")
+        cache = TranslationCache(data_dir=self._tmpdir)
+        # Старые данные не загружены — miss
+        self.assertIsNone(cache.get("x", "en", "ru", "e"))
+        # Новые записи работают нормально
+        cache.put("x", "en", "ru", "e", "translation")
+        self.assertEqual(cache.get("x", "en", "ru", "e"), "translation")
+        # Персистентность после corrupt-recovery тоже работает
+        cache2 = TranslationCache(data_dir=self._tmpdir)
+        self.assertEqual(cache2.get("x", "en", "ru", "e"), "translation")
+
+    def test_no_ttl_entries_persist_indefinitely(self):
+        """TranslationCache не имеет TTL — записи сохраняются без истечения срока."""
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет")
+        # Без TTL запись всегда доступна
+        for _ in range(3):
+            result = self.cache.get("hello", "en", "ru", "hf_marian")
+            self.assertEqual(result, "привет")
+        stats = self.cache.get_stats()
+        self.assertEqual(stats["hits"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
