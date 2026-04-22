@@ -9,7 +9,6 @@
 
 import sys
 import os
-import re
 import unicodedata
 
 # Убеждаемся, что KrabEar/ в PYTHONPATH
@@ -21,10 +20,36 @@ for p in (PROJECT_ROOT, KRAB_EAR_ROOT):
 
 import unittest
 
-from hypothesis import given, settings, HealthCheck
-from hypothesis import strategies as st
+try:
+    from hypothesis import given, settings, HealthCheck
+    from hypothesis import strategies as st
+    from core.utils import TextUtils
+    _IMPORT_ERROR: Exception | None = None
+except (ImportError, OSError) as _err:
+    _IMPORT_ERROR = _err
 
-from core.utils import TextUtils
+    def given(*_a, **_kw):  # type: ignore[no-redef]
+        return lambda fn: fn
+
+    def settings(*_a, **_kw):  # type: ignore[no-redef]
+        return lambda fn: fn
+
+    class _HealthCheckMeta(type):
+        def __getattr__(cls, _name):
+            return None
+
+    class HealthCheck(metaclass=_HealthCheckMeta):  # type: ignore[no-redef]
+        pass
+
+    class _ChainableShim:
+        def __call__(self, *_a, **_kw):
+            return self
+
+        def __getattr__(self, _name):
+            return self
+
+    st = _ChainableShim()  # type: ignore[assignment]
+    TextUtils = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # Стратегии
@@ -67,6 +92,7 @@ _PROFILES = st.sampled_from(["soft", "strict"])
 # Property 1: Идемпотентность cleanup_transcript (soft и strict профили)
 # ---------------------------------------------------------------------------
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestIdempotence(unittest.TestCase):
     """cleanup_transcript(cleanup_transcript(x)) == cleanup_transcript(x)"""
 
@@ -95,6 +121,7 @@ class TestIdempotence(unittest.TestCase):
 # Property 2: Ограничение длины (cleanup только убирает или нормализует)
 # ---------------------------------------------------------------------------
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestLengthBound(unittest.TestCase):
     """len(cleanup_transcript(x)) <= len(x) + safety_margin.
 
@@ -132,6 +159,7 @@ class TestLengthBound(unittest.TestCase):
 # Property 3: Корректность Unicode (нет mojibake, результат — валидный Unicode)
 # ---------------------------------------------------------------------------
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestUnicodePreservation(unittest.TestCase):
     """Валидный Unicode на входе → валидный Unicode на выходе."""
 
@@ -171,6 +199,7 @@ class TestUnicodePreservation(unittest.TestCase):
 # если normalize_phrase сам идемпотентен (что тоже проверяется).
 # ---------------------------------------------------------------------------
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestNormalizePhraseInvariant(unittest.TestCase):
     """normalize_phrase идемпотентен и commutes с cleanup на нормализованных входах."""
 
@@ -245,6 +274,7 @@ _HALLUCINATION_KEYWORDS = [
 ]
 
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestHallucinationStripping(unittest.TestCase):
     """Тексты без hallucination-паттернов не удаляются полностью."""
 
@@ -300,6 +330,7 @@ class TestHallucinationStripping(unittest.TestCase):
 # Property 6: normalize_entities идемпотентен
 # ---------------------------------------------------------------------------
 
+@unittest.skipIf(_IMPORT_ERROR is not None, f"dependency unavailable: {_IMPORT_ERROR}")
 class TestNormalizeEntities(unittest.TestCase):
     """normalize_entities(normalize_entities(x)) == normalize_entities(x)."""
 

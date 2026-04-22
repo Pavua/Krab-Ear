@@ -156,7 +156,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
         rewriter._circuit.state = "open"
         stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
         ctx = _make_ctx(cleaned_text="текст")
-        result = stage.process(ctx)
+        stage.process(ctx)
         # Circuit open → should_run returns False
         self.assertFalse(stage.should_run(ctx))
 
@@ -181,7 +181,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
         rewriter = _mock_rewriter(ok=True, text="из raw")
         stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
         ctx = _make_ctx(cleaned_text="", raw_text="raw текст для переписи")
-        result = stage.process(ctx)
+        stage.process(ctx)
         # Should call rewriter with raw_text
         rewriter.rewrite.assert_called_with("raw текст для переписи")
 
@@ -189,7 +189,7 @@ class TestLLMRewriteEdgeCases(unittest.TestCase):
         rewriter = _mock_rewriter(ok=True, text="default")
         stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
         ctx = _make_ctx(cleaned_text="", raw_text="")
-        result = stage.process(ctx)
+        stage.process(ctx)
         # Should still call with empty string
         rewriter.rewrite.assert_called_once_with("")
 

@@ -251,5 +251,3 @@ class TestSTTEdgeCases(unittest.TestCase):
         result = stage.process(ctx)
         # Raw result preserved
         self.assertEqual(result.confidence, -0.5)
-
-

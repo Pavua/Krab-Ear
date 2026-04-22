@@ -14,8 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # noqa: E402
 from backend.recording_chain import RecordingChainManager  # noqa: E402
 
-from backend.recording_chain import RecordingChainManager
-
 
 class FakeHistoryItem:
     def __init__(self, item_id: str, text: str, duration_sec: float = 0.0) -> None:
