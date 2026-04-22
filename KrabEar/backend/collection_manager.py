@@ -182,6 +182,50 @@ class CollectionManager:
             self._save()
             return self._collection_to_dict(col)
 
+    def rename_collection(self, old_name: str, new_name: str) -> dict[str, Any]:
+        """Переименовывает коллекцию.
+
+        Args:
+            old_name: Текущее имя коллекции.
+            new_name: Новое имя (непустое, уникальное).
+
+        Returns:
+            dict с новым именем и item_count.
+
+        Raises:
+            KeyError: если коллекция с old_name не найдена.
+            ValueError: если new_name пустой или уже занят.
+        """
+        old_name = old_name.strip()
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("Новое имя коллекции не может быть пустым")
+
+        with self._lock:
+            if old_name not in self._data["collections"]:
+                raise KeyError(f"Коллекция '{old_name}' не найдена")
+            if new_name != old_name and new_name in self._data["collections"]:
+                raise ValueError(f"Коллекция '{new_name}' уже существует")
+            col = self._data["collections"].pop(old_name)
+            col["name"] = new_name
+            self._data["collections"][new_name] = col
+            self._save()
+
+        return self._collection_to_dict(col)
+
+    def handle_rename_collection(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC-обработчик: rename_collection."""
+        old_name = str(params.get("old_name", "")).strip()
+        new_name = str(params.get("new_name", "")).strip()
+        if not old_name:
+            raise RuntimeError("old_name обязателен")
+        if not new_name:
+            raise RuntimeError("new_name обязателен")
+        try:
+            return self.rename_collection(old_name, new_name)
+        except KeyError as exc:
+            raise RuntimeError(str(exc)) from exc
+
     def get_collection_items(self, collection_name: str) -> list[dict[str, Any]]:
         """Возвращает записи истории, входящие в коллекцию.
 
