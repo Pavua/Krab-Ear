@@ -359,6 +359,134 @@ class TranslatorTestCase(unittest.TestCase):
         self.assertNotEqual(offline.text, online.text)
         self.assertEqual(calls["count"], 2)
 
+    def test_cache_miss_different_inputs_calls_pipeline_twice(self) -> None:
+        """Два разных текста → кэш не срабатывает → pipeline вызывается 2 раза."""
+        translator = Translator()
+        calls = {"count": 0}
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                calls["count"] += 1
+                return [{"translation_text": f"ES:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            first = translator.translate("первый текст", mode="ru_to_es", network_mode="offline_default")
+            second = translator.translate("второй текст", mode="ru_to_es", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(first.status, "ok")
+        self.assertEqual(second.status, "ok")
+        self.assertNotEqual(first.text, second.text)
+        self.assertEqual(calls["count"], 2, "Разные тексты не должны попадать в один кэш-ключ")
+
+    def test_glossary_substitutes_term_in_output(self) -> None:
+        """Глоссарий {src: tgt} заменяет слово src в переводе на tgt."""
+        translator = Translator()
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def fake_pipeline(text: str):
+                # Имитируем: переводчик вернул строку с ключевым словом "cliente"
+                return [{"translation_text": "El cliente fue amable"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            result = translator.translate(
+                "клиент был вежлив",
+                mode="ru_to_es",
+                network_mode="offline_default",
+                glossary={"cliente": "kliyent"},
+            )
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "ok")
+        # Глоссарий должен заменить "cliente" → "kliyent" в переводе
+        self.assertIn("kliyent", result.text)
+        self.assertNotIn("cliente", result.text)
+
+    def test_error_handling_pipeline_raises(self) -> None:
+        """Исключение внутри pipeline → статус translate_error, текст пустой, ok==False."""
+        translator = Translator()
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            def bad_pipeline(text: str):
+                raise ValueError("simulated crash")
+
+            return bad_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            result = translator.translate("тест ошибки pipeline", mode="ru_to_es", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "translate_error")
+        self.assertEqual(result.text, "")
+        self.assertFalse(result.ok)
+
+    def test_ru_to_es_mode_uses_correct_model(self) -> None:
+        """Режим ru_to_es использует Helsinki-NLP/opus-mt-ru-es."""
+        translator = Translator()
+        used_models: list[str] = []
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            used_models.append(model_name)
+
+            def fake_pipeline(text: str):
+                return [{"translation_text": f"ES:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            result = translator.translate("привет мир", mode="ru_to_es", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(any("ru-es" in m for m in used_models), f"Ожидался opus-mt-ru-es, получили: {used_models}")
+
+    def test_es_to_ru_mode_uses_correct_model(self) -> None:
+        """Режим es_to_ru использует Helsinki-NLP/opus-mt-es-ru."""
+        translator = Translator()
+        used_models: list[str] = []
+        original_builder = Translator._build_pipeline
+
+        def fake_builder(model_name: str, allow_network: bool):
+            used_models.append(model_name)
+
+            def fake_pipeline(text: str):
+                return [{"translation_text": f"RU:{text}"}]
+
+            return fake_pipeline
+
+        Translator._build_pipeline = staticmethod(fake_builder)
+        try:
+            result = translator.translate("hola mundo", mode="es_to_ru", network_mode="offline_default")
+        finally:
+            Translator._build_pipeline = original_builder
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(any("es-ru" in m for m in used_models), f"Ожидался opus-mt-es-ru, получили: {used_models}")
+
+    def test_off_mode_returns_input_unchanged_via_status(self) -> None:
+        """Режим off не переводит текст (status=not_requested, text пустой)."""
+        translator = Translator()
+        result = translator.translate("какой-то текст", mode="off", network_mode="offline_default")
+        self.assertEqual(result.status, "not_requested")
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.mode, "off")
+
 
 if __name__ == "__main__":
     unittest.main()
