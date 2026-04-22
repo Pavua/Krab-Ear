@@ -390,5 +390,113 @@ class TestTemplateManagerIPCEdgeCases(unittest.TestCase):
         self.assertTrue(len(result["templates"]) > 0)
 
 
+class TestTemplatePlaceholderExtraction(unittest.TestCase):
+    """Тесты для обнаружения и работы с плейсхолдерами {variable}."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def _placeholders_in(self, text: str) -> list:
+        """Вспомогательный метод: извлекает {variable} из текста."""
+        import re
+        return re.findall(r"\{(\w+)\}", text)
+
+    def test_single_placeholder_detected(self):
+        self.tm.add_template("single_ph", "Привет, {name}!")
+        templates = self.tm.get_templates()
+        t = next(x for x in templates if x["name"] == "single_ph")
+        phs = self._placeholders_in(t["text"])
+        self.assertEqual(phs, ["name"])
+
+    def test_multiple_placeholders_detected(self):
+        self.tm.add_template("multi_ph", "{greeting}, {name}! Ваш заказ {order}.")
+        templates = self.tm.get_templates()
+        t = next(x for x in templates if x["name"] == "multi_ph")
+        phs = self._placeholders_in(t["text"])
+        self.assertIn("greeting", phs)
+        self.assertIn("name", phs)
+        self.assertIn("order", phs)
+
+    def test_no_placeholders_gives_empty_list(self):
+        self.tm.add_template("no_ph", "Текст без переменных.")
+        templates = self.tm.get_templates()
+        t = next(x for x in templates if x["name"] == "no_ph")
+        phs = self._placeholders_in(t["text"])
+        self.assertEqual(phs, [])
+
+    def test_render_substitutes_all_placeholders(self):
+        """apply_template (render) заменяет все вхождения переменных."""
+        self.tm.add_template("render_tpl", "{a} и {b}, и снова {a}")
+        result = self.tm.apply_template("render_tpl", {"a": "Кот", "b": "Пёс"})
+        self.assertEqual(result, "Кот и Пёс, и снова Кот")
+
+    def test_render_with_none_variables_leaves_placeholders(self):
+        """apply_template без variables оставляет {var} нетронутыми."""
+        self.tm.add_template("ph_none", "Привет, {name}!")
+        result = self.tm.apply_template("ph_none", None)
+        self.assertEqual(result, "Привет, {name}!")
+
+    def test_get_template_by_name_via_get_templates(self):
+        """Получение шаблона по имени через get_templates (list/get паттерн)."""
+        self.tm.add_template("lookup", "Найти меня", "test")
+        templates = self.tm.get_templates()
+        found = [t for t in templates if t["name"] == "lookup"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["text"], "Найти меня")
+        self.assertEqual(found[0]["category"], "test")
+
+    def test_list_returns_all_categories(self):
+        """get_templates возвращает шаблоны разных категорий."""
+        self.tm.add_template("cat_a", "Текст A", "alpha")
+        self.tm.add_template("cat_b", "Текст B", "beta")
+        templates = self.tm.get_templates()
+        cats = {t["category"] for t in templates}
+        self.assertIn("alpha", cats)
+        self.assertIn("beta", cats)
+
+    def test_placeholder_with_underscore_in_name(self):
+        """Плейсхолдеры вида {first_name} корректно подставляются."""
+        self.tm.add_template("underscore_ph", "Добрый день, {first_name} {last_name}!")
+        result = self.tm.apply_template(
+            "underscore_ph", {"first_name": "Иван", "last_name": "Петров"}
+        )
+        self.assertEqual(result, "Добрый день, Иван Петров!")
+
+    def test_add_and_delete_template_lifecycle(self):
+        """Полный цикл: добавить → найти → удалить → не найти."""
+        self.tm.add_template("lifecycle", "Текст жизненного цикла")
+        # Найти
+        found = [t for t in self.tm.get_templates() if t["name"] == "lifecycle"]
+        self.assertEqual(len(found), 1)
+        # Удалить
+        result = self.tm.remove_template("lifecycle")
+        self.assertTrue(result)
+        # Убедиться, что удалён
+        found_after = [t for t in self.tm.get_templates() if t["name"] == "lifecycle"]
+        self.assertEqual(len(found_after), 0)
+
+    def test_render_nonexistent_raises_key_error(self):
+        """apply_template (render) на несуществующем шаблоне → KeyError."""
+        with self.assertRaises(KeyError):
+            self.tm.apply_template("no_such_template_xyz", {"x": "y"})
+
+    def test_builtin_template_has_placeholders(self):
+        """Встроенные шаблоны содержат плейсхолдеры в тексте."""
+        templates = self.tm.get_templates()
+        greeting = next(t for t in templates if t["name"] == "greeting_ru")
+        phs = self._placeholders_in(greeting["text"])
+        self.assertIn("name", phs)
+
+    def test_persistence_preserves_placeholders(self):
+        """Плейсхолдеры в тексте сохраняются и восстанавливаются из файла."""
+        self.tm.add_template("ph_persist", "Уважаемый {title} {name}!")
+        tm2 = TemplateManager(data_dir=self.tmpdir)
+        t = next(x for x in tm2.get_templates() if x["name"] == "ph_persist")
+        phs = self._placeholders_in(t["text"])
+        self.assertIn("title", phs)
+        self.assertIn("name", phs)
+
+
 if __name__ == "__main__":
     unittest.main()

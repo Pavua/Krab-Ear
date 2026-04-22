@@ -554,5 +554,111 @@ class TestHistoryServiceSummaryProfileEdgeCases(unittest.TestCase):
             self.svc.handle_auto_summarize_batch({"ids": ["nonexistent_id_xyz"]})
 
 
+class TestSummaryProfileGetDefault(unittest.TestCase):
+    """Тесты получения дефолтного профиля и его применения."""
+
+    def setUp(self):
+        self.mgr = SummaryProfileManager(data_dir=None)
+
+    def test_brief_is_accessible_as_default(self):
+        """'brief' — дефолтный профиль; get_profile('brief') всегда работает."""
+        p = self.mgr.get_profile("brief")
+        self.assertEqual(p.name, "brief")
+        self.assertTrue(p.builtin)
+
+    def test_all_builtin_profiles_system_prompts_nonempty(self):
+        """Все встроенные профили имеют непустой system_prompt."""
+        for name in ("brief", "detailed", "bullet_points", "meeting_notes", "telegram"):
+            p = self.mgr.get_profile(name)
+            self.assertTrue(
+                len(p.system_prompt) > 10,
+                f"system_prompt профиля {name!r} слишком короткий"
+            )
+
+    def test_all_builtin_profiles_max_tokens_positive(self):
+        """Все встроенные профили имеют max_tokens > 0."""
+        for name in ("brief", "detailed", "bullet_points", "meeting_notes", "telegram"):
+            p = self.mgr.get_profile(name)
+            self.assertGreater(p.max_tokens, 0, f"max_tokens профиля {name!r} <= 0")
+
+    def test_all_builtin_profiles_have_format_instructions(self):
+        """Все встроенные профили имеют непустые format_instructions."""
+        for name in ("brief", "detailed", "bullet_points", "meeting_notes", "telegram"):
+            p = self.mgr.get_profile(name)
+            self.assertTrue(
+                len(p.format_instructions) > 0,
+                f"format_instructions профиля {name!r} пустые"
+            )
+
+    def test_apply_defaults_brief_tokens_lte_detailed(self):
+        """'brief' имеет меньше max_tokens чем 'detailed' — дефолтный минимум."""
+        brief = self.mgr.get_profile("brief")
+        detailed = self.mgr.get_profile("detailed")
+        self.assertLessEqual(brief.max_tokens, detailed.max_tokens)
+
+    def test_default_profile_to_dict_has_all_keys(self):
+        """to_dict() дефолтного профиля содержит все обязательные ключи."""
+        p = self.mgr.get_profile("brief")
+        d = p.to_dict()
+        for key in ("name", "system_prompt", "max_tokens", "format_instructions", "builtin"):
+            self.assertIn(key, d, f"Ключ {key!r} отсутствует в to_dict()")
+
+    def test_list_profiles_total_count_builtin(self):
+        """list_profiles без кастомных возвращает ровно 5 встроенных."""
+        profiles = self.mgr.list_profiles()
+        self.assertEqual(len(profiles), 5)
+
+    def test_brief_profile_mentioned_in_prompt(self):
+        """Промпт профиля 'brief' упоминает краткость."""
+        p = self.mgr.get_profile("brief")
+        self.assertIn("краткое", p.system_prompt.lower())
+
+    def test_bullet_points_prompt_mentions_list(self):
+        """Промпт 'bullet_points' упоминает список."""
+        p = self.mgr.get_profile("bullet_points")
+        prompt_lower = p.system_prompt.lower()
+        self.assertTrue(
+            "список" in prompt_lower or "маркир" in prompt_lower,
+            "Промпт bullet_points должен упоминать список"
+        )
+
+
+class TestSummaryProfileApplyDefaults(unittest.TestCase):
+    """Тесты поведения при неизвестном профиле (fallback к 'brief')."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+        self.svc = _make_history_service(self.tmp)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_unknown_profile_fallback_to_brief(self):
+        """handle_auto_summarize_batch с неизвестным профилем → brief."""
+        rw = _ok_rewriter("РЕЗЮМЕ: Краткий.\nТЕЗИСЫ:\n- Тезис")
+        svc = _make_history_service(self.tmp, llm_rewriter=rw)
+        ids = _add_items(svc, ["Текст для теста дефолта."])
+        result = svc.handle_auto_summarize_batch({"ids": ids, "profile": "unknown_profile_xyz"})
+        self.assertEqual(result.get("profile"), "brief")
+
+    def test_no_profile_defaults_to_brief(self):
+        """handle_auto_summarize_batch без profile → brief."""
+        rw = _ok_rewriter("РЕЗЮМЕ: Краткий.\nТЕЗИСЫ:\n- Тезис")
+        svc = _make_history_service(self.tmp, llm_rewriter=rw)
+        ids = _add_items(svc, ["Дефолтный текст."])
+        result = svc.handle_auto_summarize_batch({"ids": ids})
+        self.assertEqual(result.get("profile"), "brief")
+
+    def test_explicit_brief_profile_used(self):
+        """Явный brief profile используется корректно."""
+        rw = _ok_rewriter("РЕЗЮМЕ: Explicit.\nТЕЗИСЫ:\n- Тезис")
+        svc = _make_history_service(self.tmp, llm_rewriter=rw)
+        ids = _add_items(svc, ["Явный brief текст."])
+        result = svc.handle_auto_summarize_batch({"ids": ids, "profile": "brief"})
+        self.assertEqual(result.get("profile"), "brief")
+        self.assertTrue(result["llm"])
+
+
 if __name__ == "__main__":
     unittest.main()
