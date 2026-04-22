@@ -554,5 +554,130 @@ class TestCheckSttModelCached(unittest.TestCase):
         self.assertFalse(result.details["cached"])
 
 
+# ===========================================================================
+# 13. critical_errors() subset
+# ===========================================================================
+
+class TestCriticalErrors(unittest.TestCase):
+    """critical_errors() возвращает только CheckResult со status='error'."""
+
+    def _make_all_ok_diag(self) -> StartupDiagnostics:
+        tmpdir = tempfile.mkdtemp()
+        diag = StartupDiagnostics(data_dir=tmpdir)
+        # Запускаем полный прогон с мок-проверками — все ok
+        ok = CheckResult("x", "ok", "ok", 1.0)
+        report = StartupReport(status="ready", checks=[ok], startup_time_ms=1.0, warnings=[], errors=[])
+        diag._cached_report = report
+        diag._cache_ts = __import__("time").monotonic()
+        return diag
+
+    def test_critical_errors_empty_when_all_ok(self) -> None:
+        diag = self._make_all_ok_diag()
+        errors = diag.critical_errors()
+        self.assertEqual(errors, [])
+
+    def test_critical_errors_returns_only_error_checks(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        diag = StartupDiagnostics(data_dir=tmpdir)
+        checks = [
+            CheckResult("python_version", "ok", "ok", 1.0),
+            CheckResult("required_packages", "error", "mlx_whisper missing", 1.0),
+            CheckResult("disk_space", "error", "too low", 1.0),
+            CheckResult("ffmpeg", "warning", "not found", 1.0),
+        ]
+        report = StartupReport(
+            status="critical", checks=checks, startup_time_ms=2.0,
+            warnings=["not found"], errors=["mlx_whisper missing", "too low"],
+        )
+        diag._cached_report = report
+        diag._cache_ts = __import__("time").monotonic()
+
+        errors = diag.critical_errors()
+        self.assertEqual(len(errors), 2)
+        for c in errors:
+            self.assertEqual(c.status, "error")
+
+    def test_critical_errors_triggers_run_all_if_no_cache(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        diag = StartupDiagnostics(data_dir=tmpdir)
+        # Нет кэша — critical_errors() должен вызвать run_all_checks()
+        self.assertIsNone(diag._cached_report)
+        errors = diag.critical_errors()
+        # После вызова кэш должен быть заполнен
+        self.assertIsNotNone(diag._cached_report)
+        # Результат — список (может быть пустым или непустым)
+        self.assertIsInstance(errors, list)
+
+    def test_critical_errors_check_names_present(self) -> None:
+        tmpdir = tempfile.mkdtemp()
+        diag = StartupDiagnostics(data_dir=tmpdir)
+        err_check = CheckResult("disk_space", "error", "disk full", 1.0)
+        report = StartupReport(
+            status="critical",
+            checks=[err_check, CheckResult("ffmpeg", "ok", "ok", 1.0)],
+            startup_time_ms=1.0, warnings=[], errors=["disk full"],
+        )
+        diag._cached_report = report
+        diag._cache_ts = __import__("time").monotonic()
+
+        errors = diag.critical_errors()
+        self.assertEqual(errors[0].name, "disk_space")
+
+
+# ===========================================================================
+# 14. Check caching (не перезапускается если < TTL)
+# ===========================================================================
+
+class TestCheckCaching(unittest.TestCase):
+    """run_all_checks кэширует результат и не перезапускает проверки до истечения TTL."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        # TTL = 60 секунд (дефолт)
+        self.diag = StartupDiagnostics(data_dir=self.tmpdir)
+
+    def test_result_cached_after_first_call(self) -> None:
+        report1 = self.diag.run_all_checks()
+        # Кэш должен быть заполнен
+        self.assertIsNotNone(self.diag._cached_report)
+        # Второй вызов возвращает тот же объект
+        report2 = self.diag.run_all_checks()
+        self.assertIs(report1, report2)
+
+    def test_force_bypasses_cache(self) -> None:
+        report1 = self.diag.run_all_checks()
+        report2 = self.diag.run_all_checks(force=True)
+        # force=True — новый объект (не тот же)
+        self.assertIsNot(report1, report2)
+
+    def test_expired_cache_triggers_rerun(self) -> None:
+        import time as _time
+        # TTL = 0 сек — всегда истёкший
+        diag = StartupDiagnostics(data_dir=self.tmpdir, cache_ttl_sec=0.0)
+        report1 = diag.run_all_checks()
+        # Немного подождём, чтобы cache_ts стал "старым"
+        _time.sleep(0.01)
+        report2 = diag.run_all_checks()
+        # Новый прогон — другой объект
+        self.assertIsNot(report1, report2)
+
+    def test_invalidate_cache_clears_report(self) -> None:
+        self.diag.run_all_checks()
+        self.assertIsNotNone(self.diag._cached_report)
+        self.diag.invalidate_cache()
+        self.assertIsNone(self.diag._cached_report)
+
+    def test_cache_ttl_respected_within_window(self) -> None:
+        """Внутри TTL-окна кэш не обновляется (cache_ts остаётся прежним)."""
+        import time as _time
+        diag = StartupDiagnostics(data_dir=self.tmpdir, cache_ttl_sec=300.0)
+        diag.run_all_checks()
+        ts_before = diag._cache_ts
+        _time.sleep(0.01)
+        diag.run_all_checks()
+        # cache_ts не изменился — использовался кэш
+        self.assertEqual(ts_before, diag._cache_ts)
+
+
 if __name__ == "__main__":
     unittest.main()

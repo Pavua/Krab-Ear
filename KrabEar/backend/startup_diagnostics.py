@@ -85,23 +85,37 @@ class StartupDiagnostics:
         self,
         data_dir: Path | str | None = None,
         socket_path: Path | str | None = None,
+        cache_ttl_sec: float = 60.0,
     ) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir else None
         self._socket_path: Path | str | None = socket_path
+        self._cache_ttl_sec = cache_ttl_sec
+        self._cached_report: StartupReport | None = None
+        self._cache_ts: float = 0.0
 
     # ------------------------------------------------------------------
     # Публичный метод
     # ------------------------------------------------------------------
 
-    def run_all_checks(self) -> StartupReport:
+    def run_all_checks(self, *, force: bool = False) -> StartupReport:
         """Выполняет все проверки и возвращает StartupReport.
 
         Каждая проверка независима — сбой одной не влияет на остальные.
+        Результат кэшируется на cache_ttl_sec секунд; force=True сбрасывает кэш.
+
         Итоговый статус:
           "critical" — хотя бы одна проверка со статусом "error"
           "degraded"  — хотя бы одна проверка со статусом "warning"
           "ready"     — все проверки "ok"
         """
+        now = time.monotonic()
+        if (
+            not force
+            and self._cached_report is not None
+            and (now - self._cache_ts) < self._cache_ttl_sec
+        ):
+            return self._cached_report
+
         suite_start = time.monotonic()
 
         checks: list[CheckResult] = [
@@ -129,13 +143,31 @@ class StartupDiagnostics:
         else:
             overall = "ready"
 
-        return StartupReport(
+        report = StartupReport(
             status=overall,
             checks=checks,
             startup_time_ms=suite_elapsed_ms,
             warnings=warnings,
             errors=errors,
         )
+        self._cached_report = report
+        self._cache_ts = time.monotonic()
+        return report
+
+    def critical_errors(self) -> list[CheckResult]:
+        """Возвращает только проверки со статусом 'error' из последнего отчёта.
+
+        Если кэш пуст — запускает run_all_checks() автоматически.
+        """
+        if self._cached_report is None:
+            self.run_all_checks()
+        assert self._cached_report is not None
+        return [c for c in self._cached_report.checks if c.status == "error"]
+
+    def invalidate_cache(self) -> None:
+        """Сбрасывает кэшированный отчёт."""
+        self._cached_report = None
+        self._cache_ts = 0.0
 
     # ------------------------------------------------------------------
     # Отдельные проверки
