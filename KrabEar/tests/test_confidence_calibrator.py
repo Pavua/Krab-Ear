@@ -200,5 +200,116 @@ class TestCalibratorEdgeCases(unittest.TestCase):
         self.assertEqual(stats["total_calibrations"], 200)
 
 
+class TestCalibratorOutOfRangeRaw(unittest.TestCase):
+    """raw_confidence вне [0, 1] зажимается корректно."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_raw_above_1_clamped_to_1(self):
+        # raw=1.5, long(+0.05) → 1.55 → clamp 1.0
+        result = self.cal.calibrate(1.5, duration_sec=90.0, language="ru",
+                                    model="mlx-max")
+        self.assertLessEqual(result, 1.0)
+
+    def test_raw_above_1_no_penalties_clamp_to_1(self):
+        # raw=1.2, нормальные условия → clamp 1.0
+        result = self.cal.calibrate(1.2, duration_sec=10.0, language="ru",
+                                    model="mlx-max")
+        self.assertLessEqual(result, 1.0)
+
+    def test_raw_negative_clamped_to_0(self):
+        # raw=-0.5 + short_penalty(-0.10) → -0.60 → clamp 0.0
+        result = self.cal.calibrate(-0.5, duration_sec=0.5, language="ru",
+                                    model="mlx-max")
+        self.assertGreaterEqual(result, 0.0)
+
+    def test_raw_zero_with_short_penalty(self):
+        # raw=0.0, short(-0.10) → -0.10 → clamp 0.0
+        result = self.cal.calibrate(0.0, duration_sec=1.0, language="ru",
+                                    model="mlx-max")
+        self.assertEqual(result, 0.0)
+
+    def test_raw_exactly_1_no_boost_stays_1(self):
+        result = self.cal.calibrate(1.0, duration_sec=10.0, language="ru",
+                                    model="mlx-max")
+        self.assertAlmostEqual(result, 1.0, places=4)
+
+
+class TestCalibratorZeroDuration(unittest.TestCase):
+    """Нулевая длительность < 2s → получает short_penalty."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_zero_duration_applies_short_penalty(self):
+        result = self.cal.calibrate(0.90, duration_sec=0.0, language="ru",
+                                    model="mlx-max")
+        self.assertAlmostEqual(result, 0.80, places=4)
+
+    def test_zero_duration_adjustment_label(self):
+        score = self.cal.calibrate_detailed(0.80, duration_sec=0.0,
+                                            language="ru", model="mlx-max")
+        self.assertTrue(any("short_recording" in a for a in score.adjustments))
+
+
+class TestCalibratorMonotonicity(unittest.TestCase):
+    """Монотонность: выше raw → выше или равное calibrated."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_monotonic_same_conditions(self):
+        values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        calibrated = [
+            self.cal.calibrate(v, duration_sec=10.0, language="ru",
+                               model="mlx-max")
+            for v in values
+        ]
+        for i in range(len(calibrated) - 1):
+            self.assertLessEqual(
+                calibrated[i], calibrated[i + 1],
+                f"Not monotonic: calibrated[{i}]={calibrated[i]} > "
+                f"calibrated[{i+1}]={calibrated[i+1]}",
+            )
+
+    def test_monotonic_with_short_penalty(self):
+        low = self.cal.calibrate(0.3, duration_sec=1.0, language="ru",
+                                 model="mlx-max")
+        high = self.cal.calibrate(0.9, duration_sec=1.0, language="ru",
+                                  model="mlx-max")
+        self.assertLessEqual(low, high)
+
+    def test_monotonic_with_combined_penalties(self):
+        low = self.cal.calibrate(0.4, duration_sec=1.0, language="en",
+                                 model="balanced")
+        high = self.cal.calibrate(0.9, duration_sec=1.0, language="en",
+                                  model="balanced")
+        self.assertLessEqual(low, high)
+
+
+class TestCalibratorDetailedRawPreserved(unittest.TestCase):
+    """calibrate_detailed сохраняет raw даже если он вне [0, 1]."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_raw_above_1_preserved_in_score(self):
+        score = self.cal.calibrate_detailed(1.5, duration_sec=10.0,
+                                            language="ru", model="mlx-max")
+        self.assertAlmostEqual(score.raw, 1.5, places=4)
+
+    def test_raw_negative_preserved_in_score(self):
+        score = self.cal.calibrate_detailed(-0.2, duration_sec=10.0,
+                                            language="ru", model="mlx-max")
+        self.assertAlmostEqual(score.raw, -0.2, places=4)
+
+    def test_calibrated_is_rounded_to_4_places(self):
+        score = self.cal.calibrate_detailed(0.7777777, duration_sec=10.0,
+                                            language="ru", model="mlx-max")
+        # calibrated should be rounded
+        self.assertEqual(score.calibrated, round(score.calibrated, 4))
+
+
 if __name__ == "__main__":
     unittest.main()

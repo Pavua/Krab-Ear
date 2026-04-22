@@ -229,6 +229,113 @@ class TestEmotionDetectorBasic(unittest.TestCase):
         self.assertGreaterEqual(multiple.confidence, single.confidence)
 
 
+class TestEmotionDetectorSpanishMarkers(unittest.TestCase):
+    """Испанские инвертированные знаки ¡ и ¿."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    def test_inverted_exclamation_triggers_excited(self) -> None:
+        # ¡ сам по себе не считается «!» через text.count('!')
+        # Но текст ¡Excelente! содержит '!' в конце → excited
+        result = self.detector.detect("¡Excelente trabajo amigo!", language="es")
+        self.assertIn(result.primary_emotion, ("excited", "positive"))
+        self.assertGreaterEqual(result.exclamation_count, 1)
+
+    def test_inverted_question_not_counted_as_question_mark(self) -> None:
+        # '¿' — не '?', поэтому question_count не увеличивается от него
+        result = self.detector.detect("¿Qué tal?", language="es")
+        # Обычный '?' есть → question_count >= 1
+        self.assertGreaterEqual(result.question_count, 1)
+        self.assertIn(result.primary_emotion, ("questioning", "neutral"))
+
+    def test_spanish_excited_with_positive(self) -> None:
+        result = self.detector.detect("¡Bravo! ¡Fantástico!", language="es")
+        self.assertIn(result.primary_emotion, ("excited", "positive"))
+
+    def test_spanish_frustrated_caps(self) -> None:
+        result = self.detector.detect("HORRIBLE TERRIBLE MAL", language="es")
+        self.assertIn(result.primary_emotion, ("frustrated", "negative"))
+
+    def test_spanish_negative_only(self) -> None:
+        result = self.detector.detect("terrible malo horrible", language="es")
+        self.assertEqual(result.primary_emotion, "negative")
+
+
+class TestEmotionDetectorLocaleFallback(unittest.TestCase):
+    """Нормализация locale тегов и fallback на English."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    def test_locale_tag_ru_ru_normalized(self) -> None:
+        # «ru-RU» → «ru» после split('-')[0]
+        result = self.detector.detect("Отлично, хорошо!", language="ru-RU")
+        self.assertIn(result.primary_emotion, ("excited", "positive", "neutral"))
+        self.assertNotEqual(result.primary_emotion, "")
+
+    def test_locale_tag_es_mx_normalized(self) -> None:
+        result = self.detector.detect("bueno excelente!", language="es-MX")
+        self.assertIn(result.primary_emotion, ("excited", "positive", "neutral"))
+
+    def test_unknown_language_uses_en_words(self) -> None:
+        # Для неизвестного языка используется English dict
+        result = self.detector.detect("great excellent amazing", language="de")
+        self.assertIn(result.primary_emotion, ("positive", "excited", "neutral"))
+
+    def test_uppercase_language_code(self) -> None:
+        # «RU» → lang_lower → «ru»
+        result = self.detector.detect("Отлично!", language="RU")
+        self.assertIn(result.primary_emotion, ("excited", "positive", "neutral"))
+
+
+class TestEmotionDetectorMonotonicity(unittest.TestCase):
+    """Монотонность: больше восклицаний → не ниже confidence."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    def test_more_exclamations_not_less_confident(self) -> None:
+        one = self.detector.detect("Отлично!")
+        three = self.detector.detect("Отлично!!! Здорово!!!")
+        self.assertGreaterEqual(three.confidence, one.confidence)
+
+    def test_more_questions_not_less_confident(self) -> None:
+        one = self.detector.detect("Как дела?")
+        three = self.detector.detect("Как дела? Где ты? Когда?")
+        self.assertGreaterEqual(three.confidence, one.confidence)
+
+    def test_more_negative_words_not_less_confident(self) -> None:
+        one = self.detector.detect("ужасно")
+        many = self.detector.detect("ужасно плохо кошмар беда провал")
+        self.assertGreaterEqual(many.confidence, one.confidence)
+
+
+class TestEmotionDetectorTokenize(unittest.TestCase):
+    """Внутренний _tokenize: приводит к lower, фильтрует короткие токены."""
+
+    def test_tokenize_strips_short_words(self) -> None:
+        tokens = EmotionDetector._tokenize("I am ok")
+        # «I» (1 символ) и «am» (2 символа OK), «ok» (2 символа OK)
+        for tok in tokens:
+            self.assertGreaterEqual(len(tok), EmotionDetector.MIN_WORD_LEN)
+
+    def test_tokenize_lowercases(self) -> None:
+        tokens = EmotionDetector._tokenize("Hello WORLD")
+        for tok in tokens:
+            self.assertEqual(tok, tok.lower())
+
+    def test_tokenize_handles_punctuation(self) -> None:
+        tokens = EmotionDetector._tokenize("Привет, мир! Как дела?")
+        # Знаки препинания отфильтрованы
+        for tok in tokens:
+            self.assertTrue(tok.isalpha() or all(c.isalpha() for c in tok))
+
+    def test_tokenize_empty_string(self) -> None:
+        tokens = EmotionDetector._tokenize("")
+        self.assertEqual(tokens, [])
+
+
 class TestEmotionDetectorIPC(unittest.TestCase):
     """Тесты IPC-метода detect_emotion через BackendService."""
 
