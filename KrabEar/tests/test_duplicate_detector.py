@@ -196,5 +196,114 @@ class HistoryServiceFindDuplicatesTestCase(unittest.TestCase):
             self.assertIn("similarity", group)
 
 
+class GetTextFieldsTestCase(unittest.TestCase):
+    """_get_text — извлечение текста из разных полей записи."""
+
+    def test_text_field_used(self) -> None:
+        item = {"text": "hello"}
+        self.assertEqual(DuplicateDetector._get_text(item), "hello")
+
+    def test_transcript_field_fallback(self) -> None:
+        item = {"transcript": "transcript text"}
+        self.assertEqual(DuplicateDetector._get_text(item), "transcript text")
+
+    def test_empty_item_returns_empty_string(self) -> None:
+        self.assertEqual(DuplicateDetector._get_text({}), "")
+
+    def test_text_field_takes_priority_over_transcript(self) -> None:
+        item = {"text": "primary", "transcript": "secondary"}
+        self.assertEqual(DuplicateDetector._get_text(item), "primary")
+
+
+class GetTimestampTestCase(unittest.TestCase):
+    """_get_timestamp — разные форматы временных меток."""
+
+    def test_float_ts_returned_as_float(self) -> None:
+        item = {"ts": 1_700_000_000.0}
+        self.assertEqual(DuplicateDetector._get_timestamp(item), 1_700_000_000.0)
+
+    def test_int_ts_returned_as_float(self) -> None:
+        item = {"ts": 1_700_000_000}
+        result = DuplicateDetector._get_timestamp(item)
+        self.assertIsInstance(result, float)
+        self.assertAlmostEqual(result, 1_700_000_000.0)
+
+    def test_iso_string_ts_parsed(self) -> None:
+        item = {"created_at": "2024-01-15T10:00:00+00:00"}
+        result = DuplicateDetector._get_timestamp(item)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, float)
+        self.assertGreater(result, 0)
+
+    def test_missing_ts_returns_none(self) -> None:
+        self.assertIsNone(DuplicateDetector._get_timestamp({}))
+
+    def test_invalid_string_ts_returns_none(self) -> None:
+        item = {"ts": "not-a-date"}
+        self.assertIsNone(DuplicateDetector._get_timestamp(item))
+
+    def test_timestamp_field_alias(self) -> None:
+        item = {"timestamp": 1_600_000_000.5}
+        result = DuplicateDetector._get_timestamp(item)
+        self.assertAlmostEqual(result, 1_600_000_000.5)
+
+
+class FindDuplicatesExtraTestCase(unittest.TestCase):
+    """find_duplicates — дополнительные граничные случаи."""
+
+    def setUp(self) -> None:
+        self.det = DuplicateDetector()
+        self.base_ts = 1_700_000_000.0
+
+    def test_items_with_empty_text_skipped(self) -> None:
+        items = [
+            {"text": "", "ts": self.base_ts},
+            {"text": "real content here", "ts": self.base_ts + 2},
+            {"text": "real content here", "ts": self.base_ts + 4},
+        ]
+        groups = self.det.find_duplicates(items)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0].items), 2)
+
+    def test_low_threshold_finds_partial_matches(self) -> None:
+        items = [
+            _make_item("hello world today", self.base_ts),
+            _make_item("hello earth tomorrow", self.base_ts + 5),
+        ]
+        groups_strict = self.det.find_duplicates(items, similarity_threshold=0.95)
+        groups_loose = self.det.find_duplicates(items, similarity_threshold=0.3)
+        self.assertEqual(len(groups_strict), 0)
+        self.assertEqual(len(groups_loose), 1)
+
+    def test_similarity_score_is_between_zero_and_one(self) -> None:
+        items = [
+            _make_item("The quick brown fox", self.base_ts),
+            _make_item("The quick brown fix", self.base_ts + 1),
+        ]
+        groups = self.det.find_duplicates(items, similarity_threshold=0.8)
+        if groups:
+            self.assertGreater(groups[0].similarity, 0.0)
+            self.assertLessEqual(groups[0].similarity, 1.0)
+
+    def test_transcript_field_recognised_for_dedup(self) -> None:
+        items = [
+            {"transcript": "same transcript text", "ts": self.base_ts},
+            {"transcript": "same transcript text", "ts": self.base_ts + 3},
+        ]
+        groups = self.det.find_duplicates(items)
+        self.assertEqual(len(groups), 1)
+
+    def test_exact_time_boundary_included(self) -> None:
+        """Записи ровно в 60-секундном окне должны проверяться."""
+        text = "boundary test sentence"
+        items = [
+            _make_item(text, self.base_ts),
+            _make_item(text, self.base_ts + 60),  # exactly at boundary
+        ]
+        groups = self.det.find_duplicates(items)
+        # abs(60 - 0) == 60 which is NOT > 60, so they should be compared
+        self.assertEqual(len(groups), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

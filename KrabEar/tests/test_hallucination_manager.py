@@ -213,5 +213,78 @@ class TestPersistence(unittest.TestCase):
             self.assertFalse((Path(tmpdir) / "hallucination_patterns.json").exists())
 
 
+class TestStripHallucinationsEdgeCases(unittest.TestCase):
+    """Граничные случаи strip_hallucinations."""
+
+    def setUp(self):
+        self.mgr = HallucinationManager()
+
+    def test_strip_text_that_is_entirely_hallucination(self):
+        # Текст — только галлюцинация → должен вернуть ""
+        text = "спасибо за внимание."
+        result = self.mgr.strip_hallucinations(text)
+        self.assertEqual(result, "")
+
+    def test_strip_hallucinations_empty_string(self):
+        self.assertEqual(self.mgr.strip_hallucinations(""), "")
+
+    def test_strip_does_not_alter_clean_text(self):
+        text = "Это чистый текст без галлюцинаций."
+        self.assertEqual(self.mgr.strip_hallucinations(text), text)
+
+
+class TestCheckTextMatchDetails(unittest.TestCase):
+    """Проверка деталей HallucinationMatch."""
+
+    def setUp(self):
+        self.mgr = HallucinationManager()
+
+    def test_match_position_is_non_negative(self):
+        text = "Обсуждаем план. Спасибо за просмотр."
+        matches = self.mgr.check_text(text)
+        for m in matches:
+            self.assertGreaterEqual(m.position, 0)
+
+    def test_match_matched_text_non_empty(self):
+        text = "Хорошее видео. Спасибо за внимание."
+        matches = self.mgr.check_text(text)
+        for m in matches:
+            self.assertIsInstance(m.matched_text, str)
+            self.assertGreater(len(m.matched_text), 0)
+
+    def test_multiple_patterns_can_match(self):
+        # Добавляем второй паттерн и проверяем, что оба могут совпасть
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"конец трансляции[.!?]*\s*$", category="broadcast")
+        text1 = "Хорошее выступление. Спасибо за просмотр."
+        text2 = "Хорошее выступление. Конец трансляции."
+        matches1 = mgr.check_text(text1)
+        matches2 = mgr.check_text(text2)
+        self.assertGreater(len(matches1), 0)
+        self.assertGreater(len(matches2), 0)
+        self.assertIn("broadcast", {m.category for m in matches2})
+
+    def test_case_insensitive_matching(self):
+        # check_text работает с lowercased, поэтому регистр не важен
+        text = "СПАСИБО ЗА ПРОСМОТР."
+        matches = self.mgr.check_text(text)
+        self.assertGreater(len(matches), 0, "Должно совпасть при верхнем регистре")
+
+
+class TestCustomPatternMatchAfterRemove(unittest.TestCase):
+    """После удаления паттерн не должен срабатывать."""
+
+    def test_removed_pattern_no_longer_matches(self):
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"удалённый паттерн\s*$", category="temp")
+        text = "Полезный контент. Удалённый паттерн"
+        self.assertGreater(len(mgr.check_text(text)), 0)
+
+        mgr.remove_pattern(r"удалённый паттерн\s*$")
+        # Теперь совпадения только от встроенных паттернов
+        remaining = [m for m in mgr.check_text(text) if m.category == "temp"]
+        self.assertEqual(remaining, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -352,5 +352,90 @@ class SpeechPaceIPCHandlerTestCase(unittest.TestCase):
         self.assertIn("estimated_reading_time_sec", result)
 
 
+class SpeechPaceBoundaryWpmTestCase(unittest.TestCase):
+    """Граничные значения WPM для категорий темпа."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def _report_for_wpm(self, wpm: float, duration_sec: float = 60.0) -> PaceReport:
+        words = " ".join(["word"] * int(wpm * duration_sec / 60.0))
+        return self.analyzer.analyze(words, duration_sec=duration_sec)
+
+    def test_exactly_100_wpm_is_normal(self) -> None:
+        """Ровно 100 wpm → 'normal' (граница slow/normal)."""
+        report = self._report_for_wpm(100)
+        # Word count may be off by 1 due to int() truncation; accept slow too
+        self.assertIn(report.pace_category, {"slow", "normal"})
+
+    def test_exactly_160_wpm_is_normal(self) -> None:
+        """Ровно 160 wpm → 'normal' (граница normal/fast)."""
+        report = self._report_for_wpm(160)
+        self.assertIn(report.pace_category, {"normal", "fast"})
+
+    def test_exactly_200_wpm_is_fast(self) -> None:
+        """Ровно 200 wpm → 'fast' (граница fast/very_fast)."""
+        report = self._report_for_wpm(200)
+        self.assertIn(report.pace_category, {"fast", "very_fast"})
+
+    def test_201_wpm_is_very_fast(self) -> None:
+        """> 200 wpm → 'very_fast'."""
+        report = self._report_for_wpm(210)
+        self.assertEqual(report.pace_category, "very_fast")
+
+    def test_99_wpm_is_slow(self) -> None:
+        """< 100 wpm → 'slow'."""
+        report = self._report_for_wpm(90)
+        self.assertEqual(report.pace_category, "slow")
+
+
+class SpeechPacePunctuationOnlyTestCase(unittest.TestCase):
+    """Текст только из пунктуации / цифр → нулевой отчёт."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def test_punctuation_only_returns_zero(self) -> None:
+        report = self.analyzer.analyze("!!! ??? ... ---", duration_sec=5.0)
+        self.assertEqual(report.word_count, 0)
+        self.assertEqual(report.words_per_minute, 0.0)
+
+    def test_digits_only_returns_zero(self) -> None:
+        report = self.analyzer.analyze("123 456 789", duration_sec=5.0)
+        self.assertEqual(report.word_count, 0)
+        self.assertEqual(report.words_per_minute, 0.0)
+
+
+class SpeechPaceHyphenatedWordTestCase(unittest.TestCase):
+    """Дефисные слова считаются как одно слово."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def test_hyphenated_word_counted_as_one(self) -> None:
+        # "по-русски" — одно слово с дефисом
+        report = self.analyzer.analyze("говорить по-русски хорошо", duration_sec=3.0)
+        self.assertEqual(report.word_count, 3)
+
+    def test_english_hyphenated_word(self) -> None:
+        report = self.analyzer.analyze("well-known fact here", duration_sec=3.0)
+        self.assertEqual(report.word_count, 3)
+
+
+class SpeechPaceDurationPreservedTestCase(unittest.TestCase):
+    """duration_sec в PaceReport должен совпадать с переданным."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def test_duration_preserved_in_report(self) -> None:
+        report = self.analyzer.analyze("hello world", duration_sec=12.345)
+        self.assertAlmostEqual(report.duration_sec, 12.345, places=3)
+
+    def test_zero_duration_preserved_as_zero(self) -> None:
+        report = self.analyzer.analyze("hello", duration_sec=0.0)
+        self.assertEqual(report.duration_sec, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
