@@ -448,5 +448,86 @@ class EdgeCasesTestCase(unittest.TestCase):
         self.assertEqual(resolved, [])
 
 
+class UnicodeVocabTestCase(unittest.TestCase):
+    """Tests for unicode / accented characters in vocabulary extraction."""
+
+    def setUp(self) -> None:
+        self.mgr = LanguageLearningManager()
+
+    def test_accented_spanish_words_extracted(self) -> None:
+        """Spanish words with accents are extracted correctly."""
+        items = [
+            _make_item(
+                "programación educación selección",
+                "programming education selection",
+                src_lang="es",
+                tgt_lang="en",
+            )
+        ]
+        result = self.mgr.extract_vocabulary(items, "es", "en")
+        words = [e.word_source for e in result]
+        self.assertTrue(
+            any("programaci" in w for w in words),
+            f"Expected programación in {words}",
+        )
+
+    def test_cyrillic_words_extracted(self) -> None:
+        """Cyrillic words are extracted and stop-words filtered."""
+        items = [_make_item("программирование алгоритмы базы данных")]
+        result = self.mgr.extract_vocabulary(items, "ru", "es")
+        words = [e.word_source for e in result]
+        self.assertIn("программирование", words)
+        self.assertIn("алгоритмы", words)
+
+    def test_mixed_unicode_frequency_counted(self) -> None:
+        """Frequency counts are correct for Cyrillic words appearing multiple times."""
+        items = [
+            _make_item("кот сидел на окне"),
+            _make_item("кот спал"),
+            _make_item("кот играл снова"),
+        ]
+        result = self.mgr.extract_vocabulary(items, "ru", "es")
+        кот_entry = next((e for e in result if e.word_source == "кот"), None)
+        self.assertIsNotNone(кот_entry)
+        self.assertEqual(кот_entry.frequency, 3)
+
+    def test_flashcard_front_back_keys_exist(self) -> None:
+        """Flashcards have 'front' and 'back' keys (word and translation)."""
+        items = [
+            _make_item("программирование алгоритм", "programación algoritmo")
+        ]
+        cards = self.mgr.generate_flashcards(items, "ru", "es")
+        self.assertGreater(len(cards), 0)
+        for card in cards:
+            self.assertIn("front", card, "Flashcard must have 'front' key")
+            self.assertIn("back", card, "Flashcard must have 'back' key")
+            self.assertIsInstance(card["front"], str)
+            self.assertIsInstance(card["back"], str)
+
+    def test_flashcard_front_is_source_word(self) -> None:
+        """Flashcard 'front' contains the source language word."""
+        items = [_make_item("программирование", "programación")]
+        cards = self.mgr.generate_flashcards(items, "ru", "es")
+        self.assertGreater(len(cards), 0)
+        fronts = [c["front"] for c in cards]
+        self.assertIn("программирование", fronts)
+
+    def test_short_words_under_3_chars_excluded_from_flashcards(self) -> None:
+        """Words shorter than 3 characters are excluded from flashcards."""
+        items = [_make_item("он ты я мы программирование")]
+        cards = self.mgr.generate_flashcards(items, "ru", "es")
+        fronts = [c["front"] for c in cards]
+        for short in ["он", "ты", "я", "мы"]:
+            self.assertNotIn(short, fronts)
+
+    def test_stop_words_not_in_flashcards(self) -> None:
+        """Stop words are filtered out and don't appear as flashcard fronts."""
+        items = [_make_item("и в на для программирование")]
+        cards = self.mgr.generate_flashcards(items, "ru", "es")
+        fronts = [c["front"] for c in cards]
+        for sw in ["и", "в", "на", "для"]:
+            self.assertNotIn(sw, fronts)
+
+
 if __name__ == "__main__":
     unittest.main()

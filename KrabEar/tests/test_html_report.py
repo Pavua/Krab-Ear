@@ -380,5 +380,83 @@ class TestExportHtmlReportIPC(unittest.TestCase):
         self.assertIn("Привет мир", result["html"])
 
 
+class TestHTMLReportSelfContained(unittest.TestCase):
+    """Tests verifying the report is self-contained and embeds data correctly."""
+
+    def setUp(self) -> None:
+        self.gen = HTMLReportGenerator()
+
+    # No external resources (no http/https links in src/href attributes)
+    def test_no_external_resources(self) -> None:
+        """HTML report must not reference any external http/https resources."""
+        import re
+        items = [_simple_item(text="Проверка", confidence=0.9)]
+        result = self.gen.generate_report(items)
+        external = re.findall(r'(?:src|href)=["\']https?://', result)
+        self.assertEqual(external, [], f"Found external resources: {external}")
+
+    # Word count is embedded in the stats section
+    def test_word_count_embedded_in_stats(self) -> None:
+        """Stats card shows total word count derived from item texts."""
+        items = [
+            _simple_item(text="один два три"),        # 3 words
+            _simple_item(text="четыре пять"),          # 2 words
+        ]
+        stats = self.gen._compute_stats(items)
+        self.assertEqual(stats["total_words"], 5)
+        result = self.gen.generate_report(items)
+        # The rendered HTML must contain the word count in some form
+        self.assertIn("5", result)
+
+    # Avg confidence displayed as percentage
+    def test_avg_confidence_shown_as_percentage(self) -> None:
+        items = [_simple_item(confidence=0.8), _simple_item(confidence=1.0)]
+        result = self.gen.generate_report(items)
+        # avg = 0.9 → "90.0%"
+        self.assertIn("90.0%", result)
+
+    # Empty stats renders zero word count
+    def test_empty_stats_zero_word_count_in_card(self) -> None:
+        result = self.gen.generate_report([])
+        stats = self.gen._compute_stats([])
+        self.assertEqual(stats["total_words"], 0)
+        # "0" should appear somewhere in the stats
+        self.assertIn("0", result)
+
+    # Report has <html lang="ru"> for lang attribute
+    def test_html_lang_attribute(self) -> None:
+        result = self.gen.generate_report([])
+        self.assertIn('lang="ru"', result)
+
+    # Inline CSS is present (self-contained)
+    def test_inline_css_present(self) -> None:
+        result = self.gen.generate_report([])
+        self.assertIn("<style>", result)
+        self.assertNotIn('<link rel="stylesheet"', result)
+
+    # Confidence bar classes for different confidence levels
+    def test_confidence_bar_high_class(self) -> None:
+        items = [_simple_item(confidence=0.9)]
+        result = self.gen.generate_report(items)
+        self.assertIn("conf-high", result)
+
+    def test_confidence_bar_mid_class(self) -> None:
+        items = [_simple_item(confidence=0.6)]
+        result = self.gen.generate_report(items)
+        self.assertIn("conf-mid", result)
+
+    def test_confidence_bar_low_class(self) -> None:
+        items = [_simple_item(confidence=0.2)]
+        result = self.gen.generate_report(items)
+        self.assertIn("conf-low", result)
+
+    # generate_report with single item returns valid minimal HTML
+    def test_single_item_valid_html(self) -> None:
+        result = self.gen.generate_report([_simple_item(text="Единственная запись")])
+        self.assertIn("<!DOCTYPE html>", result)
+        self.assertIn("</html>", result)
+        self.assertIn("Единственная запись", result)
+
+
 if __name__ == "__main__":
     unittest.main()
