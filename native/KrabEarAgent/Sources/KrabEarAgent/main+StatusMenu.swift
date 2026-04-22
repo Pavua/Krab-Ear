@@ -1,0 +1,549 @@
+/*
+ main+StatusMenu.swift
+ AgentAppDelegate extension: NSStatusItem management, menu bar construction, mode switching.
+*/
+
+import AppKit
+import Foundation
+
+extension AgentAppDelegate {
+
+    // MARK: - Status item & mode
+
+    func ensureStatusItem() {
+        if statusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            item.button?.title = "KE"
+            item.button?.toolTip = "Krab Ear"
+            statusItem = item
+        }
+    }
+
+    func removeStatusItem() {
+        guard let statusItem else {
+            return
+        }
+        NSStatusBar.system.removeStatusItem(statusItem)
+        self.statusItem = nil
+    }
+
+    func refreshStatusItemTitle() {
+        guard let button = statusItem?.button else {
+            return
+        }
+        if isRecording {
+            button.title = "KE ●"
+        } else if isProcessing {
+            button.title = "KE …"
+        } else {
+            button.title = "KE"
+        }
+    }
+
+    func applyMode(_ mode: String, persist: Bool) {
+        let normalized = mode == "menubar" ? "menubar" : "headless"
+        settings.mode = normalized
+        applyActivationPolicy()
+
+        if normalized == "menubar" {
+            ensureStatusItem()
+        } else {
+            removeStatusItem()
+        }
+
+        if persist {
+            persistSettingsPayload(settings.toPayload())
+        }
+
+        refreshStatusItemTitle()
+        rebuildStatusMenu()
+    }
+
+    func applyActivationPolicy() {
+        let policy: NSApplication.ActivationPolicy = settings.showDockIcon ? .regular : .accessory
+        _ = NSApp.setActivationPolicy(policy)
+    }
+
+    func applySettingsSideEffects(previous: AgentSettings, current: AgentSettings) {
+        if previous.autoStartEnabled != current.autoStartEnabled {
+            launchAgentManager.setAutostart(enabled: current.autoStartEnabled)
+        }
+        if previous.realtimePreviewEnabled != current.realtimePreviewEnabled {
+            if current.realtimePreviewEnabled && isRecording {
+                startRealtimeOverlayPolling()
+            } else {
+                stopRealtimeOverlayPolling()
+            }
+        }
+        if previous.overlayOpacityPercent != current.overlayOpacityPercent {
+            realtimeOverlay.setOpacityPercent(current.overlayOpacityPercent)
+        }
+        if previous.hotkey != current.hotkey {
+            logger.info("Перезапуск hotkey manager с вариантом: \(current.hotkey)")
+            hotkeyManager?.stop()
+            hotkeyManager = HotkeyManager(variant: current.hotkey, onToggle: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.handleRecordToggleRequest()
+                }
+            })
+            hotkeyManager?.start()
+        }
+    }
+
+    // MARK: - Menu construction
+
+    func rebuildStatusMenu() {
+        guard let statusItem else {
+            return
+        }
+
+        let menu = NSMenu()
+
+        let recordItem = NSMenuItem(
+            title: isRecording ? "Остановить запись" : "Начать запись",
+            action: #selector(onRecordToggle),
+            keyEquivalent: ""
+        )
+        recordItem.target = self
+        recordItem.isEnabled = !isProcessing
+        menu.addItem(recordItem)
+
+        let historyItem = NSMenuItem(
+            title: "Открыть историю",
+            action: #selector(onOpenHistory),
+            keyEquivalent: "h"
+        )
+        historyItem.target = self
+        historyItem.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(historyItem)
+
+        let showPanelItem = NSMenuItem(
+            title: "Показать панель",
+            action: #selector(onOpenHistory),
+            keyEquivalent: "k"
+        )
+        showPanelItem.target = self
+        showPanelItem.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(showPanelItem)
+
+        let openTranscriptsItem = NSMenuItem(
+            title: "Открыть транскрипты",
+            action: #selector(onOpenTranscriptsInFinder),
+            keyEquivalent: ""
+        )
+        openTranscriptsItem.target = self
+        menu.addItem(openTranscriptsItem)
+
+        menu.addItem(.separator())
+
+        let modeItem = NSMenuItem(
+            title: settings.mode == "menubar" ? "Переключить в headless" : "Переключить в menu bar",
+            action: #selector(onModeToggle),
+            keyEquivalent: ""
+        )
+        modeItem.target = self
+        menu.addItem(modeItem)
+
+        let qualityMenuItem = NSMenuItem(title: "Качество транскрибации", action: nil, keyEquivalent: "")
+        menu.addItem(qualityMenuItem)
+
+        let qualitySubmenu = NSMenu()
+        let balancedItem = NSMenuItem(
+            title: "Balanced (turbo)",
+            action: #selector(onQualityBalanced),
+            keyEquivalent: ""
+        )
+        balancedItem.target = self
+        balancedItem.state = settings.qualityProfile == "balanced" ? .on : .off
+        qualitySubmenu.addItem(balancedItem)
+
+        let maxItem = NSMenuItem(
+            title: "Max (настраиваемый)",
+            action: #selector(onQualityMax),
+            keyEquivalent: ""
+        )
+        maxItem.target = self
+        maxItem.state = settings.qualityProfile == "max" ? .on : .off
+        qualitySubmenu.addItem(maxItem)
+
+        menu.setSubmenu(qualitySubmenu, for: qualityMenuItem)
+
+        let autoPasteItem = NSMenuItem(
+            title: settings.autoPaste ? "Автовставка: вкл" : "Автовставка: выкл",
+            action: #selector(onAutoPasteToggle),
+            keyEquivalent: ""
+        )
+        autoPasteItem.target = self
+        menu.addItem(autoPasteItem)
+
+        let translationLabel: String
+        switch settings.translationMode {
+        case "ru_to_es":
+            translationLabel = "RU -> ES"
+        case "es_to_ru":
+            translationLabel = "ES -> RU"
+        case "en_to_ru":
+            translationLabel = "EN -> RU"
+        case "auto":
+            translationLabel = "Auto"
+        case "auto_to_ru":
+            translationLabel = "Auto -> RU"
+        case "bilingual_ru_es":
+            translationLabel = "Bilingual RU<->ES"
+        default:
+            translationLabel = "Off"
+        }
+        let translationItem = NSMenuItem(title: "Перевод", action: nil, keyEquivalent: "")
+        menu.addItem(translationItem)
+
+        let translationSubmenu = NSMenu()
+        let translationInfoItem = NSMenuItem(
+            title: settings.translateAndPaste
+                ? "Текущий: \(translationLabel) / вставка перевода"
+                : "Текущий: \(translationLabel) / вставка оригинала",
+            action: nil,
+            keyEquivalent: ""
+        )
+        translationInfoItem.isEnabled = false
+        translationSubmenu.addItem(translationInfoItem)
+        translationSubmenu.addItem(.separator())
+
+        let modeOffItem = NSMenuItem(title: "Off", action: #selector(onTranslationModeOff), keyEquivalent: "")
+        modeOffItem.target = self
+        modeOffItem.state = settings.translationMode == "off" ? .on : .off
+        translationSubmenu.addItem(modeOffItem)
+
+        let modeRuToEsItem = NSMenuItem(title: "RU -> ES", action: #selector(onTranslationModeRuToEs), keyEquivalent: "")
+        modeRuToEsItem.target = self
+        modeRuToEsItem.state = settings.translationMode == "ru_to_es" ? .on : .off
+        translationSubmenu.addItem(modeRuToEsItem)
+
+        let modeEsToRuItem = NSMenuItem(title: "ES -> RU", action: #selector(onTranslationModeEsToRu), keyEquivalent: "")
+        modeEsToRuItem.target = self
+        modeEsToRuItem.state = settings.translationMode == "es_to_ru" ? .on : .off
+        translationSubmenu.addItem(modeEsToRuItem)
+
+        let modeEnToRuItem = NSMenuItem(title: "EN -> RU", action: #selector(onTranslationModeEnToRu), keyEquivalent: "")
+        modeEnToRuItem.target = self
+        modeEnToRuItem.state = settings.translationMode == "en_to_ru" ? .on : .off
+        translationSubmenu.addItem(modeEnToRuItem)
+
+        let modeAutoItem = NSMenuItem(title: "Auto", action: #selector(onTranslationModeAuto), keyEquivalent: "")
+        modeAutoItem.target = self
+        modeAutoItem.state = settings.translationMode == "auto" ? .on : .off
+        translationSubmenu.addItem(modeAutoItem)
+
+        let modeBilingualItem = NSMenuItem(
+            title: "Bilingual RU<->ES",
+            action: #selector(onTranslationModeBilingualRuEs),
+            keyEquivalent: ""
+        )
+        modeBilingualItem.target = self
+        modeBilingualItem.state = settings.translationMode == "bilingual_ru_es" ? .on : .off
+        translationSubmenu.addItem(modeBilingualItem)
+
+        translationSubmenu.addItem(.separator())
+        let livePresetItem = NSMenuItem(
+            title: "Live Translation preset",
+            action: #selector(onApplyLiveTranslationPreset),
+            keyEquivalent: ""
+        )
+        livePresetItem.target = self
+        translationSubmenu.addItem(livePresetItem)
+
+        let swapRuEsItem = NSMenuItem(
+            title: "Swap RU <-> ES",
+            action: #selector(onSwapRuEsDirection),
+            keyEquivalent: ""
+        )
+        swapRuEsItem.target = self
+        swapRuEsItem.isEnabled = settings.translationMode == "ru_to_es"
+            || settings.translationMode == "es_to_ru"
+            || settings.translationMode == "auto"
+            || settings.translationMode == "bilingual_ru_es"
+        translationSubmenu.addItem(swapRuEsItem)
+
+        translationSubmenu.addItem(.separator())
+        let translateAndPasteItem = NSMenuItem(
+            title: settings.translateAndPaste ? "Перевод + вставка: вкл" : "Перевод + вставка: выкл",
+            action: #selector(onTranslateAndPasteToggle),
+            keyEquivalent: ""
+        )
+        translateAndPasteItem.target = self
+        translationSubmenu.addItem(translateAndPasteItem)
+
+        translationSubmenu.addItem(.separator())
+        let styleMenuItem = NSMenuItem(title: "Стиль перевода", action: nil, keyEquivalent: "")
+        translationSubmenu.addItem(styleMenuItem)
+        let styleSubmenu = NSMenu()
+        let styleNeutral = NSMenuItem(title: "Neutral", action: #selector(onTranslationStyleNeutral), keyEquivalent: "")
+        styleNeutral.target = self
+        styleNeutral.state = settings.translationStyle == "neutral" ? .on : .off
+        styleSubmenu.addItem(styleNeutral)
+        let styleChat = NSMenuItem(title: "Chat", action: #selector(onTranslationStyleChat), keyEquivalent: "")
+        styleChat.target = self
+        styleChat.state = settings.translationStyle == "chat" ? .on : .off
+        styleSubmenu.addItem(styleChat)
+        let styleFormal = NSMenuItem(title: "Formal", action: #selector(onTranslationStyleFormal), keyEquivalent: "")
+        styleFormal.target = self
+        styleFormal.state = settings.translationStyle == "formal" ? .on : .off
+        styleSubmenu.addItem(styleFormal)
+        translationSubmenu.setSubmenu(styleSubmenu, for: styleMenuItem)
+
+        menu.setSubmenu(translationSubmenu, for: translationItem)
+
+        let clipboardMenuItem = NSMenuItem(title: "Буфер обмена", action: nil, keyEquivalent: "")
+        menu.addItem(clipboardMenuItem)
+        let clipboardSubmenu = NSMenu()
+        let clipAlways = NSMenuItem(title: "Always copy", action: #selector(onClipboardModeAlways), keyEquivalent: "")
+        clipAlways.target = self
+        clipAlways.state = settings.clipboardMode == "always_copy" ? .on : .off
+        clipboardSubmenu.addItem(clipAlways)
+        let clipOnFail = NSMenuItem(title: "Copy on fail", action: #selector(onClipboardModeOnFail), keyEquivalent: "")
+        clipOnFail.target = self
+        clipOnFail.state = settings.clipboardMode == "copy_on_fail" ? .on : .off
+        clipboardSubmenu.addItem(clipOnFail)
+        let clipNever = NSMenuItem(title: "Never copy", action: #selector(onClipboardModeNever), keyEquivalent: "")
+        clipNever.target = self
+        clipNever.state = settings.clipboardMode == "never_copy" ? .on : .off
+        clipboardSubmenu.addItem(clipNever)
+        menu.setSubmenu(clipboardSubmenu, for: clipboardMenuItem)
+
+        let networkMenuItem = NSMenuItem(title: "Сетевой режим", action: nil, keyEquivalent: "")
+        menu.addItem(networkMenuItem)
+
+        let networkSubmenu = NSMenu()
+        let offlineDefaultItem = NSMenuItem(
+            title: "Offline default",
+            action: #selector(onNetworkOfflineDefault),
+            keyEquivalent: ""
+        )
+        offlineDefaultItem.target = self
+        offlineDefaultItem.state = settings.networkMode == "offline_default" ? .on : .off
+        networkSubmenu.addItem(offlineDefaultItem)
+
+        let offlineStrictItem = NSMenuItem(
+            title: "Offline strict",
+            action: #selector(onNetworkOfflineStrict),
+            keyEquivalent: ""
+        )
+        offlineStrictItem.target = self
+        offlineStrictItem.state = settings.networkMode == "offline_strict" ? .on : .off
+        networkSubmenu.addItem(offlineStrictItem)
+
+        let onlineOptInItem = NSMenuItem(
+            title: "Online opt-in",
+            action: #selector(onNetworkOnlineOptIn),
+            keyEquivalent: ""
+        )
+        onlineOptInItem.target = self
+        onlineOptInItem.state = settings.networkMode == "online_opt_in" ? .on : .off
+        networkSubmenu.addItem(onlineOptInItem)
+
+        menu.setSubmenu(networkSubmenu, for: networkMenuItem)
+
+        let hotkeyProfileItem = NSMenuItem(title: "Hotkey Profile", action: nil, keyEquivalent: "")
+        menu.addItem(hotkeyProfileItem)
+        let hotkeyProfileSubmenu = NSMenu()
+        let profileDefaultItem = NSMenuItem(title: "Default", action: #selector(onHotkeyProfileDefault), keyEquivalent: "")
+        profileDefaultItem.target = self
+        profileDefaultItem.state = settings.hotkeyProfile == "default" ? .on : .off
+        hotkeyProfileSubmenu.addItem(profileDefaultItem)
+        let profileMeetingItem = NSMenuItem(title: "Meeting", action: #selector(onHotkeyProfileMeeting), keyEquivalent: "")
+        profileMeetingItem.target = self
+        profileMeetingItem.state = settings.hotkeyProfile == "meeting" ? .on : .off
+        hotkeyProfileSubmenu.addItem(profileMeetingItem)
+        let profileTranslationItem = NSMenuItem(title: "Translation", action: #selector(onHotkeyProfileTranslation), keyEquivalent: "")
+        profileTranslationItem.target = self
+        profileTranslationItem.state = settings.hotkeyProfile == "translation" ? .on : .off
+        hotkeyProfileSubmenu.addItem(profileTranslationItem)
+        menu.setSubmenu(hotkeyProfileSubmenu, for: hotkeyProfileItem)
+
+        let updateChannelItem = NSMenuItem(title: "Update Channel", action: nil, keyEquivalent: "")
+        menu.addItem(updateChannelItem)
+        let updateChannelSubmenu = NSMenu()
+        let stableChannelItem = NSMenuItem(title: "Stable", action: #selector(onUpdateChannelStable), keyEquivalent: "")
+        stableChannelItem.target = self
+        stableChannelItem.state = settings.updateChannel == "stable" ? .on : .off
+        updateChannelSubmenu.addItem(stableChannelItem)
+        let betaChannelItem = NSMenuItem(title: "Beta", action: #selector(onUpdateChannelBeta), keyEquivalent: "")
+        betaChannelItem.target = self
+        betaChannelItem.state = settings.updateChannel == "beta" ? .on : .off
+        updateChannelSubmenu.addItem(betaChannelItem)
+        menu.setSubmenu(updateChannelSubmenu, for: updateChannelItem)
+
+        let quickActionsItem = NSMenuItem(title: "Быстрые действия", action: nil, keyEquivalent: "")
+        menu.addItem(quickActionsItem)
+
+        let quickActionsSubmenu = NSMenu()
+        let copyLastItem = NSMenuItem(
+            title: "Копировать последний",
+            action: #selector(onCopyLastResult),
+            keyEquivalent: "c"
+        )
+        copyLastItem.target = self
+        copyLastItem.keyEquivalentModifierMask = [.command, .option]
+        copyLastItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(copyLastItem)
+
+        let pasteLastItem = NSMenuItem(
+            title: "Вставить последний",
+            action: #selector(onPasteLastResult),
+            keyEquivalent: "v"
+        )
+        pasteLastItem.target = self
+        pasteLastItem.keyEquivalentModifierMask = [.command, .option]
+        pasteLastItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(pasteLastItem)
+
+        let pasteOriginalItem = NSMenuItem(
+            title: "Вставить оригинал",
+            action: #selector(onPasteLastOriginal),
+            keyEquivalent: ""
+        )
+        pasteOriginalItem.target = self
+        pasteOriginalItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(pasteOriginalItem)
+
+        let pasteTranslationItem = NSMenuItem(
+            title: "Вставить перевод",
+            action: #selector(onPasteLastTranslation),
+            keyEquivalent: ""
+        )
+        pasteTranslationItem.target = self
+        pasteTranslationItem.isEnabled = (lastResult?.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+        quickActionsSubmenu.addItem(pasteTranslationItem)
+
+        let pastePlainItem = NSMenuItem(
+            title: "Вставить plain (1 строка)",
+            action: #selector(onPasteLastPlainText),
+            keyEquivalent: ""
+        )
+        pastePlainItem.target = self
+        pastePlainItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(pastePlainItem)
+
+        quickActionsSubmenu.addItem(.separator())
+        let templateRuItem = NSMenuItem(
+            title: "Шаблон RU follow-up",
+            action: #selector(onApplyTemplateRu),
+            keyEquivalent: ""
+        )
+        templateRuItem.target = self
+        templateRuItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(templateRuItem)
+
+        let templateEsItem = NSMenuItem(
+            title: "Шаблон ES follow-up",
+            action: #selector(onApplyTemplateEs),
+            keyEquivalent: ""
+        )
+        templateEsItem.target = self
+        templateEsItem.isEnabled = lastResult != nil
+        quickActionsSubmenu.addItem(templateEsItem)
+
+        menu.setSubmenu(quickActionsSubmenu, for: quickActionsItem)
+
+        let startSoundItem = NSMenuItem(
+            title: settings.playStartSound ? "Звук старта: вкл" : "Звук старта: выкл",
+            action: #selector(onStartSoundToggle),
+            keyEquivalent: ""
+        )
+        startSoundItem.target = self
+        menu.addItem(startSoundItem)
+
+        let duckingMenuItem = NSMenuItem(title: "Приглушение звука", action: nil, keyEquivalent: "")
+        menu.addItem(duckingMenuItem)
+        let duckingSubmenu = NSMenu()
+        let duckEnabledItem = NSMenuItem(
+            title: settings.audioDuckingEnabled ? "При записи: вкл" : "При записи: выкл",
+            action: #selector(onAudioDuckingToggle),
+            keyEquivalent: ""
+        )
+        duckEnabledItem.target = self
+        duckingSubmenu.addItem(duckEnabledItem)
+        duckingSubmenu.addItem(.separator())
+        let duck25 = NSMenuItem(title: "25%", action: #selector(onAudioDuckingPercent25), keyEquivalent: "")
+        duck25.target = self
+        duck25.state = settings.audioDuckingPercent == 25 ? .on : .off
+        duckingSubmenu.addItem(duck25)
+        let duck50 = NSMenuItem(title: "50%", action: #selector(onAudioDuckingPercent50), keyEquivalent: "")
+        duck50.target = self
+        duck50.state = settings.audioDuckingPercent == 50 ? .on : .off
+        duckingSubmenu.addItem(duck50)
+        let duck75 = NSMenuItem(title: "75%", action: #selector(onAudioDuckingPercent75), keyEquivalent: "")
+        duck75.target = self
+        duck75.state = settings.audioDuckingPercent == 75 ? .on : .off
+        duckingSubmenu.addItem(duck75)
+        let duck100 = NSMenuItem(title: "100% (mute)", action: #selector(onAudioDuckingPercent100), keyEquivalent: "")
+        duck100.target = self
+        duck100.state = settings.audioDuckingPercent == 100 ? .on : .off
+        duckingSubmenu.addItem(duck100)
+        menu.setSubmenu(duckingSubmenu, for: duckingMenuItem)
+
+        let overlayMenuItem = NSMenuItem(title: "Прозрачность realtime", action: nil, keyEquivalent: "")
+        menu.addItem(overlayMenuItem)
+        let overlaySubmenu = NSMenu()
+        let overlay25 = NSMenuItem(title: "25%", action: #selector(onOverlayOpacity25), keyEquivalent: "")
+        overlay25.target = self
+        overlay25.state = settings.overlayOpacityPercent == 25 ? .on : .off
+        overlaySubmenu.addItem(overlay25)
+        let overlay45 = NSMenuItem(title: "45%", action: #selector(onOverlayOpacity45), keyEquivalent: "")
+        overlay45.target = self
+        overlay45.state = settings.overlayOpacityPercent == 45 ? .on : .off
+        overlaySubmenu.addItem(overlay45)
+        let overlay65 = NSMenuItem(title: "65%", action: #selector(onOverlayOpacity65), keyEquivalent: "")
+        overlay65.target = self
+        overlay65.state = settings.overlayOpacityPercent == 65 ? .on : .off
+        overlaySubmenu.addItem(overlay65)
+        menu.setSubmenu(overlaySubmenu, for: overlayMenuItem)
+
+        let autostartItem = NSMenuItem(
+            title: settings.autoStartEnabled ? "Автозапуск: вкл" : "Автозапуск: выкл",
+            action: #selector(onAutostartToggle),
+            keyEquivalent: ""
+        )
+        autostartItem.target = self
+        menu.addItem(autostartItem)
+
+        let dockItem = NSMenuItem(
+            title: settings.showDockIcon ? "Иконка в Dock: вкл" : "Иконка в Dock: выкл",
+            action: #selector(onDockIconToggle),
+            keyEquivalent: ""
+        )
+        dockItem.target = self
+        menu.addItem(dockItem)
+
+        let compactItem = NSMenuItem(
+            title: "Оптимизировать историю",
+            action: #selector(onCompactHistory),
+            keyEquivalent: ""
+        )
+        compactItem.target = self
+        menu.addItem(compactItem)
+
+        menu.addItem(.separator())
+
+        let restartItem = NSMenuItem(
+            title: "Перезапустить агент",
+            action: #selector(onRestartAgent),
+            keyEquivalent: ""
+        )
+        restartItem.target = self
+        menu.addItem(restartItem)
+
+        let stopItem = NSMenuItem(
+            title: "Остановить агент",
+            action: #selector(onStopAgent),
+            keyEquivalent: ""
+        )
+        stopItem.target = self
+        menu.addItem(stopItem)
+
+        let quitItem = NSMenuItem(title: "Выход", action: #selector(onQuit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+    }
+}
