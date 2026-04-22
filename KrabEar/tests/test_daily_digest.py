@@ -305,5 +305,242 @@ class DailyDigestServiceIntegrationTestCase(unittest.TestCase):
         self.assertEqual(resp["result"]["date"], date.today().isoformat())
 
 
+def _make_mock_store(items, today=None):
+    """Вспомогательная функция: mock-store, возвращающий items."""
+    if today is None:
+        today = date.today().isoformat()
+
+    for item in items:
+        if not hasattr(item, 'ts') or not item.ts:
+            item.ts = f"{today}T10:00:00"
+        if not hasattr(item, 'confidence') or item.confidence is None:
+            item.confidence = 0.90
+        if not hasattr(item, 'audio_duration_sec') or item.audio_duration_sec is None:
+            item.audio_duration_sec = 60.0
+        if not hasattr(item, 'source_lang'):
+            item.source_lang = "ru"
+
+    @contextmanager
+    def mock_lock():
+        yield
+
+    store = Mock()
+    store._lock = mock_lock
+    store._load_active_items_unlocked.return_value = items
+    return store
+
+
+def _make_item(text, ts=None, lang="ru", confidence=0.90, duration=60.0):
+    """Фабрика тестовых items."""
+    item = Mock()
+    item.text = text
+    item.ts = ts or f"{date.today().isoformat()}T10:00:00"
+    item.source_lang = lang
+    item.confidence = confidence
+    item.audio_duration_sec = duration
+    return item
+
+
+class DailyDigestDirectItemsTestCase(unittest.TestCase):
+    """Тесты с прямой передачей items через mock store."""
+
+    def setUp(self):
+        self.gen = DailyDigestGenerator()
+        self.today = date.today().isoformat()
+
+    def test_empty_items_returns_graceful_empty_digest(self):
+        """Пустой список items возвращает пустой дайджест без исключений."""
+        store = _make_mock_store([])
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertIsInstance(digest, DailyDigest)
+        self.assertEqual(digest.total_recordings, 0)
+        self.assertEqual(digest.total_words, 0)
+        self.assertEqual(digest.total_duration_min, 0.0)
+        self.assertEqual(digest.languages_used, {})
+        self.assertEqual(digest.top_topics, [])
+        self.assertEqual(digest.highlights, [])
+
+    def test_empty_items_markdown_has_no_recordings_message(self):
+        """Markdown пустого дайджеста содержит сообщение об отсутствии записей."""
+        store = _make_mock_store([])
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertIn("Записей за этот день не найдено", digest.formatted_markdown)
+
+    def test_single_item_word_count(self):
+        """Дайджест корректно считает слова одного item."""
+        item = _make_item("один два три четыре пять")
+        store = _make_mock_store([item])
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.total_recordings, 1)
+        self.assertEqual(digest.total_words, 5)
+
+    def test_multiple_items_word_count_summed(self):
+        """Слова суммируются по всем items за день."""
+        items = [
+            _make_item("раз два три"),          # 3
+            _make_item("четыре пять шесть семь"),  # 4
+        ]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.total_words, 7)
+
+    def test_duration_summed_correctly(self):
+        """Длительность (мин) суммируется и конвертируется из секунд."""
+        items = [
+            _make_item("текст один", duration=90.0),
+            _make_item("текст два", duration=90.0),
+        ]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.total_duration_min, 3.0)  # 180 сек / 60
+
+    def test_multilanguage_grouping(self):
+        """Дайджест корректно группирует языки из разных items."""
+        items = [
+            _make_item("текст первый", lang="ru"),
+            _make_item("texto en español", lang="es"),
+            _make_item("english text here", lang="en"),
+            _make_item("ещё один русский", lang="ru"),
+        ]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.languages_used.get("ru"), 2)
+        self.assertEqual(digest.languages_used.get("es"), 1)
+        self.assertEqual(digest.languages_used.get("en"), 1)
+
+    def test_multilanguage_most_frequent_in_markdown(self):
+        """Markdown содержит языки, отсортированные по частоте."""
+        items = [
+            _make_item("rus1", lang="ru"),
+            _make_item("rus2", lang="ru"),
+            _make_item("es1", lang="es"),
+        ]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        md = digest.formatted_markdown
+        self.assertIn("ru (2)", md)
+        self.assertIn("es (1)", md)
+        # ru должен идти перед es (по убыванию частоты)
+        self.assertLess(md.index("ru (2)"), md.index("es (1)"))
+
+    def test_top_topics_extracted_from_items(self):
+        """top_topics содержит значимые слова из транскрипций."""
+        items = [
+            _make_item("проект разработка разработка код"),
+            _make_item("проект тестирование разработка"),
+        ]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertIn("разработка", digest.top_topics)
+        self.assertIn("проект", digest.top_topics)
+
+    def test_top_topics_excludes_stop_words(self):
+        """top_topics не содержит стоп-слова."""
+        items = [_make_item("и в на для с это тот нужный термин термин термин")]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        stop_words_in_topics = {"и", "в", "на", "для", "с", "это", "тот"}
+        for w in digest.top_topics:
+            self.assertNotIn(w, stop_words_in_topics, f"Стоп-слово {w!r} в top_topics")
+
+    def test_top_topics_max_10(self):
+        """top_topics содержит не более 10 слов."""
+        long_text = " ".join(f"слово{i}" * 2 for i in range(30))
+        items = [_make_item(long_text)]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertLessEqual(len(digest.top_topics), 10)
+
+    def test_items_with_no_text_handled_gracefully(self):
+        """Items с пустым text не вызывают исключений."""
+        item1 = _make_item("")
+        item2 = _make_item("нормальный текст")
+        store = _make_mock_store([item1, item2])
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.total_recordings, 2)
+        self.assertEqual(digest.total_words, 2)
+
+    def test_items_with_none_duration_handled_gracefully(self):
+        """Items с audio_duration_sec=None не вызывают исключений."""
+        item = Mock()
+        item.text = "текст"
+        item.ts = f"{self.today}T10:00:00"
+        item.source_lang = "ru"
+        item.confidence = 0.9
+        item.audio_duration_sec = None
+
+        @contextmanager
+        def mock_lock():
+            yield
+
+        store = Mock()
+        store._lock = mock_lock
+        store._load_active_items_unlocked.return_value = [item]
+
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.total_duration_min, 0.0)
+
+    def test_items_with_no_source_lang_skipped_in_languages(self):
+        """Items без source_lang не попадают в languages_used."""
+        item = Mock()
+        item.text = "текст без языка"
+        item.ts = f"{self.today}T10:00:00"
+        item.source_lang = ""
+        item.confidence = 0.9
+        item.audio_duration_sec = 60.0
+        store = _make_mock_store([item])
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertEqual(digest.languages_used, {})
+
+    def test_highlights_count_at_most_3(self):
+        """highlights содержит не более 3 элементов."""
+        items = [_make_item(f"текст записи {i}", confidence=0.9 - i * 0.01) for i in range(10)]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertLessEqual(len(digest.highlights), 3)
+
+    def test_digest_date_matches_input(self):
+        """date поле дайджеста совпадает с переданной датой."""
+        store = _make_mock_store([_make_item("текст", ts="2025-06-15T09:00:00")], today="2025-06-15")
+        digest = self.gen.generate_digest(date_str="2025-06-15", store=store)
+        self.assertEqual(digest.date, "2025-06-15")
+
+    def test_digest_result_is_DailyDigest_instance(self):
+        """generate_digest всегда возвращает экземпляр DailyDigest."""
+        items = [_make_item("проверка типа")]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertIsInstance(digest, DailyDigest)
+
+    def test_markdown_contains_word_count(self):
+        """Markdown содержит количество слов."""
+        items = [_make_item("один два три")]
+        store = _make_mock_store(items)
+        digest = self.gen.generate_digest(date_str=self.today, store=store)
+        self.assertIn("Слов", digest.formatted_markdown)
+        self.assertIn("3", digest.formatted_markdown)
+
+    def test_markdown_contains_date_header(self):
+        """Markdown содержит заголовок с датой."""
+        items = [_make_item("текст")]
+        store = _make_mock_store(items, today="2025-03-10")
+        digest = self.gen.generate_digest(date_str="2025-03-10", store=store)
+        self.assertIn("2025-03-10", digest.formatted_markdown)
+
+    def test_tokenize_function_lowercases_words(self):
+        """_tokenize возвращает слова в нижнем регистре."""
+        from backend.daily_digest import _tokenize
+        tokens = _tokenize("Привет МИР Hello WORLD")
+        for t in tokens:
+            self.assertEqual(t, t.lower(), f"Токен {t!r} не в нижнем регистре")
+
+    def test_tokenize_skips_digits_and_punctuation(self):
+        """_tokenize возвращает только буквенные токены."""
+        from backend.daily_digest import _tokenize
+        tokens = _tokenize("hello 123 world! foo, bar.")
+        for t in tokens:
+            self.assertTrue(t.isalpha(), f"Токен {t!r} содержит не-буквы")
+
+
 if __name__ == "__main__":
     unittest.main()
