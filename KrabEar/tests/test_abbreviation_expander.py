@@ -302,5 +302,66 @@ class TestLongestMatchFirst(unittest.TestCase):
         self.assertIn("так далее", result)
 
 
+class TestExpandDefaultLanguage(unittest.TestCase):
+    """Tests for default language parameter (ru) and case edge cases."""
+
+    def setUp(self):
+        self.expander = AbbreviationExpander()
+
+    def test_expand_default_language_is_ru(self):
+        """expand() without explicit language defaults to Russian."""
+        result = self.expander.expand("Приехал в г. Москва")
+        self.assertIn("город", result)
+
+    def test_expand_unknown_abbr_unchanged(self) -> None:
+        """Unknown abbreviation is left unchanged."""
+        text = "Текст с неизв. сокращением"
+        result = self.expander.expand(text, language="ru")
+        self.assertIn("неизв.", result)
+
+    def test_case_insensitive_expansion_lowercase(self):
+        """Lowercase abbreviation is expanded correctly."""
+        result = self.expander.expand("нужно, т.е. обязательно", language="ru")
+        self.assertIn("то есть", result)
+
+    def test_expand_does_not_alter_nonabbrev_dots(self):
+        """Dots in regular text (end of sentence) are not consumed."""
+        result = self.expander.expand("Конец предложения.", language="ru")
+        self.assertTrue(result.endswith("."))
+
+    def test_expand_multiple_known_abbrevs_en(self):
+        """Multiple EN abbreviations in one text are all expanded."""
+        text = "Use e.g. a hammer, i.e. a tool, etc."
+        result = self.expander.expand(text, language="en")
+        self.assertIn("for example", result)
+        self.assertIn("that is", result)
+        self.assertIn("et cetera", result)
+
+    def test_expand_es_with_unknown_remains(self):
+        """Unknown ES abbreviation stays in text."""
+        text = "Texto con descon. abreviatura"
+        result = self.expander.expand(text, language="es")
+        self.assertIn("descon.", result)
+
+    def test_list_abbreviations_en_has_items(self):
+        """English abbreviations list is non-empty."""
+        items = self.expander.list_abbreviations(language="en")
+        self.assertTrue(len(items) > 0)
+        abbrs = [i["abbr"] for i in items]
+        self.assertIn("e.g.", abbrs)
+
+    def test_list_abbreviations_es_has_items(self):
+        """Spanish abbreviations list is non-empty."""
+        items = self.expander.list_abbreviations(language="es")
+        self.assertTrue(len(items) > 0)
+
+    def test_builtin_flag_is_true_for_builtin_abbrevs(self):
+        """Built-in abbreviations have builtin=True in list output."""
+        items = self.expander.list_abbreviations(language="ru")
+        builtin_items = [i for i in items if i["abbr"] == "т.е."]
+        self.assertEqual(len(builtin_items), 1)
+        self.assertTrue(builtin_items[0]["builtin"])
+
+
 if __name__ == "__main__":
     unittest.main()
