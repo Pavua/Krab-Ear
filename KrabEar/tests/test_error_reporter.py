@@ -232,5 +232,62 @@ class ErrorReporterThreadSafetyTestCase(unittest.TestCase):
         self.assertLessEqual(len(reporter.get_recent_errors(limit=200)), 200)
 
 
+class ErrorReporterRingBufferEvictionTestCase(unittest.TestCase):
+    """Кольцевой буфер: при переполнении самые старые записи вытесняются."""
+
+    def test_oldest_records_evicted_when_full(self) -> None:
+        reporter = ErrorReporter(max_size=3)
+        reporter.report_error("stt", "E", "oldest")
+        reporter.report_error("stt", "E", "middle")
+        reporter.report_error("stt", "E", "newest")
+        # Буфер полон — добавляем ещё одну запись
+        reporter.report_error("stt", "E", "overflow")
+        errors = reporter.get_recent_errors(limit=10)
+        messages = [e.message for e in errors]
+        # "oldest" должна быть вытеснена
+        self.assertNotIn("oldest", messages)
+        # остальные три присутствуют
+        self.assertIn("overflow", messages)
+        self.assertIn("newest", messages)
+        self.assertIn("middle", messages)
+
+    def test_buffer_size_never_exceeds_max_size(self) -> None:
+        reporter = ErrorReporter(max_size=5)
+        for i in range(20):
+            reporter.report_error("llm", "E", f"msg {i}")
+        stats = reporter.get_error_stats()
+        self.assertEqual(stats["total"], 5)
+
+
+class ErrorReporterSummaryOrderTestCase(unittest.TestCase):
+    """get_error_stats: по_type / по_component содержат корректные счётчики."""
+
+    def test_by_type_counts_most_frequent(self) -> None:
+        reporter = ErrorReporter()
+        for _ in range(5):
+            reporter.report_error("stt", "TimeoutError", "t")
+        for _ in range(2):
+            reporter.report_error("llm", "ValueError", "v")
+        reporter.report_error("ipc", "IOError", "i")
+        stats = reporter.get_error_stats()
+        # TimeoutError должен быть самым частым
+        by_type = stats["by_type"]
+        self.assertEqual(by_type["TimeoutError"], 5)
+        self.assertEqual(by_type["ValueError"], 2)
+        self.assertEqual(by_type["IOError"], 1)
+        most_frequent = max(by_type, key=lambda k: by_type[k])
+        self.assertEqual(most_frequent, "TimeoutError")
+
+    def test_by_component_aggregates_across_types(self) -> None:
+        reporter = ErrorReporter()
+        reporter.report_error("stt", "TypeA", "a")
+        reporter.report_error("stt", "TypeB", "b")
+        reporter.report_error("stt", "TypeC", "c")
+        reporter.report_error("llm", "TypeA", "d")
+        stats = reporter.get_error_stats()
+        self.assertEqual(stats["by_component"]["stt"], 3)
+        self.assertEqual(stats["by_component"]["llm"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
