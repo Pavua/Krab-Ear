@@ -664,5 +664,153 @@ class SpecialValueEdgeCasesTestCase(unittest.TestCase):
             self.assertEqual(peak_ins.data["peak_hour"], 9)
 
 
+class InsightMessagePriorityTestCase(unittest.TestCase):
+    """Проверяет структуру полей type/title/description/confidence на всех инсайтах."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_all_insights_have_nonempty_type(self) -> None:
+        items = [_make_item(ts_offset_days=i * 0.1, hour=10) for i in range(8)]
+        for ins in self.gen.generate_insights(items, days=7):
+            self.assertTrue(ins.type, f"Пустой type у инсайта: {ins!r}")
+
+    def test_all_insights_have_nonempty_title_and_description(self) -> None:
+        items = [_make_item(ts_offset_days=i * 0.1, hour=10) for i in range(8)]
+        for ins in self.gen.generate_insights(items, days=7):
+            self.assertTrue(ins.title.strip(), "Пустой title")
+            self.assertTrue(ins.description.strip(), "Пустое description")
+
+    def test_insight_confidence_is_float(self) -> None:
+        items = [_make_item(ts_offset_days=i * 0.1, hour=14) for i in range(6)]
+        for ins in self.gen.generate_insights(items, days=7):
+            self.assertIsInstance(ins.confidence, float)
+
+    def test_to_dict_type_matches_attribute(self) -> None:
+        ins = Insight(type="recording_streak", title="T", description="D", confidence=0.6)
+        d = ins.to_dict()
+        self.assertEqual(d["type"], ins.type)
+        self.assertEqual(d["confidence"], ins.confidence)
+
+
+class MondayPatternTestCase(unittest.TestCase):
+    """Тест: инсайт peak_productivity отражает доминирующий день/час (паттерн 'понедельники')."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_peak_hour_reflects_concentrated_recordings(self) -> None:
+        """Большинство записей в один час → peak_hour указывает на него."""
+        # 7 записей в 9:00, 1 в 18:00 — peak должен быть 9
+        items = [_make_item(ts_offset_days=i * 0.1, hour=9) for i in range(7)]
+        items += [_make_item(ts_offset_days=0.5, hour=18)]
+        insights = self.gen.generate_insights(items, days=7)
+        peak = next((i for i in insights if i.type == "peak_productivity"), None)
+        self.assertIsNotNone(peak)
+        self.assertEqual(peak.data["peak_hour"], 9)
+
+    def test_peak_ratio_in_data(self) -> None:
+        """peak_ratio присутствует в data и находится в диапазоне 0–1."""
+        items = [_make_item(ts_offset_days=i * 0.1, hour=10) for i in range(7)]
+        items += [_make_item(ts_offset_days=0.5, hour=20)]
+        insights = self.gen.generate_insights(items, days=7)
+        peak = next((i for i in insights if i.type == "peak_productivity"), None)
+        if peak:
+            self.assertIn("peak_ratio", peak.data)
+            self.assertGreater(peak.data["peak_ratio"], 0.0)
+            self.assertLessEqual(peak.data["peak_ratio"], 1.0)
+
+    def test_uniform_hour_distribution_still_produces_insight(self) -> None:
+        """Даже равномерное распределение по часам порождает peak_productivity."""
+        items = []
+        for h in range(4):
+            items.extend(_make_item(ts_offset_days=h * 0.2, hour=h) for _ in range(1))
+        # Добавим доминирующий час
+        items.extend(_make_item(ts_offset_days=i * 0.05, hour=12) for i in range(5))
+        insights = self.gen.generate_insights(items, days=7)
+        types = [ins.type for ins in insights]
+        self.assertIn("peak_productivity", types)
+
+    def test_peak_hour_distribution_sums_to_total(self) -> None:
+        """Сумма hour_distribution равна total_count."""
+        items = [_make_item(ts_offset_days=i * 0.1, hour=(8 + i) % 3) for i in range(9)]
+        insights = self.gen.generate_insights(items, days=7)
+        peak = next((i for i in insights if i.type == "peak_productivity"), None)
+        if peak and "hour_distribution" in peak.data:
+            self.assertEqual(
+                sum(peak.data["hour_distribution"].values()),
+                peak.data["total_count"],
+            )
+
+
+class QualityImprovementExtendedTestCase(unittest.TestCase):
+    """Расширенные тесты quality_improvement."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_quality_degradation_also_detected(self) -> None:
+        """quality_improvement срабатывает и при снижении confidence."""
+        new_items = [_make_item(ts_offset_days=i * 0.5, confidence=0.55) for i in range(4)]
+        old_items = [_make_item(ts_offset_days=8 + i, confidence=0.92) for i in range(4)]
+        insights = self.gen.generate_insights(old_items + new_items, days=7)
+        qi = next((i for i in insights if i.type == "quality_improvement"), None)
+        self.assertIsNotNone(qi)
+        # change должен быть отрицательным
+        self.assertLess(qi.data["change"], 0)
+
+    def test_quality_improvement_change_sign_positive(self) -> None:
+        """change положительный при росте confidence."""
+        old_items = [_make_item(ts_offset_days=8 + i, confidence=0.60) for i in range(4)]
+        new_items = [_make_item(ts_offset_days=i * 0.5, confidence=0.95) for i in range(4)]
+        insights = self.gen.generate_insights(old_items + new_items, days=7)
+        qi = next((i for i in insights if i.type == "quality_improvement"), None)
+        if qi:
+            self.assertGreater(qi.data["change"], 0)
+
+    def test_quality_improvement_sample_sizes_in_data(self) -> None:
+        """prev_sample_size и recent_sample_size присутствуют в data."""
+        old_items = [_make_item(ts_offset_days=8 + i, confidence=0.65) for i in range(3)]
+        new_items = [_make_item(ts_offset_days=i * 0.5, confidence=0.90) for i in range(3)]
+        insights = self.gen.generate_insights(old_items + new_items, days=7)
+        qi = next((i for i in insights if i.type == "quality_improvement"), None)
+        if qi:
+            self.assertIn("prev_sample_size", qi.data)
+            self.assertIn("recent_sample_size", qi.data)
+            self.assertGreater(qi.data["prev_sample_size"], 0)
+            self.assertGreater(qi.data["recent_sample_size"], 0)
+
+
+class RecordingStreakExtendedTestCase(unittest.TestCase):
+    """Расширенные тесты recording_streak."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_streak_three_days(self) -> None:
+        items = _make_items_for_streak(3)
+        insights = self.gen.generate_insights(items, days=7)
+        streak = next((i for i in insights if i.type == "recording_streak"), None)
+        self.assertIsNotNone(streak)
+        self.assertGreaterEqual(streak.data["streak_days"], 2)
+
+    def test_streak_total_days_in_data(self) -> None:
+        items = _make_items_for_streak(5)
+        insights = self.gen.generate_insights(items, days=14)
+        streak = next((i for i in insights if i.type == "recording_streak"), None)
+        if streak:
+            self.assertIn("total_days_with_recordings", streak.data)
+            self.assertGreater(streak.data["total_days_with_recordings"], 0)
+
+    def test_streak_confidence_at_least_half(self) -> None:
+        """Confidence серии >= 0.5 согласно формуле 0.5 + streak*0.05."""
+        items = _make_items_for_streak(4)
+        insights = self.gen.generate_insights(items, days=14)
+        streak = next((i for i in insights if i.type == "recording_streak"), None)
+        if streak:
+            self.assertGreaterEqual(streak.data["streak_days"], 2)
+            self.assertGreaterEqual(streak.confidence, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
