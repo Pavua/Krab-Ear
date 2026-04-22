@@ -406,7 +406,12 @@ class RateLimitTest(_RestBase):
         _rest_mod.limiter.enabled = True
 
     def tearDown(self):
-        # Reset after the test; the base tearDown restores the original value
+        # Flush limiter counters so unrelated test files that hit /health
+        # don't inherit 429 state from this class (test isolation).
+        try:
+            _rest_mod.limiter.reset()
+        except Exception:
+            pass
         super().tearDown()
 
     def test_exceeding_health_rate_limit_returns_429(self):
