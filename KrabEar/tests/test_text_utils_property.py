@@ -21,10 +21,17 @@ for p in (PROJECT_ROOT, KRAB_EAR_ROOT):
 
 import unittest
 
-from hypothesis import given, settings, HealthCheck
-from hypothesis import strategies as st
+import pytest
 
-from core.utils import TextUtils
+try:
+    from hypothesis import given, settings, HealthCheck
+    from hypothesis import strategies as st
+    from core.utils import TextUtils
+except (ImportError, OSError) as _import_err:
+    pytest.skip(
+        f"Skipping property tests — dependency unavailable: {_import_err}",
+        allow_module_level=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Стратегии
