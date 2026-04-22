@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -179,6 +180,138 @@ class TestAudioConverterInit(unittest.TestCase):
         c = AudioConverter()
         # Просто убеждаемся что метод возвращает bool без исключений
         self.assertIsInstance(c.is_ffmpeg_available(), bool)
+
+
+class TestConvertMocked(unittest.TestCase):
+    """Тесты convert() через mock subprocess — не требует реального ffmpeg."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_mock_conv_")
+        # Создаём stub ffmpeg path (должен существовать + быть executable для init)
+        self.fake_ffmpeg = os.path.join(self.tmp, "ffmpeg")
+        with open(self.fake_ffmpeg, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_ffmpeg, 0o755)
+        self.converter = AudioConverter(ffmpeg_path=self.fake_ffmpeg)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_src(self, name: str = "input.wav") -> str:
+        path = os.path.join(self.tmp, name)
+        _make_wav(path, duration=0.2, sample_rate=16000)
+        return path
+
+    def _mock_run_ok(self):
+        """Возвращает mock subprocess.CompletedProcess с returncode=0."""
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        return result
+
+    # ── Проверка аргументов subprocess ───────────────────────────────────────
+
+    def test_convert_calls_ffmpeg_with_correct_args(self):
+        """convert() вызывает ffmpeg с -y -i src -ac 1 -ar rate dst."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "out.wav")
+
+        with patch("subprocess.run", return_value=self._mock_run_ok()) as mock_run:
+            result = self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
+
+        self.assertEqual(result, dst)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], self.fake_ffmpeg)
+        self.assertIn("-y", cmd)
+        self.assertIn("-i", cmd)
+        self.assertIn(str(src), cmd)
+        self.assertIn("-ac", cmd)
+        self.assertIn("1", cmd)
+        self.assertIn("-ar", cmd)
+        self.assertIn("16000", cmd)
+        self.assertIn(dst, cmd)
+
+    def test_convert_custom_sample_rate_passed_to_ffmpeg(self):
+        """Пользовательский sample_rate передаётся в аргументы ffmpeg."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "out22.wav")
+
+        with patch("subprocess.run", return_value=self._mock_run_ok()) as mock_run:
+            self.converter.convert(src, output_format="wav", sample_rate=22050, output_path=dst)
+
+        cmd = mock_run.call_args[0][0]
+        ar_idx = cmd.index("-ar")
+        self.assertEqual(cmd[ar_idx + 1], "22050")
+
+    def test_convert_nonzero_returncode_raises_runtime_error(self):
+        """convert() бросает RuntimeError если ffmpeg вернул ненулевой код."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "out_fail.wav")
+
+        fail_result = MagicMock()
+        fail_result.returncode = 1
+        fail_result.stderr = "some ffmpeg error"
+
+        with patch("subprocess.run", return_value=fail_result):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.converter.convert(src, output_format="wav", output_path=dst)
+        self.assertIn("1", str(ctx.exception))
+
+    def test_convert_returns_temp_path_without_output_path(self):
+        """Без output_path convert() создаёт временный файл и возвращает его путь."""
+        src = self._make_src()
+        created_paths: list = []
+
+        def fake_run(cmd, **kwargs):
+            # Симулируем создание выходного файла ffmpeg
+            dst = cmd[-1]
+            with open(dst, "wb") as f:
+                f.write(b"\x00" * 64)
+            created_paths.append(dst)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            return r
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = self.converter.convert(src)
+
+        self.assertTrue(len(created_paths) == 1)
+        self.assertEqual(result, created_paths[0])
+        self.assertTrue(result.endswith(".wav"))
+        # Cleanup temp
+        try:
+            os.unlink(result)
+        except OSError:
+            pass
+
+    def test_convert_subprocess_oserror_raises_runtime_error(self):
+        """OSError от subprocess (ffmpeg не запускается) → RuntimeError."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "out_os.wav")
+
+        with patch("subprocess.run", side_effect=OSError("exec failed")):
+            with self.assertRaises(RuntimeError):
+                self.converter.convert(src, output_path=dst)
+
+    def test_convert_file_not_found_before_subprocess(self):
+        """FileNotFoundError бросается до запуска subprocess."""
+        with patch("subprocess.run") as mock_run:
+            with self.assertRaises(FileNotFoundError):
+                self.converter.convert("/tmp/krab_ear_no_such_42.wav")
+        mock_run.assert_not_called()
+
+    def test_convert_unsupported_format_before_subprocess(self):
+        """ValueError для неподдерживаемого формата бросается до subprocess."""
+        bad = os.path.join(self.tmp, "file.avi")
+        with open(bad, "wb") as fh:
+            fh.write(b"dummy")
+        with patch("subprocess.run") as mock_run:
+            with self.assertRaises(ValueError):
+                self.converter.convert(bad)
+        mock_run.assert_not_called()
 
 
 if __name__ == "__main__":
