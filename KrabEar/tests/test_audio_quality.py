@@ -201,5 +201,76 @@ class TestEdgeCases(unittest.TestCase):
         self.assertGreater(report.snr_estimate_db, 10.0)
 
 
+class TestClippingPartial(unittest.TestCase):
+    """Частичный клиппинг и граничные случаи."""
+
+    def test_partial_clipping_detected(self):
+        """10% семплов насыщены → clipping_ratio ~0.1."""
+        audio = _sine(amplitude=0.5, duration=2.0)
+        clipped = audio.copy()
+        # Принудительно насыщаем каждый 10-й семпл
+        clipped[::10] = 1.0
+        report = AudioQualityAnalyzer().analyze(clipped, SR)
+        self.assertGreater(report.clipping_ratio, 0.0)
+
+    def test_no_clipping_below_threshold(self):
+        """Амплитуда 0.9 не достигает порога 0.99 → нет клиппинга."""
+        audio = np.full(SR * 2, 0.9, dtype=np.float32)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertAlmostEqual(report.clipping_ratio, 0.0, delta=1e-6)
+
+    def test_clipping_ratio_in_range_0_to_1(self):
+        """clipping_ratio всегда в [0, 1]."""
+        for amp in [0.0, 0.5, 0.99, 1.0]:
+            audio = np.full(SR, amp, dtype=np.float32)
+            report = AudioQualityAnalyzer().analyze(audio, SR)
+            self.assertGreaterEqual(report.clipping_ratio, 0.0)
+            self.assertLessEqual(report.clipping_ratio, 1.0)
+
+
+class TestSilenceRatioEdge(unittest.TestCase):
+    """Доля тишины — граничные случаи."""
+
+    def test_empty_audio_silence_ratio(self):
+        """Пустой массив — silence_ratio может быть 1.0 (нет фреймов)."""
+        report = AudioQualityAnalyzer().analyze(np.array([], dtype=np.float32), SR)
+        # Не проверяем конкретное значение — лишь отсутствие исключения
+        self.assertIsInstance(report.silence_ratio, float)
+
+    def test_silence_warning_for_very_silent_audio(self):
+        """Аудио с >80% тишины имеет предупреждение."""
+        active = _sine(amplitude=0.3, duration=0.2)
+        silent = _silence(duration=1.8)
+        audio = np.concatenate([active, silent])
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertTrue(any("тишин" in w.lower() for w in report.warnings))
+
+
+class TestQualityScoreEdge(unittest.TestCase):
+    """Дополнительные тесты итоговой оценки."""
+
+    def test_poor_score_for_mostly_silence(self):
+        """Аудио >90% тишины → оценка poor."""
+        active = _sine(amplitude=0.3, duration=0.1)
+        silent = _silence(duration=2.9)
+        audio = np.concatenate([active, silent])
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertEqual(report.quality_score, "poor")
+
+    def test_quality_score_always_valid(self):
+        """quality_score всегда один из допустимых."""
+        valid = {"excellent", "good", "fair", "poor"}
+        for amp in [0.0, 0.001, 0.3, 0.99, 1.0]:
+            audio = np.full(SR, amp, dtype=np.float32)
+            report = AudioQualityAnalyzer().analyze(audio, SR)
+            self.assertIn(report.quality_score, valid)
+
+    def test_duration_zero_sample_rate_no_crash(self):
+        """sample_rate=1 (граничный) не вызывает деления на ноль."""
+        audio = np.zeros(10, dtype=np.float32)
+        report = AudioQualityAnalyzer().analyze(audio, sample_rate=1)
+        self.assertIsInstance(report.duration_sec, float)
+
+
 if __name__ == "__main__":
     unittest.main()

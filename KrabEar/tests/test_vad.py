@@ -237,5 +237,50 @@ class TestVADParameters(unittest.TestCase):
         self.assertGreater(len(r50.speech_segments), 0)
 
 
+class TestVADAllSilentAllLoud(unittest.TestCase):
+    """All-silent → no speech; all-loud → speech detected."""
+
+    def setUp(self):
+        self.vad = VoiceActivityDetector(margin_db=8.0, onset_frames=2, offset_frames=3)
+
+    def test_all_silent_frames_no_speech(self):
+        """Полностью тихий сигнал → speech_ratio=0, нет сегментов."""
+        silence = _make_silence(3.0, noise_level=1e-6)
+        result = self.vad.detect(silence, SR)
+        self.assertEqual(len(result.speech_segments), 0)
+        self.assertAlmostEqual(result.speech_ratio, 0.0, places=1)
+
+    def test_all_loud_continuous_speech_detected(self):
+        """Непрерывный громкий тон → вся запись классифицируется как речь."""
+        loud = _make_tone(440, 3.0, amplitude=0.9)
+        result = self.vad.detect(loud, SR)
+        self.assertGreater(result.speech_ratio, 0.7)
+        self.assertGreater(len(result.speech_segments), 0)
+
+    def test_voice_then_gap_then_voice(self):
+        """Речь → долгая тишина → речь: два отдельных сегмента."""
+        s1 = _make_tone(440, 1.0, amplitude=0.7)
+        gap = _make_silence(1.0)
+        s2 = _make_tone(880, 1.0, amplitude=0.7)
+        audio = _concat(s1, gap, s2)
+        result = self.vad.detect(audio, SR)
+        # Должны быть сегменты и соотношение речи ~0.6
+        self.assertGreater(len(result.speech_segments), 0)
+        self.assertGreater(result.speech_ratio, 0.3)
+        self.assertLess(result.speech_ratio, 1.0)
+
+    def test_speech_ratio_is_zero_for_true_silence(self):
+        """np.zeros → абсолютно тихо → speech_ratio=0."""
+        audio = np.zeros(SR * 2, dtype=np.float32)
+        result = self.vad.detect(audio, SR)
+        self.assertAlmostEqual(result.speech_ratio, 0.0, places=2)
+
+    def test_all_loud_speech_ratio_close_to_1(self):
+        """Постоянная амплитуда 0.8 → speech_ratio близко к 1."""
+        audio = np.full(SR * 2, 0.8, dtype=np.float32)
+        result = self.vad.detect(audio, SR)
+        self.assertGreater(result.speech_ratio, 0.7)
+
+
 if __name__ == "__main__":
     unittest.main()

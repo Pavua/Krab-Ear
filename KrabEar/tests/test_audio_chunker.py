@@ -251,6 +251,60 @@ class TestChunkEdgeCases(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 5b. chunk() — all-silence and continuous-sound edge cases
+# ---------------------------------------------------------------------------
+
+class TestChunkAllSilenceAndContinuous(unittest.TestCase):
+    """Тесты для аудио из чистой тишины и непрерывного сигнала."""
+
+    def setUp(self):
+        self.chunker = AudioChunker(min_silence_sec=0.3)
+
+    def test_all_silence_long_returns_chunks(self):
+        """Длинная полная тишина — чанки покрывают всё аудио."""
+        audio = _silence(65.0)
+        chunks = self.chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+        self.assertGreaterEqual(len(chunks), 1)
+        # Суммарная длительность покрывает исходное аудио
+        total_duration = len(audio) / SAMPLE_RATE
+        covered = sum(c.duration_sec() for c in chunks)
+        self.assertAlmostEqual(covered, total_duration, delta=1.0)
+
+    def test_all_silence_short_single_chunk(self):
+        """Короткая тишина (< max_chunk_sec) — один чанк."""
+        audio = _silence(10.0)
+        chunks = self.chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+        self.assertEqual(len(chunks), 1)
+
+    def test_continuous_sound_no_silence_hard_split(self):
+        """Непрерывный сигнал без пауз → жёсткий разрез по max_chunk_sec."""
+        audio = _speech(90.0)
+        chunks = self.chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+        # Должно быть 3+ чанка
+        self.assertGreaterEqual(len(chunks), 3)
+        # Первые N-1 чанков не превышают max_chunk_sec + небольшой допуск
+        for c in chunks[:-1]:
+            self.assertLessEqual(c.duration_sec(), 30.0 + 0.5)
+
+    def test_chunk_audio_data_concatenates_to_original(self):
+        """Сумма сэмплов по всем чанкам равна исходному (моно)."""
+        audio = _speech(65.0)
+        chunks = self.chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+        total_samples = sum(len(c.audio) for c in chunks)
+        self.assertEqual(total_samples, len(audio))
+
+    def test_negative_sample_rate_raises(self):
+        audio = _speech(5.0)
+        with self.assertRaises(ValueError):
+            self.chunker.chunk(audio, sample_rate=-1)
+
+    def test_negative_max_chunk_sec_raises(self):
+        audio = _speech(5.0)
+        with self.assertRaises(ValueError):
+            self.chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=-5.0)
+
+
+# ---------------------------------------------------------------------------
 # 6. merge_results()
 # ---------------------------------------------------------------------------
 
