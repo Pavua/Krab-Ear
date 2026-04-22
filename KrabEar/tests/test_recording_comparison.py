@@ -354,5 +354,108 @@ class RecordingComparisonIPCTestCase(unittest.TestCase):
         self.assertFalse(resp["ok"])
 
 
+class RecordingComparisonIdenticalTestCase(unittest.TestCase):
+    """Тесты для идентичных и полностью различных записей."""
+
+    def setUp(self) -> None:
+        self.svc = RecordingComparison()
+        self.store = FakeStore()
+
+    def test_identical_texts_similarity_is_one(self) -> None:
+        """Два идентичных текста имеют сходство == 1.0."""
+        same_text = "apple orange banana mango grape"
+        self.store.add_item("id1", text=same_text)
+        self.store.add_item("id2", text=same_text)
+        result = self.svc.compare(["id1", "id2"], self.store)
+        self.assertAlmostEqual(result.text_similarity_matrix[0][1], 1.0, places=4)
+
+    def test_identical_texts_common_words_equals_all_tokens(self) -> None:
+        """Идентичные тексты: common_words содержит все токены."""
+        same_text = "apple orange banana"
+        self.store.add_item("id1", text=same_text)
+        self.store.add_item("id2", text=same_text)
+        result = self.svc.compare(["id1", "id2"], self.store)
+        # все слова общие (>= 3 букв, не стоп-слова)
+        self.assertIn("apple", result.common_words)
+        self.assertIn("orange", result.common_words)
+        self.assertIn("banana", result.common_words)
+
+    def test_identical_texts_no_unique_words(self) -> None:
+        """Идентичные тексты: unique_words_per_item для обоих пустые."""
+        same_text = "apple orange banana"
+        self.store.add_item("id1", text=same_text)
+        self.store.add_item("id2", text=same_text)
+        result = self.svc.compare(["id1", "id2"], self.store)
+        self.assertEqual(result.unique_words_per_item[0], [])
+        self.assertEqual(result.unique_words_per_item[1], [])
+
+    def test_completely_different_texts_similarity_is_zero(self) -> None:
+        """Тексты без общих слов имеют сходство == 0.0."""
+        self.store.add_item("diff1", text="mountain river valley forest")
+        self.store.add_item("diff2", text="algebra geometry calculus matrix")
+        result = self.svc.compare(["diff1", "diff2"], self.store)
+        self.assertAlmostEqual(result.text_similarity_matrix[0][1], 0.0, places=4)
+
+    def test_completely_different_texts_no_common_words(self) -> None:
+        """Тексты без общих слов: common_words пустой."""
+        self.store.add_item("diff1", text="mountain river valley forest")
+        self.store.add_item("diff2", text="algebra geometry calculus matrix")
+        result = self.svc.compare(["diff1", "diff2"], self.store)
+        self.assertEqual(result.common_words, [])
+
+    def test_single_item_compare_returns_view(self) -> None:
+        """Один элемент в compare() возвращает ComparisonView (диагональ == 1.0)."""
+        self.store.add_item("solo", text="единственный текст здесь")
+        result = self.svc.compare(["solo"], self.store)
+        self.assertIsInstance(result, ComparisonView)
+        self.assertEqual(len(result.items), 1)
+        self.assertAlmostEqual(result.text_similarity_matrix[0][0], 1.0)
+
+    def test_three_items_pairwise_matrix(self) -> None:
+        """Три записи: матрица 3x3, все off-diagonal значения >= 0."""
+        self.store.add_item("t1", text="apple orange pineapple")
+        self.store.add_item("t2", text="apple banana pineapple")
+        self.store.add_item("t3", text="mango grape watermelon")
+        result = self.svc.compare(["t1", "t2", "t3"], self.store)
+        self.assertEqual(len(result.text_similarity_matrix), 3)
+        for i in range(3):
+            for j in range(3):
+                self.assertGreaterEqual(result.text_similarity_matrix[i][j], 0.0)
+                self.assertLessEqual(result.text_similarity_matrix[i][j], 1.0)
+        # t1 и t2 имеют общие слова (apple, pineapple) → сходство > t1 с t3
+        sim_12 = result.text_similarity_matrix[0][1]
+        sim_13 = result.text_similarity_matrix[0][2]
+        self.assertGreater(sim_12, sim_13)
+
+    def test_four_items_duration_stats(self) -> None:
+        """Четыре записи: duration_comparison корректно считает статистику."""
+        durations = [5.0, 10.0, 15.0, 20.0]
+        for i, d in enumerate(durations):
+            self.store.add_item(f"s{i}", text=f"текст запись {i}", audio_duration_sec=d)
+        result = self.svc.compare([f"s{i}" for i in range(4)], self.store)
+        self.assertAlmostEqual(result.duration_comparison["min"], 5.0)
+        self.assertAlmostEqual(result.duration_comparison["max"], 20.0)
+        self.assertAlmostEqual(result.duration_comparison["avg"], 12.5)
+        self.assertEqual(result.duration_comparison["count"], 4)
+
+    def test_two_items_confidence_avg(self) -> None:
+        """Два элемента: среднее confidence вычисляется корректно."""
+        self.store.add_item("conf1", text="первый текст здесь", confidence=0.6)
+        self.store.add_item("conf2", text="второй текст здесь", confidence=1.0)
+        result = self.svc.compare(["conf1", "conf2"], self.store)
+        self.assertAlmostEqual(result.confidence_comparison["avg"], 0.8, places=4)
+
+    def test_mixed_language_distribution(self) -> None:
+        """Смешанные языки: language_distribution правильно группирует."""
+        self.store.add_item("lang1", text="hello world", source_lang="en")
+        self.store.add_item("lang2", text="привет мир", source_lang="ru")
+        self.store.add_item("lang3", text="hola mundo", source_lang="es")
+        self.store.add_item("lang4", text="hello again", source_lang="en")
+        result = self.svc.compare(["lang1", "lang2", "lang3", "lang4"], self.store)
+        self.assertEqual(result.language_distribution.get("en"), 2)
+        self.assertEqual(result.language_distribution.get("ru"), 1)
+        self.assertEqual(result.language_distribution.get("es"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
