@@ -227,5 +227,96 @@ class ReadabilityScorerIPCTestCase(unittest.TestCase):
         self.assertFalse(resp["ok"])
 
 
+class ReadabilityScorerExplicitRequirementsTestCase(unittest.TestCase):
+    """Explicit requirement scenarios from task spec."""
+
+    def setUp(self) -> None:
+        self.scorer = ReadabilityScorer()
+
+    def test_score_returns_flesch_avg_sentence_vocab(self) -> None:
+        """score() dict-like report has flesch, avg_sentence_length, vocabulary_level."""
+        report = self.scorer.score("Простой текст. Ещё одно предложение.")
+        self.assertIsNotNone(report.flesch_score)
+        self.assertIsNotNone(report.avg_sentence_length)
+        self.assertIsNotNone(report.vocabulary_level)
+
+    def test_simple_text_high_flesch(self) -> None:
+        """Very short, simple words yield a high Flesch score (>= 50)."""
+        report = self.scorer.score("Я иду. Он тут. Мы дома.")
+        self.assertGreaterEqual(report.flesch_score, 50.0)
+
+    def test_complex_text_low_flesch(self) -> None:
+        """Long sentences of multi-syllable words yield a low Flesch score (< 60)."""
+        text = (
+            "Многоуровневая архитектура распределённых нейронных трансформеров "
+            "обеспечивает эффективное семантическое представление лингвистических "
+            "признаков в пространстве высокоразмерных векторных вложений."
+        )
+        report = self.scorer.score(text)
+        self.assertLess(report.flesch_score, 60.0)
+
+    def test_empty_text_graceful_zero(self) -> None:
+        """Empty string → flesch=0, avg_sentence_length=0, vocabulary_level not None."""
+        report = self.scorer.score("")
+        self.assertEqual(report.flesch_score, 0.0)
+        self.assertEqual(report.avg_sentence_length, 0.0)
+        self.assertIsNotNone(report.vocabulary_level)
+
+    def test_none_like_whitespace_graceful(self) -> None:
+        """Whitespace-only text → zero word/sentence counts, no exception."""
+        report = self.scorer.score("   \t\n  ")
+        self.assertEqual(report.word_count, 0)
+        self.assertEqual(report.sentence_count, 0)
+        self.assertEqual(report.flesch_score, 0.0)
+
+    def test_avg_sentence_length_matches_manual(self) -> None:
+        """avg_sentence_length equals total_words / sentence_count."""
+        text = "Раз два три. Четыре пять."
+        report = self.scorer.score(text)
+        # 3 words in sent 1, 2 words in sent 2 → avg = 5/2 = 2.5
+        self.assertAlmostEqual(report.avg_sentence_length, 2.5, places=1)
+
+    def test_vocabulary_level_simple_for_trivial_text(self) -> None:
+        """Very short words yield 'simple' vocabulary level."""
+        report = self.scorer.score("Я ты он. Мы вы.")
+        self.assertEqual(report.vocabulary_level, "simple")
+
+    def test_vocabulary_level_complex_for_long_words(self) -> None:
+        """Long multi-syllable words yield 'complex' vocabulary level."""
+        text = (
+            "Экспериментальная нейрофизиологическая многоуровневая архитектура "
+            "распределённых информационных систем."
+        )
+        report = self.scorer.score(text)
+        self.assertEqual(report.vocabulary_level, "complex")
+
+    def test_english_only_text(self) -> None:
+        """English-only text is processed without errors."""
+        report = self.scorer.score("The quick brown fox. A simple short sentence.")
+        self.assertIsInstance(report, ReadabilityReport)
+        self.assertEqual(report.sentence_count, 2)
+        self.assertGreater(report.flesch_score, 0.0)
+
+    def test_spanish_only_text(self) -> None:
+        """Spanish-only text is processed without errors."""
+        report = self.scorer.score("Hola mundo. Esto es una prueba sencilla.")
+        self.assertIsInstance(report, ReadabilityReport)
+        self.assertEqual(report.sentence_count, 2)
+        self.assertGreater(report.word_count, 0)
+
+    def test_flesch_clamped_non_negative(self) -> None:
+        """Flesch score is never negative, even for extremely complex text."""
+        text = " ".join([
+            "многоуровневый" * 3 + "."
+        ] * 5)
+        report = self.scorer.score(text)
+        self.assertGreaterEqual(report.flesch_score, 0.0)
+
+    def test_flesch_clamped_at_100(self) -> None:
+        """Flesch score never exceeds 100."""
+        report = self.scorer.score("Я. Он. Мы.")
+        self.assertLessEqual(report.flesch_score, 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()

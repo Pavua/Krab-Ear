@@ -148,5 +148,75 @@ class TestTextUtilsIntegration(unittest.TestCase):
         self.assertTrue(result.endswith("."))
 
 
+class TestPunctuationFixerExplicitRequirements(unittest.TestCase):
+    """Explicit requirement scenarios from task spec."""
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_space_after_comma_added(self):
+        """'тест,ok' → space inserted after comma."""
+        result = self.fixer.fix("тест,ok", language="ru")
+        self.assertIn(", ", result)
+        self.assertNotIn(",o", result)
+
+    def test_space_after_comma_not_doubled(self):
+        """'тест, ok' already correct → no extra space added."""
+        result = self.fixer.fix("тест, ok уже норм.", language="ru")
+        self.assertNotIn(",  ", result)
+
+    def test_spanish_inverted_question_mark(self):
+        """'qué pasa?' → '¿qué pasa?'."""
+        result = self.fixer.fix("qué pasa?", language="es")
+        self.assertTrue(result.lstrip().startswith("¿"))
+        self.assertIn("?", result)
+
+    def test_spanish_inverted_exclamation_mark(self):
+        """'qué bien!' → '¡qué bien!'."""
+        result = self.fixer.fix("qué bien!", language="es")
+        self.assertTrue(result.lstrip().startswith("¡"))
+        self.assertIn("!", result)
+
+    def test_russian_ascii_quotes_to_guillemets(self):
+        """'\"text\"' → '«text»'."""
+        result = self.fixer.fix('"текст"', language="ru")
+        self.assertIn("«", result)
+        self.assertIn("»", result)
+        self.assertNotIn('"', result)
+
+    def test_already_correct_text_unchanged(self):
+        """Already-correct Russian text structure is preserved."""
+        text = "Всё хорошо."
+        result = self.fixer.fix(text, language="ru")
+        self.assertIn("Всё хорошо", result)
+        self.assertTrue(result.endswith("."))
+
+    def test_already_correct_spanish_no_double_iquest(self):
+        """'¿cómo estás?' does not gain extra '¿'."""
+        result = self.fixer.fix("¿cómo estás?", language="es")
+        self.assertFalse(result.startswith("¿¿"))
+
+    def test_no_space_before_period(self):
+        """Space before period is removed."""
+        result = self.fixer.fix("Привет .", language="ru")
+        self.assertNotIn(" .", result)
+
+    def test_capitalize_first_letter_ru_explicit(self):
+        """Lowercase first letter is capitalised for Russian text."""
+        result = self.fixer.fix("проверка.", language="ru")
+        self.assertTrue(result[0].isupper())
+
+    def test_capitalize_first_letter_es_explicit(self):
+        """Lowercase first letter is capitalised for Spanish text."""
+        result = self.fixer.fix("hola mundo.", language="es")
+        self.assertTrue(result[0].isupper())
+
+    def test_english_like_text_passes_through_without_error(self):
+        """Text treated as default language does not raise exceptions."""
+        result = self.fixer.fix("hello world")
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

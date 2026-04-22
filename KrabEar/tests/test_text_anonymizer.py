@@ -233,5 +233,71 @@ class TestTextAnonymizerEdgeCases(unittest.TestCase):
         self.assertEqual(result.redaction_count, 3)
 
 
+class TestTextAnonymizerMultilingual(unittest.TestCase):
+    """Multilingual (EN/ES) and no-PII gap tests."""
+
+    def setUp(self) -> None:
+        self.a = TextAnonymizer()
+
+    def test_no_pii_english_text_unchanged(self) -> None:
+        """English text with no PII is returned unchanged."""
+        text = "The meeting is scheduled for tomorrow morning."
+        result = self.a.anonymize(text)
+        self.assertEqual(result.anonymized_text, text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_no_pii_spanish_text_unchanged(self) -> None:
+        """Spanish text with no PII is returned unchanged."""
+        text = "Hoy hace buen tiempo en Madrid."
+        result = self.a.anonymize(text)
+        self.assertEqual(result.anonymized_text, text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_email_in_english_context(self) -> None:
+        """Email address embedded in English sentence is redacted."""
+        result = self.a.anonymize("Contact me at alice@example.com for details")
+        self.assertIn("[EMAIL]", result.anonymized_text)
+        self.assertNotIn("alice@example.com", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_email_in_spanish_context(self) -> None:
+        """Email address embedded in Spanish sentence is redacted."""
+        result = self.a.anonymize("Envíame un correo a pepe@correo.es por favor")
+        self.assertIn("[EMAIL]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_credit_card_no_spaces_16_digits(self) -> None:
+        """16-digit card number without separators is redacted."""
+        result = self.a.anonymize("Número de tarjeta: 1234567890123456")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_list_rules_contains_builtins(self) -> None:
+        """list_rules() includes all builtin rule names."""
+        rules = self.a.list_rules()
+        for expected in ("phone", "email", "credit_card", "passport",
+                         "date_of_birth", "inn", "snils"):
+            self.assertIn(expected, rules)
+
+    def test_anonymize_returns_original_in_redaction(self) -> None:
+        """Redaction.original contains the matched text."""
+        text = "Email: test@example.com here"
+        result = self.a.anonymize(text, rules=["email"])
+        self.assertEqual(result.redactions[0].original, "test@example.com")
+
+    def test_custom_rule_not_applied_when_excluded(self) -> None:
+        """Custom rule is not applied when rules= list omits it."""
+        self.a.add_custom_rule("secret", r"\bTOKEN-\d+\b", "[SECRET]")
+        text = "TOKEN-999 user@mail.com"
+        result = self.a.anonymize(text, rules=["email"])
+        self.assertIn("TOKEN-999", result.anonymized_text)
+        self.assertIn("[EMAIL]", result.anonymized_text)
+
+    def test_whitespace_only_text(self) -> None:
+        """Whitespace-only text returns unchanged with zero redactions."""
+        result = self.a.anonymize("   ")
+        self.assertEqual(result.redaction_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
