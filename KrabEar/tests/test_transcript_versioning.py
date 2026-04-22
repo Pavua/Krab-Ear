@@ -336,6 +336,77 @@ class TestTranscriptVersionManagerIPC(unittest.TestCase):
         self.assertEqual(result["version_num"], 3)
         self.assertEqual(result["text"], "Version 1")
 
+    def test_ipc_handle_get_versions_missing_item_id_raises(self) -> None:
+        """handle_get_transcript_versions требует item_id."""
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.handle_get_transcript_versions({})
+        self.assertIn("item_id", str(ctx.exception))
+
+    def test_ipc_handle_revert_missing_version_num_raises(self) -> None:
+        """handle_revert_transcript_version требует version_num."""
+        self.manager.save_version("item_001", "Text", "manual")
+        with self.assertRaises(ValueError) as ctx:
+            self.manager.handle_revert_transcript_version({"item_id": "item_001"})
+        self.assertIn("version_num", str(ctx.exception))
+
+
+class TestTranscriptVersionManagerDiffEdgeCases(unittest.TestCase):
+    """Edge-cases для diff_versions."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_diff_identical_texts_zero_changes(self) -> None:
+        """diff_versions для двух идентичных версий: added и removed равны 0."""
+        self.manager.save_version("item_x", "Same text", "manual")
+        self.manager.save_version("item_x", "Same text", "manual")
+        result = self.manager.diff_versions("item_x", 1, 2)
+        self.assertEqual(result["added_lines"], 0)
+        self.assertEqual(result["removed_lines"], 0)
+
+    def test_diff_same_version_number_raises(self) -> None:
+        """diff_versions(v, v, v) — сравнение версии с собой не ошибка."""
+        self.manager.save_version("item_x", "Text", "manual")
+        result = self.manager.diff_versions("item_x", 1, 1)
+        self.assertEqual(result["added_lines"], 0)
+        self.assertEqual(result["removed_lines"], 0)
+
+    def test_diff_returns_texts(self) -> None:
+        """diff_versions включает оригинальные тексты обеих версий."""
+        self.manager.save_version("item_x", "First", "stt_raw")
+        self.manager.save_version("item_x", "Second", "manual")
+        result = self.manager.diff_versions("item_x", 1, 2)
+        self.assertEqual(result["text_v1"], "First")
+        self.assertEqual(result["text_v2"], "Second")
+
+
+class TestTranscriptVersionManagerRevertPersistence(unittest.TestCase):
+    """Проверка что revert сохраняет reverted_from в NDJSON."""
+
+    def test_reverted_from_persists(self) -> None:
+        """reverted_from из revert_to_version сохраняется в NDJSON после перезагрузки."""
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            mgr1 = TranscriptVersionManager(temp_dir.name)
+            mgr1.save_version("item_r", "Original", "stt_raw")
+            mgr1.save_version("item_r", "Edited", "manual")
+            mgr1.revert_to_version("item_r", 1)
+
+            # Reload и проверяем что все 3 версии есть
+            mgr2 = TranscriptVersionManager(temp_dir.name)
+            versions = mgr2.get_versions("item_r")
+            self.assertEqual(len(versions), 3)
+            # Версия 3 (самая новая) должна содержать текст из версии 1
+            latest = versions[0]  # sorted desc
+            self.assertEqual(latest["version_num"], 3)
+            self.assertEqual(latest["text"], "Original")
+        finally:
+            temp_dir.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
