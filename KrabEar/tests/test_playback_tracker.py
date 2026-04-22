@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 # Настройка путей для standalone-запуска
@@ -565,6 +566,86 @@ class TestRoundtripOperations(unittest.TestCase):
         result4 = tracker.handle_get_most_replayed({"limit": 10})
         self.assertGreater(result4["count"], 0)
         self.assertEqual(result4["items"][0]["item_id"], "ipc_test")
+
+
+# ===========================================================================
+# 10. API-naming and get_stats coverage
+# ===========================================================================
+
+class TestAPIContract(unittest.TestCase):
+    """Verify public method names and return-value contract match the spec."""
+
+    def setUp(self):
+        self.tracker = PlaybackTracker()
+
+    def test_record_playback_method_exists(self):
+        """Public API method record_playback must exist."""
+        self.assertTrue(callable(getattr(self.tracker, "record_playback", None)))
+
+    def test_get_playback_stats_returns_required_keys(self):
+        """get_playback_stats must return play_count, total_listened_sec, last_played."""
+        self.tracker.record_playback("key_test", duration_listened_sec=5.0)
+        stats = self.tracker.get_playback_stats("key_test")
+        for key in ("play_count", "total_listened_sec", "last_played", "item_id"):
+            self.assertIn(key, stats, f"Missing key: {key}")
+
+    def test_play_count_type_is_int(self):
+        self.tracker.record_playback("type_test", duration_listened_sec=1.0)
+        stats = self.tracker.get_playback_stats("type_test")
+        self.assertIsInstance(stats["play_count"], int)
+
+    def test_total_listened_sec_type_is_float(self):
+        self.tracker.record_playback("type_test2", duration_listened_sec=1.0)
+        stats = self.tracker.get_playback_stats("type_test2")
+        self.assertIsInstance(stats["total_listened_sec"], float)
+
+    def test_last_played_is_iso8601(self):
+        self.tracker.record_playback("ts_test", duration_listened_sec=1.0)
+        last = self.tracker.get_playback_stats("ts_test")["last_played"]
+        self.assertIsNotNone(last)
+        # Must be parseable as ISO8601
+        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        self.assertIsNotNone(dt)
+
+
+class TestMultipleItemsIndependence(unittest.TestCase):
+    """Multiple items must be tracked completely independently."""
+
+    def test_ten_items_all_tracked_separately(self):
+        tracker = PlaybackTracker()
+        items = [f"item_{i}" for i in range(10)]
+        for i, iid in enumerate(items):
+            for _ in range(i + 1):
+                tracker.record_playback(iid, duration_listened_sec=float(i))
+        for i, iid in enumerate(items):
+            stats = tracker.get_playback_stats(iid)
+            self.assertEqual(stats["play_count"], i + 1)
+
+    def test_recording_one_does_not_affect_another(self):
+        tracker = PlaybackTracker()
+        tracker.record_playback("alpha", duration_listened_sec=10.0)
+        tracker.record_playback("alpha", duration_listened_sec=10.0)
+        tracker.record_playback("beta", duration_listened_sec=5.0)
+
+        alpha = tracker.get_playback_stats("alpha")
+        beta = tracker.get_playback_stats("beta")
+        gamma = tracker.get_playback_stats("gamma")
+
+        self.assertEqual(alpha["play_count"], 2)
+        self.assertEqual(beta["play_count"], 1)
+        self.assertEqual(gamma["play_count"], 0)
+
+    def test_disk_persistence_multiple_items(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            t1 = PlaybackTracker(data_dir=tmpdir)
+            for i in range(5):
+                t1.record_playback(f"item_{i}", duration_listened_sec=float(i * 2))
+
+            t2 = PlaybackTracker(data_dir=tmpdir)
+            for i in range(5):
+                stats = t2.get_playback_stats(f"item_{i}")
+                self.assertEqual(stats["play_count"], 1)
+                self.assertAlmostEqual(stats["total_listened_sec"], float(i * 2))
 
 
 if __name__ == "__main__":
