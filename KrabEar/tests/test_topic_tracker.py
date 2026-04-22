@@ -261,5 +261,139 @@ class TestHelpers(unittest.TestCase):
         self.assertAlmostEqual(_keyword_overlap(["что-то"], []), 0.0)
 
 
+class TestTopicTrackerSegmentCoverage(unittest.TestCase):
+    """Тесты полноты покрытия: все элементы должны быть в сегментах."""
+
+    def setUp(self):
+        self.tracker = TopicTracker()
+
+    def test_all_items_covered_same_topic(self):
+        """Сумма items_count всех сегментов == длина входного списка."""
+        items = _items_same_topic(8)
+        result = self.tracker.track_topics(items, window_size=3)
+        total_covered = sum(seg.items_count for seg in result)
+        self.assertEqual(total_covered, len(items))
+
+    def test_all_items_covered_two_topics(self):
+        """Полное покрытие при двух темах."""
+        items = _items_two_topics()
+        result = self.tracker.track_topics(items, window_size=3)
+        total_covered = sum(seg.items_count for seg in result)
+        self.assertEqual(total_covered, len(items))
+
+    def test_source_text_field_supported(self):
+        """Записи с полем source_text (а не text) обрабатываются корректно."""
+        items = [
+            {"source_text": "Python программирование функции классы модули библиотека"},
+            {"source_text": "Код Python писать тесты модули библиотека функция"},
+            {"source_text": "Python классы наследование полиморфизм программирование"},
+        ]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+        # Полное покрытие
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+    def test_three_distinct_topics_detected(self):
+        """Три явно разные темы → минимум 2 сегмента."""
+        topic1 = [
+            _item("Football match yesterday team scored goals players stadium"),
+            _item("Soccer training tactics coach players football match"),
+            _item("Championship football team wins cup goals scored"),
+        ]
+        topic2 = [
+            _item("Recipe cake flour sugar butter eggs bake oven"),
+            _item("Cooking soup vegetables boil recipe kitchen dinner"),
+            _item("Baking bread yeast dough temperature oven recipe"),
+        ]
+        topic3 = [
+            _item("Python programming code algorithms data structures software"),
+            _item("Machine learning neural networks training data models"),
+            _item("Software engineering code review testing deployment build"),
+        ]
+        items = topic1 + topic2 + topic3
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreaterEqual(len(result), 2)
+
+    def test_segments_are_contiguous(self):
+        """Сегменты не перекрываются и не имеют пробелов."""
+        items = _items_two_topics()
+        result = self.tracker.track_topics(items, window_size=3)
+        # Первый сегмент начинается с 0
+        self.assertEqual(result[0].start_index, 0)
+        # Последний сегмент заканчивается на len(items)-1
+        self.assertEqual(result[-1].end_index, len(items) - 1)
+        # Каждый сегмент примыкает к предыдущему
+        for i in range(1, len(result)):
+            self.assertEqual(
+                result[i].start_index,
+                result[i - 1].end_index + 1,
+                "Сегменты должны примыкать без пробелов",
+            )
+
+    def test_segment_summary_is_nonempty_string(self):
+        """summary каждого сегмента — непустая строка."""
+        items = _items_same_topic(6)
+        result = self.tracker.track_topics(items, window_size=3)
+        for seg in result:
+            self.assertIsInstance(seg.summary, str)
+            self.assertGreater(len(seg.summary), 0)
+
+    def test_two_items_no_crash(self):
+        """Два элемента обрабатываются без ошибок."""
+        items = [_item("Python код"), _item("Python функция")]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+
+    def test_current_topic_items_count_capped_at_total(self):
+        """last_n > len(items) → items_count == len(items)."""
+        items = _items_same_topic(3)
+        result = self.tracker.get_current_topic(items, last_n=100)
+        self.assertEqual(result["items_count"], 3)
+        self.assertEqual(result["start_index"], 0)
+
+    def test_all_stopwords_text_returns_segment(self):
+        """Текст только из стоп-слов не вызывает исключений."""
+        items = [_item("и в на с по из от до за под"), _item("я он она мы вы они")]
+        result = self.tracker.track_topics(items, window_size=1)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+
+class TestMakeSummaryHelper(unittest.TestCase):
+    """Тесты вспомогательной функции _make_summary."""
+
+    def test_make_summary_with_words(self):
+        """_make_summary возвращает слова через запятую."""
+        from core.topic_tracker import _make_summary
+        result = _make_summary(["python", "код", "функция"])
+        self.assertIn("python", result)
+        self.assertIn(",", result)
+
+    def test_make_summary_empty(self):
+        """_make_summary с пустым списком возвращает fallback."""
+        from core.topic_tracker import _make_summary
+        result = _make_summary([])
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_make_summary_max_words(self):
+        """_make_summary ограничивает количество слов."""
+        from core.topic_tracker import _make_summary
+        words = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        result = _make_summary(words, max_words=3)
+        parts = result.split(", ")
+        self.assertLessEqual(len(parts), 3)
+
+    def test_top_keywords_sorted(self):
+        """_top_keywords возвращает слова по убыванию веса."""
+        from core.topic_tracker import _top_keywords
+        scores = {"python": 0.9, "код": 0.5, "функция": 0.7}
+        result = _top_keywords(scores, top_n=2)
+        self.assertEqual(result[0], "python")
+        self.assertEqual(result[1], "функция")
+
+
 if __name__ == "__main__":
     unittest.main()

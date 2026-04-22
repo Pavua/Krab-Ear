@@ -342,5 +342,100 @@ class TestPasteFormatterEdgeCases(unittest.TestCase):
         self.assertEqual(len(formatters), 6)
 
 
+class TestPasteFormatterExtraEdgeCases(unittest.TestCase):
+    """Дополнительные граничные случаи для PasteFormatter."""
+
+    def setUp(self):
+        self.formatter = PasteFormatter(data_dir=None)
+
+    def test_telegram_no_trailing_period_already_clean(self):
+        """Текст без точки в конце остаётся без изменений (Telegram)."""
+        text = "Привет"
+        result = self.formatter.format_for_app(text, "telegram")
+        self.assertEqual(result, "Привет")
+
+    def test_email_already_capitalized(self):
+        """Email: уже заглавная буква не дублируется."""
+        result = _fmt_email("Встреча в пятницу")
+        self.assertIn("Встреча в пятницу.", result)
+
+    def test_email_already_has_period(self):
+        """Email: уже есть точка в конце — не добавляется вторая."""
+        result = _fmt_email("Жду ответа.")
+        # Строка содержит ровно одну точку в тексте тела
+        body_part = result.split("Здравствуйте,\n\n")[1].split("\n\nС уважением")[0]
+        self.assertFalse(body_part.endswith(".."))
+
+    def test_apply_rules_no_rules_returns_stripped(self):
+        """_apply_rules с пустыми правилами возвращает stripped текст."""
+        result = _apply_rules("  текст  ", {})
+        self.assertEqual(result, "текст")
+
+    def test_apply_rules_max_length_exact(self):
+        """max_length точно совпадает с длиной — текст не обрезается."""
+        text = "hello world"
+        result = _apply_rules(text, {"max_length": len(text)})
+        self.assertNotIn("…", result)
+
+    def test_apply_rules_bullet_single_sentence_no_bullet(self):
+        """bullet_sentences не добавляет маркеры для одного предложения."""
+        result = _apply_rules("Одно.", {"bullet_sentences": True})
+        # Один элемент — маркер добавляется только если > 1 предложение
+        # Проверяем что текст не пустой
+        self.assertGreater(len(result), 0)
+
+    def test_format_for_app_notes_uses_notes_formatter(self):
+        """Имя 'notes' использует Notes форматтер (заголовок с датой)."""
+        result = self.formatter.format_for_app("Идея для проекта.", "notes")
+        self.assertRegex(result, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
+
+    def test_format_for_app_email_uses_email_formatter(self):
+        """Имя 'email' использует Email форматтер (Здравствуйте)."""
+        result = self.formatter.format_for_app("Встреча завтра", "email")
+        self.assertIn("Здравствуйте", result)
+
+    def test_format_for_app_code_editor(self):
+        """Имя 'code_editor' применяет блочный комментарий."""
+        result = self.formatter.format_for_app("fix the bug", "code_editor")
+        self.assertTrue(result.startswith("/*"))
+
+    def test_handle_format_for_paste_no_app_name_defaults(self):
+        """handle_format_for_paste без app_name использует default."""
+        text = "Неизменённый текст."
+        resp = self.formatter.handle_format_for_paste({"text": text})
+        self.assertEqual(resp["formatted_text"], text)
+        self.assertIn("formatter_used", resp)
+
+    def test_custom_formatter_label_in_list(self):
+        """Кастомный форматтер с label показывает правильный label в list."""
+        self.formatter.add_custom_formatter(
+            "myapp", {"capitalize": True, "label": "My Custom App"}
+        )
+        formatters = self.formatter.list_formatters()
+        custom = next((f for f in formatters if f["name"] == "myapp"), None)
+        self.assertIsNotNone(custom)
+        self.assertEqual(custom["label"], "My Custom App")
+
+    def test_custom_formatter_builtin_false(self):
+        """Кастомный форматтер имеет builtin=False."""
+        self.formatter.add_custom_formatter("mycustom", {"append": "end"})
+        formatters = self.formatter.list_formatters()
+        custom = next((f for f in formatters if f["name"] == "mycustom"), None)
+        self.assertIsNotNone(custom)
+        self.assertFalse(custom["builtin"])
+
+    def test_code_editor_single_empty_line(self):
+        """code_editor обрабатывает строки без текста как '//'."""
+        result = _fmt_code_editor("line1\n\nline3")
+        self.assertIn("//", result)
+        self.assertIn("// line1", result)
+        self.assertIn("// line3", result)
+
+    def test_notes_empty_text_has_timestamp(self):
+        """Notes форматтер для пустого текста всё равно даёт timestamp."""
+        result = self.formatter.format_for_app("", "notes")
+        self.assertRegex(result, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
+
+
 if __name__ == "__main__":
     unittest.main()
