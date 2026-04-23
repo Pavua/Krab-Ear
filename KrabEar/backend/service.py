@@ -105,6 +105,7 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
+from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 
 import argparse
 from datetime import datetime, timedelta
@@ -288,6 +289,13 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
+        # Telegram Bridge — мост Krab Ear → main Krab userbot.
+        self._telegram_bridge = TelegramBridge(
+            base_url=settings.TELEGRAM_BRIDGE_URL,
+            timeout_sec=settings.TELEGRAM_BRIDGE_TIMEOUT_SEC,
+            circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
+            circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
+        )
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
         # Проверяем авто-бэкап при старте
@@ -651,6 +659,8 @@ class BackendService:
             "add_hallucination_pattern": self._handle_add_hallucination_pattern,  # добавить пользовательский паттерн галлюцинации
             "remove_hallucination_pattern": self._handle_remove_hallucination_pattern,  # удалить пользовательский паттерн галлюцинации
             "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
+            # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
+            "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
         }
 
         handler = handlers.get(method)
@@ -3337,6 +3347,65 @@ class BackendService:
         """Возвращает все паттерны галлюцинаций (встроенные + пользовательские)."""
         patterns = self._hallucination_manager.list_patterns()
         return {"patterns": patterns, "total": len(patterns)}
+
+    # ── Telegram Bridge ──────────────────────────────────────────────────────
+
+    def _handle_send_to_telegram(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Отправляет текст в Telegram через main Krab userbot.
+
+        Параметры:
+          - text: str — текст сообщения (обязательный, не пустой).
+          - chat_id: int | str — ID или username чата Telegram (обязательный).
+          - reply_to: int | None — ID сообщения для цитирования (опционально).
+
+        Возвращает:
+          {message_id, sent_at, chat_title}
+
+        Ошибки:
+          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
+          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
+          - "circuit_open" — если circuit breaker разомкнут после 3 ошибок подряд.
+        """
+        if not settings.TELEGRAM_BRIDGE_ENABLED:
+            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
+
+        text = str(params.get("text") or "").strip()
+        if not text:
+            raise ValueError("Параметр 'text' обязателен и не может быть пустым")
+
+        raw_chat_id = params.get("chat_id")
+        if raw_chat_id is None or str(raw_chat_id).strip() == "":
+            raise ValueError("Параметр 'chat_id' обязателен")
+        chat_id: int | str
+        try:
+            chat_id = int(raw_chat_id)
+        except (ValueError, TypeError):
+            chat_id = str(raw_chat_id).strip()
+
+        reply_to_raw = params.get("reply_to")
+        reply_to: int | None = None
+        if reply_to_raw is not None:
+            try:
+                reply_to = int(reply_to_raw)
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            result = self._telegram_bridge.send_message(
+                text=text,
+                chat_id=chat_id,
+                reply_to=reply_to,
+            )
+        except CircuitBreakerOpen as exc:
+            raise RuntimeError(f"circuit_open: {exc}") from exc
+        except (Exception,) as exc:
+            msg = str(exc)
+            if "krab_unavailable" in msg or "krab_error" in msg:
+                raise RuntimeError(msg) from exc
+            # ConnectionError, Timeout и др. — оборачиваем в понятный код
+            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+
+        return result
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
