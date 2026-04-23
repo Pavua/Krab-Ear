@@ -416,6 +416,7 @@ class BackendService:
             "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "translate_selection": self._translation.handle_translate_selection,  # Phase 2A: selection-translate workflow
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._translation.handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             # VERIFIED: called from Swift (HistoryPanel)

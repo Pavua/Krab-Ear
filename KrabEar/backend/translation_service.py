@@ -1,14 +1,18 @@
 """TranslationService — обработчики IPC-методов перевода.
 
 Извлечено из service.py (BackendService) для уменьшения размера монолита.
-Методы: translate_text, set/remove_translation_glossary_item,
+Методы: translate_text, translate_selection,
+set/remove_translation_glossary_item,
 get_glossary_suggestions, get_vocabulary_suggestions.
 """
 
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Callable, TYPE_CHECKING
+
+from core.language_detector import LanguageDetector
 
 if TYPE_CHECKING:
     from backend.state_store import StateStore
@@ -56,6 +60,14 @@ class TranslationService:
         "solo", "bueno", "bien", "vale",
     ])
 
+    # Карта авто-определения направления: detected_lang → translation_mode
+    _AUTO_DIRECTION: dict[str, str] = {
+        "ru": "ru_to_es",
+        "es": "es_to_ru",
+        "en": "en_to_ru",
+        "uk": "en_to_ru",  # украинский → русский как наиболее близкий
+    }
+
     def __init__(
         self,
         translator: "Translator",
@@ -69,6 +81,7 @@ class TranslationService:
         self._cached_settings = cached_settings
         self._invalidate_settings_cache = invalidate_settings_cache
         self._vocabulary_store = vocabulary_store
+        self._lang_detector = LanguageDetector()
 
     def handle_translate_text(self, params: dict[str, Any]) -> dict[str, Any]:
         """Отдельная IPC-команда перевода текста для UI и будущих workflow."""
@@ -93,6 +106,85 @@ class TranslationService:
             "translation_mode": result.mode,
             "translation_style": translation_style,
             "engine": result.engine,
+        }
+
+    def handle_translate_selection(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Переводит выделенный текст из любого приложения (Phase 2A workflow).
+
+        Параметры:
+            text        — выделенный текст (обязательно).
+            source_lang — ISO-код языка источника (ru/es/en). Опционально;
+                          если не задан — определяется автоматически через
+                          LanguageDetector.
+            target_lang — ISO-код языка перевода (ru/es/en). Опционально;
+                          если не задан — определяется по умолчанию:
+                          ru→es, es→ru, en→ru, else ru.
+
+        Возвращает:
+            translated_text      — результат перевода (пустая строка если text пуст).
+            source_lang_detected — определённый или переданный язык источника.
+            target_lang          — целевой язык перевода.
+            engine               — движок перевода.
+            latency_ms           — время обработки в миллисекундах.
+        """
+        t0 = time.monotonic()
+        text = str(params.get("text", "")).strip()
+
+        # Пустой текст — возвращаем быстрый ответ без ошибки
+        if not text:
+            return {
+                "translated_text": "",
+                "source_lang_detected": "",
+                "target_lang": "",
+                "engine": "none",
+                "latency_ms": 0,
+            }
+
+        # Определяем язык источника
+        source_lang = str(params.get("source_lang") or "").strip().lower()
+        if not source_lang:
+            detected = self._lang_detector.detect(text)
+            source_lang = detected.language if detected.language != "und" else "ru"
+
+        # Определяем целевой язык
+        target_lang = str(params.get("target_lang") or "").strip().lower()
+        if not target_lang:
+            # ru→es, es→ru, en→ru, остальное → ru
+            target_map = {"ru": "es", "es": "ru", "en": "ru"}
+            target_lang = target_map.get(source_lang, "ru")
+
+        # Формируем режим перевода
+        _mode_map = {
+            ("ru", "es"): "ru_to_es",
+            ("es", "ru"): "es_to_ru",
+            ("en", "ru"): "en_to_ru",
+            ("uk", "ru"): "en_to_ru",
+        }
+        mode = _mode_map.get((source_lang, target_lang))
+        if mode is None:
+            # Неизвестная пара → авто-режим с fallback на ru_to_es
+            mode = self._AUTO_DIRECTION.get(source_lang, "ru_to_es")
+
+        settings = self._cached_settings()
+        network_mode = str(settings.get("network_mode", "offline_default"))
+        translation_style = str(settings.get("translation_style", "neutral"))
+        glossary = settings.get("translation_glossary", {})
+
+        result = self.translator.translate(
+            text=text,
+            mode=mode,
+            network_mode=network_mode,
+            translation_style=translation_style,
+            glossary=glossary,
+        )
+
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        return {
+            "translated_text": result.text,
+            "source_lang_detected": source_lang,
+            "target_lang": target_lang,
+            "engine": result.engine,
+            "latency_ms": latency_ms,
         }
 
     def handle_set_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:

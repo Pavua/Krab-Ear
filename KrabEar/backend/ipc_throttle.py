@@ -95,6 +95,7 @@ EXCLUDED_METHODS: Set[str] = {
     "get_settings",
     "apply_profile_preset",
     "list_profile_presets",
+    "translate_selection",  # Phase 2A: вызывается часто при выделении текста
 }
 
 # Всё остальное — light (120/min)
