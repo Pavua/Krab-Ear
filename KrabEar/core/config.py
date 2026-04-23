@@ -187,6 +187,20 @@ class Settings(BaseSettings):
     # При False Voxtral работает только как STT (без reasoning overhead).
     VOXTRAL_REASONING_ENABLED: bool = False
 
+    # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
+    # Мост для отправки транскрипций напрямую в Telegram через main Krab web-панель.
+    # False = функция "Отправить в Telegram" в UI скрыта / недоступна.
+    TELEGRAM_BRIDGE_ENABLED: bool = True
+    # URL web-панели main Krab. Default = WEB_PORT 8080 (см. src/bootstrap/runtime.py).
+    # Переопределяется через KRAB_EAR_TELEGRAM_BRIDGE_URL.
+    TELEGRAM_BRIDGE_URL: str = "http://localhost:8080"
+    # Таймаут HTTP-запроса к main Krab (секунды).
+    TELEGRAM_BRIDGE_TIMEOUT_SEC: float = 5.0
+    # Circuit breaker: сколько ошибок подряд до размыкания.
+    TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD: int = 3
+    # Circuit breaker: сколько секунд держать разомкнутым.
+    TELEGRAM_BRIDGE_CB_RESET_SEC: float = 60.0
+
     # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
     # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
     # При TTS_ENABLED=True включается Silero (RU primary) + Kokoro (EN fallback) цепочка.
