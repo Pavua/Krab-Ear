@@ -207,6 +207,13 @@ class Settings(BaseSettings):
     # Circuit breaker: сколько секунд держать разомкнутым.
     TELEGRAM_BRIDGE_CB_RESET_SEC: float = 60.0
 
+    # --- Sentry / GlitchTip crash telemetry ---
+    # Пустой DSN = интеграция полностью отключена (no-op).
+    # Совместимо с self-hosted GlitchTip (Sentry-compatible protocol).
+    # Задайте через KRAB_EAR_SENTRY_DSN или ~/Library/Application Support/KrabEar/.secrets
+    SENTRY_DSN: str = ""
+    SENTRY_ENVIRONMENT: str = "production"
+
     # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
     # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
     # При TTS_ENABLED=True включается Silero (RU primary) + Kokoro (EN fallback) цепочка.
