@@ -112,6 +112,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     let realtimeOverlay = RealtimeOverlayController()
     let logger = AgentLogger.shared
 
+    /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
+    var selectionTranslator: SelectionTranslator?
+
     var historyPanel: HistoryPanelController?
     var hotkeyManager: HotkeyManager?
     var statusItem: NSStatusItem?
@@ -228,6 +231,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован")
 
+        // Phase 2A: Selection translator — Cmd+Shift+T
+        selectionTranslator = SelectionTranslator(
+            ipcClient: ipcClient,
+            notificationService: notificationService
+        )
+        selectionTranslator?.start()
+        logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
+
         // PR 1.5: Wake word listener (default OFF — toggle в Settings)
         setupWakeWordListenerIfEnabled()
 
@@ -247,6 +258,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()
         wakeWordListener?.stop()
+        selectionTranslator?.stop()
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
     }

@@ -1776,6 +1776,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaBrainSelector.action = #selector(onVABrainSelectorChanged)
         settingsBar.addArrangedSubview(vaSection)
 
+        // --- SELECTION TRANSLATOR SECTION (Phase 2A) ---
+        let selTransSection = buildSelectionTranslatorSection()
+        settingsBar.addArrangedSubview(selTransSection)
+
         // --- DIAGNOSTICS & METRICS SECTION ---
         let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
         let diagCard = ThemeCardView()
