@@ -13,6 +13,7 @@
 import XCTest
 @testable import KrabEarAgent
 
+@MainActor
 final class HistoryPanelAnalyticsTests: XCTestCase {
 
     // MARK: - usageLabelTexts
