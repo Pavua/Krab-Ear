@@ -221,6 +221,19 @@ extension HistoryPanelController {
             valueLabel: audioDuckingValueLabel
         )
 
+        // 6. Live субтитры для видео (Phase 2B, macOS 12.3+, default OFF)
+        let liveSubsToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onLiveSubsChanged))
+        liveSubsToggle.setButtonType(.switch)
+        liveSubsToggle.state = UserDefaults.standard.liveSubsEnabled ? .on : .off
+        liveSubsToggle.tag = 202601 // Phase 2B tag
+        let liveSubsBadge = cdMakeBadge(text: "2B", color: .controlAccentColor)
+        let liveSubsRow = cdMakeRow(
+            label: "Live субтитры для видео",
+            control: liveSubsToggle,
+            badge: liveSubsBadge,
+            badgeOnRight: false
+        )
+
         card.contentStackView.addArrangedSubview(qualRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(cleanRow)
@@ -229,6 +242,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(duckRow)
         card.contentStackView.addArrangedSubview(duckSliderRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(liveSubsRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
@@ -387,6 +402,19 @@ extension HistoryPanelController {
 
         section.contentStackView.addArrangedSubview(card)
         return section
+    }
+
+    // MARK: - Live субтитры toggle handler (Phase 2B)
+
+    @objc func onLiveSubsChanged(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        // Делегируем в AgentAppDelegate через responder chain
+        if let appDelegate = NSApp.delegate as? AgentAppDelegate {
+            appDelegate.applyLiveSubsEnabled(enabled)
+        } else {
+            // Fallback: только сохранить UserDefaults
+            UserDefaults.standard.liveSubsEnabled = enabled
+        }
     }
 
     // MARK: - A/B toggle handler
