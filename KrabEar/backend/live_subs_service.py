@@ -1,0 +1,184 @@
+"""LiveSubsService — потоковый STT + перевод для живых субтитров (Sprint 2B).
+
+Принимает audio-чанки (base64 PCM 16 kHz mono), аккумулирует в буфере
+и выполняет flush при накоплении ≥3 секунд или при is_final=True.
+После flush: Whisper STT → translate → emit live_subs.result через EventBus.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import time
+from typing import Any, TYPE_CHECKING
+
+import numpy as np
+
+from backend.event_bus import bus as event_bus
+from contracts.live_subs_events import LiveSubsResult
+from contracts.registry import EventType
+
+if TYPE_CHECKING:
+    from backend.transcriber import Transcriber
+    from backend.translator import Translator
+
+logger = logging.getLogger("KrabEar.Backend.LiveSubsService")
+
+# Размер буфера (в секундах), при достижении которого происходит авто-flush.
+_FLUSH_THRESHOLD_SEC = 3.0
+
+
+class LiveSubsService:
+    """Буферизация и обработка потоковых аудио-чанков для живых субтитров."""
+
+    def __init__(
+        self,
+        transcriber: "Transcriber",
+        translator: "Translator",
+    ) -> None:
+        self._transcriber = transcriber
+        self._translator = translator
+        self._buffer: list[np.ndarray] = []
+        self._buffer_samples: int = 0
+        self._session_start: float = time.monotonic()
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def ingest(
+        self,
+        audio_bytes: bytes,
+        sample_rate: int,
+        target_lang: str,
+        is_final: bool,
+    ) -> dict[str, Any] | None:
+        """Добавляет чанк в буфер; при необходимости выполняет flush.
+
+        Returns:
+            None если flush не произошёл, иначе dict с результатами.
+        """
+        audio_array = self._decode_audio(audio_bytes, sample_rate)
+        self._buffer.append(audio_array)
+        self._buffer_samples += len(audio_array)
+
+        buffer_sec = self._buffer_samples / max(sample_rate, 1)
+
+        if is_final or buffer_sec >= _FLUSH_THRESHOLD_SEC:
+            return self._flush(sample_rate=sample_rate, target_lang=target_lang)
+        return None
+
+    def stop(self) -> dict[str, Any]:
+        """Flush оставшегося буфера и сброс состояния."""
+        result = self._flush(sample_rate=16000, target_lang="off") if self._buffer else None
+        self._reset()
+        return {"status": "stopped", "flushed": result is not None}
+
+    def buffer_duration_sec(self, sample_rate: int = 16000) -> float:
+        """Текущая длительность буфера в секундах."""
+        return self._buffer_samples / max(sample_rate, 1)
+
+    # ── IPC handlers ──────────────────────────────────────────────────────────
+
+    def handle_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC handler: live_subs_ingest."""
+        audio_b64 = params.get("audio_chunk", "")
+        target_lang = str(params.get("target_lang", "off"))
+        sample_rate = int(params.get("sample_rate", 16000))
+        is_final = bool(params.get("is_final", False))
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as exc:
+            raise ValueError(f"audio_chunk: invalid base64: {exc}") from exc
+
+        result = self.ingest(
+            audio_bytes=audio_bytes,
+            sample_rate=sample_rate,
+            target_lang=target_lang,
+            is_final=is_final,
+        )
+
+        buf_sec = self.buffer_duration_sec(sample_rate)
+        if result is not None:
+            return {
+                "status": "flushed",
+                "buffer_duration_sec": buf_sec,
+                "text": result.get("text"),
+                "translation": result.get("translation"),
+            }
+        return {"status": "accepted", "buffer_duration_sec": buf_sec}
+
+    def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """IPC handler: live_subs_stop."""
+        return self.stop()
+
+    # ── internals ─────────────────────────────────────────────────────────────
+
+    def _flush(self, sample_rate: int, target_lang: str) -> dict[str, Any]:
+        """Выполняет STT + translate по накопленному буферу и сбрасывает его."""
+        if not self._buffer:
+            return {"text": "", "translation": None}
+
+        start_ts = self._session_start
+        end_ts = time.monotonic()
+
+        audio = np.concatenate(self._buffer).astype(np.float32)
+        self._reset()
+
+        # STT
+        stt_result = self._transcriber.transcribe(audio, quality_profile="balanced")
+        text = stt_result.get("text", "").strip()
+        language_detected = stt_result.get("language")
+
+        # Translate
+        translation: str | None = None
+        if text and target_lang and target_lang not in ("off", "none", ""):
+            try:
+                tr = self._translator.translate(
+                    text=text,
+                    mode=target_lang,
+                    network_mode="offline",
+                )
+                translation = tr.translated_text or None
+            except Exception:
+                logger.exception("LiveSubsService: ошибка перевода")
+
+        # Emit event
+        event_payload = LiveSubsResult(
+            text=text,
+            translation=translation,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            language_detected=language_detected,
+        )
+        event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
+        logger.debug(
+            "LiveSubsService: flush text=%r lang=%s translation=%r",
+            text,
+            language_detected,
+            translation,
+        )
+
+        return {
+            "text": text,
+            "translation": translation,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "language_detected": language_detected,
+        }
+
+    def _reset(self) -> None:
+        """Сбрасывает буфер и метки времени."""
+        self._buffer = []
+        self._buffer_samples = 0
+        self._session_start = time.monotonic()
+
+    @staticmethod
+    def _decode_audio(audio_bytes: bytes, sample_rate: int) -> np.ndarray:
+        """Декодирует сырые PCM int16 байты в float32 [-1, 1]."""
+        if len(audio_bytes) == 0:
+            return np.zeros(0, dtype=np.float32)
+        # Ожидаем 16-bit PCM (2 байта на сэмпл)
+        if len(audio_bytes) % 2 != 0:
+            audio_bytes = audio_bytes[: len(audio_bytes) - 1]
+        pcm = np.frombuffer(audio_bytes, dtype=np.int16)
+        return pcm.astype(np.float32) / 32768.0

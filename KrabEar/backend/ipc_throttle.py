@@ -96,6 +96,9 @@ EXCLUDED_METHODS: Set[str] = {
     "apply_profile_preset",
     "list_profile_presets",
     "translate_selection",  # Phase 2A: вызывается часто при выделении текста
+    # Live subtitles: вызывается ~10-30 раз/сек по одному аудио-чанку
+    "live_subs_ingest",
+    "live_subs_stop",
 }
 
 # Всё остальное — light (120/min)

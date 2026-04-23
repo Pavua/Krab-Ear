@@ -89,6 +89,7 @@ from backend.recording_merger import RecordingMerger
 from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
+from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
 from backend.ipc_throttle import IPCThrottle
@@ -195,6 +196,10 @@ class BackendService:
             start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
         )
         self._tts = TTSService()
+        self._live_subs = LiveSubsService(
+            transcriber=self.transcriber,
+            translator=self.translator,
+        )
         self._translation = TranslationService(
             translator=self.translator,
             store=self.store,
@@ -620,6 +625,9 @@ class BackendService:
             "set_speaker_alias": self._speaker_manager.handle_set_speaker_alias,  # назначить псевдоним для спикера
             "get_speaker_aliases": self._speaker_manager.handle_get_speaker_aliases,  # список псевдонимов спикеров
             "remove_speaker_alias": self._speaker_manager.handle_remove_speaker_alias,  # удалить псевдоним спикера
+            # --- live subtitles (Sprint 2B) ---
+            "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
+            "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера
             # --- plugins ---
             "list_plugins": self._plugin_manager.handle_list_plugins,  # список обнаруженных плагинов
             "get_plugin_info": self._plugin_manager.handle_get_plugin_info,  # информация о конкретном плагине
