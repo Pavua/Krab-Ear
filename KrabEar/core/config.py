@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     # кастомный .ppn файл «Краб» (тренировка на https://console.picovoice.ai).
     WAKE_WORD_ENABLED: bool = False
     PORCUPINE_ACCESS_KEY: str = ""
+    # Движок wake word: "openwakeword" | "porcupine" | "disabled"
+    # "openwakeword" — free, Apache 2.0, без email/signup (встроенные: alexa,
+    #   hey_mycroft, hey_jarvis; кастомные .onnx в {DATA_DIR}/wake_word_models/).
+    # "porcupine" — высокая точность, требует AccessKey + .ppn файл «Краб».
+    # "disabled" — wake word полностью выключен.
+    WAKE_WORD_ENGINE: str = "disabled"
 
     # --- SenseVoice adapter (Phase 4 quick win) ---
     # Alibaba SenseVoice (FunASR) — альтернативный STT движок, поддерживает 50+ языков
@@ -319,6 +325,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Voice Assistant wake word (PR 1.5) ---
     # По умолчанию off — приватность пользователя.
     "wake_word_enabled": False,
+    # Движок: "openwakeword" | "porcupine" | "disabled"
+    "wake_word_engine": "disabled",
     # Движок разговора: "auto" | "moshi" | "seamless"
     "conversation_engine": "auto",
     # LLM мозг: "auto" | "qwen3-30b" | "qwen3-4b"
