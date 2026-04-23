@@ -161,6 +161,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             logger.info("Single-instance guard: дубликаты не обнаружены")
         }
 
+        // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
+        let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDsn") ?? ""
+        let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
+        SentryConfig.initialize(dsn: sentryDsn.isEmpty ? nil : sentryDsn, environment: sentryEnv)
+
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
         logger.info("BackendSupervisor режим: \(backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
         notificationService.requestAuthorizationIfNeeded()

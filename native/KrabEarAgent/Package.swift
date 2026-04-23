@@ -20,18 +20,26 @@ let package = Package(
         //     url: "https://github.com/Picovoice/porcupine",
         //     from: "3.0.0"
         // ),
+
+        // Sentry Cocoa SDK — crash/error telemetry.
+        // No-op если DSN не задан (см. SentryConfig.swift).
+        // Совместимо с self-hosted GlitchTip (Sentry-compatible protocol).
+        .package(
+            url: "https://github.com/getsentry/sentry-cocoa.git",
+            from: "8.0.0"
+        ),
     ],
     targets: [
         .executableTarget(
             name: "KrabEarAgent",
+            dependencies: [
+                // Раскомментируйте после добавления Porcupine зависимости:
+                // .product(name: "Porcupine", package: "porcupine"),
+                .product(name: "Sentry", package: "sentry-cocoa"),
+            ],
             path: "Sources/KrabEarAgent",
-            // Раскомментируйте после добавления Porcupine зависимости:
-            // dependencies: [
-            //     .product(name: "Porcupine", package: "porcupine"),
-            // ]
             swiftSettings: [
                 // Закомментированный импорт Porcupine SDK не приводит к ошибкам.
-                // Когда SDK добавлен — удалите эту секцию swiftSettings.
             ]
         ),
         .testTarget(

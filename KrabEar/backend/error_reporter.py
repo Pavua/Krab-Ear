@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.observability import capture_exception as _sentry_capture
+
 VALID_CATEGORIES = {"stt", "llm", "translation", "ipc", "audio", "storage", "other"}
 _BUFFER_SIZE = 500
 
@@ -56,8 +58,12 @@ class ErrorReporter:
         error_type: str,
         message: str,
         context: dict | None = None,
+        exc: Exception | None = None,
     ) -> ErrorRecord:
-        """Добавляет запись об ошибке в буфер. Потокобезопасно."""
+        """Добавляет запись об ошибке в буфер. Потокобезопасно.
+
+        Если Sentry инициализирован и передан exc — зеркалирует исключение в Sentry.
+        """
         # Нормализуем категорию компонента
         normalized = component.lower().strip()
         if normalized not in VALID_CATEGORIES:
@@ -72,6 +78,11 @@ class ErrorReporter:
         )
         with self._lock:
             self._buffer.append(record)
+
+        # Mirror to Sentry if SDK initialized and exception provided
+        if exc is not None:
+            _sentry_capture(exc, component=normalized)
+
         return record
 
     def get_recent_errors(self, limit: int = 50) -> list[ErrorRecord]:

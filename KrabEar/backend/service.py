@@ -108,6 +108,7 @@ from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, A
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
+from backend.observability import init_sentry
 
 import argparse
 from datetime import datetime, timedelta
@@ -4167,6 +4168,18 @@ def main() -> None:
     )
 
     configure_logging(data_dir)
+
+    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан)
+    sentry_ok = init_sentry(
+        dsn=settings.SENTRY_DSN or None,
+        environment=settings.SENTRY_ENVIRONMENT,
+        release=f"krab-ear@{APP_VERSION}",
+    )
+    if sentry_ok:
+        logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
+    else:
+        logger.debug("Sentry telemetry отключена (DSN не задан)")
+
     service = build_service(data_dir)
     server = IPCServer(socket_path=socket_path, service=service)
 
