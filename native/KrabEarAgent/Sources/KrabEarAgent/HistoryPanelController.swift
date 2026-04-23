@@ -1055,7 +1055,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         aiSettingsRow2.spacing = KrabEarTheme.Metrics.standard
         aiSettingsRow2.alignment = .centerY
 
-        settingsRow7.addArrangedSubview(NSTextField(labelWithString: "Прозрачность оверлея:"))
+        settingsRow7.addArrangedSubview(NSTextField(labelWithString: "Прозрачность Live Preview:"))
         overlayOpacitySlider.target = self
         overlayOpacitySlider.action = #selector(onOverlayOpacityChanged)
         overlayOpacitySlider.numberOfTickMarks = 6

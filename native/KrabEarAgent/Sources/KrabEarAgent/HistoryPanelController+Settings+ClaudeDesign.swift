@@ -328,7 +328,7 @@ extension HistoryPanelController {
 
         // Overlay opacity
         let overlayRow = cdMakeSliderRow(
-            label: "Прозрачность оверлея",
+            label: "Прозрачность Live Preview",
             slider: overlayOpacitySlider,
             valueLabel: overlayOpacityValueLabel
         )
