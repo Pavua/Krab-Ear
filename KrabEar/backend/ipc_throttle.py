@@ -89,6 +89,12 @@ EXCLUDED_METHODS: Set[str] = {
     "get_recording_state",
     "set_paste_status",
     "ping",
+    # settings writes: slider drag может бёрстить 20+ событий/сек,
+    # это legitimate write, не повод отклонять
+    "set_settings",
+    "get_settings",
+    "apply_profile_preset",
+    "list_profile_presets",
 }
 
 # Всё остальное — light (120/min)

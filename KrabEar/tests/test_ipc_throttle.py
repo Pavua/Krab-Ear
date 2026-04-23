@@ -44,7 +44,7 @@ class TestClassifyMethod(unittest.TestCase):
             self.assertEqual(_classify_method(m), "medium", f"Expected medium: {m}")
 
     def test_light_methods_classified_as_light(self):
-        for m in ["get_settings", "some_unknown_method"]:
+        for m in ["get_clipboard_history", "some_unknown_method"]:
             self.assertEqual(_classify_method(m), "light", f"Expected light: {m}")
 
     def test_heavy_medium_sets_are_disjoint(self):
@@ -97,7 +97,7 @@ class TestTokenBucket(unittest.TestCase):
         self.assertEqual(heavy_ok, 5)
 
         throttle2 = IPCThrottle()
-        light_ok = sum(1 for _ in range(121) if throttle2.check_rate("get_settings"))
+        light_ok = sum(1 for _ in range(121) if throttle2.check_rate("get_clipboard_history"))
         self.assertEqual(light_ok, 120)
 
 
@@ -122,7 +122,7 @@ class TestGetWaitTime(unittest.TestCase):
         # Исчерпать heavy
         throttle.check_rate("transcribe_paths")
         # light не должен иметь wait
-        self.assertAlmostEqual(throttle.get_wait_time("get_settings"), 0.0, places=2)
+        self.assertAlmostEqual(throttle.get_wait_time("get_clipboard_history"), 0.0, places=2)
 
     def test_excluded_methods_wait_time_is_zero(self):
         throttle = IPCThrottle(limits={"heavy": 1, "medium": 1, "light": 1})
@@ -143,13 +143,13 @@ class TestThrottleStats(unittest.TestCase):
 
     def test_stats_tracks_allowed_calls(self):
         throttle = IPCThrottle()
-        throttle.check_rate("get_settings")
-        throttle.check_rate("get_settings")
+        throttle.check_rate("get_clipboard_history")
+        throttle.check_rate("get_clipboard_history")
         stats = throttle.get_throttle_stats()
         self.assertEqual(stats["total_calls"], 2)
         self.assertEqual(stats["total_throttled"], 0)
-        self.assertEqual(stats["methods"]["get_settings"]["calls"], 2)
-        self.assertEqual(stats["methods"]["get_settings"]["throttled"], 0)
+        self.assertEqual(stats["methods"]["get_clipboard_history"]["calls"], 2)
+        self.assertEqual(stats["methods"]["get_clipboard_history"]["throttled"], 0)
 
     def test_stats_tracks_throttled_calls(self):
         throttle = IPCThrottle(limits={"heavy": 2, "medium": 30, "light": 120})
@@ -183,7 +183,7 @@ class TestThrottleStats(unittest.TestCase):
 
     def test_reset_stats_clears_counters(self):
         throttle = IPCThrottle()
-        throttle.check_rate("get_settings")
+        throttle.check_rate("get_clipboard_history")
         throttle.reset_stats()
         stats = throttle.get_throttle_stats()
         self.assertEqual(stats["total_calls"], 0)
@@ -200,7 +200,7 @@ class TestCustomLimits(unittest.TestCase):
 
     def test_custom_light_limit(self):
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 5})
-        ok = sum(1 for _ in range(6) if throttle.check_rate("get_settings"))
+        ok = sum(1 for _ in range(6) if throttle.check_rate("get_clipboard_history"))
         self.assertEqual(ok, 5)
 
 
@@ -214,8 +214,8 @@ class TestThreadSafety(unittest.TestCase):
         def worker():
             try:
                 for _ in range(50):
-                    throttle.check_rate("get_settings")
-                    throttle.get_wait_time("get_settings")
+                    throttle.check_rate("get_clipboard_history")
+                    throttle.get_wait_time("get_clipboard_history")
                     throttle.get_throttle_stats()
             except Exception as e:
                 errors.append(str(e))
@@ -304,12 +304,12 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
         )
 
     def test_throttled_request_returns_rate_limit_error(self):
-        # get_settings — light-метод (не исключён из throttle), лимит=1 в тестовом throttle
-        resp1 = self.service.handle_request({"id": "1", "method": "get_settings", "params": {}})
+        # get_clipboard_history — light-метод (не исключён из throttle), лимит=1 в тестовом throttle
+        resp1 = self.service.handle_request({"id": "1", "method": "get_clipboard_history", "params": {}})
         self.assertTrue(resp1["ok"])
 
-        # Второй get_settings — должен быть throttled (лимит = 1)
-        resp2 = self.service.handle_request({"id": "2", "method": "get_settings", "params": {}})
+        # Второй get_clipboard_history — должен быть throttled (лимит = 1)
+        resp2 = self.service.handle_request({"id": "2", "method": "get_clipboard_history", "params": {}})
         self.assertFalse(resp2["ok"])
         self.assertEqual(resp2["error"]["code"], "rate_limit_exceeded")
 
@@ -317,7 +317,7 @@ class TestIPCThrottleIntegrationWithService(unittest.TestCase):
         # Отключаем throttle
         self.service._ipc_throttle = None
         for i in range(10):
-            resp = self.service.handle_request({"id": str(i), "method": "get_settings", "params": {}})
+            resp = self.service.handle_request({"id": str(i), "method": "get_clipboard_history", "params": {}})
             self.assertTrue(resp["ok"], f"Call {i} was blocked but throttle is disabled")
 
     def test_get_throttle_stats_ipc_method(self):
