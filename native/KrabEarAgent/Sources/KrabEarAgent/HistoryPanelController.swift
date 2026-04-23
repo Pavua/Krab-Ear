@@ -426,7 +426,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             backing: .buffered,
             defer: false
         )
-        window.title = "Krab Ear — Центр управления"
+        window.title = "Krab Ear"
         // Явно разрешаем сильное сужение по ширине для небольших экранов.
         window.minSize = NSSize(width: 360, height: 520)
         window.contentMinSize = NSSize(width: 360, height: 520)
