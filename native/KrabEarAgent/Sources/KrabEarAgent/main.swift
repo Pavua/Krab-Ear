@@ -152,6 +152,15 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance guard: убиваем orphan-дубликаты KrabEarAgent
+        // (например, устаревший native/runtime/KrabEarAgent --launched-by-launchd).
+        let killed = killOtherAgentInstances()
+        if killed > 0 {
+            logger.warn("Single-instance guard: убито дубликатов KrabEarAgent: \(killed)")
+        } else {
+            logger.info("Single-instance guard: дубликаты не обнаружены")
+        }
+
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
         logger.info("BackendSupervisor режим: \(backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
         notificationService.requestAuthorizationIfNeeded()
