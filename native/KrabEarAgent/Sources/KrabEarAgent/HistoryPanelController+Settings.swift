@@ -809,7 +809,7 @@ extension HistoryPanelController {
         duckRow.addArrangedSubview(duckSliderStack)
 
         // 3. Overlay opacity slider (same complex layout)
-        let overlayLabelField = NSTextField(labelWithString: "Прозрачность оверлея")
+        let overlayLabelField = NSTextField(labelWithString: "Прозрачность Live Preview")
         overlayLabelField.font = KrabEarTheme.Typography.body
         overlayLabelField.textColor = KrabEarTheme.Colors.textPrimary
         let overlaySpacer = NSView()
