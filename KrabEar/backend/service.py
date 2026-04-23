@@ -2094,7 +2094,7 @@ class BackendService:
             except Exception as exc:
                 err_msg = str(exc)
                 file_name = Path(audio_path).name
-                if "Resource deadlock" in err_msg:
+                if "Resource deadlock" in err_msg or "errno 11" in err_msg or "[Errno 11]" in err_msg or "[Errno 35]" in err_msg:
                     err_msg = f"Файл заблокирован (возможно iCloud): {file_name}"
                 elif "timeout" in err_msg.lower():
                     err_msg = f"Превышено время транскрибации: {file_name}"

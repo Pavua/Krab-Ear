@@ -213,6 +213,93 @@ def _get_available_memory_gb() -> float:
         return -1.0
 
 
+# ---------------------------------------------------------------------------
+# Утилиты: iCloud workaround — копирование в /tmp перед ffmpeg
+# ---------------------------------------------------------------------------
+
+# Паттерны путей, которые macOS iCloud Drive может «заморозить» без
+# NSFileCoordinator. При попытке read() или ffmpeg-pipe возникает
+# errno 11 (EDEADLK «Resource deadlock avoided») на macOS.
+_ICLOUD_PATH_MARKERS = (
+    "Mobile Documents",
+    "com~apple~CloudDocs",
+    "iCloud~",
+    "CloudDocs",
+)
+
+# errno 11 = EDEADLK ("Resource deadlock avoided") на macOS — типично для
+# iCloud-заглушек (placeholder), к которым обращаются без NSFileCoordinator.
+_ICLOUD_ERRNO = 11
+
+
+def _is_icloud_path(path: str) -> bool:
+    """Возвращает True если путь выглядит как iCloud Drive расположение."""
+    return any(marker in path for marker in _ICLOUD_PATH_MARKERS)
+
+
+def _needs_icloud_copy(path: str) -> bool:
+    """Пробует открыть файл; возвращает True если получаем errno 11 (EDEADLK).
+
+    Это ловит iCloud-placeholder'ы вне стандартных путей Mobile Documents —
+    например, в ~/Downloads или ~/Desktop после частичной синхронизации.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.read(1)
+        return False
+    except OSError as exc:
+        return exc.errno == _ICLOUD_ERRNO
+
+
+def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
+    """Пытается скопировать iCloud-файл во временный путь в /tmp.
+
+    Шаги:
+    1. Если файл — незагруженный placeholder (размер 0 или errno 11 при чтении),
+       вызывает ``brctl download`` чтобы macOS инициировал загрузку, затем
+       ждёт до 30 секунд пока файл станет доступен.
+    2. Копирует в /tmp и возвращает путь к копии.
+    При ошибке возвращает None (вызывающий продолжит с оригинальным путём
+    и получит осмысленную ошибку позже).
+    """
+    _log = logging.getLogger("KrabEar.Engine")
+    try:
+        # Шаг 1: проверяем, нужна ли загрузка (placeholder = 0 байт)
+        file_size = os.path.getsize(path)
+        if file_size == 0:
+            _log.info("iCloud placeholder обнаружен, запрашиваем загрузку: %s", path)
+            try:
+                subprocess.run(
+                    ["brctl", "download", path],
+                    timeout=5,
+                    capture_output=True,
+                )
+            except Exception:
+                pass  # brctl может отсутствовать; продолжаем
+
+            # Ждём пока файл станет ненулевым (macOS скачивает в фоне)
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                try:
+                    if os.path.getsize(path) > 0:
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.5)
+
+        # Шаг 2: копируем в /tmp
+        suffix = Path(path).suffix
+        with tempfile.NamedTemporaryFile(
+            prefix="krab_ear_import_", suffix=suffix, delete=False
+        ) as tmp:
+            tmp_path = tmp.name
+        shutil.copy2(path, tmp_path)
+        return tmp_path
+    except Exception as exc:
+        _log.warning("Не удалось скопировать iCloud файл %s: %s", path, exc)
+        return None
+
+
 class AudioEngine:
     """Сервисный слой для STT ( Speech-to-Text) и TTS (Text-to-Speech)."""
 
@@ -424,18 +511,16 @@ class AudioEngine:
             size_mb = os.path.getsize(audio_data) / _BYTES_PER_MB
             if size_mb > settings.MAX_AUDIO_MB:
                 raise ValueError(f"Файл слишком большой: {size_mb:.1f}MB > {settings.MAX_AUDIO_MB}MB")
-            # iCloud Drive files may trigger "Resource deadlock avoided" (errno 11)
+            # iCloud Drive files may trigger "Resource deadlock avoided" (errno 11 EDEADLK)
             # when ffmpeg tries to read them without NSFileCoordinator.
-            # Workaround: copy to /tmp before processing.
+            # Workaround: try to trigger iCloud download via brctl, then copy to /tmp.
             audio_str = str(audio_data)
-            if "Mobile Documents" in audio_str or "com~apple~CloudDocs" in audio_str:
-                import shutil
-                suffix = Path(audio_str).suffix
-                with tempfile.NamedTemporaryFile(prefix="krab_ear_import_", suffix=suffix, delete=False) as tmp:
-                    _temp_copy_path = tmp.name
-                shutil.copy2(audio_str, _temp_copy_path)
-                audio_data = _temp_copy_path
-                logger.info("iCloud файл скопирован во временный: %s", _temp_copy_path)
+            if _is_icloud_path(audio_str) or _needs_icloud_copy(audio_str):
+                tmp_path = _copy_to_tmp_with_icloud_download(audio_str)
+                if tmp_path:
+                    _temp_copy_path = tmp_path
+                    audio_data = _temp_copy_path
+                    logger.info("iCloud файл скопирован во временный: %s", _temp_copy_path)
 
         # Auto-select model for file imports based on duration
         _report("normalize")
