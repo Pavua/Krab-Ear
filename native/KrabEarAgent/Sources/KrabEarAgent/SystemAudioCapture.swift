@@ -21,7 +21,7 @@
 
 import AVFoundation
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
 // MARK: - Error
 
