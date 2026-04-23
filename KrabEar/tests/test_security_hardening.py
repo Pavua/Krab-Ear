@@ -420,7 +420,7 @@ class TestRateLimitingUnderBurst(unittest.TestCase):
     def test_light_method_burst_eventually_throttled(self):
         """A light method with limit=3 must be throttled after 3 calls."""
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 3})
-        method = "get_settings"  # light method
+        method = "get_clipboard_history"  # light method (get_settings теперь excluded)
 
         results = [throttle.check_rate(method) for _ in range(6)]
         self.assertEqual(results[:3], [True, True, True])
