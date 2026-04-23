@@ -39,5 +39,15 @@ let package = Package(
             dependencies: ["KrabEarAgent"],
             path: "Tests/KrabEarAgentTests"
         ),
+        // UI / E2E test suite.
+        // Слой 1 (KrabEarSettingsLogicTests, KrabEarSyntheticHotkeyTests) — headless,
+        //   запускается через `swift test --filter KrabEarAgentUITests`.
+        // Слой 2 (KrabEarXCUIFlowTests) — полный XCUITest E2E, требует Xcode UITest
+        //   host runner; тесты корректно skip при запуске через swift test.
+        .testTarget(
+            name: "KrabEarAgentUITests",
+            dependencies: ["KrabEarAgent"],
+            path: "Tests/KrabEarAgentUITests"
+        ),
     ]
 )
