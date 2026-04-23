@@ -287,10 +287,11 @@ extension HistoryPanelController {
     // MARK: - IPC: fetch suggestions
 
     @objc func onGlossarySuggestTapped() {
+        let client = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let result = try self.ipcClient.call(
+                let result = try client.call(
                     method: "suggest_medical_glossary_terms",
                     params: ["limit": 20]
                 )
@@ -346,10 +347,11 @@ extension HistoryPanelController {
                 "confidence":  item.confidence,
             ]
         }
+        let client = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let result = try self.ipcClient.call(
+                let result = try client.call(
                     method: "apply_glossary_suggestions",
                     params: [
                         "selected_ids": selectedIds,
