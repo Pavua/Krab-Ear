@@ -269,6 +269,10 @@ extension HistoryPanelController {
         translateAndPasteButton.setButtonType(.switch)
         let tpRow = cdMakeRow(label: "Перевод при вставке", control: translateAndPasteButton)
 
+        // Glossary suggestions button row
+        let glossaryButton = cdMakeGlossarySuggestButton()
+        let glossaryRow = cdMakeRow(label: "Глоссарий", control: glossaryButton)
+
         card.contentStackView.addArrangedSubview(modeRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(styleRow)
@@ -276,6 +280,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(netRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(tpRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(glossaryRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
