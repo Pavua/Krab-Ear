@@ -76,6 +76,7 @@ from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
 from backend.system_monitor import SystemMonitor
 from backend.translation_service import TranslationService
+from backend.glossary_auto_learn import GlossaryAutoLearnService
 from backend.settings_service import SettingsService
 from backend.transcript_writer import TranscriptWriter
 from backend.cost_estimator import CostEstimator
@@ -206,6 +207,11 @@ class BackendService:
             cached_settings=self._cached_settings,
             invalidate_settings_cache=self._invalidate_settings_cache,
             vocabulary_store=self.vocabulary,
+        )
+        self._glossary_auto_learn = GlossaryAutoLearnService(
+            store=self.store,
+            cached_settings=self._cached_settings,
+            invalidate_settings_cache=self._invalidate_settings_cache,
         )
         from backend.health_checker import HealthChecker
         self._health_checker = HealthChecker(
@@ -427,6 +433,8 @@ class BackendService:
             # VERIFIED: called from Swift (HistoryPanel)
             "remove_translation_glossary_item": self._translation.handle_remove_translation_glossary_item,
             "get_glossary_suggestions": self._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
+            "suggest_medical_glossary_terms": self._glossary_auto_learn.handle_suggest_medical_glossary_terms,  # мед. домен auto-learn: предлагает пары ES↔RU из истории переводов
+            "apply_glossary_suggestions": self._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
             "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
