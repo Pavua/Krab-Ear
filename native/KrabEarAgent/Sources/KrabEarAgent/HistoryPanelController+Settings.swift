@@ -453,6 +453,7 @@ extension HistoryPanelController {
         applyHistoryFocusMode(settings.historyFocusMode)
         applyHistoryTextDensity(settings.historyTextDensity)
         syncVoiceAssistantControls()
+        syncSelectionTranslatorControls()
         isSyncingSettings = false
         updateLoadMoreButtonCaption()
         refreshCaptureSourceHint()
