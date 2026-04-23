@@ -330,7 +330,7 @@ final class LiveSubtitlesOverlay: NSObject {
 // MARK: - SSESessionDelegate
 
 /// URLSessionDataDelegate для SSE long-poll стриминга.
-private final class SSESessionDelegate: NSObject, URLSessionDataDelegate {
+private final class SSESessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let onLine: (String) -> Void
     private var buffer = ""
 

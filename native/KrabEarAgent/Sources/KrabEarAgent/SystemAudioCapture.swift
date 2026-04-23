@@ -19,7 +19,7 @@
 */
 
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import CoreMedia
 import AppKit
 
