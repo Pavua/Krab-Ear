@@ -224,7 +224,7 @@ extension HistoryPanelController {
         // 6. Live субтитры для видео (Phase 2B, macOS 12.3+, default OFF)
         let liveSubsToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onLiveSubsChanged))
         liveSubsToggle.setButtonType(.switch)
-        liveSubsToggle.state = UserDefaults.standard.liveSubsEnabled ? .on : .off
+        liveSubsToggle.state = UserDefaults.standard.bool(forKey: UserDefaults.liveSubsEnabledKey) ? .on : .off
         liveSubsToggle.tag = 202601 // Phase 2B tag
         let liveSubsBadge = cdMakeBadge(text: "2B", color: .controlAccentColor)
         let liveSubsRow = cdMakeRow(
@@ -409,11 +409,13 @@ extension HistoryPanelController {
     @objc func onLiveSubsChanged(_ sender: NSButton) {
         let enabled = sender.state == .on
         // Делегируем в AgentAppDelegate через responder chain
+        UserDefaults.standard.set(enabled, forKey: UserDefaults.liveSubsEnabledKey)
         if let appDelegate = NSApp.delegate as? AgentAppDelegate {
-            appDelegate.applyLiveSubsEnabled(enabled)
-        } else {
-            // Fallback: только сохранить UserDefaults
-            UserDefaults.standard.liveSubsEnabled = enabled
+            if enabled {
+                appDelegate.startLiveSubsCapture()
+            } else {
+                appDelegate.stopLiveSubsCapture()
+            }
         }
     }
 

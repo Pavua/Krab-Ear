@@ -136,6 +136,18 @@ extension AgentAppDelegate {
 
         menu.addItem(.separator())
 
+        // Live субтитры (Cmd+Shift+L)
+        let liveSubsItem = NSMenuItem(
+            title: systemAudioCapture.isCapturing ? "Остановить Live субтитры" : "Live субтитры (захват аудио)",
+            action: #selector(onToggleLiveSubs),
+            keyEquivalent: "l"
+        )
+        liveSubsItem.target = self
+        liveSubsItem.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(liveSubsItem)
+
+        menu.addItem(.separator())
+
         let modeItem = NSMenuItem(
             title: settings.mode == "menubar" ? "Переключить в headless" : "Переключить в menu bar",
             action: #selector(onModeToggle),

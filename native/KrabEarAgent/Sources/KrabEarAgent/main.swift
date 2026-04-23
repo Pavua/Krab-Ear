@@ -115,13 +115,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Phase 2A: Selection translator — Cmd+Shift+T auto-translate selection.
     var selectionTranslator: SelectionTranslator?
 
-    /// Phase 2B: Live субтитры для видео — захват системного аудио через ScreenCaptureKit.
-    /// НЕ запускается автоматически — только по Cmd+Shift+L или Settings toggle.
-    @available(macOS 12.3, *)
-    private(set) lazy var systemAudioCapture: SystemAudioCapture = SystemAudioCapture()
-
-    /// Глобальный monitor для Cmd+Shift+L (Live сабы toggle).
-    var liveSubsHotkeyMonitor: Any?
+    // Phase 2B live-subs state moved to main+LiveSubs.swift (associated objects).
 
     var historyPanel: HistoryPanelController?
     var hotkeyManager: HotkeyManager?
@@ -247,8 +241,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.start()
         logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
 
-        // Phase 2B: Live субтитры — Cmd+Shift+L toggle (только macOS 12.3+)
-        setupLiveSubsHotkey()
+        // Phase 2B: Live субтитры — Cmd+Shift+L через menu item (main+StatusMenu + main+LiveSubs).
 
         // PR 1.5: Wake word listener (default OFF — toggle в Settings)
         setupWakeWordListenerIfEnabled()
@@ -270,7 +263,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager?.stop()
         wakeWordListener?.stop()
         selectionTranslator?.stop()
-        teardownLiveSubsHotkey()
+        stopLiveSubsCapture()
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
     }
