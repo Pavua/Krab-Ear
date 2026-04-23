@@ -11,6 +11,7 @@ from __future__ import annotations
 from __version__ import __version__ as APP_VERSION  # noqa: E402
 from backend.model_cache_manager import ModelCacheManager
 from backend.hotword_detector import HotwordDetector
+from backend.openwakeword_adapter import OpenWakeWordAdapter
 from backend.plugin_system import PluginManager
 from backend.feature_flags import FeatureFlags
 from backend.template_manager import TemplateManager
@@ -302,6 +303,8 @@ class BackendService:
             circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
             circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
         )
+        # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
+        self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
         # Проверяем авто-бэкап при старте
@@ -661,6 +664,11 @@ class BackendService:
             # --- Voice Assistant wake word config (PR 1.5) ---
             "get_wake_word_config": self._handle_get_wake_word_config,  # конфигурация wake word: enabled, access_key_present, ppn_present
             "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
+            # --- openWakeWord adapter (free, Apache 2.0) ---
+            "wake_word_list_models": self._oww_adapter.handle_wake_word_list_models,  # список builtin+custom моделей
+            "wake_word_start": self._oww_adapter.handle_wake_word_start,  # запустить прослушивание
+            "wake_word_stop": self._oww_adapter.handle_wake_word_stop,  # остановить прослушивание
+            "wake_word_status": self._oww_adapter.handle_wake_word_status,  # статус адаптера
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             # --- Hallucination pattern management ---
