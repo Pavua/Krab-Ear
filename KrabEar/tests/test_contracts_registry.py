@@ -28,6 +28,7 @@ _EXPECTED_EVENT_TYPE_VALUES = {
     "markdown_export",
     "auto_summary",
     "hotword.detected",
+    "live_subs.result",
 }
 
 
