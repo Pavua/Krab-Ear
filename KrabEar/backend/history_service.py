@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from backend.observability import add_breadcrumb
 from core.fuzzy_search import FuzzySearcher
 from core.parsing_utils import safe_json_loads
 from core.search_highlighter import SearchHighlighter
@@ -1219,6 +1220,12 @@ class HistoryService:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
 
+        add_breadcrumb(
+            category="history",
+            message="cleanup_old_history",
+            level="info",
+            data={"deleted_count": len(to_delete), "remaining": remaining, "older_than_days": older_than_days},
+        )
         return {"deleted_count": len(to_delete), "remaining": remaining}
 
     def handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:

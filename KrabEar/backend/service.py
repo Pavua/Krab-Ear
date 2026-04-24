@@ -112,7 +112,11 @@ from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, A
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
-from backend.observability import init_sentry
+from backend.observability import (
+    _BREADCRUMB_EXCLUDED_METHODS,
+    add_breadcrumb,
+    init_sentry,
+)
 
 import argparse
 from datetime import datetime, timedelta
@@ -737,6 +741,13 @@ class BackendService:
                     f"Превышен лимит запросов для метода {method!r}. Повторите через {wait_sec:.1f}s",
                 )
 
+        if method not in _BREADCRUMB_EXCLUDED_METHODS:
+            add_breadcrumb(
+                category="ipc",
+                message=method,
+                level="info",
+            )
+
         try:
             result = handler(params)
             return {"id": request_id, "ok": True, "result": result}
@@ -853,6 +864,12 @@ class BackendService:
             }
         self._reset_preview_state()
         settings = self._cached_settings()
+        add_breadcrumb(
+            category="recording",
+            message="started",
+            level="info",
+            data={"quality_profile": str(settings.get("quality_profile", "balanced"))},
+        )
         if bool(settings.get("realtime_preview_enabled", True)):
             quality_profile = str(settings.get("quality_profile", "balanced"))
             self._start_preview_worker(quality_profile=quality_profile)
@@ -975,6 +992,12 @@ class BackendService:
             }
 
         audio, duration_sec = stopped
+        add_breadcrumb(
+            category="recording",
+            message="stopped",
+            level="info",
+            data={"duration_sec": round(float(duration_sec), 2)},
+        )
         sr = self._load_stop_recording_settings(params, settings)
         quality_profile = sr["quality_profile"]
         cleanup_profile = sr["cleanup_profile"]
@@ -1070,6 +1093,16 @@ class BackendService:
         # Загружаем пользовательский vocabulary для подсказок Whisper
         user_vocabulary = self.vocabulary.load() or []
 
+        add_breadcrumb(
+            category="transcription",
+            message="transcribe_start",
+            level="info",
+            data={
+                "quality_profile": quality_profile,
+                "audio_len_sec": round(float(duration_sec), 2),
+                "lang_hint": lang_hint or "auto",
+            },
+        )
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -1132,6 +1165,15 @@ class BackendService:
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
         confidence = tp.get("confidence", 0.0)
+        add_breadcrumb(
+            category="transcription",
+            message="transcribe_complete",
+            level="info",
+            data={
+                "confidence": round(float(confidence), 3),
+                "word_count": len(text.split()) if text else 0,
+            },
+        )
         if confidence < 0.4 and text:
             logger.warning("Низкая уверенность STT: %.2f — возможна ошибка распознавания", confidence)
         diarization_data = tp.get("diarization")

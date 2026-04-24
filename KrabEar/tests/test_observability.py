@@ -145,5 +145,105 @@ class TestCaptureException(unittest.TestCase):
             self.fail(f"capture_exception raised {e!r} when not initialized")
 
 
+# ---------------------------------------------------------------------------
+# Breadcrumb tests
+# ---------------------------------------------------------------------------
+
+class TestAddBreadcrumbNoOp(unittest.TestCase):
+    """add_breadcrumb is a no-op when Sentry is not initialized."""
+
+    def setUp(self):
+        _reload_observability()
+
+    def test_no_op_when_not_initialized(self):
+        """Must not raise and must not call sentry_sdk when uninitialized."""
+        import backend.observability as mod
+        mod._sentry_initialized = False
+        fake_sdk = types.ModuleType("sentry_sdk")
+        fake_sdk.add_breadcrumb = MagicMock()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.add_breadcrumb("recording", "started")
+        fake_sdk.add_breadcrumb.assert_not_called()
+
+    def test_no_op_does_not_raise(self):
+        import backend.observability as mod
+        mod._sentry_initialized = False
+        try:
+            mod.add_breadcrumb("ipc", "ping", level="debug", data={"x": 1})
+        except Exception as e:
+            self.fail(f"add_breadcrumb raised {e!r} when not initialized")
+
+
+class TestAddBreadcrumbWithDsn(unittest.TestCase):
+    """add_breadcrumb calls sentry_sdk.add_breadcrumb when initialized."""
+
+    def _init_with_fake_sdk(self):
+        import backend.observability as mod
+        mod._sentry_initialized = False
+        fake_sdk = types.ModuleType("sentry_sdk")
+        fake_sdk.init = MagicMock()
+        fake_sdk.add_breadcrumb = MagicMock()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.init_sentry("https://fake@sentry.io/123")
+        return mod, fake_sdk
+
+    def test_calls_sentry_add_breadcrumb(self):
+        mod, fake_sdk = self._init_with_fake_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.add_breadcrumb("recording", "started", level="info", data={"quality_profile": "balanced"})
+        fake_sdk.add_breadcrumb.assert_called_once()
+
+    def test_passes_correct_category_and_message(self):
+        mod, fake_sdk = self._init_with_fake_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.add_breadcrumb("translation", "translate_text", level="info", data={"source_lang": "ru"})
+        _, kwargs = fake_sdk.add_breadcrumb.call_args
+        self.assertEqual(kwargs.get("category"), "translation")
+        self.assertEqual(kwargs.get("message"), "translate_text")
+
+    def test_passes_level(self):
+        mod, fake_sdk = self._init_with_fake_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.add_breadcrumb("ipc", "stop_recording", level="warning")
+        _, kwargs = fake_sdk.add_breadcrumb.call_args
+        self.assertEqual(kwargs.get("level"), "warning")
+
+    def test_data_defaults_to_empty_dict_when_none(self):
+        mod, fake_sdk = self._init_with_fake_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.add_breadcrumb("ipc", "ping")
+        _, kwargs = fake_sdk.add_breadcrumb.call_args
+        self.assertEqual(kwargs.get("data"), {})
+
+
+class TestMaskPhone(unittest.TestCase):
+    """mask_phone helper returns only last 4 digits."""
+
+    def setUp(self):
+        _reload_observability()
+
+    def test_masks_international_number(self):
+        from backend.observability import mask_phone
+        result = mask_phone("+34666123456")
+        self.assertTrue(result.endswith("3456"))
+        self.assertNotIn("666", result)
+
+    def test_masks_local_number(self):
+        from backend.observability import mask_phone
+        result = mask_phone("0501234567")
+        self.assertTrue(result.endswith("4567"))
+
+    def test_short_number_returns_masked(self):
+        from backend.observability import mask_phone
+        result = mask_phone("1234")
+        self.assertIn("*", result)
+        self.assertTrue(result.endswith("1234"))
+
+    def test_empty_string_returns_masked(self):
+        from backend.observability import mask_phone
+        result = mask_phone("")
+        self.assertTrue(result.startswith("*"))
+
+
 if __name__ == "__main__":
     unittest.main()
