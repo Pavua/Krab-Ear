@@ -1,9 +1,20 @@
 import Cocoa
 import ObjectiveC
 
+// MARK: - Associated key for AnalyticsDashboard window (Analytics tab button)
+private enum AnalyticsDashboardAssocKey {
+    nonisolated(unsafe) static var windowController: UInt8 = 0
+}
+
 @MainActor
 extension HistoryPanelController {
-    
+
+    @objc func openAnalyticsDashboard() {
+        let wc = AnalyticsDashboardWindowController(ipcClient: ipcClient)
+        wc.showWindow(nil)
+        objc_setAssociatedObject(self, &AnalyticsDashboardAssocKey.windowController, wc, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
     private struct AssociatedKeys {
         nonisolated(unsafe) static var todayLabel: UInt8 = 0
         nonisolated(unsafe) static var weekLabel: UInt8 = 0
@@ -132,7 +143,11 @@ extension HistoryPanelController {
         scoreRow.orientation = .horizontal
         scoreRow.spacing = KrabEarTheme.Metrics.standard
 
+        let dashboardButton = ThemeSecondaryButton(title: "Открыть аналитику", target: self, action: #selector(openAnalyticsDashboard))
+        dashboardButton.applyThemeSecondary()
+
         analyticsCard.contentStackView.addArrangedSubview(usageRow)
+        analyticsCard.contentStackView.addArrangedSubview(dashboardButton)
         analyticsCard.contentStackView.addArrangedSubview(errorsButton)
         analyticsCard.contentStackView.addArrangedSubview(scoreRow)
 
