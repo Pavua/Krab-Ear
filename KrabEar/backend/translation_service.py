@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any, Callable, TYPE_CHECKING
 
+from backend.observability import add_breadcrumb
 from core.language_detector import LanguageDetector
 
 if TYPE_CHECKING:
@@ -97,6 +98,17 @@ class TranslationService:
             network_mode=network_mode,
             translation_style=translation_style,
             glossary=glossary,
+        )
+        add_breadcrumb(
+            category="translation",
+            message="translate_text",
+            level="info",
+            data={
+                "source_lang": result.source_lang or "auto",
+                "target_lang": result.target_lang or "auto",
+                "mode": mode,
+                "engine": result.engine or "none",
+            },
         )
         return {
             "text": result.text,

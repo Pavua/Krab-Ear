@@ -15,6 +15,8 @@ from typing import Any, Callable
 from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 import uuid
 
+from backend.observability import add_breadcrumb, mask_phone
+
 logger = logging.getLogger("KrabEar.Backend.CallAssist")
 
 
@@ -325,6 +327,18 @@ class CallAssistService:
         with self._lock:
             self._state = state
 
+        phone_raw = str(params.get("phone", "")).strip()
+        add_breadcrumb(
+            category="call",
+            message="call_dial",
+            level="info",
+            data={
+                "provider": str(params.get("provider", "voip")),
+                "phone_masked": mask_phone(phone_raw) if phone_raw else None,
+                "translation_mode": translation_mode,
+            },
+        )
+
         if gateway_session_id and gateway_status == "ok":
             t = threading.Thread(
                 target=self._assist_loop,
@@ -423,6 +437,30 @@ class CallAssistService:
 
         with self._lock:
             self._state = dict(state)
+
+        started_at_str = str(state.get("started_at") or "")
+        call_duration_sec: float | None = None
+        if started_at_str:
+            try:
+                from datetime import timezone  # noqa: PLC0415
+                started_dt = datetime.fromisoformat(started_at_str)
+                stopped_dt = datetime.fromisoformat(stopped_at)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                if stopped_dt.tzinfo is None:
+                    stopped_dt = stopped_dt.replace(tzinfo=timezone.utc)
+                call_duration_sec = round((stopped_dt - started_dt).total_seconds(), 1)
+            except Exception:  # noqa: BLE001
+                pass
+        add_breadcrumb(
+            category="call",
+            message="call_hangup",
+            level="info",
+            data={
+                "duration_sec": call_duration_sec,
+                "summary_status": state.get("summary_status"),
+            },
+        )
         return state
 
     def handle_get_state(self, params: dict[str, Any]) -> dict[str, Any]:
