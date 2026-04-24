@@ -91,6 +91,7 @@ from backend.recording_merger import RecordingMerger
 from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
+from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
@@ -292,6 +293,7 @@ class BackendService:
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
+        self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
         self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
@@ -678,6 +680,13 @@ class BackendService:
             "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            # --- Phase 3: Call Session CRUD (outbound call automation) ---
+            "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
+            "call_session_get": self._handle_call_session_get,  # получить сессию по id
+            "call_session_list": self._handle_call_session_list,  # список сессий с опциональным фильтром по статусу
+            "call_session_update_status": self._handle_call_session_update_status,  # перевести статус сессии
+            "call_session_add_transcript": self._handle_call_session_add_transcript,  # добавить реплику в транскрипт
+            "call_session_end": self._handle_call_session_end,  # завершить сессию: compute duration, total_cost
         }
 
         handler = handlers.get(method)
@@ -3423,6 +3432,161 @@ class BackendService:
             raise RuntimeError(f"krab_unavailable: {msg}") from exc
 
         return result
+
+    # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
+
+    def _handle_call_session_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Создаёт новую звонковую сессию.
+
+        Параметры:
+          - phone: str — номер телефона (обязательный).
+          - goal_text: str — цель звонка (обязательный).
+
+        Возвращает:
+          {session_id, status, created_at}
+        """
+        phone = str(params.get("phone") or "").strip()
+        if not phone:
+            raise ValueError("Параметр 'phone' обязателен")
+        goal = str(params.get("goal_text") or "").strip()
+        if not goal:
+            raise ValueError("Параметр 'goal_text' обязателен")
+
+        session = self._call_session_store.create(
+            phone_number=phone,
+            goal_text=goal,
+        )
+        return {"session_id": session.id, "status": session.status, "created_at": session.created_at}
+
+    def _handle_call_session_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает полную запись сессии по id.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+
+        Возвращает полный словарь CallSession или ошибку "not_found".
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        session = self._call_session_store.get(session_id)
+        if session is None:
+            raise KeyError(f"Сессия не найдена: {session_id!r}")
+        return session.to_dict()
+
+    def _handle_call_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список звонковых сессий.
+
+        Параметры:
+          - limit: int — макс. количество сессий (по умолчанию 50, макс. 500).
+          - status_filter: str | None — фильтр по статусу (idle/dialing/...).
+
+        Возвращает:
+          {sessions: [...], total: N}
+        """
+        limit = max(1, min(int(params.get("limit", 50)), 500))
+        status_filter = params.get("status_filter") or None
+        if status_filter:
+            status_filter = str(status_filter).strip() or None
+
+        sessions = self._call_session_store.list_sessions(
+            limit=limit,
+            status_filter=status_filter,
+        )
+        return {"sessions": sessions, "total": len(sessions)}
+
+    def _handle_call_session_update_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Переводит статус звонковой сессии через машину состояний.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+          - new_status: str — целевой статус.
+
+        Возвращает:
+          {session_id, status}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        new_status = str(params.get("new_status") or "").strip()
+        if not new_status:
+            raise ValueError("Параметр 'new_status' обязателен")
+
+        session = self._call_session_store.update_status(session_id, new_status)
+        return {"session_id": session.id, "status": session.status}
+
+    def _handle_call_session_add_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет реплику в транскрипт звонковой сессии.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+          - speaker: str — источник реплики: "user" | "bot" | "operator".
+          - text: str — текст реплики.
+          - ts: str | None — временная метка ISO (опционально, по умолчанию now).
+
+        Возвращает:
+          {session_id, transcript_count}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        speaker = str(params.get("speaker") or "").strip()
+        if not speaker:
+            raise ValueError("Параметр 'speaker' обязателен")
+        text = str(params.get("text") or "").strip()
+        if not text:
+            raise ValueError("Параметр 'text' обязателен")
+        ts = params.get("ts") or None
+        if ts:
+            ts = str(ts).strip() or None
+
+        session = self._call_session_store.add_transcript(
+            session_id=session_id,
+            speaker=speaker,
+            text=text,
+            ts=ts,
+        )
+        return {"session_id": session.id, "transcript_count": len(session.transcript_history)}
+
+    def _handle_call_session_end(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Завершает звонковую сессию: переводит в COMPLETED, вычисляет duration/cost.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+          - reason: str — причина завершения (completed / no_answer / voicemail / opt_out / timeout).
+          - cost_usd: float — фактическая стоимость звонка в USD (по умолчанию 0.0).
+          - failed: bool — если True, переводит в FAILED вместо COMPLETED.
+
+        Возвращает:
+          {session_id, status, duration_sec, cost_usd, end_reason}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        reason = str(params.get("reason") or "completed").strip()
+        cost_usd = float(params.get("cost_usd") or 0.0)
+        failed = bool(params.get("failed", False))
+
+        if failed:
+            session = self._call_session_store.mark_failed(
+                session_id=session_id,
+                end_reason=reason,
+                cost_usd=cost_usd,
+            )
+        else:
+            session = self._call_session_store.mark_completed(
+                session_id=session_id,
+                end_reason=reason,
+                cost_usd=cost_usd,
+            )
+
+        return {
+            "session_id": session.id,
+            "status": session.status,
+            "duration_sec": session.duration_sec,
+            "cost_usd": session.cost_usd,
+            "end_reason": session.end_reason,
+        }
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
