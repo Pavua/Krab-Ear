@@ -134,7 +134,25 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/transcription_scorer.py`** — `TranscriptionScorer`: composite quality score 0–100 (A–F) from confidence, duration, diarization, LLM flags.
 - **`core/vad.py`** — `VoiceActivityDetector`: energy-threshold VAD over audio arrays.
 - **`core/waveform_generator.py`** — `WaveformGenerator`: downsample PCM for GUI waveform visualization.
-- **`contracts/`** — Pydantic models for event payloads (STT, Translation). `EventType` enum + `EVENT_SCHEMA_MAP` for runtime dispatch. JSON Schema export via `python -m contracts.export`.
+- **`contracts/`** — Pydantic models for event payloads (STT, Translation, LiveSubs). `EventType` enum + `EVENT_SCHEMA_MAP` for runtime dispatch. JSON Schema export via `python -m contracts.export`.
+
+#### Phase 2 — Live Translation modules:
+- **`backend/live_subs_service.py`** — `LiveSubsService`: streaming STT + translate for system audio subtitles. Accumulates base64 PCM 16 kHz chunks, flushes every ≥3 s or on `is_final=True`, emits `live_subs.result` via EventBus.
+- **`backend/glossary_auto_learn.py`** — `GlossaryAutoLearn`: auto-extract domain terms (medical etc.) from recent translation history and propose glossary entries.
+
+#### Phase 3 — Call Automation modules:
+- **`backend/call_session.py`** — `CallSession` data model + `CallStatus` state machine (`idle→dialing→connected→talking→ending→completed/failed`).
+- **`backend/call_session_store.py`** — `CallSessionStore`: persistent storage of call sessions (NDJSON).
+- **`backend/call_cost_estimator.py`** — `CallCostEstimator`: compute per-minute telephony cost estimate before dialing; shows ticker during active call.
+- **`backend/call_silence_probe.py`** — `CallSilenceProbe`: detect >10 s silence during a call to trigger soft end.
+- **`backend/call_auto_end.py`** — `CallAutoEnd`: enforce max-duration limit (default 30 min) and silence-based auto-hangup.
+- **`backend/telnyx_adapter.py`** — `TelnyxAdapter`: Telnyx Call Control REST API adapter for outbound calls; Bearer-auth + exponential-retry; stub-mode when `TELNYX_API_KEY` absent.
+- **`backend/observability.py`** — `init_sentry()` / `capture_exception()` helpers; Sentry/GlitchTip SDK init; fully no-op when DSN not provided.
+- **`backend/telegram_bridge.py`** — `TelegramBridge`: send messages from Krab Ear backend to main Krab userbot via `POST /api/notify` on localhost web-panel port.
+- **`backend/openwakeword_adapter.py`** — `OpenWakeWordAdapter`: Apache-2.0 wake-word detection (openWakeWord); primary engine until Picovoice (no email/signup); custom "Краб" model requires ~15 min Jupyter training.
+
+#### Twilio / provider abstraction (Phase 3 step 5):
+- **`backend/twilio_adapter.py`** — `TwilioAdapter`: Twilio REST API adapter, same interface as `TelnyxAdapter`. Active provider selected via `CALL_PROVIDER` setting (`telnyx` | `twilio`); swap at runtime without code changes.
 
 ### Native agent (`native/KrabEarAgent/`):
 - Swift Package (swift-tools-version 6.0, macOS 13+). Single executable target.
@@ -142,12 +160,25 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - Resolves project root by checking for `KrabEar/backend/service.py`.
 - **`KrabEarTheme.swift`** — Liquid Glass visual theme (NSVisualEffectView). ThemeCardView, CollapsibleSectionView, ThemePrimaryButton.
 - **`ThemeButton` base class** (PR #13) — общий предок для `ThemePrimaryButton` / `ThemeSecondaryButton`. Устанавливает `NSTrackingArea`, обрабатывает `mouseEntered/Exited/Down/Up` и применяет `KrabEarTheme.Interaction` токены: hover = 10% белый overlay, pressed = 15% чёрный overlay + scale 0.98×, disabled = opacity 40%. Все переходы идут через `KrabEarTheme.Motion.animate()` — Reduce Motion respected.
-- **`HistoryPanelController.swift`** (2196 lines) + 7 extension files: `+CallAssist`, `+Diagnostics`, `+History`, `+HistoryEnhancements`, `+Import`, `+Settings` (split for maintainability).
+- **`HistoryPanelController.swift`** + 12 extension files: `+CallAssist`, `+CallAutomation`, `+Diagnostics`, `+GlossarySuggestions`, `+History`, `+HistoryEnhancements`, `+Import`, `+LiveSubsSettings`, `+LiveTranslation`, `+Management`, `+SelectionTranslator`, `+Settings` (split for maintainability).
 - **`RealtimeOverlayController.swift`** — floating overlay for live transcription feedback.
 - **`NotificationService.swift`** — macOS user notifications (confidence warnings, errors).
 - **`LaunchAgentManager.swift`** — install/remove launchd plist for auto-start.
 - **`SystemAudioDuckingService.swift`** — lower system volume during recording.
 - **`PermissionWizard.swift`** — guided Accessibility + Microphone permission setup.
+
+#### Phase 2 Swift additions:
+- **`SelectionTranslator.swift`** — Cmd+Shift+T global hotkey; reads selected text via AX API (`kAXSelectedTextAttribute`) or clipboard fallback; calls `translate_selection` IPC; writes result back via AX or Cmd+V.
+- **`SystemAudioCapture.swift`** — ScreenCaptureKit-based system audio tap; streams base64 PCM 16 kHz to backend IPC `live_subs_push_chunk`; requires Screen Recording permission.
+- **`LiveSubtitlesOverlay.swift`** — floating NSPanel HUD (always on top, draggable) for live subtitles; shows last 3 lines with 4 s auto-fade; subscribes to SSE `live_subs.result` events.
+- **`main+LiveSubs.swift`** — wires `SystemAudioCapture` start/stop to menu item and `HistoryPanelController+LiveSubsSettings`.
+
+#### Phase 3 Swift additions:
+- **`CallAutomationController.swift`** — manages outbound call lifecycle; integrates with `call_session_*` IPC methods; drives cost ticker, silence probe, auto-end UI.
+- **`SentryConfig.swift`** — no-op Sentry/GlitchTip initialisation; reads DSN from `settings.sentry_dsn` via IPC; fully skips SDK init when DSN absent.
+- **`SingleInstanceGuard.swift`** — kills duplicate `KrabEarAgent` processes on launch; prevents double-paste and double-hotkey issues.
+- **`WakeWordListener.swift`** — openWakeWord adapter bridge (Swift↔Python); triggers recording on wake-word detection; hotkey remains primary fallback.
+- **`HotkeyDoubleTapDetector.swift`** — detects Right Option double-tap (300 ms window) to start Voice Assistant conversation.
 
 ### `.app` bundle (`Krab Ear.app/`):
 - Standard macOS app bundle (`com.antigravity.krab-ear`, LSUIElement=true, macOS 13+).
@@ -204,7 +235,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: 4482 passed across 178 test files.
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: **6391+ passed** across 243+ test files.
 
 ### Swift agent
 
@@ -232,6 +263,42 @@ make lint          # Flake8 on Python backend
 - `Start Krab Ear.command` — full launch (venv setup + agent start)
 - `Update Krab Ear Agent.command` — rebuild Swift agent only
 - `start_rest_service.command` — launch Flask REST API
+
+### Launch app
+```bash
+# Open the .app bundle (production, launchd-managed backend)
+open "Krab Ear.app"
+
+# Or run agent binary directly (dev mode, manual backend)
+python KrabEar/main.py --data-dir ~/.krab_ear_data &
+./native/runtime/KrabEarAgent
+```
+
+### Sentry / observability
+```bash
+# Enable Sentry crash reporting (set DSN via IPC)
+python3 -c "
+import socket, json
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.path.expanduser('~/Library/Application Support/KrabEar/krabear.sock'))
+sock.sendall(json.dumps({'id':'1','method':'set_settings','params':{'sentry_dsn':'https://YOUR_DSN@sentry.io/PROJECT_ID'}}).encode()+b'\n')
+print(sock.recv(4096).decode())
+"
+
+# Sentry alerts also land in: ~/Library/Logs/KrabEar/sentry_errors.log (when log level=debug)
+```
+
+### Call automation (Phase 3 — Telnyx / Twilio)
+```bash
+# Set provider credentials via IPC (one-time)
+# Telnyx: sign up at telnyx.com → Mission Control → API Keys
+# Twilio:  sign up at twilio.com → Console → Account SID + Auth Token
+
+# Switch active provider (default: telnyx)
+# set_settings { "call_provider": "telnyx" }   # or "twilio"
+# set_settings { "telnyx_api_key": "KEY_...", "telnyx_phone": "+1..." }
+# set_settings { "twilio_account_sid": "AC...", "twilio_auth_token": "...", "twilio_phone": "+1..." }
+```
 
 ## Important Patterns
 
@@ -272,6 +339,11 @@ make lint          # Flake8 on Python backend
 - **Diarization on Metal GPU**: pyannote.audio + torch 2.11, device selected via `diarization_device` setting (auto-selects `mps` on Apple Silicon when available).
 - **GUI layout**: 3 tabs (Main, History, Settings) with 9 total collapsible sections. Tab state is persisted via NSUserDefaults.
 - **Call Assist**: `start_call_assist` / `stop_call_assist` and related IPC methods (`call_assist_diagnostics`, `call_assist_summary`, `call_assist_timeline_*`, `call_assist_quick_phrase`) manage a real-time call translation/assist session.
+- **Sentry observability**: `backend/observability.py` wraps `sentry_sdk`. Call `init_sentry(dsn)` at startup (done in `main.py`). All functions are no-op when `dsn` is `None` or empty — safe to ship without a DSN. Swift side: `SentryConfig.init(dsn:)` reads `settings.sentry_dsn` via IPC on launch. Self-hosted GlitchTip (Sentry-compatible) is fully supported.
+- **Call provider abstraction**: `CALL_PROVIDER` setting (`telnyx` | `twilio`) selects the active adapter at runtime. Both adapters (`TelnyxAdapter`, `TwilioAdapter`) implement the same interface. Credentials are per-provider settings: `telnyx_api_key` / `twilio_account_sid` + `twilio_auth_token`. Stub mode active when credentials absent.
+- **Single-instance guard**: `SingleInstanceGuard.swift` runs at app startup and kills any existing `KrabEarAgent` process (same bundle path). Prevents double-paste, double-hotkey, and IPC port conflicts after crash-restart.
+- **Selection translate flow (Phase 2A)**: Cmd+Shift+T → `SelectionTranslator.swift` → (A) AX API reads `kAXSelectedTextAttribute` → sends `translate_selection` IPC → writes back via `AXUIElementSetAttributeValue`; (B) fallback: save clipboard → Cmd+C → read clipboard → translate → Cmd+V → restore clipboard. Failure shows error HUD, never mutates text.
+- **Live subtitles flow (Phase 2B)**: `SystemAudioCapture.swift` (ScreenCaptureKit) taps system audio → base64-encodes 16 kHz PCM chunks → `live_subs_push_chunk` IPC → `LiveSubsService.py` accumulates ≥3 s → Whisper STT → translate → emits `live_subs.result` via EventBus → SSE stream → `LiveSubtitlesOverlay.swift` HUD panel. Requires Screen Recording permission.
 - **MLX thread-safety**: MLX (mlx_whisper, mlx.core) is NOT thread-safe — concurrent GPU access corrupts internal `__hash_table<MTL::Resource*>` causing SIGSEGV. ALL MLX inference must be serialized through `core.mlx_lock.mlx_lock()` (RLock — reentrant). Pattern:
   ```python
   from core.mlx_lock import mlx_lock
