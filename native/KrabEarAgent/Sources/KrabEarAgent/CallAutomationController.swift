@@ -698,11 +698,12 @@ final class CallAutomationController: NSViewController {
         startButton.isEnabled = false
         startButton.title = "Набираем..."
 
+        let providerKey = self.selectedProvider.settingKey
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let result = try? self.ipcClient.call(
                 method: "call_dial",
-                params: ["phone": phone, "goal": goal, "provider": self.selectedProvider.settingKey]
+                params: ["phone": phone, "goal": goal, "provider": providerKey]
             )
             DispatchQueue.main.async {
                 self.handleDialResponse(result, phone: phone, goal: goal)
