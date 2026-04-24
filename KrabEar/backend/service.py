@@ -128,6 +128,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import subprocess
 import platform
 import sys
 import threading
@@ -4374,6 +4375,37 @@ def build_service(data_dir: Path) -> BackendService:
     return BackendService(store=store)
 
 
+def _trigger_sentry_release_async() -> None:
+    """Запускает sentry_create_release.py в фоне — не блокирует старт.
+
+    Вызывается только когда SENTRY_AUTO_RELEASE=1 и Sentry инициализирован.
+    Ошибки логируются, но не останавливают сервис.
+    """
+    script = Path(__file__).parent.parent.parent / "scripts" / "sentry_create_release.py"
+
+    def _run() -> None:
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                logger.info("Sentry release created: %s", result.stdout.strip())
+            else:
+                logger.warning(
+                    "sentry_create_release.py failed (rc=%d): %s",
+                    result.returncode,
+                    result.stderr.strip(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to trigger Sentry release: %s", exc)
+
+    thread = threading.Thread(target=_run, daemon=True, name="sentry-release")
+    thread.start()
+
+
 def main() -> None:
     """CLI entrypoint backend-сервиса."""
     parser = argparse.ArgumentParser(description="Krab Ear backend service")
@@ -4400,6 +4432,10 @@ def main() -> None:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
     else:
         logger.debug("Sentry telemetry отключена (DSN не задан)")
+
+    # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1
+    if os.environ.get("SENTRY_AUTO_RELEASE") == "1" and sentry_ok:
+        _trigger_sentry_release_async()
 
     service = build_service(data_dir)
     server = IPCServer(socket_path=socket_path, service=service)
