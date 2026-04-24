@@ -67,7 +67,13 @@ extension ConversationViewController {
         // 80ms буфер = 16000 * 0.08 = 1280 сэмплов.
         let bufferSize: AVAudioFrameCount = 1280
 
-        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, _ in
+        // Swift 6: AVAudioNodeTapBlock runs on the Core Audio real-time thread.
+        // Without an explicit `@Sendable` annotation the compiler infers the closure as
+        // `@MainActor`-isolated (because `startAudioCapture` is `@MainActor`), which makes
+        // the Swift 6 runtime assert `_swift_task_checkIsolatedSwift` trap with
+        // EXC_BREAKPOINT when the block fires from `RealtimeMessenger.mServiceQueue`.
+        // Marking the block `@Sendable` breaks that inference and satisfies Swift 6.
+        let tapBlock: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, _ in
             // ⚠️ Core Audio real-time thread — do NOT access @MainActor properties here.
             // Use the nonisolated mirror _rtSessionActive instead of self.isSessionActive.
             guard self != nil, ConversationViewController._rtSessionActive else { return }
@@ -96,6 +102,8 @@ extension ConversationViewController {
                 self?.processAudioSamples(samples)
             }
         }
+
+        inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat, block: tapBlock)
 
         audioHolder.engine = engine
 

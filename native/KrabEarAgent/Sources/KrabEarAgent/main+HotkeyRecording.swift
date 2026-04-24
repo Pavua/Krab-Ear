@@ -22,7 +22,19 @@ extension AgentAppDelegate {
         }
         lastToggleRequestAt = now
 
+        // Dispatch IPC work off the main thread to prevent the 2000ms+ main-thread
+        // hang (Sentry KRAB-EAR-AGENT-3) caused by synchronous `callWithRecovery`
+        // blocking the main runloop. UI state reads happen before the hop;
+        // stopRecording/startRecording update UI state via @MainActor methods inside.
         let wasRecordingLocally = isRecording
+        Task.detached { [weak self] in
+            await self?.performRecordToggle(wasRecordingLocally: wasRecordingLocally)
+        }
+    }
+
+    /// Выполнить логику toggle записи вне главного потока.
+    /// Все обращения к @MainActor-изолированным свойствам сделаны через явные `await MainActor.run`.
+    func performRecordToggle(wasRecordingLocally: Bool) async {
         let backendRecording = syncRecordingStateWithBackend()
         if backendRecording != wasRecordingLocally {
             logger.warn("Десинхрон состояния записи: local=\(wasRecordingLocally), backend=\(backendRecording)")
@@ -31,24 +43,28 @@ extension AgentAppDelegate {
         // Если локально считалось, что пишем, но backend уже idle — не стартуем новую
         // запись этим же нажатием. Сначала фиксируем состояние, следующий toggle начнёт запись явно.
         if wasRecordingLocally && !backendRecording {
-            notify(
-                title: "Krab Ear",
-                body: "Запись уже остановлена в backend. Состояние синхронизировано."
-            )
+            await MainActor.run {
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Запись уже остановлена в backend. Состояние синхронизировано."
+                )
+            }
             return
         }
 
         // Если backend пишет, а локально флаг был сбит, сначала корректно завершаем зависшую запись.
         if !wasRecordingLocally && backendRecording {
-            notify(
-                title: "Krab Ear",
-                body: "Найден рассинхрон записи. Сначала завершаю зависшую сессию."
-            )
+            await MainActor.run {
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Найден рассинхрон записи. Сначала завершаю зависшую сессию."
+                )
+            }
             stopRecording()
             return
         }
 
-        if isRecording {
+        if wasRecordingLocally {
             stopRecording()
         } else {
             startRecording()
