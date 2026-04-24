@@ -228,6 +228,15 @@ class Settings(BaseSettings):
     # При True: если Silero/Kokoro недоступны — fallback на macOS `say` (последний резерв).
     TTS_FALLBACK_SAY: bool = True
 
+    # --- Telnyx SIP/Call Control adapter (Phase 3 step 3/4) ---
+    # Прямой REST-fallback к Telnyx Call Control API (без FreeSWITCH).
+    # Пустой TELNYX_API_KEY = stub-режим (все методы возвращают ошибку
+    # "telnyx_not_configured", никаких реальных запросов не делается).
+    # TELNYX_FROM_NUMBER — Telnyx-номер в формате E.164 (например "+15551234567").
+    TELNYX_API_KEY: str = ""
+    TELNYX_CONNECTION_ID: str = ""
+    TELNYX_FROM_NUMBER: str = ""
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
