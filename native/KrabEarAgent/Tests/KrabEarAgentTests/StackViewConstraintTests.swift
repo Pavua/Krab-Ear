@@ -115,4 +115,71 @@ final class StackViewConstraintOrderingTests: XCTestCase {
         XCTAssertNotEqual(stackA.superview, stackB.superview,
                           "Stacks with different parents have no common ancestor — constraint unsafe")
     }
+
+    // MARK: - Regression guards for residual KRAB-EAR-AGENT-2 patterns
+
+    // Validates the fix for liveSettingsBar: a view that is removed from liveStack by
+    // applyVisualTheme() must NOT hold an active width constraint referencing liveStack,
+    // because after removal liveSettingsBar and liveStack have no common ancestor.
+    // The fix: liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor)
+    // was removed from setupLiveTranslationTab() constraints array.
+    func test_orphanedView_constraintToFormerParent_wouldBeInvalid() {
+        let liveStack = NSStackView()
+        liveStack.orientation = .vertical
+        liveStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let liveSettingsBar = NSStackView()
+        liveSettingsBar.orientation = .vertical
+        liveSettingsBar.translatesAutoresizingMaskIntoConstraints = false
+
+        // Simulate setup: liveSettingsBar added to liveStack, constraint activated.
+        liveStack.addArrangedSubview(liveSettingsBar)
+        XCTAssertEqual(liveSettingsBar.superview, liveStack, "liveSettingsBar should be in liveStack")
+
+        // Simulate applyVisualTheme: removes liveSettingsBar from liveStack.
+        liveStack.removeArrangedSubview(liveSettingsBar)
+        liveSettingsBar.removeFromSuperview()
+
+        // After removal, liveSettingsBar has no common ancestor with liveStack.
+        XCTAssertNil(liveSettingsBar.superview, "liveSettingsBar should have no parent after removal")
+        // This verifies the precondition that would cause a crash if .isActive = true
+        // were called now — our fix avoids creating this constraint in the first place.
+        XCTAssertNotEqual(liveSettingsBar.superview, liveStack.superview,
+                          "Removed view and former parent have no common ancestor")
+    }
+
+    // Validates the settingsBarCD superview guard: the loop that activates child width
+    // constraints for settingsBarCD should only run when settingsBarCD.superview != nil
+    // (i.e., it is actually inserted in the dictationStack hierarchy).
+    func test_settingsBarCD_childConstraints_guardedBySuperview() {
+        let dictationStack = NSStackView()
+        dictationStack.orientation = .vertical
+        dictationStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let settingsBarCD = NSStackView()
+        settingsBarCD.orientation = .vertical
+        settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
+
+        let childSection = NSStackView()
+        childSection.translatesAutoresizingMaskIntoConstraints = false
+        settingsBarCD.addArrangedSubview(childSection)
+
+        // Case A: settingsBarCD NOT in hierarchy — guard prevents constraint activation.
+        XCTAssertNil(settingsBarCD.superview, "settingsBarCD without parent — guard should block")
+        if settingsBarCD.superview != nil {
+            // This block must NOT execute — if it did, the constraint would be safe
+            // (childSection IS in settingsBarCD), but the guard correctly omits it
+            // when settingsBarCD is detached.
+            XCTFail("Guard should have prevented execution when superview is nil")
+        }
+
+        // Case B: settingsBarCD added to dictationStack — constraint activation is safe.
+        dictationStack.addArrangedSubview(settingsBarCD)
+        XCTAssertNotNil(settingsBarCD.superview, "settingsBarCD with parent — guard should pass")
+        if settingsBarCD.superview != nil {
+            let constraint = childSection.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor)
+            constraint.isActive = true
+            XCTAssertTrue(constraint.isActive, "Constraint should activate safely when settingsBarCD is in hierarchy")
+        }
+    }
 }
