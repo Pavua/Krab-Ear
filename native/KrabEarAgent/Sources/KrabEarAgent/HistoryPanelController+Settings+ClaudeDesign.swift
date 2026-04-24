@@ -84,6 +84,12 @@ final class CDSettingsCardView: NSVisualEffectView {
     }
 }
 
+// MARK: - Associated object key for analytics dashboard
+
+private enum AssocDashboardKey {
+    nonisolated(unsafe) static var dashboardWC: UInt8 = 0
+}
+
 // MARK: - Claude Design helpers
 
 extension HistoryPanelController {
@@ -392,6 +398,10 @@ extension HistoryPanelController {
             badgeOnRight: false
         )
 
+        // Analytics dashboard button
+        let analyticsBtn = ThemeSecondaryButton(title: "Открыть аналитику", target: self, action: #selector(onOpenAnalyticsDashboard))
+        let analyticsRow = cdMakeRow(label: "Дашборд аналитики", control: analyticsBtn)
+
         card.contentStackView.addArrangedSubview(overlayRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(pasteRow)
@@ -405,9 +415,18 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(dockRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(abRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(analyticsRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
+    }
+
+    @objc func onOpenAnalyticsDashboard() {
+        let wc = AnalyticsDashboardWindowController(ipcClient: ipcClient)
+        wc.showWindow(nil)
+        // Keep strong reference while shown
+        objc_setAssociatedObject(self, &AssocDashboardKey.dashboardWC, wc, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     // MARK: - Section 6: Автозвонки (Claude Design)
