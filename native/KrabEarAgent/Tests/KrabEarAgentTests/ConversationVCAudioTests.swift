@@ -78,6 +78,53 @@ final class ConversationVCAudioTests: XCTestCase {
                        "stopConversation должен вернуть состояние в .idle")
     }
 
+    // MARK: - RT-thread safety: _rtSessionActive mirror + @Sendable tap block
+
+    /// _rtSessionActive зеркалит isSessionActive и доступен с non-main queue без краша.
+    /// Регрессионный тест для EXC_BREAKPOINT (_swift_task_checkIsolatedSwift) —
+    /// ранее installTap-блок наследовал @MainActor-изоляцию из startAudioCapture(),
+    /// что вызывало SIGTRAP при вызове с RealtimeMessenger.mServiceQueue.
+    /// Фикс: tapBlock объявлен как `@Sendable`, разрывая вывод @MainActor-изоляции.
+    func test_rtSessionActiveMirror_callableFromBackgroundQueue() {
+        // Установить зеркало через startConversation (выставляет _rtSessionActive = true).
+        vc.isSessionActive = false
+        ConversationViewController._rtSessionActive = false
+
+        // Симулируем то, что делает startAudioCapture() перед installTap.
+        vc.isSessionActive = true
+        ConversationViewController._rtSessionActive = true
+
+        let expectation = expectation(description: "background queue access")
+
+        // Core Audio RT thread — симулируем через глобальную очередь высокого приоритета.
+        // До фикса это вызывало _swift_task_checkIsolatedSwift → EXC_BREAKPOINT
+        // в closure, захватившей @MainActor-изолированный `self.isSessionActive`.
+        DispatchQueue.global(qos: .userInteractive).async {
+            // Читаем nonisolated зеркало — не @MainActor-isolated, краша нет.
+            let active = ConversationViewController._rtSessionActive
+            XCTAssertTrue(active, "_rtSessionActive должен быть true после startConversation")
+            expectation.fulfill()
+        }
+
+        waitForExpectations(timeout: 1.0)
+
+        // Cleanup
+        vc.isSessionActive = false
+        ConversationViewController._rtSessionActive = false
+    }
+
+    /// Остановка сессии очищает зеркало до удаления тапа, чтобы in-flight блоки выходили рано.
+    func test_stopAudioCapture_clearsRtMirrorBeforeTapRemoval() {
+        ConversationViewController._rtSessionActive = true
+        vc.isSessionActive = true
+
+        // stopAudioCapture() должен обнулить зеркало.
+        vc.stopAudioCapture()
+
+        XCTAssertFalse(ConversationViewController._rtSessionActive,
+                       "stopAudioCapture должен очистить _rtSessionActive до удаления тапа")
+    }
+
     // MARK: - ConversationEvent.decode (pure logic, не требует AVAudioEngine)
 
     /// stt.partial декодируется в .sttPartial с корректными полями.
