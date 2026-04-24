@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [codex/krab-ear-v2]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     name: Python ${{ matrix.python-version }}
@@ -28,16 +32,19 @@ jobs:
       - name: Cache pip dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: pip-${{ matrix.python-version }}-${{ hashFiles('KrabEar/requirements.txt') }}
+          path: |
+            ~/.cache/pip
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('KrabEar/requirements.txt') }}
           restore-keys: |
-            pip-${{ matrix.python-version }}-
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+            ${{ runner.os }}-pip-
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r KrabEar/requirements.txt
-          pip install pytest pytest-cov flake8
+          pip install pytest pytest-cov flake8 pytest-xdist
 
       - name: Lint (flake8)
         run: |
@@ -109,7 +116,7 @@ jobs:
             --tb=short \
             --cov=KrabEar \
             --cov-report=term-missing \
-            -p no:cacheprovider
+            -n auto
 
   swift:
     name: Swift agent build
@@ -118,6 +125,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Cache Swift Package Manager
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            native/KrabEarAgent/.build/checkouts
+          key: ${{ runner.os }}-spm-${{ hashFiles('native/KrabEarAgent/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
 
       - name: Build Swift agent
         run: cd native/KrabEarAgent && swift build -c release
