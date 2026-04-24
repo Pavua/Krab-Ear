@@ -46,6 +46,21 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
         run: |
           python -m pytest KrabEar/tests/ -v --tb=short -n auto
+      - name: Compare benchmark history (regression gate)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/KrabEar
+        run: |
+          python scripts/compare_benchmarks.py || (echo '::error::Benchmark regression detected' && exit 1)
+
+      - name: Upload benchmark history artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-history
+          path: .benchmarks/history.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
 
   swift-build:
     runs-on: macos-latest
