@@ -1,15 +1,16 @@
 #!/bin/zsh
 # ------------------------------------------------------------------
-# Восстановление прав Accessibility для Krab Ear (.app bundle).
+# Восстановление прав TCC для Krab Ear (.app bundle).
 #
 # Почему это нужно:
 # macOS TCC привязывает разрешения к cdhash бинарника. При ad-hoc signing
 # (codesign -s -) каждая пересборка даёт новый cdhash → TCC считает app
-# новым → разрешение нужно выдавать заново. Этот скрипт:
-#  1) Убивает старые процессы (standalone binary + bundle);
-#  2) Чистит stale TCC записи для нашего bundle ID;
+# новым → разрешения нужно выдавать заново. Этот скрипт:
+#  1) Убивает старые процессы;
+#  2) Чистит stale TCC записи (Accessibility, Microphone, ScreenCapture, ListenEvent);
 #  3) Открывает System Settings → Accessibility;
-#  4) Запускает .app bundle чтобы при первом paste показал диалог.
+#  4) Выводит инструкции на русском;
+#  5) Перезапускает .app bundle.
 # ------------------------------------------------------------------
 
 set -euo pipefail
@@ -19,55 +20,67 @@ BUNDLE_ID="com.antigravity.krab-ear"
 APP_BUNDLE="$ROOT_DIR/Krab Ear.app"
 
 echo "----------------------------------------------------------------"
-echo "Krab Ear: восстановление прав Accessibility"
+echo "Krab Ear: восстановление прав TCC (Accessibility / Mic / Screen)"
 echo "----------------------------------------------------------------"
 echo ""
 
 if [ ! -d "$APP_BUNDLE" ]; then
-  echo "❌ Не найден .app bundle: $APP_BUNDLE"
+  echo "Не найден .app bundle: $APP_BUNDLE"
   echo "   Сначала выполните: make build && make sign"
   exit 1
 fi
 
-echo "1/4 Убиваем старые процессы..."
-pkill -f "Krab Ear.app/Contents/MacOS/KrabEarAgent" 2>/dev/null || true
-# standalone binary (устаревший путь запуска) — kill тоже
+echo "1/5 Убиваем старые процессы..."
+pkill -9 -f "Krab Ear.app/Contents/MacOS/KrabEarAgent" 2>/dev/null || true
 pkill -f "native/runtime/KrabEarAgent" 2>/dev/null || true
 pkill -f "native/KrabEarAgent/.build/release/KrabEarAgent" 2>/dev/null || true
+sleep 1
 
-echo "2/4 Чистим stale TCC записи для $BUNDLE_ID..."
-# Текущий bundle ID
+echo "2/5 Сбрасываем Accessibility..."
 tccutil reset Accessibility "$BUNDLE_ID" >/dev/null 2>&1 || true
-tccutil reset PostEvent "$BUNDLE_ID" >/dev/null 2>&1 || true
-tccutil reset ListenEvent "$BUNDLE_ID" >/dev/null 2>&1 || true
-tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
-# Legacy identifiers из прошлых версий (на всякий случай)
 tccutil reset Accessibility com.krabear.agent >/dev/null 2>&1 || true
 tccutil reset Accessibility KrabEarAgent >/dev/null 2>&1 || true
 
-echo "3/4 Открываем System Settings → Privacy & Security → Accessibility..."
-echo ""
-echo "  В открывшемся окне:"
-echo "    — Удалите любые старые записи 'Krab Ear.app' и 'KrabEarAgent' кнопкой (−)"
-echo "    — НЕ нажимайте '+' вручную — macOS само предложит при запросе"
-echo ""
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
+echo "3/5 Сбрасываем Microphone..."
+tccutil reset Microphone "$BUNDLE_ID" >/dev/null 2>&1 || true
 
-echo "4/4 Запускаем Krab Ear.app (через 3 секунды)..."
-sleep 3
-open "$APP_BUNDLE" --args --show-history
+echo "4/5 Сбрасываем ScreenCapture и ListenEvent..."
+tccutil reset ScreenCapture "$BUNDLE_ID" >/dev/null 2>&1 || true
+tccutil reset ListenEvent "$BUNDLE_ID" >/dev/null 2>&1 || true
+tccutil reset PostEvent "$BUNDLE_ID" >/dev/null 2>&1 || true
+tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
 
 echo ""
 echo "----------------------------------------------------------------"
-echo "Готово! Дальнейшие шаги (подтверждённый flow):"
+echo "ИНСТРУКЦИЯ: что сделать в System Settings"
+echo "----------------------------------------------------------------"
 echo ""
-echo "  1. Активируйте Right Option → скажите фразу → отпустите"
-echo "  2. macOS может показать dialog Accessibility — закройте его"
-echo "     (всё равно текст уже в clipboard, можно вставить Cmd+V)"
-echo "  3. В открытом System Settings появится запись 'Krab Ear'"
-echo "     с тумблером OFF — ВКЛЮЧИТЕ тумблер вручную"
-echo "  4. Попробуйте paste ещё раз — теперь работает без dialog"
+echo "  1. Найди Krab Ear в списке Универсального доступа."
+echo "  2. Нажми '-' чтобы удалить запись."
+echo "  3. Нажми '+' чтобы добавить заново."
+echo "  4. Выбери: $APP_BUNDLE"
+echo "  5. Toggle должен включиться."
+echo "  6. Повтори для Microphone и Screen Recording в соседних pane."
 echo ""
-echo "  До следующей пересборки агента — всё стабильно."
-echo "  После пересборки — запустите этот скрипт снова."
+echo "----------------------------------------------------------------"
+
+echo "5/5 Открываем System Settings → Privacy & Security → Accessibility..."
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
+
+echo ""
+echo "Перезапускаем Krab Ear.app через 3 секунды..."
+sleep 3
+open "$APP_BUNDLE"
+
+echo ""
+echo "----------------------------------------------------------------"
+echo "Готово! Дальнейшие шаги:"
+echo ""
+echo "  1. Активируйте Right Option → скажите фразу → отпустите."
+echo "  2. macOS может показать диалог разрешения — подтвердите его."
+echo "  3. В System Settings включите тумблер напротив Krab Ear."
+echo "  4. Также проверьте Microphone и Screen Recording."
+echo "  5. После включения вставка работает без диалогов."
+echo ""
+echo "  После следующей пересборки агента — запустите скрипт снова."
 echo "----------------------------------------------------------------"
