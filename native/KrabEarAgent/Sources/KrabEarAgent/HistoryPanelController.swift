@@ -1479,12 +1479,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationStack.topAnchor.constraint(equalTo: dictationOuterScroll.contentView.topAnchor, constant: 12),
             dictationStack.leadingAnchor.constraint(equalTo: dictationOuterScroll.contentView.leadingAnchor, constant: 12),
             dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
-            controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            // NOTE: settingsBarCD width constraint is applied in applyVisualTheme() AFTER
-            // settingsBarCD is added to dictationStack via addArrangedSubview. Activating it
-            // here (before a common ancestor exists) causes KRAB-EAR-AGENT-2 crash:
-            // "Unable to activate constraint with anchors … because they have no common ancestor."
+            // NOTE: controlRow, settingsBar, settingsBarCD width constraints are applied in
+            // applyVisualTheme() AFTER each view is added to dictationStack via addArrangedSubview.
+            // Activating them here risks "no common ancestor" if the hierarchy hasn't been
+            // established yet (KRAB-EAR-AGENT-2). applyVisualTheme loops handle all dictationStack
+            // child width constraints uniformly.
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHintLabel.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1540,7 +1539,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             liveStack.topAnchor.constraint(equalTo: liveOuterScroll.contentView.topAnchor, constant: 12),
             liveStack.leadingAnchor.constraint(equalTo: liveOuterScroll.contentView.leadingAnchor, constant: 12),
             liveStack.trailingAnchor.constraint(equalTo: liveOuterScroll.contentView.trailingAnchor, constant: -12),
-            liveSettingsBar.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
+            // NOTE: liveSettingsBar is intentionally excluded — applyVisualTheme() removes
+            // liveSettingsBar from liveStack (it becomes orphaned), so a liveSettingsBar ↔ liveStack
+            // constraint would become invalid (no common ancestor) after the first applyVisualTheme
+            // call. Residual stale constraints are a source of KRAB-EAR-AGENT-2-style exceptions.
+            // toolsRow, callAssistControlRow etc. are constrained in applyVisualTheme via the
+            // liveStack.arrangedSubviews loop (after they've been wrapped in card views).
             toolsRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callAssistControlRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
             callPhrasePresetRow.widthAnchor.constraint(equalTo: liveStack.widthAnchor),
@@ -2118,9 +2122,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor).isActive = true
         }
 
-        // Width constraints for settingsBarCD children (Claude Design variant)
-        for child in settingsBarCD.arrangedSubviews {
-            child.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor).isActive = true
+        // Width constraints for settingsBarCD children (Claude Design variant).
+        // Guard: only activate when settingsBarCD is actually in the view hierarchy
+        // (i.e. CD variant is active). Activating against a detached NSStackView
+        // would leave stale constraints referencing views with no common ancestor
+        // once settingsBarCD is later replaced — partial guard against KRAB-EAR-AGENT-2.
+        if settingsBarCD.superview != nil {
+            for child in settingsBarCD.arrangedSubviews {
+                child.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor).isActive = true
+            }
         }
 
         for child in dictationStack.arrangedSubviews {
