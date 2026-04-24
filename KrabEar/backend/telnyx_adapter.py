@@ -206,8 +206,12 @@ class TelnyxAdapter:
         }
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — CallProvider interface
     # ------------------------------------------------------------------
+
+    def is_configured(self) -> bool:
+        """Возвращает True если Telnyx API key задан."""
+        return self._configured
 
     def dial(
         self,
