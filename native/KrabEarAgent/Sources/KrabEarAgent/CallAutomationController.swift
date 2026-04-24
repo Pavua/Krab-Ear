@@ -6,6 +6,14 @@
  историю последних 10 звонков.
 
  Если backend возвращает "telnyx_not_configured" → показывает баннер настройки.
+
+ Polish v2:
+   1. Cost estimator preview (call_estimate_cost IPC) показывает ~$X.XXX/min (Country, Provider)
+   2. Phone validation tooltip + красная обводка если не E.164
+   3. Call history table: Date | To | Duration | Cost | Status icon | Goal (truncated)
+      Click row → modal с полным транскриптом
+   4. Emergency stop — большая красная кнопка ЭКСТРЕННО ПРЕРВАТЬ, всегда видна при активном звонке
+   5. Provider switcher — segmented control Telnyx / Twilio, зелёная точка если оба ключа настроены
 */
 
 import AppKit
@@ -43,6 +51,25 @@ struct CallSession {
             case .error:                 return .systemRed
             }
         }
+
+        /// Иконка-символ для колонки истории
+        var historyIcon: String {
+            switch self {
+            case .ended:            return "✓"
+            case .error:            return "✗"
+            case .ending:           return "⏱"
+            default:                return "•"
+            }
+        }
+
+        var historyIconColor: NSColor {
+            switch self {
+            case .ended:   return .systemGreen
+            case .error:   return .systemRed
+            case .ending:  return .systemOrange
+            default:       return .secondaryLabelColor
+            }
+        }
     }
 
     var sessionID: String
@@ -65,6 +92,12 @@ struct CallHistoryItem {
     let costUSD: Double
     let startedAt: String
     let summary: String
+
+    /// Отформатированная длительность mm:ss
+    var durationFormatted: String {
+        let total = Int(durationSec)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
 }
 
 // MARK: - Controller
@@ -82,6 +115,38 @@ final class CallAutomationController: NSViewController {
     private var callHistory: [CallHistoryItem] = []
     private var durationTimer: Timer?
     private var pollTimer: Timer?
+
+    /// Текущий выбранный провайдер
+    enum CallProvider: Int {
+        case telnyx = 0
+        case twilio = 1
+        var settingKey: String {
+            switch self {
+            case .telnyx: return "telnyx"
+            case .twilio: return "twilio"
+            }
+        }
+    }
+    private var selectedProvider: CallProvider = .telnyx
+
+    // MARK: - UI: Provider switcher
+
+    private let providerSegmented: NSSegmentedControl = {
+        let sc = NSSegmentedControl(labels: ["Telnyx", "Twilio"], trackingMode: .selectOne, target: nil, action: nil)
+        sc.selectedSegment = 0
+        sc.font = KrabEarTheme.Typography.caption
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        return sc
+    }()
+
+    private let providerStatusDot: NSTextField = {
+        let l = NSTextField(labelWithString: "●")
+        l.font = .systemFont(ofSize: 11)
+        l.textColor = .systemGray
+        l.toolTip = "API key и from-number не настроены"
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
 
     // MARK: - UI: Input
 
@@ -115,6 +180,16 @@ final class CallAutomationController: NSViewController {
         f.font = KrabEarTheme.Typography.body
         f.isEditable = true
         return f
+    }()
+
+    // MARK: - UI: Cost estimator preview
+
+    private let costEstimateLabel: NSTextField = {
+        let l = NSTextField(labelWithString: "")
+        l.font = KrabEarTheme.Typography.caption
+        l.textColor = KrabEarTheme.Colors.textSecondary
+        l.toolTip = "Примерная стоимость на основе номера и провайдера"
+        return l
     }()
 
     private let startButton = ThemePrimaryButton(title: "Начать звонок", target: nil, action: nil)
@@ -184,6 +259,23 @@ final class CallAutomationController: NSViewController {
         return b
     }()
 
+    // MARK: - UI: Emergency stop button
+
+    /// Большая красная кнопка — экстренный hangup без confirmation dialog.
+    private let emergencyStopButton: NSButton = {
+        let b = NSButton(title: "🛑 ЭКСТРЕННО ПРЕРВАТЬ", target: nil, action: nil)
+        b.bezelStyle = .rounded
+        b.font = .systemFont(ofSize: 13, weight: .bold)
+        b.contentTintColor = .white
+        b.wantsLayer = true
+        b.layer?.backgroundColor = NSColor.systemRed.cgColor
+        b.layer?.cornerRadius = 8
+        b.isHidden = true
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.toolTip = "Немедленно завершить звонок без подтверждения"
+        return b
+    }()
+
     // MARK: - UI: Config-not-set banner
 
     private let configBannerCard: NSVisualEffectView = {
@@ -248,6 +340,7 @@ final class CallAutomationController: NSViewController {
         wireTargets()
         updateSessionUI(session: nil)
         loadCallHistory()
+        refreshProviderStatus()
     }
 
     // MARK: - Build UI
@@ -268,6 +361,19 @@ final class CallAutomationController: NSViewController {
         outerStack.translatesAutoresizingMaskIntoConstraints = false
         outerStack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
 
+        // ---- Provider switcher row ----
+
+        let providerRow = NSStackView(views: [providerSegmented, providerStatusDot, NSView()])
+        providerRow.orientation = .horizontal
+        providerRow.spacing = 6
+        providerRow.alignment = .centerY
+        outerStack.addArrangedSubview(providerRow)
+
+        // ---- Emergency stop (fixed above input, visible during active call) ----
+
+        outerStack.addArrangedSubview(emergencyStopButton)
+        emergencyStopButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+
         // ---- Input section ----
 
         let inputCard = makeCard()
@@ -280,6 +386,7 @@ final class CallAutomationController: NSViewController {
         let phoneLabelRow = makeRow(label: phoneLabel, control: phoneField)
         inputStack.addArrangedSubview(phoneLabelRow)
         inputStack.addArrangedSubview(phoneValidationLabel)
+        inputStack.addArrangedSubview(costEstimateLabel)
         let goalLabelRow = makeRow(label: goalLabel, control: goalField)
         inputStack.addArrangedSubview(goalLabelRow)
 
@@ -375,31 +482,44 @@ final class CallAutomationController: NSViewController {
 
         historyTableView.style = .inset
         historyTableView.intercellSpacing = NSSize(width: 0, height: 2)
-        historyTableView.rowHeight = 40
-        historyTableView.headerView = nil
+        historyTableView.rowHeight = 32
         historyTableView.backgroundColor = .clear
         historyTableView.gridStyleMask = []
         historyTableView.dataSource = self
         historyTableView.delegate = self
+        historyTableView.doubleAction = #selector(onHistoryRowDoubleClick)
+        historyTableView.target = self
 
-        let colPhone = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("phone"))
-        colPhone.title = "Номер"
-        colPhone.width = 120
-        let colGoal = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("goal"))
-        colGoal.title = "Цель"
-        colGoal.width = 200
-        let colStatus = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("status"))
-        colStatus.title = "Статус"
-        colStatus.width = 80
-        let colCost = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("cost"))
-        colCost.title = "Стоимость"
-        colCost.width = 80
+        // Columns: Date/Time | To | Duration | Cost | Status | Goal
         let colDate = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("date"))
         colDate.title = "Дата"
-        colDate.width = 120
-        for col in [colPhone, colGoal, colStatus, colCost, colDate] {
+        colDate.width = 100
+
+        let colPhone = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("phone"))
+        colPhone.title = "Куда"
+        colPhone.width = 120
+
+        let colDuration = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("duration"))
+        colDuration.title = "Длит."
+        colDuration.width = 60
+
+        let colCost = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("cost"))
+        colCost.title = "Стоим."
+        colCost.width = 65
+
+        let colStatus = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("status"))
+        colStatus.title = "Ст."
+        colStatus.width = 30
+
+        let colGoal = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("goal"))
+        colGoal.title = "Цель"
+        colGoal.width = 160
+
+        for col in [colDate, colPhone, colDuration, colCost, colStatus, colGoal] {
             historyTableView.addTableColumn(col)
         }
+
+        historyTableView.headerView = NSTableHeaderView()
 
         historyScrollView.documentView = historyTableView
         historyScrollView.heightAnchor.constraint(equalToConstant: 200).isActive = true
@@ -409,7 +529,9 @@ final class CallAutomationController: NSViewController {
         for sub in [inputCard, configBannerCard, activeCallCard, historyScrollView] {
             sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor).isActive = true
         }
-        historyLabel.widthAnchor.constraint(equalTo: outerStack.widthAnchor).isActive = true
+        for sub in [historyLabel, providerRow, emergencyStopButton] {
+            sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor).isActive = true
+        }
 
         // Embed in outer scroll
         scrollOuter.documentView = outerStack
@@ -457,8 +579,6 @@ final class CallAutomationController: NSViewController {
 
     private func makeRow(label: NSView, control: NSView) -> NSStackView {
         label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
         row.spacing = KrabEarTheme.Metrics.standard
@@ -477,21 +597,87 @@ final class CallAutomationController: NSViewController {
         interveneButton.target = self
         interveneButton.action = #selector(onIntervene)
         phoneField.target = self
-        phoneField.action = #selector(onPhoneFieldChanged)
+        phoneField.action = #selector(onPhoneFieldCommit)
+        phoneField.delegate = self as? NSTextFieldDelegate
+        providerSegmented.target = self
+        providerSegmented.action = #selector(onProviderChanged)
+        emergencyStopButton.target = self
+        emergencyStopButton.action = #selector(onEmergencyStop)
     }
 
     // MARK: - Actions
 
-    @objc private func onPhoneFieldChanged() {
+    @objc private func onPhoneFieldCommit() {
+        validateAndPreviewCost()
+    }
+
+    /// Вызывается после каждого изменения номера: валидация + cost preview
+    private func validateAndPreviewCost() {
         let raw = phoneField.stringValue.trimmingCharacters(in: .whitespaces)
+        let valid = isValidE164(raw)
+
+        // Обводка
+        phoneField.layer?.borderWidth = 0
         if raw.isEmpty {
             phoneValidationLabel.stringValue = ""
-        } else if isValidE164(raw) {
+            costEstimateLabel.stringValue = ""
+        } else if valid {
             phoneValidationLabel.stringValue = "✓ Корректный формат E.164"
             phoneValidationLabel.textColor = .systemGreen
+            phoneField.layer?.borderWidth = 0
+            fetchCostEstimate(phone: raw)
         } else {
-            phoneValidationLabel.stringValue = "Введите номер в формате +7XXXXXXXXXX"
+            phoneValidationLabel.stringValue = "Use E.164 format: +34612345678"
             phoneValidationLabel.textColor = .systemRed
+            phoneField.wantsLayer = true
+            phoneField.layer?.borderWidth = 1.5
+            phoneField.layer?.borderColor = NSColor.systemRed.cgColor
+            phoneField.layer?.cornerRadius = 3
+            phoneField.toolTip = "Use E.164 format: +34612345678"
+            costEstimateLabel.stringValue = ""
+        }
+        if raw.isEmpty || valid {
+            phoneField.layer?.borderWidth = 0
+            phoneField.toolTip = nil
+        }
+    }
+
+    /// IPC вызов call_estimate_cost → показывает ~$X.XXX/min (Country, Provider)
+    private func fetchCostEstimate(phone: String) {
+        let provider = selectedProvider.settingKey
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let result = try? self.ipcClient.call(
+                method: "call_estimate_cost",
+                params: ["phone": phone, "provider": provider]
+            )
+            DispatchQueue.main.async {
+                self.applyCostEstimate(result)
+            }
+        }
+    }
+
+    private func applyCostEstimate(_ response: [String: Any]?) {
+        guard let result = response?["result"] as? [String: Any] else {
+            costEstimateLabel.stringValue = ""
+            return
+        }
+        let costPerMin  = (result["cost_per_minute"] as? Double) ?? 0
+        let country     = (result["country"] as? String) ?? ""
+        let provider    = (result["provider"] as? String) ?? selectedProvider.settingKey.capitalized
+
+        if costPerMin > 0 {
+            let providerTitle = provider.capitalized
+            let countryStr = country.isEmpty ? "" : " \(country),"
+            costEstimateLabel.stringValue = String(format: "~$%.3f/min (%@%@ %@)", costPerMin, countryStr.isEmpty ? "" : "", country, providerTitle)
+            // Более читаемый вариант
+            if country.isEmpty {
+                costEstimateLabel.stringValue = String(format: "~$%.3f/min (%@)", costPerMin, providerTitle)
+            } else {
+                costEstimateLabel.stringValue = String(format: "~$%.3f/min (%@, %@)", costPerMin, country, providerTitle)
+            }
+        } else {
+            costEstimateLabel.stringValue = ""
         }
     }
 
@@ -500,8 +686,12 @@ final class CallAutomationController: NSViewController {
         let goal  = goalField.stringValue.trimmingCharacters(in: .whitespaces)
 
         guard isValidE164(phone) else {
-            phoneValidationLabel.stringValue = "Введите номер в формате E.164 (+7XXXXXXXXXX)"
+            phoneValidationLabel.stringValue = "Use E.164 format: +34612345678"
             phoneValidationLabel.textColor = .systemRed
+            phoneField.wantsLayer = true
+            phoneField.layer?.borderWidth = 1.5
+            phoneField.layer?.borderColor = NSColor.systemRed.cgColor
+            phoneField.layer?.cornerRadius = 3
             return
         }
 
@@ -512,7 +702,7 @@ final class CallAutomationController: NSViewController {
             guard let self else { return }
             let result = try? self.ipcClient.call(
                 method: "call_dial",
-                params: ["phone": phone, "goal": goal]
+                params: ["phone": phone, "goal": goal, "provider": self.selectedProvider.settingKey]
             )
             DispatchQueue.main.async {
                 self.handleDialResponse(result, phone: phone, goal: goal)
@@ -541,6 +731,34 @@ final class CallAutomationController: NSViewController {
         }
     }
 
+    /// Экстренная остановка — hangup БЕЗ confirmation dialog
+    @objc private func onEmergencyStop() {
+        guard let sessionID = currentSession?.sessionID else { return }
+        emergencyStopButton.isEnabled = false
+        stopSessionPolling()
+        var s = currentSession
+        s?.status = .ending
+        currentSession = s
+        updateSessionUI(session: currentSession)
+
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self else { return }
+            let _ = try? self.ipcClient.call(
+                method: "call_hangup",
+                params: ["session_id": sessionID]
+            )
+            DispatchQueue.main.async {
+                var s2 = self.currentSession
+                s2?.status = .ended
+                s2?.endedAt = Date()
+                self.currentSession = s2
+                self.updateSessionUI(session: self.currentSession)
+                self.emergencyStopButton.isEnabled = true
+                self.loadCallHistory()
+            }
+        }
+    }
+
     @objc private func onIntervene() {
         guard let sessionID = currentSession?.sessionID else { return }
         let isActive = interveneButton.title == "Вмешаться"
@@ -554,6 +772,92 @@ final class CallAutomationController: NSViewController {
             DispatchQueue.main.async {
                 self.interveneButton.title = isActive ? "Передать боту" : "Вмешаться"
             }
+        }
+    }
+
+    @objc private func onProviderChanged() {
+        selectedProvider = providerSegmented.selectedSegment == 0 ? .telnyx : .twilio
+        refreshProviderStatus()
+        // Если уже введён корректный номер — обновить estimate
+        let raw = phoneField.stringValue.trimmingCharacters(in: .whitespaces)
+        if isValidE164(raw) { fetchCostEstimate(phone: raw) }
+    }
+
+    /// Click по строке истории → показать полный транскрипт в modal
+    @objc private func onHistoryRowDoubleClick() {
+        let row = historyTableView.clickedRow
+        guard row >= 0 && row < callHistory.count else { return }
+        let item = callHistory[row]
+        showTranscriptModal(for: item)
+    }
+
+    // MARK: - Provider status
+
+    /// Опрашивает IPC get_settings → проверяет настроены ли API ключ + from_number
+    private func refreshProviderStatus() {
+        let provider = selectedProvider.settingKey
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let result = try? self.ipcClient.call(method: "get_settings", params: [:])
+            DispatchQueue.main.async {
+                self.applyProviderStatus(result, provider: provider)
+            }
+        }
+    }
+
+    private func applyProviderStatus(_ response: [String: Any]?, provider: String) {
+        guard let settings = response?["result"] as? [String: Any] else { return }
+        let isConfigured: Bool
+        if provider == "telnyx" {
+            let key  = (settings["telnyx_api_key"]    as? String) ?? ""
+            let from = (settings["telnyx_from_number"] as? String) ?? ""
+            isConfigured = !key.isEmpty && !from.isEmpty
+        } else {
+            let sid  = (settings["twilio_account_sid"] as? String) ?? ""
+            let tok  = (settings["twilio_auth_token"]  as? String) ?? ""
+            let from = (settings["twilio_from_number"] as? String) ?? ""
+            isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
+        }
+        providerStatusDot.textColor = isConfigured ? .systemGreen : .systemGray
+        providerStatusDot.toolTip   = isConfigured
+            ? "\(provider.capitalized) настроен"
+            : "\(provider.capitalized): API key или from-number не задан в Настройках"
+    }
+
+    // MARK: - Transcript modal
+
+    private func showTranscriptModal(for item: CallHistoryItem) {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 380),
+                           styleMask: [.titled, .closable, .resizable],
+                           backing: .buffered, defer: false)
+        panel.title = "Транскрипт — \(item.phone)"
+        panel.isReleasedWhenClosed = false
+
+        let scroll = NSScrollView(frame: NSRect(x: 12, y: 48, width: 496, height: 320))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.autoresizingMask = [.width]
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.font = .systemFont(ofSize: 12)
+        let text = item.summary.isEmpty ? "(транскрипт недоступен)" : item.summary
+        tv.string = "Цель: \(item.goal)\nНомер: \(item.phone)\nДлительность: \(item.durationFormatted)\nСтоимость: \(item.costUSD > 0 ? String(format: "$%.3f", item.costUSD) : "—")\n\n\(text)"
+        scroll.documentView = tv
+
+        let closeBtn = NSButton(title: "Закрыть", target: panel, action: #selector(NSWindow.close))
+        closeBtn.frame = NSRect(x: 420, y: 10, width: 90, height: 28)
+        closeBtn.bezelStyle = .rounded
+
+        panel.contentView?.addSubview(scroll)
+        panel.contentView?.addSubview(closeBtn)
+
+        if let window = view.window {
+            window.beginSheet(panel, completionHandler: nil)
+        } else {
+            panel.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -579,7 +883,7 @@ final class CallAutomationController: NSViewController {
         if let result = response["result"] as? [String: Any] {
             let sessionID = (result["session_id"] as? String) ?? UUID().uuidString
             let statusRaw  = (result["status"] as? String) ?? "dialing"
-            var session = CallSession(
+            let session = CallSession(
                 sessionID: sessionID,
                 status: CallSession.Status(rawValue: statusRaw) ?? .dialing,
                 phone: phone,
@@ -661,6 +965,7 @@ final class CallAutomationController: NSViewController {
             costLabel.isHidden = true
             hangupButton.isHidden = true
             interveneButton.isHidden = true
+            emergencyStopButton.isHidden = true
             transcriptTextView.string = ""
             return
         }
@@ -682,6 +987,9 @@ final class CallAutomationController: NSViewController {
         hangupButton.isHidden = !isActive
         interveneButton.isHidden = !isActive
         hangupButton.isEnabled = true
+
+        // Кнопка экстренного прерывания — видна при ЛЮБОМ активном звонке
+        emergencyStopButton.isHidden = !isActive
     }
 
     private func updateDurationLabel() {
@@ -730,7 +1038,7 @@ final class CallAutomationController: NSViewController {
 
     // MARK: - Helpers
 
-    private func isValidE164(_ s: String) -> Bool {
+    func isValidE164(_ s: String) -> Bool {
         let pattern = #"^\+[1-9]\d{6,14}$"#
         return s.range(of: pattern, options: .regularExpression) != nil
     }
@@ -765,24 +1073,48 @@ extension CallAutomationController: NSTableViewDataSource, NSTableViewDelegate {
         let label = NSTextField(labelWithString: "")
         label.font = KrabEarTheme.Typography.caption
         label.translatesAutoresizingMaskIntoConstraints = false
+        label.lineBreakMode = .byTruncatingTail
         cell.addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
             label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
             label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
+
         switch tableColumn?.identifier.rawValue {
-        case "phone":  label.stringValue = item.phone
-        case "goal":   label.stringValue = item.goal
-        case "status": label.stringValue = item.status
+        case "date":
+            // Показываем дату+время если есть
+            let dateStr = item.startedAt
+            label.stringValue = dateStr.count >= 16 ? String(dateStr.prefix(16)) : String(dateStr.prefix(10))
+
+        case "phone":
+            label.stringValue = item.phone
+
+        case "duration":
+            label.stringValue = item.durationFormatted
+
         case "cost":
             label.stringValue = item.costUSD > 0 ? String(format: "$%.3f", item.costUSD) : "—"
-        case "date":
-            label.stringValue = String(item.startedAt.prefix(10))
-        default: break
+
+        case "status":
+            // Иконка статуса
+            let st = CallSession.Status(rawValue: item.status)
+            let icon = st?.historyIcon ?? "•"
+            label.stringValue = icon
+            label.textColor = st?.historyIconColor ?? .secondaryLabelColor
+            label.font = .systemFont(ofSize: 14)
+            label.alignment = .center
+
+        case "goal":
+            label.stringValue = item.goal
+
+        default:
+            break
         }
         return cell
     }
 
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 30 }
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 28 }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { true }
 }
