@@ -78,6 +78,12 @@ struct AgentSettings {
     var diarizationEnabled: Bool
     var llmRewriteEnabled: Bool
     var llmModel: String
+    // Phase 3.4 — Call Automation / Telnyx
+    var telnyxAPIKey: String
+    var telnyxFromNumber: String
+    var callMaxDurationMin: Int
+    var callCostWarnUSD: Double
+    var callAutoEndOnSilence: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -117,7 +123,12 @@ struct AgentSettings {
         onboardingCompleted: false,
         diarizationEnabled: true,
         llmRewriteEnabled: false,
-        llmModel: "qwen3.5-9b@6bit"
+        llmModel: "qwen3.5-9b@6bit",
+        telnyxAPIKey: "",
+        telnyxFromNumber: "",
+        callMaxDurationMin: 30,
+        callCostWarnUSD: 5.0,
+        callAutoEndOnSilence: true
     )
 
     init(from payload: [String: Any]) {
@@ -180,6 +191,11 @@ struct AgentSettings {
         self.diarizationEnabled = (payload["diarization_enabled"] as? Bool) ?? Self.default.diarizationEnabled
         self.llmRewriteEnabled = (payload["llm_rewrite_enabled"] as? Bool) ?? Self.default.llmRewriteEnabled
         self.llmModel = (payload["llm_model"] as? String) ?? Self.default.llmModel
+        self.telnyxAPIKey = (payload["telnyx_api_key"] as? String) ?? Self.default.telnyxAPIKey
+        self.telnyxFromNumber = (payload["telnyx_from_number"] as? String) ?? Self.default.telnyxFromNumber
+        self.callMaxDurationMin = (payload["call_max_duration_min"] as? Int) ?? Self.default.callMaxDurationMin
+        self.callCostWarnUSD = (payload["call_cost_warn_usd"] as? Double) ?? Self.default.callCostWarnUSD
+        self.callAutoEndOnSilence = (payload["call_auto_end_on_silence"] as? Bool) ?? Self.default.callAutoEndOnSilence
     }
 
     init(
@@ -217,7 +233,12 @@ struct AgentSettings {
         onboardingCompleted: Bool,
         diarizationEnabled: Bool,
         llmRewriteEnabled: Bool,
-        llmModel: String
+        llmModel: String,
+        telnyxAPIKey: String,
+        telnyxFromNumber: String,
+        callMaxDurationMin: Int,
+        callCostWarnUSD: Double,
+        callAutoEndOnSilence: Bool
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -254,6 +275,11 @@ struct AgentSettings {
         self.diarizationEnabled = diarizationEnabled
         self.llmRewriteEnabled = llmRewriteEnabled
         self.llmModel = llmModel
+        self.telnyxAPIKey = telnyxAPIKey
+        self.telnyxFromNumber = telnyxFromNumber
+        self.callMaxDurationMin = callMaxDurationMin
+        self.callCostWarnUSD = callCostWarnUSD
+        self.callAutoEndOnSilence = callAutoEndOnSilence
     }
 
     func toPayload() -> [String: Any] {
@@ -293,6 +319,11 @@ struct AgentSettings {
             "diarization_enabled": diarizationEnabled,
             "llm_rewrite_enabled": llmRewriteEnabled,
             "llm_model": llmModel,
+            "telnyx_api_key": telnyxAPIKey,
+            "telnyx_from_number": telnyxFromNumber,
+            "call_max_duration_min": callMaxDurationMin,
+            "call_cost_warn_usd": callCostWarnUSD,
+            "call_auto_end_on_silence": callAutoEndOnSilence,
         ]
     }
 }
