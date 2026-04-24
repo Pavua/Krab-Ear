@@ -602,10 +602,10 @@ final class CallAutomationController: NSViewController {
 
     private func startSessionPolling(sessionID: String) {
         durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async { self?.updateDurationLabel() }
+            Task { @MainActor in self?.updateDurationLabel() }
         }
         pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.pollSessionStatus(sessionID: sessionID)
+            Task { @MainActor in self?.pollSessionStatus(sessionID: sessionID) }
         }
     }
 
