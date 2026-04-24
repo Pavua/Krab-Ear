@@ -485,6 +485,7 @@ class BackendService:
             "export_obsidian": self._history.handle_export_obsidian,  # Obsidian-совместимый .md экспорт
             "export_history_json": self._history.handle_export_history_json,
             "export_html_report": self._history.handle_export_html_report,  # автономный HTML-отчёт с аналитикой
+            "generate_html_report": self._history.handle_export_html_report,  # алиас для Swift UI (Analytics Dashboard)
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
@@ -1152,6 +1153,8 @@ class BackendService:
             llm_applied=bool(tp.get("llm_applied", False)),
             llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
             diarization=diarization_data,
+            audio_duration_sec=duration_sec if duration_sec else None,
+            confidence=confidence if confidence else None,
             emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
             word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
             speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
