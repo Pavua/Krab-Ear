@@ -101,10 +101,22 @@ chmod +x "$RUNTIME_BIN"
 cp -f "$BUILD_BIN" "$APP_BUNDLE_BIN"
 chmod +x "$APP_BUNDLE_BIN"
 
-# Ad-hoc codesign. Bundle подписываем целиком (включает Info.plist + ресурсы),
-# standalone бинарь — как отдельный слот с тем же bundle identifier.
-codesign --force --sign - --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN" >/dev/null 2>&1 || true
-codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+# Выбираем signing identity:
+#   Если в login Keychain есть self-signed identity "Krab Ear Dev Local",
+#   используем её — cdhash стабилен → TCC не сбрасывает permissions при rebuild.
+#   Fallback: ad-hoc (-s -) — backward-compatible, но TCC revoke при каждой сборке.
+#   Для создания identity: ./scripts/create_local_signing_identity.command
+LOCAL_IDENTITY="Krab Ear Dev Local"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$LOCAL_IDENTITY"; then
+  SIGN_ID="$LOCAL_IDENTITY"
+  echo "Подписываю с identity: \"$SIGN_ID\" (stable cdhash, TCC-safe)"
+else
+  SIGN_ID="-"
+  echo "Подписываю ad-hoc (TCC revoke при rebuild; запустите scripts/create_local_signing_identity.command)"
+fi
+
+codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN" >/dev/null 2>&1 || true
+codesign --force --sign "$SIGN_ID" "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 # Запускаем через LaunchServices (`open`) — macOS создаёт управляемый
 # application.com.antigravity.krab-ear.* job, тот же самый, что появляется при
