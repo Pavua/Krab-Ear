@@ -228,6 +228,11 @@ class Settings(BaseSettings):
     # При True: если Silero/Kokoro недоступны — fallback на macOS `say` (последний резерв).
     TTS_FALLBACK_SAY: bool = True
 
+    # --- Call provider abstraction (Phase 3) ---
+    # Выбор активного провайдера телефонии.
+    # Допустимые значения: "telnyx" | "twilio" | "none"
+    CALL_PROVIDER: str = "telnyx"
+
     # --- Telnyx SIP/Call Control adapter (Phase 3 step 3/4) ---
     # Прямой REST-fallback к Telnyx Call Control API (без FreeSWITCH).
     # Пустой TELNYX_API_KEY = stub-режим (все методы возвращают ошибку
@@ -236,6 +241,14 @@ class Settings(BaseSettings):
     TELNYX_API_KEY: str = ""
     TELNYX_CONNECTION_ID: str = ""
     TELNYX_FROM_NUMBER: str = ""
+
+    # --- Twilio adapter (Phase 3, trial credit MVP) ---
+    # Использует Twilio REST API v2010 с Basic Auth (без пакета twilio).
+    # TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN = обязательны для работы.
+    # TWILIO_FROM_NUMBER — купленный Twilio номер в формате E.164.
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
 
     @property
     def model_max_list(self) -> List[str]:
