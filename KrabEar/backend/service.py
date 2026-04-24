@@ -104,6 +104,9 @@ from backend.ipc_constants import (
     IPC_SOCKET_PERMISSIONS,
 )
 from backend.export_scheduler import ExportScheduler
+from backend.call_cost_estimator import CallCostEstimator
+from backend.call_silence_probe import CallSilenceProbe
+from backend.call_auto_end import CallAutoEnd
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.job_tracker import JobTracker
@@ -199,6 +202,12 @@ class BackendService:
             transcriber=self.transcriber,
             reset_preview_fn=self._reset_preview_state,
             start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
+        )
+        self._call_cost_estimator = CallCostEstimator()
+        self._call_silence_probe = CallSilenceProbe()
+        self._call_auto_end = CallAutoEnd(
+            cost_estimator=self._call_cost_estimator,
+            silence_probe=self._call_silence_probe,
         )
         self._tts = TTSService()
         self._live_subs = LiveSubsService(
@@ -634,6 +643,9 @@ class BackendService:
             "call_assist_remove_template": self._call_assist.handle_remove_template,  # удалить шаблон быстрой реплики
             "call_assist_template": self._call_assist.handle_template,  # отправить шаблонную реплику в Gateway
             "call_assist_cost_report": self._call_assist.handle_cost_report,  # подробный cost report текущей звонковой сессии
+            # --- Phase 3 safeguards ---
+            "call_estimate_cost": self._call_cost_estimator.handle_estimate_cost,  # оценить стоимость звонка по провайдеру и стране
+            "call_check_auto_end": self._call_auto_end.handle_check_auto_end,  # проверить правила автоматического завершения
             # --- text templates ---
             "get_templates": self._template_manager.handle_get_templates,  # список шаблонов быстрой вставки текста
             "add_template": self._template_manager.handle_add_template,  # добавить шаблон текста

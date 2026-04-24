@@ -99,6 +99,9 @@ EXCLUDED_METHODS: Set[str] = {
     # Live subtitles: вызывается ~10-30 раз/сек по одному аудио-чанку
     "live_subs_ingest",
     "live_subs_stop",
+    # Phase 3 safeguards: polling calls from auto-end monitor loop
+    "call_estimate_cost",
+    "call_check_auto_end",
 }
 
 # Всё остальное — light (120/min)
