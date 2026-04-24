@@ -95,6 +95,9 @@ EXCLUDED_METHODS: Set[str] = {
     "get_settings",
     "apply_profile_preset",
     "list_profile_presets",
+    "list_settings_backups",
+    "restore_settings_backup",
+    "create_manual_settings_backup",
     "translate_selection",  # Phase 2A: вызывается часто при выделении текста
     # Live subtitles: вызывается ~10-30 раз/сек по одному аудио-чанку
     "live_subs_ingest",
