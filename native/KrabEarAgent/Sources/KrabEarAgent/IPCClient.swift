@@ -37,7 +37,7 @@ enum IPCError: Error, LocalizedError {
 }
 
 /// Клиент JSON-команд к локальному Unix socket backend.
-final class IPCClient {
+final class IPCClient: @unchecked Sendable {
     private let socketPath: String
     var endpoint: String { socketPath }
 
