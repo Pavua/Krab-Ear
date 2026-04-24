@@ -1481,7 +1481,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
             controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
+            // settingsBarCD constraint is deferred: settingsBarCD is conditionally added to dictationStack
+            // in applyVisualTheme() — activating this constraint before addArrangedSubview crashes with
+            // "no common ancestor" (KRAB-EAR-AGENT-2).
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHintLabel.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1907,6 +1909,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
             settingsBar.isHidden = true
             dictationStack.addArrangedSubview(settingsBarCD)
+            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor).isActive = true
         } else {
             settingsBarCD.isHidden = true
             dictationStack.addArrangedSubview(settingsBar)
