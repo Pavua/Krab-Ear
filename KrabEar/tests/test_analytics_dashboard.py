@@ -520,5 +520,209 @@ class TestAnalyticsDashboardIPCMethod(unittest.TestCase):
         self.assertIn("overview", response["result"])
 
 
+# ---------------------------------------------------------------------------
+# Тесты Bug 2 & 3: корректная агрегация duration и confidence
+# ---------------------------------------------------------------------------
+
+class TestAggregationBugFixes(unittest.TestCase):
+    """Регрессионные тесты для багов агрегации duration и confidence."""
+
+    def setUp(self):
+        self.dashboard = AnalyticsDashboard()
+
+    def test_total_hours_none_duration_treated_as_zero(self):
+        """Элементы с audio_duration_sec=None не должны ломать агрегацию."""
+        items = [
+            _make_item(audio_duration_sec=3600.0),
+            _make_item(audio_duration_sec=None),  # type: ignore[arg-type]
+        ]
+        # Устанавливаем None вручную, т.к. фабрика по умолчанию ставит 30.0
+        items[1].audio_duration_sec = None  # type: ignore[attr-defined]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        # 3600 / 3600 = 1.0 час; None → 0, не вызывает исключение
+        self.assertAlmostEqual(result["overview"]["total_hours"], 1.0, places=2)
+
+    def test_avg_confidence_none_items_excluded(self):
+        """Элементы с confidence=None не включаются в среднее значение."""
+        items = [
+            _make_item(confidence=0.9),
+            _make_item(confidence=None),  # type: ignore[arg-type]
+        ]
+        items[1].confidence = None  # type: ignore[attr-defined]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        # Только один элемент с confidence=0.9 → среднее 0.9
+        self.assertAlmostEqual(result["quality"]["avg_confidence"], 0.9, places=2)
+
+    def test_all_none_confidence_returns_zero(self):
+        """Если у всех элементов confidence=None, avg_confidence=0.0."""
+        items = [_make_item(), _make_item()]
+        for it in items:
+            it.confidence = None  # type: ignore[attr-defined]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertEqual(result["quality"]["avg_confidence"], 0.0)
+
+    def test_total_hours_multiple_items(self):
+        """total_hours суммирует несколько записей с audio_duration_sec."""
+        durations = [120.0, 240.0, 360.0]  # 720 sec = 0.2 часа
+        items = [_make_item(audio_duration_sec=d) for d in durations]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        expected_hours = round(sum(durations) / 3600, 3)
+        self.assertAlmostEqual(result["overview"]["total_hours"], expected_hours, places=3)
+
+    def test_confidence_boundary_values(self):
+        """Граничные значения confidence: 0.0 и 1.0 считаются корректно."""
+        items = [
+            _make_item(confidence=0.0),
+            _make_item(confidence=1.0),
+        ]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertAlmostEqual(result["quality"]["avg_confidence"], 0.5, places=2)
+        # 0.0 < 0.7 → low_confidence_rate = 0.5
+        self.assertAlmostEqual(result["quality"]["low_confidence_rate"], 0.5, places=2)
+
+
+# ---------------------------------------------------------------------------
+# Тест Bug 1: generate_html_report IPC-метод
+# ---------------------------------------------------------------------------
+
+class TestGenerateHtmlReportIPCMethod(unittest.TestCase):
+    """Проверяем, что generate_html_report зарегистрирован в dispatch table."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_service(self):
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+
+        store = StateStore(data_dir=Path(self.tmp.name))
+
+        class _FakeRecorder:
+            is_recording = False
+            def start(self): pass
+            def stop(self): return b""
+
+        class _FakeTranscriber:
+            engine = MagicMock()
+            engine._llm_rewriter = None
+            engine._settings_get = None
+            def transcribe(self, *a, **kw): return ("", 0.0)
+
+        return BackendService(
+            store=store,
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+        )
+
+    def test_generate_html_report_registered(self):
+        """generate_html_report должен быть зарегистрирован и не возвращать 'Неизвестный метод'."""
+        svc = self._make_service()
+        response = svc.handle_request({
+            "id": "hr1",
+            "method": "generate_html_report",
+            "params": {"title": "Test Report"},
+        })
+        # Не должно быть ошибки «Неизвестный метод»
+        error_msg = response.get("error", "")
+        self.assertNotIn("Неизвестный метод", str(error_msg))
+
+    def test_generate_html_report_returns_html(self):
+        """generate_html_report должен возвращать HTML-контент."""
+        svc = self._make_service()
+        response = svc.handle_request({
+            "id": "hr2",
+            "method": "generate_html_report",
+            "params": {},
+        })
+        self.assertTrue(response.get("ok"), f"Expected ok=True, got: {response}")
+        result = response.get("result", {})
+        html_content = result.get("html", "")
+        self.assertIn("<!DOCTYPE html>", html_content)
+
+    def test_export_html_report_still_works(self):
+        """Оригинальный export_html_report должен продолжать работать."""
+        svc = self._make_service()
+        response = svc.handle_request({
+            "id": "hr3",
+            "method": "export_html_report",
+            "params": {},
+        })
+        self.assertTrue(response.get("ok"), f"Expected ok=True, got: {response}")
+
+
+# ---------------------------------------------------------------------------
+# Тест Bug 2+3: StateStore.add_history_item сохраняет confidence и duration
+# ---------------------------------------------------------------------------
+
+class TestStateStoreConfidenceAndDuration(unittest.TestCase):
+    """Проверяем, что add_history_item принимает и сохраняет confidence."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = StateStore(data_dir=Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_add_history_item_saves_confidence(self):
+        """add_history_item с confidence=0.85 должен сохранить значение."""
+        item = self.store.add_history_item(
+            text="тест уверенности",
+            paste_status="ok",
+            confidence=0.85,
+        )
+        self.assertAlmostEqual(item.confidence, 0.85, places=4)
+
+    def test_add_history_item_saves_audio_duration_sec(self):
+        """add_history_item с audio_duration_sec=42.0 должен сохранить значение."""
+        item = self.store.add_history_item(
+            text="тест длительности",
+            paste_status="ok",
+            audio_duration_sec=42.0,
+        )
+        self.assertAlmostEqual(item.audio_duration_sec, 42.0, places=2)
+
+    def test_confidence_persists_through_reload(self):
+        """confidence должна сохраняться и восстанавливаться из NDJSON."""
+        self.store.add_history_item(
+            text="reload test",
+            paste_status="ok",
+            confidence=0.73,
+            audio_duration_sec=90.0,
+        )
+        # Перечитываем из store заново
+        items = self.store._load_active_items_with_lock()
+        self.assertEqual(len(items), 1)
+        self.assertAlmostEqual(items[0].confidence, 0.73, places=4)
+        self.assertAlmostEqual(items[0].audio_duration_sec, 90.0, places=2)
+
+    def test_dashboard_reads_stored_confidence(self):
+        """Dashboard должен корректно считать confidence из реально сохранённых данных."""
+        dashboard = AnalyticsDashboard()
+        self.store.add_history_item(
+            text="conf test one",
+            paste_status="ok",
+            confidence=0.8,
+            audio_duration_sec=60.0,
+        )
+        self.store.add_history_item(
+            text="conf test two",
+            paste_status="ok",
+            confidence=0.6,
+            audio_duration_sec=120.0,
+        )
+        result = dashboard.get_full_dashboard(self.store, days=30)
+        self.assertAlmostEqual(result["quality"]["avg_confidence"], 0.7, places=2)
+        self.assertAlmostEqual(result["overview"]["total_hours"], round(180.0 / 3600, 3), places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
