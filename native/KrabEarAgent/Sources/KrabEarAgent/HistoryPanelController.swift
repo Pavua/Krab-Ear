@@ -1481,7 +1481,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationStack.trailingAnchor.constraint(equalTo: dictationOuterScroll.contentView.trailingAnchor, constant: -12),
             controlRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             settingsBar.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
+            // NOTE: settingsBarCD width constraint is applied in applyVisualTheme() AFTER
+            // settingsBarCD is added to dictationStack via addArrangedSubview. Activating it
+            // here (before a common ancestor exists) causes KRAB-EAR-AGENT-2 crash:
+            // "Unable to activate constraint with anchors … because they have no common ancestor."
             dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryHintLabel.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
             dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
@@ -1907,6 +1910,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
             settingsBar.isHidden = true
             dictationStack.addArrangedSubview(settingsBarCD)
+            // Width constraint must be activated AFTER addArrangedSubview so that
+            // settingsBarCD and dictationStack share a common ancestor. (Fixes KRAB-EAR-AGENT-2)
+            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor).isActive = true
         } else {
             settingsBarCD.isHidden = true
             dictationStack.addArrangedSubview(settingsBar)
