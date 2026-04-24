@@ -26,6 +26,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         case history = "history"
         /// Вкладка «Разговор с AI» — Phase 1.3 Voice Assistant Mode.
         case conversation = "conversation"
+        /// Вкладка «Автозвонки» — Phase 3.4 Call Automation.
+        case callAutomation = "call_automation"
 
         static func from(settingsValue: String) -> PanelTab {
             switch settingsValue {
@@ -35,6 +37,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 return .liveTranslation
             case PanelTab.conversation.rawValue:
                 return .conversation
+            case PanelTab.callAutomation.rawValue:
+                return .callAutomation
             default:
                 return .history
             }
@@ -500,7 +504,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.layer?.backgroundColor = NSColor.clear.cgColor
         mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
-        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
+        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI", "Автозвонки"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
         tabSelector.selectedSegment = 0
         tabSelector.translatesAutoresizingMaskIntoConstraints = false
         tabSelector.segmentStyle = .rounded
@@ -552,6 +556,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         voiceContentView.translatesAutoresizingMaskIntoConstraints = false
         voiceContentView.wantsLayer = true
         voiceContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // Вкладка «Автозвонки» — Phase 3.4.
+        let callAutoContentView = NSView()
+        callAutoContentView.translatesAutoresizingMaskIntoConstraints = false
+        callAutoContentView.wantsLayer = true
+        callAutoContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         // Pre-warm all tabs: make all tab views layer-backed и attached to the view
         // hierarchy before user sees them. Это предотвращает мерцание при первом
@@ -575,8 +584,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.addTabViewItem(liveTab)
         mainTabView.addTabViewItem(historyTab)
         mainTabView.addTabViewItem(conversationTab)
+        let callAutoTab = NSTabViewItem(identifier: PanelTab.callAutomation.rawValue)
+        callAutoTab.label = "Автозвонки"
+        callAutoTab.view = callAutoContentView
+        mainTabView.addTabViewItem(callAutoTab)
         // Встроить ConversationViewController в voiceContentView.
         setupConversationTab(contentView: voiceContentView)
+        // Встроить CallAutomationController в callAutoContentView. Phase 3.4.
+        setupCallAutomationTab(contentView: callAutoContentView)
 
         topBar.orientation = .vertical
         topBar.spacing = KrabEarTheme.Metrics.tight

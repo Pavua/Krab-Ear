@@ -410,6 +410,115 @@ extension HistoryPanelController {
         return section
     }
 
+    // MARK: - Section 6: Автозвонки (Claude Design)
+    // Phase 3.4 Call Automation settings: Telnyx credentials + call limits.
+
+    @MainActor
+    func cdBuildCallAutomationSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "cd_call_automation",
+            title: "Автозвонки",
+            isExpanded: false
+        )
+        let card = CDSettingsCardView()
+
+        // Telnyx API key (secure field shown as password)
+        let apiKeyField = NSSecureTextField(frame: .zero)
+        apiKeyField.placeholderString = "Вставьте ключ Telnyx API"
+        apiKeyField.font = KrabEarTheme.Typography.body
+        apiKeyField.tag = 31001 // CA: api key tag
+        apiKeyField.target = self
+        apiKeyField.action = #selector(onTelnyxAPIKeyChanged)
+        apiKeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        let apiKeyRow = cdMakeRow(label: "Telnyx API Key", control: apiKeyField)
+
+        // From number
+        let fromField = NSTextField(string: "")
+        fromField.placeholderString = "+79991234567"
+        fromField.font = KrabEarTheme.Typography.body
+        fromField.tag = 31002
+        fromField.target = self
+        fromField.action = #selector(onTelnyxFromNumberChanged)
+        fromField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        let fromRow = cdMakeRow(label: "Исходящий номер", control: fromField)
+
+        // Max call duration slider (5-60 min)
+        let maxDurSlider = NSSlider(value: 30, minValue: 5, maxValue: 60, target: self, action: #selector(onCallMaxDurationChanged))
+        maxDurSlider.tag = 31003
+        let maxDurLabel = NSTextField(labelWithString: "30 мин")
+        maxDurLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        maxDurLabel.textColor = KrabEarTheme.Colors.textSecondary
+        maxDurLabel.tag = 31013 // value label
+        maxDurLabel.setContentHuggingPriority(.required, for: .horizontal)
+        let maxDurRow = cdMakeSliderRow(label: "Макс. длительность", slider: maxDurSlider, valueLabel: maxDurLabel)
+
+        // Cost warn threshold slider ($1-$20)
+        let costSlider = NSSlider(value: 5, minValue: 1, maxValue: 20, target: self, action: #selector(onCallCostWarnChanged))
+        costSlider.tag = 31004
+        let costLabel = NSTextField(labelWithString: "$5")
+        costLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        costLabel.textColor = KrabEarTheme.Colors.textSecondary
+        costLabel.tag = 31014
+        costLabel.setContentHuggingPriority(.required, for: .horizontal)
+        let costRow = cdMakeSliderRow(label: "Предупреждение стоимости", slider: costSlider, valueLabel: costLabel)
+
+        // Auto-end on silence toggle
+        let silenceToggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(onCallAutoEndOnSilenceChanged))
+        silenceToggle.setButtonType(.switch)
+        silenceToggle.state = .on
+        silenceToggle.tag = 31005
+        let silenceRow = cdMakeRow(label: "Авто-завершение при тишине", control: silenceToggle)
+
+        card.contentStackView.addArrangedSubview(apiKeyRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(fromRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(maxDurRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(costRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(silenceRow)
+
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - Call Automation settings handlers
+
+    @objc func onTelnyxAPIKeyChanged(_ sender: NSSecureTextField) {
+        guard !isSyncingSettings else { return }
+        applySettingsPatch(["telnyx_api_key": sender.stringValue])
+    }
+
+    @objc func onTelnyxFromNumberChanged(_ sender: NSTextField) {
+        guard !isSyncingSettings else { return }
+        applySettingsPatch(["telnyx_from_number": sender.stringValue])
+    }
+
+    @objc func onCallMaxDurationChanged(_ sender: NSSlider) {
+        guard !isSyncingSettings else { return }
+        let value = Int(sender.doubleValue)
+        applySettingsPatch(["call_max_duration_min": value])
+        // Update inline label
+        if let label = sender.superview?.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.tag == 31013 }) {
+            label.stringValue = "\(value) мин"
+        }
+    }
+
+    @objc func onCallCostWarnChanged(_ sender: NSSlider) {
+        guard !isSyncingSettings else { return }
+        let value = Int(sender.doubleValue)
+        applySettingsPatch(["call_cost_warn_usd": Double(value)])
+        if let label = sender.superview?.subviews.compactMap({ $0 as? NSTextField }).first(where: { $0.tag == 31014 }) {
+            label.stringValue = "$\(value)"
+        }
+    }
+
+    @objc func onCallAutoEndOnSilenceChanged(_ sender: NSButton) {
+        guard !isSyncingSettings else { return }
+        applySettingsPatch(["call_auto_end_on_silence": sender.state == .on])
+    }
+
     // MARK: - Live субтитры toggle handler (Phase 2B)
 
     @objc func onLiveSubsChanged(_ sender: NSButton) {
@@ -507,6 +616,9 @@ extension HistoryPanelController {
         dockIconButton.target = self
         dockIconButton.action = #selector(onDockChanged)
 
+        // Section 6 — Автозвонки (Phase 3.4)
+        let s6 = cdBuildCallAutomationSection()
+
         settingsBarCD.removeFromSuperview()
         settingsBarCD = NSStackView()
         settingsBarCD.orientation = .vertical
@@ -514,7 +626,7 @@ extension HistoryPanelController {
         settingsBarCD.alignment = .leading
         settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
 
-        for s in [s1, s2, s3, s4, s5] {
+        for s in [s1, s2, s3, s4, s5, s6] {
             settingsBarCD.addArrangedSubview(s)
         }
     }
