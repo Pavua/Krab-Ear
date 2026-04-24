@@ -162,7 +162,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
-        let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDsn") ?? ""
+        let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
         let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
         SentryConfig.initialize(dsn: sentryDsn.isEmpty ? nil : sentryDsn, environment: sentryEnv)
 
