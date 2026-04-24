@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches 241 JSON-RPC methods via a handler lookup table, delegating to extracted services.
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches 241 JSON-RPC methods via a handler lookup table, delegating to extracted services. Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines, all 241 handlers documented).
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -235,7 +235,7 @@ PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_engine_cleanup.py:
 PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_backend_service.py -v
 ```
 
-Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: **6391+ passed** across 243+ test files.
+Tests use `unittest.TestCase` with fake/stub collaborators (e.g., `FakeRecorder`, `FakeTranscriber`). Integration tests create temp directories for `StateStore`. No external services required for test suite. Current count: **~6500+ passed** across 246+ test files.
 
 ### Swift agent
 
@@ -263,6 +263,9 @@ make lint          # Flake8 on Python backend
 - `Start Krab Ear.command` — full launch (venv setup + agent start)
 - `Update Krab Ear Agent.command` — rebuild Swift agent only
 - `start_rest_service.command` — launch Flask REST API
+- `scripts/repair_permissions.command` — reset TCC + re-grant Accessibility/Microphone (PR #234)
+- `scripts/create_local_signing_identity.command` — create `Krab Ear Dev Local` self-signed identity for stable TCC grants (PR #235)
+- `scripts/build_distribution_dmg.command` — build distribution DMG for sharing (PR #229)
 
 ### Launch app
 ```bash
@@ -286,6 +289,17 @@ print(sock.recv(4096).decode())
 "
 
 # Sentry alerts also land in: ~/Library/Logs/KrabEar/sentry_errors.log (when log level=debug)
+```
+
+### Performance benchmarks (PR #237 / #242)
+```bash
+# Run benchmark suite and store baseline snapshot
+PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_performance_benchmarks.py -v
+
+# View regression history (stored in .perf_baselines/):
+python scripts/check_performance_budget.py
+
+# Regression gate runs automatically in CI; fails if p95 latency regresses >15%
 ```
 
 ### Call automation (Phase 3 — Telnyx / Twilio)
@@ -355,6 +369,15 @@ print(sock.recv(4096).decode())
   - Profile switches (balanced↔max) trigger model reload in MLX → protect these too.
   - 2026-04-19 crash report: `~/Library/Logs/DiagnosticReports/Python-2026-04-19-213636.ips`. Fix: PR #71.
 
+- **Sentry breadcrumbs (PR #238)**: `backend/observability.py` logs privacy-respecting breadcrumbs (no transcript text, only metadata: method name, duration_ms, error_type). Breadcrumbs auto-attach to next crash report. Pattern: `add_breadcrumb(category="ipc", message="method_name", data={"ok": True})`.
+- **Sentry release tracking (PR #241)**: `SentryConfig.swift` reads `CFBundleVersion` and sets `sentry_sdk.set_tag("release", version)` at startup. Enables regression tracking per release in Sentry issues dashboard. Python side sets `release=` in `sentry_sdk.init()`.
+- **Stable codesign identity (PR #235)**: `scripts/create_local_signing_identity.command` creates a self-signed cert `Krab Ear Dev Local` in the system keychain. Sign binary with: `codesign -s "Krab Ear Dev Local" -f ...`. TCC grants persist across rebuilds because the identity hash stays constant. **Caveat**: for distribution (App Store / Notarization), replace with Apple Developer ID. See `docs/DEV_CODESIGN.md`.
+- **Distribution DMG (PR #229)**: `scripts/build_distribution_dmg.command` creates a signed `.dmg` for sharing. Requires `Krab Ear Dev Local` identity or Apple Developer ID. See `docs/DISTRIBUTION.md`.
+- **Analytics UI (PR #231 / #233)**: `HistoryPanelController+AnalyticsDashboard.swift` renders the analytics dashboard via `get_analytics_dashboard` IPC. Shows sentiment trend, quality trend, keyword cloud. Bug fixes in PR #233 (nil guard crash on empty history).
+- **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, all 241 JSON-RPC handlers documented with params/response schema and examples (PR #243). Use as ground truth before implementing new IPC calls.
+- **User manual**: `docs/USER_MANUAL.md` — full end-user guide in Russian (PR #230). Start here for onboarding new users.
+- **NSStackView distribution fixes (PRs #228, #239, #240)**: Fixed NSStackView `distribution` property (`.fill` → `.fillEqually` / `.fillProportionally`) for correct layout in Settings + ConversationVC. Actor isolation warnings resolved in ConversationViewController (Swift 6 strict concurrency).
+
 ## Non-goals (from PRD)
 
 - Merging Krab/Ear/Voice into a single runtime — they remain separate projects with API boundaries.
@@ -384,14 +407,25 @@ print(sock.recv(4096).decode())
 
 ### TCC permissions troubleshooting
 
+**Preferred solution (PR #235)**: use `Krab Ear Dev Local` self-signed identity → TCC grant survives rebuilds. One-time setup:
+```bash
+scripts/create_local_signing_identity.command   # creates cert in keychain
+make sign                                        # rebuilds + signs with stable identity
+```
+После этого TCC reset после rebuild не нужен — identity hash постоянный.
+
+**Fallback / manual reset** (если stable identity не настроена):
+
 macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR absolute path). После rebuild binary с изменённой hash:
 - Старые path-based entries в TCC.db остаются но "смотрят" на stale paths.
 - Текущий `com.antigravity.krab-ear` bundle ID **может не совпасть** с историей.
 - Симптом: user грантит tumбler, app сразу опять запрашивает permission.
 
+**Quick fix**: `scripts/repair_permissions.command` (PR #234) — автоматизирует шаги 1-4 ниже.
+
 **Diagnostic**: `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "SELECT client, service, auth_value FROM access WHERE client LIKE '%krab%';"`
 
-**Fix workflow** (only do когда user asks):
+**Manual fix workflow** (only do когда user asks):
 1. `pkill -9 -f KrabEarAgent`
 2. `tccutil reset All com.antigravity.krab-ear`
 3. `tccutil reset All com.krabear.agent`  # старый ID
