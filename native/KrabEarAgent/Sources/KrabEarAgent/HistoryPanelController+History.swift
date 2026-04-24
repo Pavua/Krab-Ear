@@ -765,19 +765,20 @@ extension HistoryPanelController {
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard row < items.count else { return historyMinRowHeight() }
-
         let textColumn = tableView.tableColumns.first { $0.identifier.rawValue == "text" }
         let columnWidth = max(180, (textColumn?.width ?? 700) - 8)
+        let cacheKey = "\(items[row].id):\(Int(columnWidth))"
+        if let cached = rowHeightCache[cacheKey] { return cached }
         let sampleText = items[row].text as NSString
-
         let textHeight = sampleText.boundingRect(
             with: NSSize(width: columnWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: historyBodyFont()],
             context: nil
         ).height
-
-        return max(historyMinRowHeight(), ceil(textHeight) + 10)
+        let height = max(historyMinRowHeight(), ceil(textHeight) + 10)
+        rowHeightCache[cacheKey] = height
+        return height
     }
 
     func buildTranslationBadge(_ item: HistoryItem) -> String {
