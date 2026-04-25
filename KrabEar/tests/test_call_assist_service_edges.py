@@ -40,6 +40,10 @@ class FakeRecorder:
         self.is_recording = True
         return True
 
+    def snapshot_audio(self, max_duration_sec: float = 12.0):
+        import numpy as np
+        return np.zeros(int(max_duration_sec * 16000), dtype=np.float32), max_duration_sec
+
 
 class FakeTranscriber:
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict:

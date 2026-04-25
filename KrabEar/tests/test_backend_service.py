@@ -798,19 +798,19 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_call_assist_flow_and_list_audio_inputs(self) -> None:
         class _MockGW:
-            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def start_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-1"}
 
-            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def stop_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
 
-            def get(self, **kwargs):  # type: ignore[no-untyped-def]
+            def get(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
 
-            def post(self, **kwargs):  # type: ignore[no-untyped-def]
+            def post(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
 
-            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
+            def delete(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
         self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
         self.service._list_audio_inputs = lambda: [  # type: ignore[method-assign]
@@ -858,18 +858,19 @@ class BackendServiceTestCase(unittest.TestCase):
         called_summary_payloads: list[dict[str, object]] = []
 
         class _MockGW:
-            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def start_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-summary-1"}
 
-            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def stop_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
 
-            def get(self, **kwargs):  # type: ignore[no-untyped-def]
+            def get(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
 
-            def post(self, **kwargs):  # type: ignore[no-untyped-def]
-                path = str(kwargs.get("path", ""))
-                payload = kwargs.get("payload", {})
+            def post(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                # Support both positional (url, api_key, path, payload) and keyword args
+                path = str(args[2] if len(args) > 2 else kwargs.get("path", ""))
+                payload = args[3] if len(args) > 3 else kwargs.get("payload", {})
                 if path.endswith("/summary"):
                     called_summary_paths.append(path)
                     called_summary_payloads.append(dict(payload) if isinstance(payload, dict) else {})
@@ -882,7 +883,7 @@ class BackendServiceTestCase(unittest.TestCase):
                     }
                 return {"ok": True, "payload": {"ok": True}}
 
-            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
+            def delete(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "payload": {}}
 
         self.service._call_assist.gateway = _MockGW()  # type: ignore[assignment]
@@ -910,14 +911,14 @@ class BackendServiceTestCase(unittest.TestCase):
         delete_paths: list[str] = []
 
         class _MockGW:
-            def start_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def start_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True, "session_id": "gw-session-77"}
 
-            def stop_session(self, **kwargs):  # type: ignore[no-untyped-def]
+            def stop_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
                 return {"ok": True}
 
-            def get(self, **kwargs):  # type: ignore[no-untyped-def]
-                path = str(kwargs.get("path", ""))
+            def get(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(args[2] if len(args) > 2 else kwargs.get("path", ""))
                 get_paths.append(path)
                 if path.startswith("/v1/telephony/cost/estimate"):
                     return {
@@ -962,13 +963,13 @@ class BackendServiceTestCase(unittest.TestCase):
                     return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"kind": "stt.partial", "text": "x"}]}}
                 return {"ok": True, "payload": {"ok": True, "count": 2, "items": [{"source_text": "x"}]}}
 
-            def post(self, **kwargs):  # type: ignore[no-untyped-def]
-                path = str(kwargs.get("path", ""))
+            def post(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(args[2] if len(args) > 2 else kwargs.get("path", ""))
                 post_paths.append(path)
                 return {"ok": True, "payload": {"ok": True, "summary": "sum", "tasks": [], "translated_text": "hola"}}
 
-            def delete(self, **kwargs):  # type: ignore[no-untyped-def]
-                path = str(kwargs.get("path", ""))
+            def delete(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                path = str(args[2] if len(args) > 2 else kwargs.get("path", ""))
                 delete_paths.append(path)
                 return {"ok": True, "payload": {"ok": True, "before": 10, "after": 1, "keep_last": 1}}
 

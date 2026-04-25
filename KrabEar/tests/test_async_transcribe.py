@@ -29,6 +29,10 @@ class _FakeRecorder:
         self.is_recording = False
         self.sample_rate = 16000
 
+    def snapshot_audio(self, max_duration_sec: float = 12.0):
+        import numpy as np
+        return np.zeros(int(max_duration_sec * 16000), dtype=np.float32), max_duration_sec
+
 
 class _FakeTranslator:
     """Фейковый переводчик: mode=off всегда возвращает not_requested."""
