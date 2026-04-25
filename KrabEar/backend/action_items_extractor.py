@@ -1,12 +1,9 @@
-"""Action Items Extractor для Krab Ear.
+"""ActionItemsExtractor — извлечение задач, решений и вопросов из meeting-транскриптов.
 
-Извлекает из транскрипта:
-- action items (задачи/поручения с исполнителем, дедлайном, приоритетом)
-- decisions (принятые решения)
-- questions (открытые вопросы)
+Использует qwen3-4b через LM Studio (OpenAI-compatible endpoint).
+Интегрируется с CircuitBreaker из LLMRewriter для защиты от сбоев LM Studio.
 
-Использует тот же LM Studio endpoint (qwen3-4b-abliterated), что и LLMRewriter.
-Контракт extract(): НИКОГДА не raises, всегда возвращает структуру (пустую при ошибке).
+Контракт: extract() НИКОГДА не raises. При любой ошибке возвращает пустую структуру.
 """
 
 from __future__ import annotations
@@ -14,335 +11,310 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 import requests
 
+from backend.llm_rewriter import CircuitBreaker
+
 logger = logging.getLogger("KrabEar.Backend.ActionItemsExtractor")
 
-# Системные промпты для трёх языков
+# ---------------------------------------------------------------------------
+# Типы данных
+# ---------------------------------------------------------------------------
+
+ACTION_PRIORITIES = {"low", "medium", "high"}
+
+
+@dataclass
+class ActionItem:
+    """Одна задача, извлечённая из транскрипта."""
+
+    text: str
+    assignee: str = ""
+    due: str = ""
+    priority: str = "medium"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ActionItem":
+        priority = str(d.get("priority", "medium")).lower()
+        if priority not in ACTION_PRIORITIES:
+            priority = "medium"
+        return cls(
+            text=str(d.get("text", "")).strip(),
+            assignee=str(d.get("assignee", "")).strip(),
+            due=str(d.get("due", "")).strip(),
+            priority=priority,
+        )
+
+
+@dataclass
+class ActionItemsResult:
+    """Результат извлечения задач/решений/вопросов из транскрипта."""
+
+    action_items: list[ActionItem] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+    ok: bool = True
+    fallback_reason: Optional[str] = None
+    latency_ms: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_items": [ai.to_dict() for ai in self.action_items],
+            "decisions": list(self.decisions),
+            "questions": list(self.questions),
+            "ok": self.ok,
+            "fallback_reason": self.fallback_reason,
+            "latency_ms": self.latency_ms,
+        }
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.action_items and not self.decisions and not self.questions
+
+    @classmethod
+    def empty(cls, reason: str, latency_ms: Optional[int] = None) -> "ActionItemsResult":
+        return cls(ok=False, fallback_reason=reason, latency_ms=latency_ms)
+
+
+# ---------------------------------------------------------------------------
+# Системные промпты по языкам
+# ---------------------------------------------------------------------------
+
 _SYSTEM_PROMPTS: dict[str, str] = {
     "ru": (
-        "Ты аналитик встреч и переговоров. Проанализируй транскрипт и найди:\n"
-        "1) action items — задачи/поручения с конкретным действием. "
-        "Для каждого укажи: text (само действие), assignee (исполнитель или null), "
-        "due (дедлайн/срок или null), priority (high/medium/low или null).\n"
-        "2) decisions — принятые решения (краткие формулировки).\n"
-        "3) questions — открытые вопросы, требующие ответа.\n\n"
-        "Верни ТОЛЬКО валидный JSON в формате:\n"
-        '{"action_items": [{"text": "...", "assignee": null, "due": null, "priority": null}], '
-        '"decisions": ["..."], "questions": ["..."]}\n'
-        "Без пояснений. Без markdown-блоков. Только JSON."
+        "Ты аналитик встреч. Тебе дают транскрипт встречи или разговора. "
+        "Извлеки из него: задачи (action items), принятые решения (decisions) и открытые вопросы (questions). "
+        "\n\nОТВЕЧАЙ ТОЛЬКО JSON, без markdown, без пояснений. Формат:\n"
+        '{"action_items": [{"text": "...", "assignee": "...", "due": "...", "priority": "high|medium|low"}], '
+        '"decisions": ["..."], "questions": ["..."]}\n\n'
+        "Если задач/решений/вопросов нет — верни пустые списки. "
+        "Поле assignee — пустая строка если не упомянут. "
+        "Поле due — пустая строка если срок не указан. "
+        "Приоритет: high если срочно/важно, medium по умолчанию, low если второстепенно."
     ),
     "es": (
-        "Eres un analista de reuniones. Analiza la transcripción y encuentra:\n"
-        "1) action items — tareas/acciones concretas. "
-        "Para cada una indica: text (acción), assignee (responsable o null), "
-        "due (fecha límite o null), priority (high/medium/low o null).\n"
-        "2) decisions — decisiones tomadas (formulaciones breves).\n"
-        "3) questions — preguntas abiertas que requieren respuesta.\n\n"
-        "Devuelve SOLO JSON válido en el formato:\n"
-        '{"action_items": [{"text": "...", "assignee": null, "due": null, "priority": null}], '
-        '"decisions": ["..."], "questions": ["..."]}\n'
-        "Sin explicaciones. Sin bloques markdown. Solo JSON."
+        "Eres un analista de reuniones. Se te proporciona una transcripción de una reunión o conversación. "
+        "Extrae: tareas (action items), decisiones tomadas (decisions) y preguntas abiertas (questions). "
+        "\n\nRESPONDE SOLO JSON, sin markdown, sin explicaciones. Formato:\n"
+        '{"action_items": [{"text": "...", "assignee": "...", "due": "...", "priority": "high|medium|low"}], '
+        '"decisions": ["..."], "questions": ["..."]}\n\n'
+        "Si no hay tareas/decisiones/preguntas — devuelve listas vacías. "
+        "Campo assignee — cadena vacía si no se menciona. "
+        "Campo due — cadena vacía si no se indica fecha. "
+        "Prioridad: high si urgente/importante, medium por defecto, low si secundario."
     ),
     "en": (
-        "You are a meeting analyst. Analyze the transcript and find:\n"
-        "1) action items — concrete tasks/actions. "
-        "For each provide: text (the action), assignee (responsible person or null), "
-        "due (deadline or null), priority (high/medium/low or null).\n"
-        "2) decisions — decisions that were made (brief formulations).\n"
-        "3) questions — open questions that need answers.\n\n"
-        "Return ONLY valid JSON in the format:\n"
-        '{"action_items": [{"text": "...", "assignee": null, "due": null, "priority": null}], '
-        '"decisions": ["..."], "questions": ["..."]}\n'
-        "No explanations. No markdown blocks. Just JSON."
+        "You are a meeting analyst. You are given a transcript of a meeting or conversation. "
+        "Extract: action items, decisions made, and open questions. "
+        "\n\nRESPOND ONLY JSON, no markdown, no explanations. Format:\n"
+        '{"action_items": [{"text": "...", "assignee": "...", "due": "...", "priority": "high|medium|low"}], '
+        '"decisions": ["..."], "questions": ["..."]}\n\n'
+        "If there are no items/decisions/questions — return empty lists. "
+        "Field assignee — empty string if not mentioned. "
+        "Field due — empty string if no deadline given. "
+        "Priority: high if urgent/important, medium by default, low if secondary."
     ),
 }
 
-_EMPTY_RESULT: dict[str, Any] = {
-    "action_items": [],
-    "decisions": [],
-    "questions": [],
-}
 
-_VALID_PRIORITIES = {"high", "medium", "low", None}
-
-
-def _empty_result() -> dict[str, Any]:
-    """Возвращает копию пустой структуры."""
-    return {
-        "action_items": [],
-        "decisions": [],
-        "questions": [],
-    }
-
-
-def _normalize_result(raw: Any) -> dict[str, Any]:
-    """Нормализует и валидирует сырой результат от LLM.
-
-    Мягкая валидация: неизвестные поля игнорируются, некорректные типы — fallback.
-    """
-    if not isinstance(raw, dict):
-        return _empty_result()
-
-    # action_items
-    raw_items = raw.get("action_items", [])
-    if not isinstance(raw_items, list):
-        raw_items = []
-
-    action_items = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text", "")).strip()
-        if not text:
-            continue
-        assignee_raw = item.get("assignee")
-        assignee = str(assignee_raw).strip() if assignee_raw is not None else None
-        if assignee == "null" or assignee == "":
-            assignee = None
-
-        due_raw = item.get("due")
-        due = str(due_raw).strip() if due_raw is not None else None
-        if due == "null" or due == "":
-            due = None
-
-        priority_raw = item.get("priority")
-        priority = str(priority_raw).strip().lower() if priority_raw is not None else None
-        if priority == "null" or priority == "":
-            priority = None
-        if priority not in _VALID_PRIORITIES:
-            priority = None
-
-        action_items.append({
-            "text": text,
-            "assignee": assignee,
-            "due": due,
-            "priority": priority,
-        })
-
-    # decisions
-    raw_decisions = raw.get("decisions", [])
-    if not isinstance(raw_decisions, list):
-        raw_decisions = []
-    decisions = [str(d).strip() for d in raw_decisions if str(d).strip()]
-
-    # questions
-    raw_questions = raw.get("questions", [])
-    if not isinstance(raw_questions, list):
-        raw_questions = []
-    questions = [str(q).strip() for q in raw_questions if str(q).strip()]
-
-    return {
-        "action_items": action_items,
-        "decisions": decisions,
-        "questions": questions,
-    }
-
-
-def _strip_json_markdown(text: str) -> str:
-    """Убирает ```json ... ``` обёртки из ответа LLM."""
-    s = text.strip()
-    if s.startswith("```"):
-        # Strip leading ```json or ``` line
-        lines = s.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        s = "\n".join(lines).strip()
-    return s
-
+# ---------------------------------------------------------------------------
+# ActionItemsExtractor
+# ---------------------------------------------------------------------------
 
 class ActionItemsExtractor:
-    """Извлекает action items, decisions, questions из транскрипта через LLM.
+    """Извлечение задач, решений и вопросов из транскрипта через LLM (LM Studio).
 
-    Контракт extract(): НИКОГДА не raises. При любой ошибке возвращает пустую структуру.
-    CircuitBreaker применяется через _llm_rewriter._circuit.
-
-    Args:
-        llm_rewriter: экземпляр LLMRewriter (может быть None если LLM выключен).
-        settings: callable () -> dict | dict — текущие runtime-настройки.
+    Контракт: extract() НИКОГДА не raises. Всегда возвращает ActionItemsResult.
     """
 
     def __init__(
         self,
-        llm_rewriter: Optional[Any] = None,
-        settings: Optional[Any] = None,
-    ) -> None:
-        self._llm_rewriter = llm_rewriter
-        self._settings = settings
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_sec: float = 20.0,
+        circuit_fail_threshold: int = 3,
+        circuit_initial_reset_sec: int = 60,
+        circuit_max_reset_sec: int = 600,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout_sec
+        self._circuit = CircuitBreaker(
+            fail_threshold=circuit_fail_threshold,
+            initial_reset_sec=circuit_initial_reset_sec,
+            max_reset_sec=circuit_max_reset_sec,
+        )
+        self._session = requests.Session()
         self._last_error: Optional[str] = None
-        self._last_latency_ms: Optional[int] = None
 
-    def _get_settings(self) -> dict:
-        """Возвращает текущие настройки."""
-        if self._settings is None:
-            return {}
-        if callable(self._settings):
-            try:
-                return self._settings() or {}
-            except Exception:
-                return {}
-        if isinstance(self._settings, dict):
-            return self._settings
-        return {}
+    def extract(self, transcript: str, language: str = "ru") -> ActionItemsResult:
+        """Извлекает задачи, решения и вопросы из транскрипта.
 
-    def extract(self, transcript: str, language: str = "ru") -> dict[str, Any]:
-        """Извлекает action items, decisions, questions из транскрипта.
-
-        Args:
-            transcript: текст транскрипта.
-            language: язык транскрипта ("ru", "es", "en"). Дефолт "ru".
-
-        Returns:
-            {
-                "action_items": [{"text": str, "assignee": str|None, "due": str|None, "priority": str|None}],
-                "decisions": [str],
-                "questions": [str],
-            }
+        Контракт: НИКОГДА не raises. При любой ошибке → ActionItemsResult.empty(...).
         """
         try:
             return self._extract_impl(transcript, language)
         except Exception as exc:
-            logger.exception("ActionItemsExtractor.extract: неожиданная ошибка: %s", exc)
-            self._last_error = f"unexpected: {exc}"
-            return _empty_result()
+            logger.exception("ActionItemsExtractor.extract: unexpected error: %s", exc)
+            return ActionItemsResult.empty(f"unexpected_error: {exc}")
 
-    def _extract_impl(self, transcript: str, language: str) -> dict[str, Any]:
-        """Внутренняя реализация без defensive wrapper."""
+    def _extract_impl(self, transcript: str, language: str) -> ActionItemsResult:
+        """Внутренняя реализация — вызывается из extract() с защитой от исключений."""
         cleaned = (transcript or "").strip()
         if not cleaned:
-            logger.debug("ActionItemsExtractor: пустой транскрипт, возврат пустой структуры")
-            return _empty_result()
+            return ActionItemsResult.empty("empty_input")
 
-        if self._llm_rewriter is None:
-            logger.debug("ActionItemsExtractor: LLMRewriter не настроен, возврат пустой структуры")
-            self._last_error = "no_llm_rewriter"
-            return _empty_result()
-
-        # Circuit breaker check через _llm_rewriter._circuit
-        circuit = getattr(self._llm_rewriter, "_circuit", None)
-        if circuit is not None and not circuit.allow_request():
-            logger.debug("ActionItemsExtractor: circuit open, возврат пустой структуры")
-            self._last_error = "circuit_open"
-            return _empty_result()
+        if not self._circuit.allow_request():
+            logger.debug("ActionItemsExtractor: circuit open, skipping")
+            return ActionItemsResult.empty("circuit_open")
 
         lang_key = (language or "ru").lower()
         if lang_key not in _SYSTEM_PROMPTS:
             lang_key = "ru"
         system_prompt = _SYSTEM_PROMPTS[lang_key]
 
-        # Оценка max_tokens: JSON-структура обычно ~2x слов транскрипта
-        word_count = len(cleaned.split())
-        max_tokens = max(512, min(int(word_count * 0.5) + 200, 2048))
-
         payload = {
-            "model": self._llm_rewriter._model,
+            "model": self._model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": cleaned},
             ],
-            "temperature": 0.1,  # детерминистичность
-            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "max_tokens": 1024,
             "stream": False,
         }
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._llm_rewriter._api_key}",
+            "Authorization": f"Bearer {self._api_key}",
         }
 
         start = time.monotonic()
         try:
-            response = self._llm_rewriter._session.post(
-                f"{self._llm_rewriter._base_url}/chat/completions",
+            response = self._session.post(
+                f"{self._base_url}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=self._llm_rewriter._timeout * 3,  # extraction занимает дольше
+                timeout=self._timeout,
             )
         except requests.Timeout:
-            if circuit is not None:
-                circuit.record_failure()
+            self._circuit.record_failure()
             self._last_error = "timeout"
-            logger.warning("ActionItemsExtractor: timeout при запросе к LLM")
-            return _empty_result()
+            return ActionItemsResult.empty("timeout")
         except (requests.ConnectionError, requests.RequestException) as exc:
-            if circuit is not None:
-                circuit.record_failure()
+            self._circuit.record_failure()
             self._last_error = f"connection_error: {exc}"
-            logger.warning("ActionItemsExtractor: ошибка подключения к LLM: %s", exc)
-            return _empty_result()
+            return ActionItemsResult.empty("connection_error")
 
-        self._last_latency_ms = int((time.monotonic() - start) * 1000)
+        latency_ms = int((time.monotonic() - start) * 1000)
 
         if response.status_code != 200:
-            if circuit is not None:
-                circuit.record_failure()
+            self._circuit.record_failure()
             self._last_error = f"http_{response.status_code}"
-            logger.warning(
-                "ActionItemsExtractor: HTTP %d от LLM endpoint", response.status_code
-            )
-            return _empty_result()
+            return ActionItemsResult.empty(f"http_{response.status_code}", latency_ms)
 
-        # Парсим JSON ответа
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            if circuit is not None:
-                circuit.record_failure()
-            self._last_error = f"parse_response_error: {exc}"
-            logger.warning("ActionItemsExtractor: ошибка парсинга ответа LLM: %s", exc)
-            return _empty_result()
+            self._circuit.record_failure()
+            self._last_error = f"parse_error: {exc}"
+            return ActionItemsResult.empty("parse_error", latency_ms)
 
-        # Убираем markdown-обёртки
-        content_clean = _strip_json_markdown(content or "")
-        if not content_clean:
-            if circuit is not None:
-                circuit.record_failure()
-            self._last_error = "empty_response"
-            return _empty_result()
+        # Parse JSON from LLM response
+        result = self._parse_llm_json(content, latency_ms)
+        if result.ok:
+            self._circuit.record_success()
+            self._last_error = None
+        else:
+            self._circuit.record_failure()
+            self._last_error = result.fallback_reason
 
-        # Парсим JSON из ответа LLM
-        try:
-            raw_result = json.loads(content_clean)
-        except (json.JSONDecodeError, ValueError) as exc:
-            # Невалидный JSON → graceful empty
-            if circuit is not None:
-                circuit.record_failure()
-            self._last_error = f"invalid_json: {exc}"
-            logger.warning(
-                "ActionItemsExtractor: LLM вернул невалидный JSON (%s), возврат пустой структуры. "
-                "Первые 200 символов ответа: %.200s",
-                exc, content_clean,
-            )
-            return _empty_result()
-
-        # Успех — сбрасываем circuit breaker
-        if circuit is not None:
-            circuit.record_success()
-        self._last_error = None
-
-        result = _normalize_result(raw_result)
-        logger.info(
-            "ActionItemsExtractor: extracted %d action_items, %d decisions, %d questions "
-            "(%d ms, lang=%s)",
-            len(result["action_items"]),
-            len(result["decisions"]),
-            len(result["questions"]),
-            self._last_latency_ms,
-            lang_key,
-        )
         return result
 
+    def _parse_llm_json(self, content: str, latency_ms: int) -> ActionItemsResult:
+        """Разбирает JSON-ответ LLM. При любой ошибке возвращает empty struct."""
+        text = (content or "").strip()
+        if not text:
+            return ActionItemsResult.empty("empty_response", latency_ms)
+
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Remove first line (```json or ```) and last line (```)
+            inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+            text = "\n".join(inner).strip()
+
+        # Find JSON object boundaries
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start == -1 or end == 0:
+            logger.warning("ActionItemsExtractor: no JSON object found in LLM response")
+            return ActionItemsResult.empty("no_json", latency_ms)
+
+        json_str = text[start:end]
+        try:
+            data = json.loads(json_str)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("ActionItemsExtractor: JSON parse error: %s", exc)
+            return ActionItemsResult.empty("invalid_json", latency_ms)
+
+        if not isinstance(data, dict):
+            return ActionItemsResult.empty("invalid_json_structure", latency_ms)
+
+        # Parse action_items
+        raw_items = data.get("action_items", [])
+        action_items: list[ActionItem] = []
+        if isinstance(raw_items, list):
+            for item in raw_items:
+                if isinstance(item, dict) and item.get("text", "").strip():
+                    action_items.append(ActionItem.from_dict(item))
+
+        # Parse decisions
+        raw_decisions = data.get("decisions", [])
+        decisions: list[str] = []
+        if isinstance(raw_decisions, list):
+            for d in raw_decisions:
+                s = str(d).strip()
+                if s:
+                    decisions.append(s)
+
+        # Parse questions
+        raw_questions = data.get("questions", [])
+        questions: list[str] = []
+        if isinstance(raw_questions, list):
+            for q in raw_questions:
+                s = str(q).strip()
+                if s:
+                    questions.append(s)
+
+        return ActionItemsResult(
+            action_items=action_items,
+            decisions=decisions,
+            questions=questions,
+            ok=True,
+            fallback_reason=None,
+            latency_ms=latency_ms,
+        )
+
+    @property
+    def circuit_state(self) -> str:
+        return self._circuit.state
+
     def status(self) -> dict[str, Any]:
-        """Статус экстрактора для диагностики."""
-        has_rewriter = self._llm_rewriter is not None
-        circuit = getattr(self._llm_rewriter, "_circuit", None)
         return {
-            "available": has_rewriter,
-            "circuit_state": circuit.state if circuit else "n/a",
+            "circuit_state": self._circuit.state,
             "last_error": self._last_error,
-            "last_latency_ms": self._last_latency_ms,
+            "model": self._model,
         }
+
+    def close(self):
+        """Закрывает HTTP session."""
+        self._session.close()

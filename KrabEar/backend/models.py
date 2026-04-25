@@ -64,6 +64,14 @@ class HistoryItem:
     # Содержит summary или Q&A ответ от Mistral Voxtral LM-decoder.
     # None для всех остальных движков (обратная совместимость).
     reasoning: str | None = None
+    # Action items extracted from meeting transcripts via LLM.
+    # Каждый элемент: {"text": str, "assignee": str, "due": str, "priority": str}.
+    # None = ещё не извлекались. [] = извлекали, ничего не найдено.
+    action_items: list | None = None
+    # Decisions made during a meeting/conversation. None = не извлекались.
+    decisions: list | None = None
+    # Open questions identified in the transcript. None = не извлекались.
+    questions: list | None = None
 
     @classmethod
     def create(
@@ -93,6 +101,9 @@ class HistoryItem:
         reasoning: str | None = None,
         audio_path: str = "",
         is_protected: bool = False,
+        action_items: list | None = None,
+        decisions: list | None = None,
+        questions: list | None = None,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -123,6 +134,9 @@ class HistoryItem:
             reasoning=(str(reasoning).strip() or None) if reasoning else None,
             audio_path=str(audio_path).strip(),
             is_protected=bool(is_protected),
+            action_items=list(action_items) if action_items is not None else None,
+            decisions=list(decisions) if decisions is not None else None,
+            questions=list(questions) if questions is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +174,9 @@ class HistoryItem:
             reasoning=(str(payload["reasoning"]).strip() or None) if payload.get("reasoning") else None,
             audio_path=str(payload.get("audio_path", "")).strip(),
             is_protected=bool(payload.get("is_protected", False)),
+            action_items=payload.get("action_items") if isinstance(payload.get("action_items"), list) else None,
+            decisions=payload.get("decisions") if isinstance(payload.get("decisions"), list) else None,
+            questions=payload.get("questions") if isinstance(payload.get("questions"), list) else None,
         )
 
 
