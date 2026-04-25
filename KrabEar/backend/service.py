@@ -510,6 +510,9 @@ class BackendService:
             "set_notification_preferences": self._settings_svc.handle_set_notification_preferences,  # обновление настроек уведомлений
             "export_settings": self._settings_svc.handle_export_settings,  # экспорт настроек в JSON-файл
             "import_settings": self._settings_svc.handle_import_settings,  # импорт настроек из JSON-файла
+            "list_settings_backups": self._settings_svc.handle_list_settings_backups,  # список rolling-бэкапов настроек
+            "restore_settings_backup": self._settings_svc.handle_restore_settings_backup,  # восстановить из бэкапа
+            "create_manual_settings_backup": self._settings_svc.handle_create_manual_settings_backup,  # ручной бэкап настроек
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM

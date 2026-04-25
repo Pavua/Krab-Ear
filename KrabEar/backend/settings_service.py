@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
+from backend.settings_backup import SettingsBackup
 from backend.settings_validator import SettingsValidator
 
 _log = logging.getLogger(__name__)
@@ -64,12 +65,13 @@ class SettingsService:
         "call_recording": "Режим записи звонка: максимальное качество, без превью и автовставки",
     }
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, backup: SettingsBackup | None = None) -> None:
         self.store = store
         self._cache: dict[str, Any] | None = None
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 5.0
         self._validator = SettingsValidator()
+        self._backup = backup if backup is not None else SettingsBackup()
 
     # ------------------------------------------------------------------
     # Кэш
@@ -103,7 +105,13 @@ class SettingsService:
         return self.cached_settings()
 
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
-        settings = self.cached_settings()
+        old_settings = self.cached_settings()
+        try:
+            self._backup.create_backup(old_settings, reason="before_set")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("handle_set_settings: auto-backup failed: %s", exc)
+
+        settings = dict(old_settings)
         settings.update(params)
 
         # Нормализуем критичные поля, чтобы UI и агент не расходились по форматам.
@@ -410,6 +418,73 @@ class SettingsService:
                 "settings": dict(values),
             })
         return {"presets": presets}
+
+    # ------------------------------------------------------------------
+    # Backup IPC handlers
+    # ------------------------------------------------------------------
+
+    def handle_list_settings_backups(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список бэкапов настроек, от новых к старым.
+
+        Params:
+            limit (int, optional): максимальное количество записей (default=10, max=50).
+
+        Returns:
+            {"backups": [{backup_id, ts, reason, file_size, settings_count_keys}, ...]}
+        """
+        try:
+            limit = int(params.get("limit", 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 50))
+
+        backups = self._backup.list_backups(limit=limit)
+        return {"backups": backups}
+
+    def handle_restore_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Восстанавливает настройки из указанного бэкапа и сохраняет их.
+
+        Params:
+            backup_id (str): идентификатор бэкапа.
+
+        Returns:
+            {"restored_settings": {...}, "backup_id": str}
+        """
+        backup_id = str(params.get("backup_id", "")).strip()
+        if not backup_id:
+            raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
+
+        restored = self._backup.restore_backup(backup_id)
+        self.store.save_settings(restored)
+        self.invalidate_cache()
+
+        _log.info("handle_restore_settings_backup: restored from %s", backup_id)
+        return {"restored_settings": restored, "backup_id": backup_id}
+
+    def handle_create_manual_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Создаёт ручной бэкап текущих настроек с произвольной причиной.
+
+        Params:
+            reason (str, optional): метка причины (default="manual").
+
+        Returns:
+            {"backup_id": str, "settings_count_keys": int}
+        """
+        reason = str(params.get("reason", "manual")).strip() or "manual"
+        current = self.cached_settings()
+        backup_id = self._backup.create_backup(current, reason=reason)
+
+        # Count non-sensitive keys
+        safe_count = sum(
+            1 for k in current
+            if k not in SettingsService._SENSITIVE_FIELDS
+        )
+        _log.info(
+            "handle_create_manual_settings_backup: %s (%d keys)",
+            backup_id,
+            safe_count,
+        )
+        return {"backup_id": backup_id, "settings_count_keys": safe_count}
 
     # ------------------------------------------------------------------
     # Coerce-хелперы
