@@ -355,5 +355,35 @@ class TestSTTRouterConfigDefaults(unittest.TestCase):
         self.assertIsInstance(real_settings.STT_AUDIO_LANG_ID_PREVIEW_SEC, float)
 
 
+class TestSTTRouterGetGigaamAdapter(unittest.TestCase):
+    """get_gigaam_adapter: enabled (adapter returned) / disabled (None returned)."""
+
+    def test_get_gigaam_adapter_disabled_returns_none(self):
+        """Когда STT_GIGAAM_ENABLED=False → get_gigaam_adapter() возвращает None."""
+        settings = _make_settings()
+        setattr(settings, "STT_GIGAAM_ENABLED", False)
+        router = STTRouter(settings)
+
+        result = router.get_gigaam_adapter()
+
+        self.assertIsNone(result)
+
+    def test_get_gigaam_adapter_enabled_importerror_returns_none(self):
+        """Когда STT_GIGAAM_ENABLED=True но gigaam не установлен → None, нет краша."""
+        settings = _make_settings()
+        setattr(settings, "STT_GIGAAM_ENABLED", True)
+        setattr(settings, "STT_GIGAAM_MODE", "rnnt")
+        setattr(settings, "STT_GIGAAM_DEVICE", "mps")
+        router = STTRouter(settings)
+
+        # Патчим sys.modules чтобы вызвать ImportError при import core.pipeline.stt_gigaam
+        import unittest.mock as _mock
+        with _mock.patch.dict("sys.modules", {"core.pipeline.stt_gigaam": None}):
+            result = router.get_gigaam_adapter()
+
+        # ImportError внутри get_gigaam_adapter → None, не exception
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

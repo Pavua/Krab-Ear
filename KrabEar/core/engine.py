@@ -355,13 +355,11 @@ class AudioEngine:
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
         self._confidence_calibrator = ConfidenceCalibrator()
 
-        # Language-aware STT router scaffold (available for future routing).
-        # Полная интеграция в transcribe() запланирована на follow-up PR после
-        # завершения research по RU-специализированным моделям (GigaAM, Parakeet-RU и др.).
-        # Инициализация через core.stt_router.STTRouter(settings, ...) выполняется
-        # в follow-up PR — здесь только заглушка для обратной совместимости.
-        # See: docs/STT_ROUTER.md
-        self._router = None  # type: ignore[assignment]  # noqa: E501
+        # Language-aware STT router — используется для GigaAM и будущих RU-адаптеров.
+        # get_gigaam_adapter() возвращает адаптер если STT_GIGAAM_ENABLED=True и
+        # пакет gigaam доступен. При недоступности возвращает None (мягкая деградация).
+        from core.stt_router import STTRouter  # noqa: E402 — lazy import to avoid circular
+        self._router = STTRouter(settings)
 
         logger.info(
             "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d, LLM=%s",
@@ -1310,6 +1308,7 @@ class AudioEngine:
     _WHISPERX_MARKER: str = "whisperx:adapter"
     _VOXTRAL_MARKER: str = "voxtral:adapter"
     _RU_FINETUNE_MARKER: str = "ru_finetune:adapter"
+    _GIGAAM_MARKER: str = "gigaam:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -1320,19 +1319,39 @@ class AudioEngine:
 
         balanced_model = settings.MODEL_BALANCED
 
-        # --- RU fine-tune adapter: позиция 0 (перед balanced, только для языка "ru") ---
+        _effective_lang = language if language is not None else settings.TRANSCRIBE_LANGUAGE
+
+        # --- RU fine-tune adapter: позиция перед balanced (только для языка "ru") ---
         # antony66/whisper-large-v3-russian — fine-tune на русском Common Voice/OpenSTT.
         # Даёт ~2pp WER improvement vs базового whisper-large-v3 на русской речи.
         # Работает через тот же mlx_whisper.transcribe (drop-in checkpoint).
         # Активируется только если язык определён как "ru" (не None, не "es", не "en").
         # При ошибке загрузки маркер помечается недоступным, chain продолжается без него.
-        _effective_lang = language if language is not None else settings.TRANSCRIBE_LANGUAGE
         if (
             settings.STT_USE_RU_FINETUNE
             and _effective_lang == "ru"
             and self._RU_FINETUNE_MARKER not in self._unavailable_models
         ):
             candidates = [self._RU_FINETUNE_MARKER] + candidates
+
+        # --- GigaAM-RNNT adapter: позиция 0 (первый в chain, только для языка "ru") ---
+        # GigaAM v2-RNNT (244M) — RU-специализированная модель Sber (salute-developers).
+        # ~3.8% WER на Common Voice RU vs ~9.8% у whisper-large-v3 (2.5× улучшение).
+        # Порядок когда оба включены: GigaAM → RU-finetune → Whisper balanced → max → remote.
+        # Работает через PyTorch MPS — mlx_lock НЕ нужен.
+        # При ImportError или ошибке загрузки маркер помечается недоступным, chain продолжается.
+        if (
+            getattr(settings, "STT_GIGAAM_ENABLED", False)
+            and _effective_lang == "ru"
+            and self._GIGAAM_MARKER not in self._unavailable_models
+        ):
+            gigaam_adapter = self._router.get_gigaam_adapter() if self._router is not None else None
+            if gigaam_adapter is not None:
+                candidates = [self._GIGAAM_MARKER] + candidates
+                logger.info(
+                    "GigaAM-RNNT добавлен в chain первым (lang=%s, engine=gigaam-rnnt)",
+                    _effective_lang,
+                )
 
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
@@ -1393,7 +1412,15 @@ class AudioEngine:
 
         # Таблица маркеров адаптеров: marker → (span_prefix, model_setting, transcribe_fn)
         _ru_finetune_model = settings.STT_RU_FINETUNE_MODEL
+        _gigaam_mode = getattr(settings, "STT_GIGAAM_MODE", "rnnt")
+        _gigaam_model_label = f"gigaam-{_gigaam_mode}"
         _adapter_dispatch = [
+            (
+                self._GIGAAM_MARKER,
+                "stt_gigaam",
+                _gigaam_model_label,
+                lambda: self._transcribe_gigaam(audio_data, language=language),
+            ),
             (
                 self._RU_FINETUNE_MARKER,
                 "stt_ru_finetune",
@@ -1978,6 +2005,79 @@ class AudioEngine:
 
         logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
         return self._voxtral_model
+
+    # --- GigaAM-RNNT adapter (Sber salute-developers, Phase 4 RU specialist) ---
+    # GigaAM v2-RNNT (244M) — Conformer-based модель для русской речи.
+    # ~3.8% WER на Common Voice RU vs ~9.8% у whisper-large-v3.
+    # Работает через PyTorch MPS (не MLX) — mlx_lock НЕ нужен.
+    # Активируется только если STT_GIGAAM_ENABLED=True И detected lang == "ru".
+
+    def _transcribe_gigaam(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+        """Транскрибация через GigaAM-RNNT v2 (русскоязычный STT, Sber).
+
+        Args:
+            audio_data: путь к wav-файлу (str/Path), numpy.ndarray (любая частота),
+                        или bytes (PCM int16 LE от AudioRecorder).
+            language: ISO 639-1 код языка; GigaAM поддерживает только "ru",
+                      передаётся для совместимости интерфейса.
+
+        Returns:
+            dict с ключами:
+                text (str): распознанный текст.
+                language (str): "ru".
+                confidence (float): уверенность из адаптера (0.0–1.0).
+                engine (str): "gigaam-rnnt".
+                model_used (str): идентификатор модели (заполняется caller'ом).
+
+        Raises:
+            ImportError: если пакет gigaam или core.pipeline.stt_gigaam недоступен.
+            RuntimeError: если адаптер не удалось получить из router.
+            Exception: любая ошибка транскрибации пробрасывается вверх для fallback chain.
+        """
+        adapter = self._router.get_gigaam_adapter() if self._router is not None else None
+        if adapter is None:
+            raise RuntimeError(
+                "GigaAM adapter недоступен (STT_GIGAAM_ENABLED=False или ImportError)"
+            )
+
+        # Нормализуем audio_data в numpy float32
+        if isinstance(audio_data, (str, Path)):
+            if sf is None:
+                raise ImportError("soundfile не установлен, не могу читать аудио-файл")
+            audio_array, _sr = sf.read(str(audio_data), dtype="float32", always_2d=False)
+            if audio_array.ndim > 1:
+                audio_array = audio_array.mean(axis=1)
+            audio_data_np = audio_array.astype(np.float32)
+        elif isinstance(audio_data, bytes):
+            # PCM int16 LE от AudioRecorder
+            audio_data_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+        elif isinstance(audio_data, np.ndarray):
+            audio_data_np = audio_data.astype(np.float32)
+            if audio_data_np.ndim > 1:
+                audio_data_np = audio_data_np.mean(axis=1)
+        else:
+            raise TypeError(f"Неподдерживаемый тип audio_data для GigaAM: {type(audio_data)}")
+
+        result = adapter.transcribe(audio_data_np)
+
+        # Нормализуем формат ответа адаптера
+        text = result.get("text", "") if isinstance(result, dict) else str(result)
+        confidence = float(result.get("confidence", 0.0)) if isinstance(result, dict) else 0.0
+        engine_name = result.get("engine", "gigaam-rnnt") if isinstance(result, dict) else "gigaam-rnnt"
+
+        logger.info(
+            "GigaAM транскрибация завершена: len=%d chars, confidence=%.3f, engine=%s",
+            len(text),
+            confidence,
+            engine_name,
+        )
+
+        return {
+            "text": text,
+            "language": "ru",
+            "confidence": confidence,
+            "engine": engine_name,
+        }
 
     def _transcribe_voxtral(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через Voxtral Mini 4B Realtime (STT + optional reasoning).

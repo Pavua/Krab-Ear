@@ -91,9 +91,9 @@ export KRAB_EAR_STT_LANGUAGE_ROUTING_ENABLED=true
             └─► fallback: whisper-large-v3 (STT_OTHER_PRIMARY_MODEL)
 ```
 
-Интеграция в `AudioEngine.transcribe()` запланирована на follow-up PR.
-Сейчас адаптер можно использовать напрямую через `GigaAMAdapter` или через
-`STTRouter.get_gigaam_adapter()`.
+✅ Wired into AudioEngine via STT router — адаптер полностью интегрирован в
+`AudioEngine._transcribe_with_fallback_impl()` (PR feat/gigaam-audio-engine-integration).
+Адаптер пробуется первым в fallback chain когда `STT_GIGAAM_ENABLED=True` и `lang=ru`.
 
 ## Лицензия
 
