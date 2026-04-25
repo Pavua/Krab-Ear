@@ -755,38 +755,101 @@ extension HistoryPanelController {
         cell.addSubview(label)
         label.translatesAutoresizingMaskIntoConstraints = false
 
-        if isTextColumn, let confidence = item.confidence {
-            // Горизонтальный индикатор уверенности STT (3pt высота) под текстом.
-            // Цвет берётся из KrabEarTheme.Colors — только существующие semantic tokens,
-            // никаких новых литеральных цветов.
-            let bar = NSView()
-            bar.wantsLayer = true
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            let barColor = confidenceColor(for: confidence)
-            bar.layer?.backgroundColor = barColor.cgColor
-            bar.layer?.cornerRadius = 1.5
+        if isTextColumn {
+            // Кнопка инлайн-перевода (🌐 / spinner-символ) справа от текста.
+            let isLoading = inlineTranslationLoading.contains(item.id)
+            let isVisible = inlineTranslationVisible.contains(item.id)
+            let btnTitle = isLoading ? "⏳" : (isVisible ? "🔤" : "🌐")
+            let translateBtn = NSButton(title: btnTitle, target: self, action: #selector(onInlineTranslateToggle(_:)))
+            translateBtn.bezelStyle = .inline
+            translateBtn.isBordered = false
+            translateBtn.tag = row
+            translateBtn.translatesAutoresizingMaskIntoConstraints = false
+            translateBtn.toolTip = isVisible ? "Скрыть перевод" : "Показать перевод"
+            cell.addSubview(translateBtn)
 
-            // Появление через Motion.animate (Reduce Motion respected автоматически)
-            bar.alphaValue = 0
-            KrabEarTheme.Motion.animate(
-                duration: KrabEarTheme.Motion.Duration.micro,
-                easing: KrabEarTheme.Motion.Easing.easeOut
-            ) {
-                bar.alphaValue = 1
+            // Вторичная строка перевода (italic, alpha 0.8) — показывается когда isVisible.
+            let translationLabel = NSTextField(wrappingLabelWithString: "")
+            translationLabel.translatesAutoresizingMaskIntoConstraints = false
+            translationLabel.isHidden = !isVisible
+            translationLabel.alphaValue = 0.8
+            translationLabel.maximumNumberOfLines = 0
+            translationLabel.lineBreakMode = .byWordWrapping
+
+            let italicDescriptor2 = bodyFont.fontDescriptor.withSymbolicTraits(.italic)
+            let italicFont = NSFont(descriptor: italicDescriptor2, size: bodyFont.pointSize - 1) ?? bodyFont
+            translationLabel.font = italicFont
+            translationLabel.textColor = NSColor.secondaryLabelColor
+
+            if isVisible {
+                if let cached = inlineTranslationCache.object(forKey: item.id as NSString) {
+                    translationLabel.stringValue = cached as String
+                } else if isLoading {
+                    translationLabel.stringValue = "…"
+                }
             }
 
-            cell.addSubview(bar)
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
-                label.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -2),
+            cell.addSubview(translationLabel)
 
-                bar.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-                bar.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                bar.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
-                bar.heightAnchor.constraint(equalToConstant: 3),
-            ])
+            if let confidence = item.confidence {
+                // Горизонтальный индикатор уверенности STT (3pt высота) под переводом.
+                let bar = NSView()
+                bar.wantsLayer = true
+                bar.translatesAutoresizingMaskIntoConstraints = false
+                let barColor = confidenceColor(for: confidence)
+                bar.layer?.backgroundColor = barColor.cgColor
+                bar.layer?.cornerRadius = 1.5
+
+                bar.alphaValue = 0
+                KrabEarTheme.Motion.animate(
+                    duration: KrabEarTheme.Motion.Duration.micro,
+                    easing: KrabEarTheme.Motion.Easing.easeOut
+                ) {
+                    bar.alphaValue = 1
+                }
+
+                cell.addSubview(bar)
+                NSLayoutConstraint.activate([
+                    // Основной текст — оставляем место для кнопки справа.
+                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    label.trailingAnchor.constraint(equalTo: translateBtn.leadingAnchor, constant: -4),
+                    label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+
+                    // Кнопка перевода — прижата к правому краю, выровнена с первой строкой текста.
+                    translateBtn.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    translateBtn.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                    translateBtn.widthAnchor.constraint(equalToConstant: 20),
+                    translateBtn.heightAnchor.constraint(equalToConstant: 18),
+
+                    // Строка перевода под основным текстом.
+                    translationLabel.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    translationLabel.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    translationLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
+                    translationLabel.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -2),
+
+                    // Полоска уверенности.
+                    bar.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    bar.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    bar.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+                    bar.heightAnchor.constraint(equalToConstant: 3),
+                ])
+            } else {
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    label.trailingAnchor.constraint(equalTo: translateBtn.leadingAnchor, constant: -4),
+                    label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+
+                    translateBtn.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    translateBtn.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                    translateBtn.widthAnchor.constraint(equalToConstant: 20),
+                    translateBtn.heightAnchor.constraint(equalToConstant: 18),
+
+                    translationLabel.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    translationLabel.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                    translationLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
+                    translationLabel.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+                ])
+            }
         } else {
             NSLayoutConstraint.activate([
                 label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
@@ -798,21 +861,111 @@ extension HistoryPanelController {
         return cell
     }
 
+    // MARK: - Inline translation toggle handler
+
+    @objc func onInlineTranslateToggle(_ sender: NSButton) {
+        let row = sender.tag
+        guard row >= 0, row < items.count else { return }
+        let item = items[row]
+
+        if inlineTranslationVisible.contains(item.id) {
+            // Toggle OFF — скрыть перевод.
+            inlineTranslationVisible.remove(item.id)
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: textColumnIndex()))
+            return
+        }
+
+        // Toggle ON — проверяем кэш.
+        if let cached = inlineTranslationCache.object(forKey: item.id as NSString) as String?,
+           !cached.isEmpty {
+            inlineTranslationVisible.insert(item.id)
+            tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: textColumnIndex()))
+            return
+        }
+
+        // Ничего в кэше — делаем IPC-запрос.
+        guard !inlineTranslationLoading.contains(item.id) else { return }
+        inlineTranslationLoading.insert(item.id)
+        inlineTranslationVisible.insert(item.id)
+        tableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: textColumnIndex()))
+
+        let textToTranslate = item.text
+        let itemID = item.id
+        let capturedRow = row
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let response = try? self.ipcClient.call(
+                method: "translate_text",
+                params: [
+                    "text": textToTranslate,
+                    "translation_mode": "auto",
+                ]
+            )
+            let result = response?["result"] as? [String: Any]
+            let translated = ((result?["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            DispatchQueue.main.async {
+                self.inlineTranslationLoading.remove(itemID)
+                if !translated.isEmpty {
+                    self.inlineTranslationCache.setObject(translated as NSString, forKey: itemID as NSString)
+                } else {
+                    // Ошибка перевода — скрыть строку.
+                    self.inlineTranslationVisible.remove(itemID)
+                }
+                if capturedRow < self.items.count {
+                    self.tableView.reloadData(
+                        forRowIndexes: IndexSet(integer: capturedRow),
+                        columnIndexes: IndexSet(integer: self.textColumnIndex())
+                    )
+                }
+            }
+        }
+    }
+
+    /// Возвращает индекс колонки "text" в tableView.
+    func textColumnIndex() -> Int {
+        tableView.tableColumns.firstIndex { $0.identifier.rawValue == "text" } ?? 0
+    }
+
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard row < items.count else { return historyMinRowHeight() }
+        let item = items[row]
 
         let textColumn = tableView.tableColumns.first { $0.identifier.rawValue == "text" }
-        let columnWidth = max(180, (textColumn?.width ?? 700) - 8)
-        let sampleText = items[row].text as NSString
+        // Оставляем 28pt под кнопку перевода справа.
+        let columnWidth = max(180, (textColumn?.width ?? 700) - 36)
+        let sampleText = item.text as NSString
+        let bodyFont = historyBodyFont()
 
         let textHeight = sampleText.boundingRect(
             with: NSSize(width: columnWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: historyBodyFont()],
+            attributes: [.font: bodyFont],
             context: nil
         ).height
 
-        return max(historyMinRowHeight(), ceil(textHeight) + 10)
+        var totalHeight = ceil(textHeight) + 10
+
+        // Если перевод виден — добавляем высоту второй строки.
+        if inlineTranslationVisible.contains(item.id) {
+            let translationText: String
+            if let cached = inlineTranslationCache.object(forKey: item.id as NSString) {
+                translationText = cached as String
+            } else {
+                translationText = "…"
+            }
+            let italicDescriptor = bodyFont.fontDescriptor.withSymbolicTraits(.italic)
+            let italicFont = NSFont(descriptor: italicDescriptor, size: bodyFont.pointSize - 1) ?? bodyFont
+            let translationHeight = (translationText as NSString).boundingRect(
+                with: NSSize(width: columnWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: italicFont],
+                context: nil
+            ).height
+            totalHeight += ceil(translationHeight) + 6
+        }
+
+        return max(historyMinRowHeight(), totalHeight)
     }
 
     func buildTranslationBadge(_ item: HistoryItem) -> String {
@@ -877,5 +1030,25 @@ extension HistoryPanelController {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Testable helpers (inline translation cache logic)
+
+    /// Возвращает true если кэш уже содержит перевод для данного itemID.
+    static func inlineTranslationCacheHit(
+        cache: NSCache<NSString, NSString>,
+        itemID: String
+    ) -> Bool {
+        cache.object(forKey: itemID as NSString) != nil
+    }
+
+    /// Вычисляет новое состояние видимости перевода при toggle:
+    /// - если уже visible → returns false (скрыть)
+    /// - если not visible → returns true (показать)
+    static func inlineTranslationNextVisible(
+        currentlyVisible: Set<String>,
+        itemID: String
+    ) -> Bool {
+        !currentlyVisible.contains(itemID)
     }
 }

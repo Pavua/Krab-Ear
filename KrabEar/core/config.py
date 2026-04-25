@@ -774,4 +774,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "history_large_mb": 500,
     "auto_cleanup_enabled": False,
     "auto_cleanup_after_days": 365,
+    # --- Инлайн-перевод в истории (кнопка-флаг у каждой записи) ---
+    # "auto" = использовать активный translation_mode, иначе явный язык: "ru", "es", "en".
+    "inline_translation_target": "auto",
 }
