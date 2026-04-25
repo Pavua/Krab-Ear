@@ -47,6 +47,7 @@ HEAVY_METHODS: Set[str] = {
     "get_waveform",             # генерация waveform-данных
     "convert_audio",            # конвертация аудио
     "bulk_reprocess_start",     # массовое перетранскрибирование (запуск фонового задания)
+    "auto_cleanup_old",         # удаление старых записей истории (CPU + disk I/O)
 }
 
 MEDIUM_METHODS: Set[str] = {
@@ -79,6 +80,8 @@ MEDIUM_METHODS: Set[str] = {
     "get_error_stats",          # статистика ошибок
     "health_check",             # health check подсистем
     "get_session_history",      # история сессий
+    "get_disk_status",          # статус дискового пространства
+    "get_storage_breakdown",    # разбивка использования диска
 }
 
 # Методы, полностью исключённые из throttling.

@@ -546,6 +546,133 @@ class StateStore:
             "total_bytes": int(stats["total_bytes"]),
         }
 
+    # ------------------------------------------------------------------
+    # Disk / storage utilities
+    # ------------------------------------------------------------------
+
+    def auto_cleanup_old(
+        self, days: int = 365, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Удаляет записи истории старше days дней (tombstone-удаление).
+
+        Args:
+            days: Записи старше этого числа дней будут удалены (>= 1).
+            dry_run: Если True - возвращает количество, но не удаляет.
+
+        Returns:
+            deleted_count, remaining, dry_run, threshold_days, oldest_item_age_days
+        """
+        if days < 1:
+            raise ValueError("days must be >= 1")
+
+        threshold_dt = datetime.now() - timedelta(days=days)
+
+        with self._lock():
+            active = self._load_active_items_unlocked()
+
+        to_delete = [
+            item
+            for item in active
+            if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
+        ]
+
+        oldest_age_days = None
+        if active:
+            oldest_ts_str = min(
+                (item.ts for item in active if item.ts), default=None
+            )
+            if oldest_ts_str:
+                oldest_dt = datetime.fromisoformat(oldest_ts_str)
+                oldest_age_days = (datetime.now() - oldest_dt).days
+
+        if not dry_run:
+            for item in to_delete:
+                if item.id:
+                    self.delete_history_item(item.id)
+
+        return {
+            "deleted_count": len(to_delete),
+            "remaining": len(active) - len(to_delete),
+            "dry_run": dry_run,
+            "threshold_days": days,
+            "oldest_item_age_days": oldest_age_days,
+        }
+
+    def get_storage_breakdown(self) -> dict[str, Any]:
+        """Возвращает разбивку использования диска по компонентам (в MB).
+
+        Returns:
+            ndjson_mb, transcripts_mb, audio_mb, total_mb, oldest_item_age_days
+        """
+        ndjson_mb = sum(
+            self._safe_size_mb(p)
+            for p in [
+                self.history_path,
+                self.tombstones_path,
+                self.status_path,
+                self.tags_path,
+                self.favorites_path,
+                self.annotations_path,
+                self.text_updates_path,
+                self.settings_path,
+            ]
+        )
+
+        transcripts_dir = self.data_dir / "transcripts"
+        transcripts_mb = self._dir_size_mb(transcripts_dir)
+
+        audio_dir = self.data_dir / "audio"
+        audio_mb = self._dir_size_mb(audio_dir)
+
+        total_mb = ndjson_mb + transcripts_mb + audio_mb
+
+        oldest_age_days = None
+        try:
+            with self._lock():
+                active = self._load_active_items_unlocked()
+            if active:
+                oldest_ts_str = min(
+                    (item.ts for item in active if item.ts), default=None
+                )
+                if oldest_ts_str:
+                    oldest_dt = datetime.fromisoformat(oldest_ts_str)
+                    oldest_age_days = (datetime.now() - oldest_dt).days
+        except Exception:
+            pass
+
+        return {
+            "ndjson_mb": round(ndjson_mb, 3),
+            "transcripts_mb": round(transcripts_mb, 3),
+            "audio_mb": round(audio_mb, 3),
+            "total_mb": round(total_mb, 3),
+            "oldest_item_age_days": oldest_age_days,
+        }
+
+    @staticmethod
+    def _safe_size_mb(path) -> float:
+        """Возвращает размер файла в MB или 0.0 если файл не найден."""
+        try:
+            return path.stat().st_size / (1024 * 1024)
+        except (FileNotFoundError, OSError):
+            return 0.0
+
+    @staticmethod
+    def _dir_size_mb(directory) -> float:
+        """Суммарный размер всех файлов в директории (рекурсивно), MB."""
+        if not directory.exists():
+            return 0.0
+        total = 0
+        try:
+            for f in directory.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except (OSError, FileNotFoundError):
+                        pass
+        except (OSError, PermissionError):
+            pass
+        return total / (1024 * 1024)
+
     def get_history_overview(self) -> dict[str, Any]:
         """Возвращает обзор истории для UI: статусы, перевод, языки, диаризация."""
         with self._lock():

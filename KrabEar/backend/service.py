@@ -120,6 +120,7 @@ from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
+from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
@@ -413,6 +414,14 @@ class BackendService:
         except Exception:
             logger.exception("Startup diagnostics завершились с исключением")
 
+        # Мониторинг дискового пространства
+        self._disk_monitor = DiskSpaceMonitor(
+            settings=settings,
+            event_bus=event_bus,
+            data_dir=self.store.data_dir,
+        )
+        self._disk_monitor.start()
+
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
@@ -704,6 +713,9 @@ class BackendService:
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
+            "get_disk_status": self._handle_get_disk_status,  # текущий статус дискового пространства
+            "get_storage_breakdown": self._handle_get_storage_breakdown,  # разбивка использования диска по компонентам
+            "auto_cleanup_old": self._handle_auto_cleanup_old,  # удаление старых записей истории (с поддержкой dry_run)
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
             "get_auto_backup_status": lambda p: self._auto_backup.get_auto_backup_status(),  # статус авто-резервного копирования
@@ -2277,6 +2289,25 @@ class BackendService:
             "count": len(items),
             "default_input_id": default_input_id,
         }
+
+    def _handle_get_disk_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий статус дискового пространства (немедленная проверка)."""
+        return self._disk_monitor.check_now()
+
+    def _handle_get_storage_breakdown(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает разбивку использования диска по компонентам (NDJSON, transcripts, audio)."""
+        return self.store.get_storage_breakdown()
+
+    def _handle_auto_cleanup_old(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет записи истории старше days дней. dry_run=True только считает.
+
+        Params:
+            days (int): порог возраста (>= 1, default: AUTO_CLEANUP_AFTER_DAYS из настроек)
+            dry_run (bool): если True — только считает, не удаляет (default: False)
+        """
+        days = int(params.get("days", settings.AUTO_CLEANUP_AFTER_DAYS))
+        dry_run = bool(params.get("dry_run", False))
+        return self.store.auto_cleanup_old(days=days, dry_run=dry_run)
 
     def _handle_get_audio_devices(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств (обёртка для GUI)."""
