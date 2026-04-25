@@ -540,6 +540,23 @@ class AudioEngine:
         try:
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
+
+            # VAD pre-filter: убираем длинные паузы ДО Whisper → меньше галлюцинаций.
+            # Работает только с numpy-массивами (не с file path).
+            if settings.STT_VAD_PREFILTER_ENABLED and isinstance(audio_data, np.ndarray):
+                vad_result = self._apply_vad_prefilter(audio_data)
+                if vad_result is None:
+                    # Тишина или слишком мало речи — возвращаем пустой результат
+                    return {"text": "", "raw_text": "", "cleaned_text": "",
+                            "llm_applied": False, "llm_latency_ms": None,
+                            "llm_fallback_reason": None, "llm_diff": None,
+                            "confidence": 0.0, "raw_confidence": 0.0,
+                            "confidence_adjustments": [], "duration_ms": 0,
+                            "engine": "vad_skip", "model": None,
+                            "language": resolved_lang, "segments": [],
+                            "diarization": None, "emotion": None}
+                audio_data = vad_result
+
             result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
             raw_text = str(result.get("text", "")).strip()
             segments = result.get("segments", [])
@@ -646,6 +663,98 @@ class AudioEngine:
                     os.unlink(_temp_copy_path)
                 except OSError:
                     pass
+
+    # ------------------------------------------------------------------
+    # VAD pre-filter
+    # ------------------------------------------------------------------
+
+    _VAD_SAMPLE_RATE: int = 16000   # Whisper всегда работает с 16 kHz
+    _VAD_MIN_VOICE_SEC: float = 0.3  # минимум речи для запуска STT
+    _VAD_PADDING_SEC: float = 0.5    # padding вокруг каждого речевого сегмента
+
+    def _apply_vad_prefilter(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = _VAD_SAMPLE_RATE,
+    ) -> Optional[np.ndarray]:
+        """Применяет VAD к аудио-массиву ДО STT.
+
+        Алгоритм:
+        1. Обнаруживает речевые сегменты через VoiceActivityDetector.
+        2. Если суммарная речь < _VAD_MIN_VOICE_SEC → возвращает None
+           (caller должен вернуть пустой результат без вызова STT).
+        3. Извлекает речевые регионы с padding _VAD_PADDING_SEC и
+           конкатенирует их. Паузы > STT_VAD_SILENCE_TRIM_THRESHOLD_SEC
+           заменяются тишиной длиной _VAD_PADDING_SEC (обрезаются).
+        4. Логирует VAD ratio и сколько тишины обрезано.
+
+        Returns:
+            Обработанный numpy-массив float32 или None если речи нет.
+        """
+        from core.vad import VoiceActivityDetector
+
+        vad = VoiceActivityDetector()
+        result = vad.detect(audio, sample_rate=sample_rate)
+
+        total_sec = len(audio) / sample_rate if sample_rate > 0 else 0.0
+        trimmed_silence_sec = 0.0
+
+        logger.info(
+            "VAD pre-filter: speech_ratio=%.2f, speech=%.2fs, silence=%.2fs, "
+            "segments=%d, total=%.2fs",
+            result.speech_ratio,
+            result.total_speech_sec,
+            result.total_silence_sec,
+            len(result.speech_segments),
+            total_sec,
+        )
+
+        if result.total_speech_sec < self._VAD_MIN_VOICE_SEC:
+            logger.info(
+                "VAD pre-filter: слишком мало речи (%.3fs < %.3fs) — STT пропускается",
+                result.total_speech_sec,
+                self._VAD_MIN_VOICE_SEC,
+            )
+            return None
+
+        silence_threshold = settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC
+        pad_samples = int(self._VAD_PADDING_SEC * sample_rate)
+
+        # Собираем фрагменты: каждый сегмент речи + padding
+        chunks: list[np.ndarray] = []
+        n_samples = len(audio)
+        for seg in result.speech_segments:
+            start_s = max(0, int(seg.start_sec * sample_rate) - pad_samples)
+            end_s = min(n_samples, int(seg.end_sec * sample_rate) + pad_samples)
+            chunks.append(audio[start_s:end_s])
+
+        if not chunks:
+            return None
+
+        # Вычисляем реальную обрезанную тишину (паузы > threshold)
+        # путём сравнения общей исходной длины с длиной конкатенированных фрагментов
+        raw_extracted_sec = sum(len(c) for c in chunks) / sample_rate
+        trimmed_silence_sec = max(0.0, total_sec - raw_extracted_sec)
+
+        if trimmed_silence_sec > 0.01:
+            logger.info(
+                "VAD pre-filter: обрезано %.2fs тишины (порог=%.1fs, padding=%.1fs)",
+                trimmed_silence_sec,
+                silence_threshold,
+                self._VAD_PADDING_SEC,
+            )
+
+        # Добавляем silence_padding между фрагментами вместо длинных пауз.
+        # Это сохраняет относительный ритм речи для Whisper.
+        silence_pad = np.zeros(pad_samples, dtype=np.float32)
+        merged_parts: list[np.ndarray] = []
+        for i, chunk in enumerate(chunks):
+            merged_parts.append(chunk.astype(np.float32))
+            if i < len(chunks) - 1:
+                merged_parts.append(silence_pad)
+
+        filtered = np.concatenate(merged_parts)
+        return filtered
 
     def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
