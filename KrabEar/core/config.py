@@ -508,6 +508,15 @@ class Settings(BaseSettings):
     CALENDAR_LINK_ENABLED: bool = False
     CALENDAR_LINK_CACHE_MIN: int = 5
 
+    # --- Мониторинг дискового пространства (backend/disk_monitor.py) ---
+    DISK_MONITOR_ENABLED: bool = True
+    DISK_CHECK_INTERVAL_MIN: int = 30
+    DISK_WARNING_GB: float = 5.0
+    DISK_CRITICAL_GB: float = 1.0
+    HISTORY_LARGE_MB: int = 500
+    AUTO_CLEANUP_ENABLED: bool = False
+    AUTO_CLEANUP_AFTER_DAYS: int = 365
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -744,4 +753,25 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "paste_app_memory_enabled": True,
     # REST API token store
     "rest_api_auth_enabled": False,
+}
+    "bulk_reprocess_batch_size": 5,,
+    "voice_fingerprint_enabled": False,
+    "voice_fingerprint_match_threshold": 0.75,
+    # REST API token store (расширенное управление токенами)
+    "rest_api_auth_enabled": False,
+    # --- Semantic search ---
+    "semantic_search_enabled": False,
+    "semantic_search_model": "intfloat/multilingual-e5-base",
+    "semantic_search_auto_index": True,
+    # --- Быстрое переключение пресетов ---
+    "active_preset": "default",
+    "preset_quick_switch_hotkey": "cmd+shift+p",
+    # --- Мониторинг дискового пространства ---
+    "disk_monitor_enabled": True,
+    "disk_check_interval_min": 30,
+    "disk_warning_gb": 5.0,
+    "disk_critical_gb": 1.0,
+    "history_large_mb": 500,
+    "auto_cleanup_enabled": False,
+    "auto_cleanup_after_days": 365,
 }
