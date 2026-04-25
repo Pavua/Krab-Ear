@@ -422,6 +422,15 @@ class Settings(BaseSettings):
     # 60s: стандартная диктовка (< 60 s аудио) должна завершаться быстрее.
     # Для длинных файлов (> 5 мин) увеличьте до 300–600s.
     MLX_TRANSCRIBE_TIMEOUT_SEC: float = 60.0
+    # --- Auto-Glossary: автоматический глоссарий из истории (core/auto_glossary.py) ---
+    # При AUTO_GLOSSARY_ENABLED=True: перед каждой транскрибацией AutoGlossaryBuilder
+    # извлекает top-N часто встречающихся имён и терминов из истории за последние
+    # AUTO_GLOSSARY_WINDOW_DAYS дней и добавляет их в initial_prompt Whisper.
+    # Кэш обновляется не чаще раза в AUTO_GLOSSARY_REFRESH_HOURS часов.
+    AUTO_GLOSSARY_ENABLED: bool = True
+    AUTO_GLOSSARY_WINDOW_DAYS: int = 7
+    AUTO_GLOSSARY_TOP_N: int = 30
+    AUTO_GLOSSARY_REFRESH_HOURS: int = 6
 
     @property
     def model_max_list(self) -> List[str]:
@@ -611,4 +620,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "mlx_crash_recovery_enabled": True,
     # Таймаут одного MLX inference (секунды).
     "mlx_transcribe_timeout_sec": 60.0,
+    # --- Auto-Glossary: автоматический глоссарий из истории ---
+    "auto_glossary_enabled": True,
+    "auto_glossary_window_days": 7,
+    "auto_glossary_top_n": 30,
+    "auto_glossary_refresh_hours": 6,
 }

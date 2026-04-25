@@ -19,6 +19,9 @@ _DEFAULT_HISTORY_LIMIT: int = 10
 # Разделитель между элементами в контексте.
 _ITEM_SEP: str = " "
 
+# Максимальное число терминов в объединённом глоссарии (hotwords + auto_glossary).
+_MAX_COMBINED_TERMS: int = 250
+
 
 def _iso_to_epoch(ts: str) -> float:
     """Конвертирует ISO-8601 строку в Unix epoch (float).
@@ -71,6 +74,7 @@ def build_initial_prompt(
     max_words: int = 250,
     max_age_seconds: int = _MAX_AGE_SECONDS,
     history_limit: int = _DEFAULT_HISTORY_LIMIT,
+    auto_glossary: list[str] | None = None,
 ) -> str:
     """Строит строку initial_prompt для передачи в mlx_whisper.transcribe.
 
@@ -91,6 +95,9 @@ def build_initial_prompt(
         max_words: Максимальное количество слов в части "Previous transcript".
         max_age_seconds: Максимальный возраст элемента в секундах.
         history_limit: Сколько последних элементов рассматривать.
+        auto_glossary: Автоматически извлечённые термины из истории (AutoGlossaryBuilder).
+                       Объединяются с hotwords; дубликаты (case-insensitive) удаляются.
+                       hotwords имеют приоритет над auto_glossary.
 
     Returns:
         Строка initial_prompt (может быть пустой, если нет валидного контекста и hotwords).
@@ -133,9 +140,22 @@ def build_initial_prompt(
     # Формируем итоговый prompt
     parts: list[str] = []
 
-    cleaned_hotwords = [w.strip() for w in (hotwords or []) if w.strip()]
-    if cleaned_hotwords:
-        parts.append(f"Glossary: {', '.join(cleaned_hotwords)}.")
+    # Объединяем hotwords (приоритет) + auto_glossary с дедупликацией (case-insensitive).
+    seen_lower: set[str] = set()
+    combined_terms: list[str] = []
+    for w in list(hotwords or []) + list(auto_glossary or []):
+        w = w.strip()
+        if not w:
+            continue
+        key = w.lower()
+        if key not in seen_lower:
+            seen_lower.add(key)
+            combined_terms.append(w)
+        if len(combined_terms) >= _MAX_COMBINED_TERMS:
+            break
+
+    if combined_terms:
+        parts.append(f"Glossary: {', '.join(combined_terms)}.")
 
     if combined:
         parts.append(f"Previous transcript: {combined}")

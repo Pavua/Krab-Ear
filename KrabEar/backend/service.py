@@ -65,6 +65,7 @@ from core.text_comparator import TextComparator
 from core.language_detector import LanguageDetector
 from core.config import settings
 from core.audio_converter import AudioConverter
+from core.auto_glossary import AutoGlossaryBuilder
 from backend.translator import Translator
 from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
@@ -348,6 +349,16 @@ class BackendService:
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
+        # Auto-Glossary — автоматический глоссарий из истории транскрибаций
+        self._auto_glossary = AutoGlossaryBuilder(
+            store=self.store,
+            data_dir=self.store.data_dir,
+            refresh_hours=float(
+                self._settings_svc.cached_settings().get(
+                    "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
+                )
+            ),
+        )
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -670,6 +681,8 @@ class BackendService:
             "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
+            "get_auto_glossary": self._handle_get_auto_glossary,  # список терминов из авто-глоссария истории
+            "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # принудительное перестроение авто-глоссария
             "toggle_favorite": self._history.handle_toggle_favorite,
             "get_favorites": self._history.handle_get_favorites,
             "is_favorite": self._history.handle_is_favorite,
@@ -1320,6 +1333,32 @@ class BackendService:
             "stt_hotwords", []
         )
 
+        # Авто-глоссарий из истории: обогащаем initial_prompt именами и терминами.
+        # Результат кэшируется 6 часов; при disabled — пустой список.
+        _auto_glossary_terms: list[str] = []
+        _cached_settings_ag = self._settings_svc.cached_settings()
+        _ag_window_days = int(_cached_settings_ag.get("auto_glossary_window_days", settings.AUTO_GLOSSARY_WINDOW_DAYS))
+        _ag_top_n = int(_cached_settings_ag.get("auto_glossary_top_n", settings.AUTO_GLOSSARY_TOP_N))
+        if _cached_settings_ag.get("auto_glossary_enabled", settings.AUTO_GLOSSARY_ENABLED):
+            try:
+                _auto_glossary_terms = self._auto_glossary.build(
+                    window_days=_ag_window_days, top_n=_ag_top_n
+                )
+            except Exception as _ag_exc:
+                logger.warning("auto_glossary: ошибка при построении глоссария: %s", _ag_exc)
+
+        # Объединяем пользовательские hotwords и авто-глоссарий с дедупликацией.
+        _combined_hotwords: list[str] | None = None
+        if _stt_hotwords or _auto_glossary_terms:
+            _seen_hw: set[str] = set()
+            _combined_hw: list[str] = []
+            for _w in list(_stt_hotwords) + list(_auto_glossary_terms):
+                _w = _w.strip()
+                if _w and _w.lower() not in _seen_hw:
+                    _seen_hw.add(_w.lower())
+                    _combined_hw.append(_w)
+            _combined_hotwords = _combined_hw if _combined_hw else None
+
         add_breadcrumb(
             category="transcription",
             message="transcribe_start",
@@ -1328,6 +1367,7 @@ class BackendService:
                 "quality_profile": quality_profile,
                 "audio_len_sec": round(float(duration_sec), 2),
                 "lang_hint": lang_hint or "auto",
+                "auto_glossary_terms": len(_auto_glossary_terms),
             },
         )
         transcribe_payload = self.transcriber.transcribe(
@@ -1337,7 +1377,7 @@ class BackendService:
             lang_hint=lang_hint,
             extra_vocabulary=user_vocabulary if user_vocabulary else None,
             history_context=_recent_history if _recent_history else None,
-            stt_hotwords=_stt_hotwords if _stt_hotwords else None,
+            stt_hotwords=_combined_hotwords,
         )
         text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
         transcription_error = self._extract_transcribed_error(transcribe_payload)
@@ -3958,6 +3998,43 @@ class BackendService:
         if not isinstance(current, list):
             current = []
         return {"hotwords": current}
+
+    # ── Auto-Glossary IPC handlers ───────────────────────────────────────────
+
+    def _handle_get_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий авто-глоссарий из истории транскрибаций.
+
+        Возвращает: {terms: list[str], count: int, cache_age_hours: float, enabled: bool}
+        """
+        _s = self._settings_svc.cached_settings()
+        enabled = bool(_s.get("auto_glossary_enabled", settings.AUTO_GLOSSARY_ENABLED))
+        if not enabled:
+            return {"terms": [], "count": 0, "cache_age_hours": 0.0, "enabled": False}
+        import time as _time
+        terms = self._auto_glossary.get_cached()
+        built_at = self._auto_glossary._cache_built_at
+        age_hours = (_time.time() - built_at) / 3600.0 if built_at else 0.0
+        return {
+            "terms": terms,
+            "count": len(terms),
+            "cache_age_hours": round(age_hours, 2),
+            "enabled": enabled,
+        }
+
+    def _handle_refresh_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Принудительно перестраивает авто-глоссарий из истории (игнорирует кэш).
+
+        Параметры:
+          - window_days: int — горизонт истории в днях (по умолчанию из настроек).
+          - top_n: int — максимальное число терминов (по умолчанию из настроек).
+
+        Возвращает: {terms: list[str], count: int}
+        """
+        _s = self._settings_svc.cached_settings()
+        window_days = int(params.get("window_days", _s.get("auto_glossary_window_days", settings.AUTO_GLOSSARY_WINDOW_DAYS)))
+        top_n = int(params.get("top_n", _s.get("auto_glossary_top_n", settings.AUTO_GLOSSARY_TOP_N)))
+        terms = self._auto_glossary.build(window_days=window_days, top_n=top_n, force=True)
+        return {"terms": terms, "count": len(terms)}
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
