@@ -15,6 +15,7 @@ enum IPCError: Error, LocalizedError {
     case socketConnectFailed(String)
     case writeFailed
     case readFailed
+    case timeout
     case invalidResponse
     case backendError(String)
 
@@ -28,6 +29,8 @@ enum IPCError: Error, LocalizedError {
             return "Ошибка отправки данных в backend"
         case .readFailed:
             return "Ошибка чтения ответа backend"
+        case .timeout:
+            return "Backend не ответил за 5 секунд (timeout)"
         case .invalidResponse:
             return "Backend вернул некорректный ответ"
         case .backendError(let message):
@@ -63,6 +66,13 @@ final class IPCClient: @unchecked Sendable {
         }
         defer { close(fd) }
 
+        // 5s timeout — иначе main thread зависает в Darwin.read когда backend медленный
+        // (mitigation для KRAB-EAR-AGENT-3/8 — proper async fix отдельно).
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        let tvSize = socklen_t(MemoryLayout<timeval>.size)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvSize)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
+
         try connectSocket(fd: fd)
 
         let requestBytes = Array((payloadString + "\n").utf8)
@@ -80,6 +90,9 @@ final class IPCClient: @unchecked Sendable {
         while true {
             let count = Darwin.read(fd, &chunk, chunk.count)
             if count < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw IPCError.timeout
+                }
                 throw IPCError.readFailed
             }
             if count == 0 {
