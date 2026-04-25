@@ -44,6 +44,7 @@ from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
 from backend.bulk_reprocess import BulkReprocessor
 from backend.realtime_partial import RealtimePartialTranscriber
+from backend.semantic_search import SemanticSearcher, keyword_fallback_search
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -361,6 +362,11 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
+        # Семантический поиск (opt-in, lazy model load)
+        self._semantic_searcher = SemanticSearcher(
+            data_dir=self.store.data_dir,
+            model_name=settings.SEMANTIC_SEARCH_MODEL,
+            enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
@@ -685,6 +691,68 @@ class BackendService:
                 logger.exception("Auto-extract action items failed for item=%s", item_id)
 
         _ait.Thread(target=_run, daemon=True, name=f"ai-{item_id[:8]}").start()
+    # ------------------------------------------------------------------
+    # Semantic search IPC handlers
+    # ------------------------------------------------------------------
+
+    def _handle_semantic_search(self, params: dict) -> dict:
+        """Семантический поиск по истории транскрипций через embeddings.
+
+        Params:
+            query     — поисковый запрос (строка, обязательный)
+            top_k     — максимальное число результатов (int, default 10)
+            fallback  — bool, использовать keyword fallback если модель недоступна (default True)
+        Returns:
+            {"results": [{"id": str, "score": float}], "mode": "semantic"|"keyword"|"disabled"}
+        """
+        query = str(params.get("query", "")).strip()
+        if not query:
+            raise ValueError("Параметр query обязателен")
+        top_k = int(params.get("top_k", 10))
+        top_k = max(1, min(top_k, 100))
+        use_fallback = bool(params.get("fallback", True))
+
+        if not self._semantic_searcher.is_enabled:
+            if use_fallback:
+                items = [{"id": it.id, "text": it.text}
+                         for it in self.store._load_active_items_with_lock()]
+                results = keyword_fallback_search(query, items, top_k=top_k)
+                return {"results": results, "mode": "keyword", "reason": "semantic_disabled"}
+            return {"results": [], "mode": "disabled"}
+
+        results = self._semantic_searcher.search(query, top_k=top_k)
+        if not results and use_fallback:
+            items = [{"id": it.id, "text": it.text}
+                     for it in self.store._load_active_items_with_lock()]
+            results = keyword_fallback_search(query, items, top_k=top_k)
+            return {"results": results, "mode": "keyword", "reason": "model_unavailable"}
+
+        return {"results": results, "mode": "semantic"}
+
+    def _handle_semantic_search_status(self, params: dict) -> dict:
+        """Возвращает статус семантического поиска.
+
+        Returns:
+            {"enabled": bool, "model_loaded": bool, "model_name": str,
+             "model_error": str|null, "indexed_count": int}
+        """
+        return self._semantic_searcher.status()
+
+    def _handle_semantic_search_reindex(self, params: dict) -> dict:
+        """Переиндексирует всю историю транскрипций.
+
+        Params:
+            force — bool, перестроить индекс с нуля (default False)
+        Returns:
+            {"indexed": int, "skipped": int, "errors": int}
+        """
+        if not self._semantic_searcher.is_enabled:
+            return {"indexed": 0, "skipped": 0, "errors": 0, "reason": "semantic_search_disabled"}
+        force = bool(params.get("force", False))
+        items = [{"id": it.id, "text": it.text}
+                 for it in self.store._load_active_items_with_lock()]
+        result = self._semantic_searcher.index_all(items, force=force)
+        return result
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
@@ -1016,6 +1084,10 @@ class BackendService:
             "list_all_bookmarks": self._bookmarks.handle_list_all_bookmarks,  # все активные закладки
             "delete_bookmark": self._bookmarks.handle_delete_bookmark,  # удалить закладку (tombstone)
             "jump_to_bookmark": self._bookmarks.handle_jump_to_bookmark,  # перейти к закладке (эмитит playback.seek)
+            # --- Semantic search (opt-in, multilingual embeddings) ---
+            "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
+            "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
+            "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
         }
 
         handler = handlers.get(method)
@@ -1592,6 +1664,17 @@ class BackendService:
             self._context_memory.update(text)
         except Exception:
             pass
+
+        # Авто-индексация для семантического поиска (фоновый поток, opt-in)
+        if self._semantic_searcher.is_enabled and settings.SEMANTIC_SEARCH_AUTO_INDEX:
+            _index_text = display_text or text
+            _index_id = item.id
+            threading.Thread(
+                target=self._semantic_searcher.index_item,
+                args=(_index_id, _index_text),
+                daemon=True,
+                name="semantic-index",
+            ).start()
 
         # Авто-бэкап каждые 100 транскрибаций
         self._transcription_counter += 1
