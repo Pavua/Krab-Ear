@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     # Пример: "http://localhost:3000,https://app.example.com"
     CORS_ORIGINS: str = "*"
 
+    # --- Адаптивное шумоподавление (Adaptive Denoising) ---
+    # При STT_DENOISE_ENABLED=True: перед транскрибацией оцениваем SNR аудио через
+    # NoiseProfiler. Если SNR < STT_DENOISE_SNR_THRESHOLD_DB → применяем деноизер.
+    # Деноизер: noisereduce (если установлен) или встроенный spectral gating (scipy).
+    # STT_DENOISE_STRENGTH: уровень подавления — "off"|"light"|"moderate"|"strong".
+    STT_DENOISE_ENABLED: bool = True
+    STT_DENOISE_SNR_THRESHOLD_DB: float = 15.0
+    STT_DENOISE_STRENGTH: str = "moderate"
+
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
 
@@ -308,6 +317,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # VAD pre-filter перед STT
     "stt_vad_prefilter_enabled": True,
     "stt_vad_silence_trim_threshold_sec": 2.0,
+    # Адаптивное шумоподавление
+    "stt_denoise_enabled": True,
+    "stt_denoise_snr_threshold_db": 15.0,
+    "stt_denoise_strength": "moderate",
     "silence_guard_enabled": True,
     "silence_guard_rms_threshold": 0.0020,
     "silence_guard_peak_threshold": 0.0120,

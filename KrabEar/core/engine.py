@@ -459,6 +459,40 @@ class AudioEngine:
         logger.warning("Неизвестный lang_hint=%r, используем авто-определение", lang_hint)
         return None
 
+    def _maybe_denoise(self, audio: np.ndarray) -> np.ndarray:
+        """Проверяет SNR и применяет шумоподавление при необходимости.
+
+        Использует NoiseProfiler для оценки SNR. Если SNR < порога из настроек →
+        запускает AudioDenoiser с заданной силой. Возвращает (возможно обработанный)
+        аудиомассив той же dtype и формы.
+
+        Исключения внутри не должны ломать транскрибацию — ловим и логируем.
+        """
+        try:
+            from core.noise_profiler import NoiseProfiler
+            from core.audio_denoiser import AudioDenoiser
+
+            sample_rate = 16000  # mlx-whisper ожидает 16 кГц
+            profile = NoiseProfiler().profile(audio, sample_rate)
+            snr = profile.snr_db
+            threshold = settings.STT_DENOISE_SNR_THRESHOLD_DB
+            strength = settings.STT_DENOISE_STRENGTH
+
+            if snr < threshold:
+                logger.info(
+                    "[STT] noise SNR=%.1f dB < %.1f dB → denoising applied (strength=%s)",
+                    snr, threshold, strength,
+                )
+                return AudioDenoiser().denoise(audio, sample_rate, strength=strength)  # type: ignore[arg-type]
+            else:
+                logger.debug(
+                    "[STT] noise SNR=%.1f dB ≥ %.1f dB → denoising skipped",
+                    snr, threshold,
+                )
+        except Exception as exc:
+            logger.warning("[STT] denoising error, skipping: %s", exc)
+        return audio
+
     def transcribe(
         self,
         audio_data: Any,
@@ -538,6 +572,15 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
+            # 2.5 Адаптивное шумоподавление (применяется только к numpy-массивам,
+            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
+            if (
+                settings.STT_DENOISE_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                audio_data = self._maybe_denoise(audio_data)
+
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
 
