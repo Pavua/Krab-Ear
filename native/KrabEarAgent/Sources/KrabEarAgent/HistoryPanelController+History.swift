@@ -754,12 +754,47 @@ extension HistoryPanelController {
         let cell = NSTableCellView()
         cell.addSubview(label)
         label.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
-            label.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
-        ])
+
+        if isTextColumn, let confidence = item.confidence {
+            // Горизонтальный индикатор уверенности STT (3pt высота) под текстом.
+            // Цвет берётся из KrabEarTheme.Colors — только существующие semantic tokens,
+            // никаких новых литеральных цветов.
+            let bar = NSView()
+            bar.wantsLayer = true
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            let barColor = confidenceColor(for: confidence)
+            bar.layer?.backgroundColor = barColor.cgColor
+            bar.layer?.cornerRadius = 1.5
+
+            // Появление через Motion.animate (Reduce Motion respected автоматически)
+            bar.alphaValue = 0
+            KrabEarTheme.Motion.animate(
+                duration: KrabEarTheme.Motion.Duration.micro,
+                easing: KrabEarTheme.Motion.Easing.easeOut
+            ) {
+                bar.alphaValue = 1
+            }
+
+            cell.addSubview(bar)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                label.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -2),
+
+                bar.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                bar.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                bar.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+                bar.heightAnchor.constraint(equalToConstant: 3),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                label.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+            ])
+        }
         return cell
     }
 
