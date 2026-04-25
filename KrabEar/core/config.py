@@ -411,6 +411,17 @@ class Settings(BaseSettings):
     # --- Recording bookmarks ---
     # Cmd+Shift+B global hotkey creates a bookmark at the current recording position.
     BOOKMARKS_HOTKEY_ENABLED: bool = True
+    # --- MLX inference watchdog (crash recovery) ---
+    # При зависании Metal GPU mlx_whisper.transcribe() может не вернуться.
+    # Watchdog запускает каждый MLX inference в daemon-thread и выбрасывает
+    # MLXTimeoutError если поток не завершился за MLX_TRANSCRIBE_TIMEOUT_SEC.
+    # Вызывающий код (engine.py) перехватывает ошибку → fallback на другой адаптер.
+    # False = watchdog полностью выключен (behavior до этого PR).
+    MLX_CRASH_RECOVERY_ENABLED: bool = True
+    # Таймаут одного mlx_whisper.transcribe() вызова (секунды).
+    # 60s: стандартная диктовка (< 60 s аудио) должна завершаться быстрее.
+    # Для длинных файлов (> 5 мин) увеличьте до 300–600s.
+    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 60.0
 
     @property
     def model_max_list(self) -> List[str]:
@@ -594,4 +605,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "paste_app_memory_enabled": True,
     # --- Recording bookmarks ---
     "bookmarks_hotkey_enabled": True,
+    # --- MLX inference watchdog (crash recovery) ---
+    # Включить watchdog-таймаут для mlx_whisper.transcribe().
+    # При зависании GPU → MLXTimeoutError → fallback на другой STT адаптер.
+    "mlx_crash_recovery_enabled": True,
+    # Таймаут одного MLX inference (секунды).
+    "mlx_transcribe_timeout_sec": 60.0,
 }

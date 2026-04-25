@@ -36,6 +36,7 @@ except Exception:
     mlx_whisper = None  # type: ignore[assignment]
 
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
+from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.transcript_context import build_initial_prompt
 
 try:
@@ -1497,6 +1498,14 @@ class AudioEngine:
                     settings.TRANSCRIBE_TIMEOUT_SEC, model_name,
                 )
                 self._unavailable_models.add(model_name)
+            except MLXTimeoutError as e:
+                # Watchdog-таймаут: Metal GPU завис.
+                # Помечаем модель недоступной → fallback на следующий адаптер.
+                logger.error(
+                    "MLX watchdog timeout %.1fs для модели %s — Metal GPU stuck? Переключаюсь на следующий адаптер.",
+                    e.timeout_sec, model_name,
+                )
+                self._unavailable_models.add(model_name)
             except MemoryError:
                 logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
                 self._unavailable_models.add(model_name)
@@ -1526,6 +1535,10 @@ class AudioEngine:
         Все MLX вызовы сериализуются через глобальный RLock (mlx_lock) во избежание
         race condition в __hash_table<MTL::Resource*> внутри libmlx.dylib (SIGSEGV).
         RLock позволяет повторный захват из того же потока (fallback chain).
+
+        Если MLX_CRASH_RECOVERY_ENABLED=True, каждый вызов mlx_whisper.transcribe()
+        оборачивается в MLXWatchdog.run_with_timeout() — при зависании GPU поток
+        обрывается через MLXTimeoutError, который всплывает в fallback chain.
         """
         effective_language = language if language is not None else settings.TRANSCRIBE_LANGUAGE
         base_params = {
@@ -1543,13 +1556,26 @@ class AudioEngine:
             base_params,
         ]
 
-        last_err = None
+        recovery_enabled = getattr(settings, "MLX_CRASH_RECOVERY_ENABLED", True)
+        timeout_sec = getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0)
+
+        last_err: Exception | None = None
         # Сериализуем доступ к GPU через глобальный MLX lock.
         # Минимальный critical section: только сам mlx_whisper.transcribe вызов.
         with mlx_lock():
             for params in variants:
                 try:
-                    return mlx_whisper.transcribe(audio_data, **params)
+                    if recovery_enabled:
+                        # Watchdog: запускает в daemon-thread, бросает MLXTimeoutError при зависании.
+                        # MLXTimeoutError — не TypeError, не перехватывается ниже → всплывает выше.
+                        captured_params = params  # closure capture
+                        return get_watchdog().run_with_timeout(
+                            fn=lambda: mlx_whisper.transcribe(audio_data, **captured_params),
+                            timeout_sec=timeout_sec,
+                            model_name=model_name,
+                        )
+                    else:
+                        return mlx_whisper.transcribe(audio_data, **params)
                 except TypeError as e:
                     last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
