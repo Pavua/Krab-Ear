@@ -52,6 +52,7 @@ test_audio.wav
 test_whisper.wav
 check_status.command
 KrabEar/tests/benchmark_results.json
+.benchmarks/
 
 # poc_diarization — отдельный sub-git, не трогаем
 poc_diarization/
