@@ -50,6 +50,8 @@ HEAVY_METHODS: Set[str] = {
     "auto_cleanup_old",         # удаление старых записей истории (CPU + disk I/O)
     "extract_action_items",       # LLM извлечение action items из одной записи
     "batch_extract_action_items",  # LLM пакетное извлечение action items
+    "extract_action_items",     # LLM извлечение задач/решений/вопросов из транскрипта
+    "batch_extract_action_items",  # пакетное LLM извлечение (несколько items)
 }
 
 MEDIUM_METHODS: Set[str] = {

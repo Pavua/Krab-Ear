@@ -179,6 +179,7 @@ class BackendService:
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
+        self._action_items_extractor = self._init_action_items_extractor()
 
         self._action_items_extractor = ActionItemsExtractor(
             llm_rewriter=self._llm_rewriter,
@@ -457,6 +458,25 @@ class BackendService:
             logger.exception("Не удалось инициализировать LLM rewriter: %s", exc)
             return None
 
+    def _init_action_items_extractor(self):
+        """Создаёт ActionItemsExtractor если LLM_ENABLED. Разделяет circuit breaker с LLMRewriter."""
+        if not settings.LLM_ENABLED:
+            return None
+        try:
+            from backend.action_items_extractor import ActionItemsExtractor
+            return ActionItemsExtractor(
+                base_url=settings.LLM_BASE_URL,
+                api_key=settings.LLM_API_KEY,
+                model=settings.LLM_MODEL,
+                timeout_sec=max(settings.LLM_TIMEOUT_SEC * 4, 20.0),
+                circuit_fail_threshold=settings.LLM_CIRCUIT_FAIL_THRESHOLD,
+                circuit_initial_reset_sec=settings.LLM_CIRCUIT_INITIAL_RESET_SEC,
+                circuit_max_reset_sec=settings.LLM_CIRCUIT_MAX_RESET_SEC,
+            )
+        except Exception as exc:
+            logger.exception("Не удалось инициализировать ActionItemsExtractor: %s", exc)
+            return None
+
     def _cached_settings(self) -> dict[str, Any]:
         """Делегирует к SettingsService. Обратная совместимость."""
         return self._settings_svc.cached_settings()
@@ -732,6 +752,9 @@ class BackendService:
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
+            "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
+            "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
+            "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
             "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
@@ -1655,6 +1678,24 @@ class BackendService:
                     language=(_ai_settings.get("source_lang") or "ru"),
                     duration_sec=duration_sec,
                 )
+        # Авто-извлечение задач/решений/вопросов (opt-in, только для длинных записей)
+        if self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
+            min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
+            if self._action_items_extractor is not None and (duration_sec or 0.0) >= min_dur:
+                try:
+                    lang = str(tp.get("language", "ru") or "ru").lower()[:2]
+                    ai_result = self._action_items_extractor.extract(display_text, language=lang)
+                    if ai_result.ok:
+                        self.store.update_history_item_action_items(
+                            item_id=item.id,
+                            action_items=[ai.to_dict() for ai in ai_result.action_items],
+                            decisions=ai_result.decisions,
+                            questions=ai_result.questions,
+                        )
+                        result_payload["action_items_extracted"] = True
+                        result_payload["action_items_count"] = len(ai_result.action_items)
+                except Exception:
+                    logger.exception("Авто-извлечение action items провалилось для %s", item.id)
 
         return result_payload
 
@@ -2305,6 +2346,111 @@ class BackendService:
             "llm": True,
             "source_chars": len(text),
         }
+
+    def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("Параметр id обязателен")
+
+        if self._action_items_extractor is None:
+            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
+
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        target = next((it for it in items if it.id == item_id), None)
+        if target is None:
+            raise RuntimeError(f"Элемент не найден: {item_id}")
+
+        text = target.text or ""
+        language = str(params.get("language", "ru")).lower()
+
+        result = self._action_items_extractor.extract(text, language=language)
+
+        if result.ok:
+            self.store.update_history_item_action_items(
+                item_id=item_id,
+                action_items=[ai.to_dict() for ai in result.action_items],
+                decisions=result.decisions,
+                questions=result.questions,
+            )
+
+        return {
+            "id": item_id,
+            "ok": result.ok,
+            "action_items": [ai.to_dict() for ai in result.action_items],
+            "decisions": result.decisions,
+            "questions": result.questions,
+            "fallback_reason": result.fallback_reason,
+            "latency_ms": result.latency_ms,
+        }
+
+    def _handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Пакетное извлечение задач/решений/вопросов для нескольких item_id."""
+        item_ids = params.get("ids", [])
+        if not isinstance(item_ids, list):
+            raise RuntimeError("Параметр ids должен быть списком")
+        language = str(params.get("language", "ru")).lower()
+
+        if self._action_items_extractor is None:
+            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
+
+        with self.store._lock():
+            all_items = self.store._load_active_items_unlocked()
+        items_by_id = {it.id: it for it in all_items}
+
+        results = []
+        for item_id in item_ids:
+            item_id = str(item_id).strip()
+            target = items_by_id.get(item_id)
+            if target is None:
+                results.append({"id": item_id, "ok": False, "error": "not_found"})
+                continue
+            text = target.text or ""
+            result = self._action_items_extractor.extract(text, language=language)
+            if result.ok:
+                self.store.update_history_item_action_items(
+                    item_id=item_id,
+                    action_items=[ai.to_dict() for ai in result.action_items],
+                    decisions=result.decisions,
+                    questions=result.questions,
+                )
+            results.append({
+                "id": item_id,
+                "ok": result.ok,
+                "action_items": [ai.to_dict() for ai in result.action_items],
+                "decisions": result.decisions,
+                "questions": result.questions,
+                "fallback_reason": result.fallback_reason,
+                "latency_ms": result.latency_ms,
+            })
+
+        return {"results": results, "count": len(results)}
+
+    def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает все items у которых action_items=None (ещё не анализировались).
+
+        Параметр min_duration_sec: минимальная длительность для фильтрации (опционально).
+        """
+        min_duration = float(params.get("min_duration_sec", 0.0))
+
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+
+        pending = []
+        for item in items:
+            if item.action_items is not None:
+                continue
+            if min_duration > 0 and (item.audio_duration_sec or 0.0) < min_duration:
+                continue
+            pending.append({
+                "id": item.id,
+                "ts": item.ts,
+                "text_preview": (item.text or "")[:100],
+                "audio_duration_sec": item.audio_duration_sec,
+            })
+
+        return {"pending": pending, "count": len(pending)}
 
     def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает последний word-level diff от LLM rewriter'а."""

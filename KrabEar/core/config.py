@@ -784,4 +784,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Quick Edit before paste
     "quick_edit_enabled": False,
     "quick_edit_timeout_sec": 5.0,
+    # --- Action items / decisions / questions extraction ---
+    # Opt-in: автоматически извлекать задачи/решения/вопросы после транскрибации.
+    # Срабатывает только если длительность > action_items_min_duration_sec.
+    "action_items_auto_extract": False,
+    # Минимальная длительность записи (сек) для авто-извлечения.
+    # Короткие записи (диктовка, фраза) не анализируются.
+    "action_items_min_duration_sec": 60.0,
 }

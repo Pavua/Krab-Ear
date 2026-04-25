@@ -794,6 +794,7 @@ class StateStore:
         self.tags_path.write_text("", encoding="utf-8")
         self.favorites_path.write_text("", encoding="utf-8")
         self.text_updates_path.write_text("", encoding="utf-8")
+        self.action_items_path.write_text("", encoding="utf-8")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -816,12 +817,13 @@ class StateStore:
         }
 
     def _load_active_items_unlocked(self) -> list[HistoryItem]:
-        """Читает активные записи с применением tombstone, status-override, tags-override, favorites-override и text-override."""
+        """Читает активные записи с применением tombstone, status-override, tags-override, favorites-override, text-override и action_items-override."""
         deleted = self._load_deleted_ids_unlocked()
         statuses = self._load_status_overrides_unlocked()
         tags_overrides = self._load_tags_overrides_unlocked()
         favorites_overrides = self._load_favorites_overrides_unlocked()
         text_overrides = self._load_text_overrides_unlocked()
+        action_items_overrides = self._load_action_items_overrides_unlocked()
 
         items: list[HistoryItem] = []
         for item in self._iter_history_items_unlocked():
@@ -838,6 +840,11 @@ class StateStore:
                 item.text = override["text"]
                 if override.get("confidence") is not None:
                     item.confidence = float(override["confidence"])
+            if item.id in action_items_overrides:
+                override = action_items_overrides[item.id]
+                item.action_items = override.get("action_items")
+                item.decisions = override.get("decisions")
+                item.questions = override.get("questions")
             items.append(item)
         return items
 
@@ -854,6 +861,50 @@ class StateStore:
                     "confidence": payload.get("confidence"),
                 }
         return result
+
+    def _load_action_items_overrides_unlocked(self) -> dict[str, dict]:
+        """Собирает последние action_items/decisions/questions overrides из журнала."""
+        result: dict[str, dict] = {}
+        if not self.action_items_path.exists():
+            return result
+        for payload in self._read_ndjson_unlocked(self.action_items_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id:
+                result[item_id] = {
+                    "action_items": payload.get("action_items"),
+                    "decisions": payload.get("decisions"),
+                    "questions": payload.get("questions"),
+                }
+        return result
+
+    def update_history_item_action_items(
+        self,
+        item_id: str,
+        action_items: list,
+        decisions: list,
+        questions: list,
+    ) -> bool:
+        """Сохраняет action_items/decisions/questions через delta-журнал (last-write-wins).
+
+        Returns True если запись с таким id существует, False иначе.
+        """
+        import json as _json
+        clean_id = (item_id or "").strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            active_ids = {item.id for item in self._load_active_items_unlocked()}
+            if clean_id not in active_ids:
+                return False
+            entry = {
+                "id": clean_id,
+                "action_items": list(action_items) if action_items is not None else [],
+                "decisions": list(decisions) if decisions is not None else [],
+                "questions": list(questions) if questions is not None else [],
+            }
+            with self.action_items_path.open("a", encoding="utf-8") as fh:
+                fh.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
 
     def update_history_item_text(self, item_id: str, text: str, confidence: float | None = None) -> bool:
         """Сохраняет text/confidence override для записи через delta-журнал bulk-reprocess.

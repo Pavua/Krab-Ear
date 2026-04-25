@@ -1,21 +1,7 @@
-"""Тесты для ActionItemsExtractor — извлечение action items из транскриптов.
+"""Тесты ActionItemsExtractor — извлечение задач/решений/вопросов из транскриптов.
 
-Покрывает:
-- Русский транскрипт с явным action item → извлечён
-- Испанский транскрипт встречи → извлечён на ES
-- Английский транскрипт → извлечён на EN
-- Транскрипт без action items → пустой список
-- Невалидный JSON от LLM → graceful empty (нет крашей)
-- LM Studio недоступен → empty + логирование
-- CircuitBreaker открыт → empty
-- Авто-извлечение запускается после порога длительности
-- Авто-извлечение пропускает короткие записи
-- IPC-обработчики зарегистрированы
-- Throttle-категория HEAVY для extract_action_items
-- Персистентность через delta-журнал
-- get_pending_action_items возвращает только не-done
-- Отметить как done через update метод
-- Несколько action items в одном транскрипте
+15+ тестов: RU/ES/EN экстракция, invalid JSON, LM Studio недоступен,
+CircuitBreaker open, threshold, IPC handlers, delta journal, get_pending.
 """
 
 from __future__ import annotations
@@ -23,7 +9,6 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -32,723 +17,461 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.action_items_extractor import (
+from backend.action_items_extractor import (  # noqa: E402
+    ActionItem,
     ActionItemsExtractor,
-    _empty_result,
-    _normalize_result,
-    _strip_json_markdown,
+    ActionItemsResult,
 )
-from backend.ipc_throttle import HEAVY_METHODS
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_mock_rewriter(response_json: dict | None = None, fail: str | None = None):
-    """Создаёт мок LLMRewriter с нужным ответом."""
-    rewriter = MagicMock()
-    rewriter._model = "test-model"
-    rewriter._api_key = "test-key"
-    rewriter._base_url = "http://localhost:1234/v1"
-    rewriter._timeout = 5.0
+SAMPLE_TRANSCRIPT_RU = (
+    "Итак, Иван возьмёт на себя задачу по обновлению документации до пятницы. "
+    "Решено: переходим на Python 3.12 в следующем квартале. "
+    "Открытый вопрос: как интегрировать новый API с legacy-системой?"
+)
 
-    # Circuit breaker mock
-    circuit = MagicMock()
-    circuit.state = "closed"
-    circuit.allow_request.return_value = True
-    rewriter._circuit = circuit
+SAMPLE_TRANSCRIPT_ES = (
+    "María se encargará de preparar el informe para el lunes. "
+    "Decisión: migrar a la nueva plataforma en enero. "
+    "Pregunta pendiente: ¿cómo gestionar los usuarios existentes durante la migración?"
+)
 
-    if fail == "timeout":
-        import requests
-        rewriter._session.post.side_effect = requests.Timeout("timeout")
-    elif fail == "connection":
-        import requests
-        rewriter._session.post.side_effect = requests.ConnectionError("refused")
-    elif fail == "http_500":
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        rewriter._session.post.return_value = mock_resp
-    elif response_json is not None:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": json.dumps(response_json)}}]
-        }
-        rewriter._session.post.return_value = mock_resp
-    else:
-        # Empty response
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "{}"}}]
-        }
-        rewriter._session.post.return_value = mock_resp
+SAMPLE_TRANSCRIPT_EN = (
+    "John will update the backend tests by Thursday. "
+    "Decision: we will use PostgreSQL instead of SQLite in production. "
+    "Open question: how do we handle zero-downtime migrations?"
+)
 
-    return rewriter
+VALID_LLM_RESPONSE_RU = json.dumps({
+    "action_items": [
+        {"text": "Обновить документацию", "assignee": "Иван", "due": "пятница", "priority": "high"},
+    ],
+    "decisions": ["Переходим на Python 3.12 в следующем квартале"],
+    "questions": ["Как интегрировать новый API с legacy-системой?"],
+})
 
+VALID_LLM_RESPONSE_ES = json.dumps({
+    "action_items": [
+        {"text": "Preparar el informe", "assignee": "María", "due": "lunes", "priority": "medium"},
+    ],
+    "decisions": ["Migrar a la nueva plataforma en enero"],
+    "questions": ["¿Cómo gestionar los usuarios existentes durante la migración?"],
+})
 
-def _make_extractor(response_json=None, fail=None, settings=None):
-    rewriter = _make_mock_rewriter(response_json=response_json, fail=fail)
-    return ActionItemsExtractor(llm_rewriter=rewriter, settings=settings or {})
+VALID_LLM_RESPONSE_EN = json.dumps({
+    "action_items": [
+        {"text": "Update backend tests", "assignee": "John", "due": "Thursday", "priority": "high"},
+    ],
+    "decisions": ["Use PostgreSQL instead of SQLite in production"],
+    "questions": ["How do we handle zero-downtime migrations?"],
+})
 
 
-# ---------------------------------------------------------------------------
-# Тест 1: Русский транскрипт с явными action items
-# ---------------------------------------------------------------------------
+def make_extractor(**kwargs):
+    """Create ActionItemsExtractor with test defaults."""
+    defaults = dict(
+        base_url="http://localhost:1234",
+        api_key="test",
+        model="qwen3-4b",
+        timeout_sec=5.0,
+    )
+    defaults.update(kwargs)
+    return ActionItemsExtractor(**defaults)
 
-class TestRussianTranscriptExtraction(unittest.TestCase):
-    """Русский транскрипт → action items извлечены."""
 
-    def test_russian_meeting_extract(self):
-        expected = {
-            "action_items": [
-                {"text": "Подготовить отчёт к пятнице", "assignee": "Иван", "due": "пятница", "priority": "high"},
-                {"text": "Разослать протокол встречи", "assignee": None, "due": None, "priority": "medium"},
-            ],
-            "decisions": ["Перенести дедлайн на следующую неделю"],
-            "questions": ["Кто будет ответственным за маркетинг?"],
-        }
-        extractor = _make_extractor(response_json=expected)
-        transcript = (
-            "Иван, подготовь отчёт к пятнице — это высокий приоритет. "
-            "Разошлём протокол встречи. "
-            "Решили перенести дедлайн на следующую неделю. "
-            "Вопрос: кто будет ответственным за маркетинг?"
-        )
-        result = extractor.extract(transcript=transcript, language="ru")
-
-        self.assertEqual(len(result["action_items"]), 2)
-        self.assertEqual(result["action_items"][0]["text"], "Подготовить отчёт к пятнице")
-        self.assertEqual(result["action_items"][0]["assignee"], "Иван")
-        self.assertEqual(result["action_items"][0]["due"], "пятница")
-        self.assertEqual(result["action_items"][0]["priority"], "high")
-        self.assertEqual(result["decisions"], ["Перенести дедлайн на следующую неделю"])
-        self.assertEqual(len(result["questions"]), 1)
+def make_mock_response(content: str, status_code: int = 200):
+    """Create a mock requests.Response with given content."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {
+        "choices": [{"message": {"content": content}}]
+    }
+    return resp
 
 
 # ---------------------------------------------------------------------------
-# Тест 2: Испанский транскрипт
+# 1. Basic extraction tests
 # ---------------------------------------------------------------------------
 
-class TestSpanishTranscriptExtraction(unittest.TestCase):
-    """Испанский транскрипт встречи → извлечён на ES."""
+class ActionItemsExtractorRuTest(unittest.TestCase):
+    """Тест извлечения из RU транскрипта."""
 
-    def test_spanish_meeting_extract(self):
-        expected = {
-            "action_items": [
-                {"text": "Enviar el presupuesto al cliente", "assignee": "María", "due": "jueves", "priority": "high"},
-            ],
-            "decisions": ["Se aprueba el proyecto de expansión"],
-            "questions": ["¿Cuándo estará lista la propuesta?"],
-        }
-        extractor = _make_extractor(response_json=expected)
-        transcript = "María, envía el presupuesto al cliente antes del jueves."
-        result = extractor.extract(transcript=transcript, language="es")
+    def test_extract_ru_action_items(self):
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_RU)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU, language="ru")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.action_items), 1)
+        self.assertEqual(result.action_items[0].text, "Обновить документацию")
+        self.assertEqual(result.action_items[0].assignee, "Иван")
+        self.assertEqual(result.action_items[0].priority, "high")
+        self.assertEqual(len(result.decisions), 1)
+        self.assertEqual(len(result.questions), 1)
 
-        self.assertEqual(len(result["action_items"]), 1)
-        self.assertEqual(result["action_items"][0]["assignee"], "María")
-        self.assertIn("expansión", result["decisions"][0])
-
-    def test_spanish_language_key_passed_to_llm(self):
-        """Проверяем, что system prompt на испанском подставляется."""
-        rewriter = _make_mock_rewriter(response_json={"action_items": [], "decisions": [], "questions": []})
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        extractor.extract(transcript="Reunión de trabajo", language="es")
-        call_args = rewriter._session.post.call_args
-        body = call_args[1]["json"] if call_args[1] else call_args[0][1]
-        system_content = body["messages"][0]["content"]
-        self.assertIn("responsable", system_content.lower())
+    def test_extract_ru_decisions_and_questions(self):
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_RU)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU, language="ru")
+        self.assertIn("Python 3.12", result.decisions[0])
+        self.assertIn("legacy", result.questions[0])
 
 
-# ---------------------------------------------------------------------------
-# Тест 3: Английский транскрипт
-# ---------------------------------------------------------------------------
+class ActionItemsExtractorEsTest(unittest.TestCase):
+    """Тест извлечения из ES транскрипта."""
 
-class TestEnglishTranscriptExtraction(unittest.TestCase):
-    """Английский транскрипт → извлечён на EN."""
+    def test_extract_es_action_items(self):
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_ES)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_ES, language="es")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action_items[0].assignee, "María")
+        self.assertEqual(len(result.decisions), 1)
 
-    def test_english_transcript_extract(self):
-        expected = {
-            "action_items": [
-                {"text": "Schedule a follow-up call", "assignee": "John", "due": "Monday", "priority": "medium"},
-            ],
-            "decisions": ["Approved Q3 budget increase"],
-            "questions": ["When will the report be ready?"],
-        }
-        extractor = _make_extractor(response_json=expected)
-        result = extractor.extract(transcript="Meeting transcript", language="en")
 
-        self.assertEqual(len(result["action_items"]), 1)
-        self.assertEqual(result["action_items"][0]["assignee"], "John")
-        self.assertEqual(result["decisions"][0], "Approved Q3 budget increase")
+class ActionItemsExtractorEnTest(unittest.TestCase):
+    """Тест извлечения из EN транскрипта."""
 
-    def test_english_system_prompt_used(self):
-        """Проверяем EN system prompt."""
-        rewriter = _make_mock_rewriter(response_json={"action_items": [], "decisions": [], "questions": []})
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        extractor.extract(transcript="Some English meeting", language="en")
-        call_args = rewriter._session.post.call_args
-        body = call_args[1]["json"] if call_args[1] else call_args[0][1]
-        system_content = body["messages"][0]["content"]
-        self.assertIn("meeting analyst", system_content.lower())
+    def test_extract_en_action_items(self):
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_EN)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_EN, language="en")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action_items[0].assignee, "John")
+        self.assertEqual(result.action_items[0].due, "Thursday")
 
 
 # ---------------------------------------------------------------------------
-# Тест 4: Транскрипт без action items
+# 2. Invalid JSON from LLM
 # ---------------------------------------------------------------------------
 
-class TestEmptyResultWhenNoActionItems(unittest.TestCase):
-    """Транскрипт без задач → пустые списки."""
+class InvalidJsonTest(unittest.TestCase):
+    """Тест graceful fallback при невалидном JSON."""
 
-    def test_no_action_items_returns_empty_lists(self):
-        response = {"action_items": [], "decisions": [], "questions": []}
-        extractor = _make_extractor(response_json=response)
-        result = extractor.extract("Привет, как дела?", language="ru")
+    def test_invalid_json_returns_empty_struct(self):
+        extractor = make_extractor()
+        bad_response = "This is not JSON at all, LLM hallucination."
+        with patch.object(extractor._session, "post", return_value=make_mock_response(bad_response)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.action_items, [])
+        self.assertEqual(result.decisions, [])
+        self.assertEqual(result.questions, [])
+        self.assertIn(result.fallback_reason, ("no_json", "invalid_json"))
 
-        self.assertEqual(result["action_items"], [])
-        self.assertEqual(result["decisions"], [])
-        self.assertEqual(result["questions"], [])
+    def test_partial_json_returns_empty_struct(self):
+        extractor = make_extractor()
+        # Valid JSON but missing required keys
+        with patch.object(extractor._session, "post", return_value=make_mock_response('{"foo": "bar"}')):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        # Should succeed but with empty lists
+        self.assertTrue(result.ok)
+        self.assertEqual(result.action_items, [])
 
+    def test_json_in_markdown_fences_parsed_correctly(self):
+        extractor = make_extractor()
+        fenced = f"```json\n{VALID_LLM_RESPONSE_EN}\n```"
+        with patch.object(extractor._session, "post", return_value=make_mock_response(fenced)):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_EN, language="en")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.action_items), 1)
 
-# ---------------------------------------------------------------------------
-# Тест 5: Невалидный JSON от LLM → graceful empty
-# ---------------------------------------------------------------------------
+    def test_empty_transcript_returns_empty_input_error(self):
+        extractor = make_extractor()
+        result = extractor.extract("")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "empty_input")
 
-class TestInvalidJsonFromLLM(unittest.TestCase):
-    """Невалидный JSON от LLM → graceful empty без крашей."""
-
-    def test_invalid_json_returns_empty(self):
-        rewriter = MagicMock()
-        rewriter._model = "test-model"
-        rewriter._api_key = "test-key"
-        rewriter._base_url = "http://localhost:1234/v1"
-        rewriter._timeout = 5.0
-        circuit = MagicMock()
-        circuit.allow_request.return_value = True
-        rewriter._circuit = circuit
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "This is NOT valid JSON {broken"}}]
-        }
-        rewriter._session.post.return_value = mock_resp
-
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        result = extractor.extract("Transcript", language="ru")
-
-        self.assertEqual(result["action_items"], [])
-        self.assertEqual(result["decisions"], [])
-        self.assertEqual(result["questions"], [])
-        # Circuit breaker должен записать failure
-        circuit.record_failure.assert_called()
-
-    def test_invalid_json_no_raise(self):
-        """extract() никогда не raises."""
-        rewriter = MagicMock()
-        rewriter._model = "m"
-        rewriter._api_key = "k"
-        rewriter._base_url = "http://localhost:1234/v1"
-        rewriter._timeout = 5.0
-        circuit = MagicMock()
-        circuit.allow_request.return_value = True
-        rewriter._circuit = circuit
-        rewriter._session.post.side_effect = Exception("unexpected crash")
-
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        # Не должен бросить исключение
-        result = extractor.extract("test", language="ru")
-        self.assertIsInstance(result, dict)
-        self.assertIn("action_items", result)
+    def test_whitespace_transcript_returns_empty_input_error(self):
+        extractor = make_extractor()
+        result = extractor.extract("   \n\t  ")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "empty_input")
 
 
 # ---------------------------------------------------------------------------
-# Тест 6: LM Studio недоступен → empty + логирование
+# 3. LM Studio unreachable
 # ---------------------------------------------------------------------------
 
-class TestLMStudioUnreachable(unittest.TestCase):
-    """LM Studio недоступен → пустой результат + нет крашей."""
+class LMStudioUnreachableTest(unittest.TestCase):
+    """Тест fallback при недоступном LM Studio."""
 
     def test_connection_error_returns_empty(self):
-        extractor = _make_extractor(fail="connection")
-        result = extractor.extract("Тест", language="ru")
-        self.assertEqual(result, _empty_result())
-        self.assertIsNotNone(extractor._last_error)
+        import requests as req
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", side_effect=req.ConnectionError("refused")):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "connection_error")
 
     def test_timeout_returns_empty(self):
-        extractor = _make_extractor(fail="timeout")
-        result = extractor.extract("Тест", language="ru")
-        self.assertEqual(result, _empty_result())
-        self.assertEqual(extractor._last_error, "timeout")
+        import requests as req
+        extractor = make_extractor()
+        with patch.object(extractor._session, "post", side_effect=req.Timeout("timed out")):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "timeout")
 
-    def test_http_error_returns_empty(self):
-        extractor = _make_extractor(fail="http_500")
-        result = extractor.extract("Тест", language="ru")
-        self.assertEqual(result, _empty_result())
-        self.assertIn("http_500", extractor._last_error or "")
-
-
-# ---------------------------------------------------------------------------
-# Тест 7: CircuitBreaker открыт → empty
-# ---------------------------------------------------------------------------
-
-class TestCircuitBreakerOpen(unittest.TestCase):
-    """Когда CircuitBreaker открыт — возвращает пустой результат."""
-
-    def test_circuit_open_returns_empty(self):
-        rewriter = MagicMock()
-        rewriter._model = "test"
-        rewriter._api_key = "k"
-        rewriter._base_url = "http://localhost:1234/v1"
-        rewriter._timeout = 5.0
-        circuit = MagicMock()
-        circuit.allow_request.return_value = False  # ← OPEN
-        rewriter._circuit = circuit
-
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        result = extractor.extract("Тест транскрипт", language="ru")
-
-        self.assertEqual(result, _empty_result())
-        self.assertEqual(extractor._last_error, "circuit_open")
-        # HTTP не вызывался
-        rewriter._session.post.assert_not_called()
+    def test_http_500_returns_empty(self):
+        extractor = make_extractor()
+        bad_resp = MagicMock()
+        bad_resp.status_code = 500
+        with patch.object(extractor._session, "post", return_value=bad_resp):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "http_500")
 
 
 # ---------------------------------------------------------------------------
-# Тест 8 & 9: Авто-извлечение (порог длительности)
+# 4. CircuitBreaker open
 # ---------------------------------------------------------------------------
 
-class TestAutoExtractDurationThreshold(unittest.TestCase):
-    """Авто-извлечение соблюдает порог duration."""
+class CircuitBreakerTest(unittest.TestCase):
+    """Тест поведения при открытом circuit breaker."""
+
+    def test_circuit_open_returns_circuit_open(self):
+        extractor = make_extractor(circuit_fail_threshold=1, circuit_initial_reset_sec=999)
+        # Trigger circuit open by forcing a failure
+        import requests as req
+        with patch.object(extractor._session, "post", side_effect=req.ConnectionError("fail")):
+            extractor.extract(SAMPLE_TRANSCRIPT_RU)  # first call → fail
+        # Second call should get circuit_open
+        result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.fallback_reason, "circuit_open")
+
+    def test_circuit_state_open_after_failures(self):
+        extractor = make_extractor(circuit_fail_threshold=2, circuit_initial_reset_sec=999)
+        import requests as req
+        for _ in range(2):
+            with patch.object(extractor._session, "post", side_effect=req.ConnectionError("fail")):
+                extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertEqual(extractor.circuit_state, "open")
+
+
+# ---------------------------------------------------------------------------
+# 5. ActionItem model
+# ---------------------------------------------------------------------------
+
+class ActionItemModelTest(unittest.TestCase):
+    """Тест ActionItem dataclass."""
+
+    def test_from_dict_valid(self):
+        ai = ActionItem.from_dict({"text": "Test task", "assignee": "Alice", "due": "Mon", "priority": "high"})
+        self.assertEqual(ai.text, "Test task")
+        self.assertEqual(ai.priority, "high")
+
+    def test_from_dict_invalid_priority_normalized(self):
+        ai = ActionItem.from_dict({"text": "x", "priority": "URGENT"})
+        self.assertEqual(ai.priority, "medium")
+
+    def test_to_dict_roundtrip(self):
+        ai = ActionItem(text="Do something", assignee="Bob", due="Friday", priority="low")
+        d = ai.to_dict()
+        ai2 = ActionItem.from_dict(d)
+        self.assertEqual(ai.text, ai2.text)
+        self.assertEqual(ai.priority, ai2.priority)
+
+    def test_empty_result_is_empty(self):
+        r = ActionItemsResult.empty("test_reason")
+        self.assertTrue(r.is_empty)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.fallback_reason, "test_reason")
+
+
+# ---------------------------------------------------------------------------
+# 6. StateStore delta journal
+# ---------------------------------------------------------------------------
+
+class DeltaJournalTest(unittest.TestCase):
+    """Тест delta-журнала action_items в StateStore."""
 
     def setUp(self):
-        self.data_dir = Path(tempfile.mkdtemp())
-
-    def _make_store_with_item(self, text="Meeting content"):
+        self.tmpdir = tempfile.mkdtemp()
         from backend.state_store import StateStore
-        store = StateStore(data_dir=self.data_dir)
-        item = store.add_history_item(
-            text=text,
-            audio_duration_sec=120.0,
+        self.store = StateStore(data_dir=Path(self.tmpdir))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_update_action_items_returns_false_for_unknown_id(self):
+        result = self.store.update_history_item_action_items(
+            "nonexistent-id",
+            action_items=[{"text": "x"}],
+            decisions=["dec"],
+            questions=["q"],
         )
-        return store, item
+        self.assertFalse(result)
 
-    def test_auto_extract_triggers_for_long_recording(self):
-        """Запись >60с → авто-извлечение запускается."""
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        item = store.add_history_item(
-            text="Иван, подготовь отчёт к пятнице.",
-            audio_duration_sec=120.0,
-        )
-
-        extract_called = threading.Event()
-        expected_result = {
-            "action_items": [
-                {"text": "Подготовить отчёт", "assignee": "Иван", "due": None, "priority": None}
-            ],
-            "decisions": [],
-            "questions": [],
-        }
-
-        rewriter = _make_mock_rewriter(response_json=expected_result)
-        extractor = ActionItemsExtractor(llm_rewriter=rewriter, settings={})
-        original_extract = extractor.extract
-
-        def patched_extract(*args, **kwargs):
-            result = original_extract(*args, **kwargs)
-            extract_called.set()
-            return result
-
-        extractor.extract = patched_extract
-
-        # Имитируем auto-extract через store
-        extractor.extract(transcript=item.text, language="ru")
-        saved = store.update_history_item_action_items(
+    def test_update_action_items_persists_for_known_id(self):
+        item = self.store.add_history_item(text="Meeting discussion about Q3 planning.")
+        success = self.store.update_history_item_action_items(
             item_id=item.id,
-            action_items=expected_result["action_items"],
-            decisions=[],
-            questions=[],
+            action_items=[{"text": "Prepare report", "assignee": "Alice", "due": "", "priority": "medium"}],
+            decisions=["Go with plan A"],
+            questions=["Budget?"],
         )
-        self.assertTrue(saved)
+        self.assertTrue(success)
 
-        # Проверяем, что action items сохранились
-        retrieved = store.get_history_item_action_items(item.id)
-        self.assertIsNotNone(retrieved)
-        self.assertEqual(len(retrieved["action_items"]), 1)
+        # Reload and verify
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        loaded = next(it for it in items if it.id == item.id)
+        self.assertIsNotNone(loaded.action_items)
+        self.assertEqual(len(loaded.action_items), 1)
+        self.assertEqual(loaded.action_items[0]["text"], "Prepare report")
+        self.assertEqual(loaded.decisions, ["Go with plan A"])
+        self.assertEqual(loaded.questions, ["Budget?"])
 
-    def test_short_recording_should_be_skipped(self):
-        """Запись <60с → авто-извлечение НЕ запускается."""
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        item = store.add_history_item(
-            text="Короткая заметка.",
-            audio_duration_sec=30.0,  # меньше порога 60с
+    def test_update_action_items_last_write_wins(self):
+        item = self.store.add_history_item(text="Short text meeting")
+        self.store.update_history_item_action_items(
+            item.id, [{"text": "Old task"}], ["Old decision"], ["Old question"]
         )
+        self.store.update_history_item_action_items(
+            item.id, [{"text": "New task"}], ["New decision"], ["New question"]
+        )
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        loaded = next(it for it in items if it.id == item.id)
+        # last-write-wins
+        self.assertEqual(loaded.action_items[0]["text"], "New task")
+        self.assertEqual(loaded.decisions[0], "New decision")
 
-        settings = {"action_items_auto_extract": True, "action_items_min_duration_sec": 60.0}
-
-        # duration 30 < 60 → не должны вызывать extract
-        duration_sec = item.audio_duration_sec or 0.0
-        min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
-        should_extract = duration_sec >= min_dur
-
-        self.assertFalse(should_extract)
+    def test_action_items_cleared_on_compact(self):
+        item = self.store.add_history_item(text="Compact test meeting")
+        self.store.update_history_item_action_items(
+            item.id, [{"text": "Task 1"}], ["Decision 1"], []
+        )
+        # Compact merges into main history
+        self.store.compact()
+        # Verify action_items_path is cleared
+        content = self.store.action_items_path.read_text(encoding="utf-8").strip()
+        self.assertEqual(content, "")
+        # But data should be in main history now
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        loaded = next(it for it in items if it.id == item.id)
+        self.assertIsNotNone(loaded.action_items)
 
 
 # ---------------------------------------------------------------------------
-# Тест 10: IPC-обработчики зарегистрированы
+# 7. IPC handler tests via BackendService
 # ---------------------------------------------------------------------------
 
-class TestIPCHandlersRegistered(unittest.TestCase):
-    """Проверяем, что IPC-методы зарегистрированы в dispatch-таблице."""
+class IPCHandlerTest(unittest.TestCase):
+    """Тест IPC handlers через BackendService."""
 
-    def test_handlers_in_dispatch_table(self):
-        """Методы extract_action_items etc. присутствуют в service."""
-        from backend.service import BackendService
+    def _make_service(self):
+        """Create a minimal BackendService with mocked dependencies."""
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        self._test_tmpdir = tmpdir
+
         from backend.state_store import StateStore
 
-        data_dir = Path(tempfile.mkdtemp())
-        store = StateStore(data_dir=data_dir)
+        store = StateStore(data_dir=Path(tmpdir))
 
-        # Minimal stubs to avoid heavy initialisation
+        # Patch settings to avoid real LM Studio
         with patch("backend.service.settings") as mock_settings:
             mock_settings.LLM_ENABLED = False
-            mock_settings.IPC_THROTTLE_ENABLED = False
-            mock_settings.IPC_SIGNING_ENABLED = False
-            mock_settings.AUTO_BACKUP_ENABLED = False
-            mock_settings.WAKE_WORD_ENGINE = "disabled"
-            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
-            mock_settings.TELEGRAM_BRIDGE_TIMEOUT_SEC = 5.0
-            mock_settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD = 3
-            mock_settings.TELEGRAM_BRIDGE_CB_RESET_SEC = 60.0
-            mock_settings.ACTION_ITEMS_AUTO_EXTRACT = False
-            mock_settings.ACTION_ITEMS_MIN_DURATION_SEC = 60.0
-            mock_settings.get = MagicMock(return_value=None)
+            mock_settings.LLM_BASE_URL = "http://localhost:1234"
+            mock_settings.LLM_API_KEY = "test"
+            mock_settings.LLM_MODEL = "test-model"
+            mock_settings.LLM_TIMEOUT_SEC = 4.0
+            mock_settings.LLM_CIRCUIT_FAIL_THRESHOLD = 3
+            mock_settings.LLM_CIRCUIT_INITIAL_RESET_SEC = 60
+            mock_settings.LLM_CIRCUIT_MAX_RESET_SEC = 600
+            mock_settings.DEFAULT_DATA_DIR = tmpdir
+            mock_settings.BACKEND_LOG_LEVEL = "WARNING"
 
-            # Use a ping request to get the handlers table indirectly
-            try:
-                svc = BackendService(store=store)
-                # Check that handle_request routes these methods without error
-                # (they will fail with missing item_id, but the routing works)
-                resp_extract = svc.handle_request({
-                    "id": "t1",
-                    "method": "extract_action_items",
-                    "params": {},
-                })
-                # Either internal_error (from ValueError) or error about item_id
-                self.assertIn(resp_extract.get("ok", True), [False, True])
+            from backend.service import BackendService
+            svc = BackendService.__new__(BackendService)
+            svc.store = store
+            svc._action_items_extractor = None
+            svc._llm_rewriter = None
+            return svc, store
 
-                resp_pending = svc.handle_request({
-                    "id": "t2",
-                    "method": "get_pending_action_items",
-                    "params": {},
-                })
-                # Should not be "unknown_method"
-                if not resp_pending.get("ok"):
-                    error_code = resp_pending.get("error", {}).get("code", "")
-                    self.assertNotEqual(error_code, "unknown_method")
-            except Exception:
-                pass  # Импортные ошибки в тестовой среде допустимы
+    def tearDown(self):
+        import shutil
+        if hasattr(self, "_test_tmpdir"):
+            shutil.rmtree(self._test_tmpdir, ignore_errors=True)
 
+    def test_extract_action_items_raises_when_llm_disabled(self):
+        svc, store = self._make_service()
+        item = store.add_history_item(text="Some meeting text here")
+        with self.assertRaises(RuntimeError) as ctx:
+            svc._handle_extract_action_items({"id": item.id})
+        self.assertIn("LLM", str(ctx.exception))
 
-# ---------------------------------------------------------------------------
-# Тест 11: Throttle-категория HEAVY
-# ---------------------------------------------------------------------------
+    def test_extract_action_items_raises_for_missing_id(self):
+        svc, store = self._make_service()
+        with self.assertRaises(RuntimeError):
+            svc._handle_extract_action_items({"id": ""})
 
-class TestThrottleCategoryHeavy(unittest.TestCase):
-    """extract_action_items и batch_extract_action_items — категория HEAVY."""
+    def test_extract_action_items_raises_for_unknown_id(self):
+        svc, store = self._make_service()
+        # Give it an extractor so we get past the LLM check
+        svc._action_items_extractor = MagicMock()
+        svc._action_items_extractor.extract.return_value = ActionItemsResult(ok=True)
+        with self.assertRaises(RuntimeError) as ctx:
+            svc._handle_extract_action_items({"id": "nonexistent-uuid"})
+        self.assertIn("не найден", str(ctx.exception))
 
-    def test_extract_action_items_in_heavy_methods(self):
-        self.assertIn("extract_action_items", HEAVY_METHODS)
+    def test_get_pending_action_items_returns_all_without_extraction(self):
+        svc, store = self._make_service()
+        item1 = store.add_history_item(text="Meeting one")
+        item2 = store.add_history_item(text="Meeting two")
+        result = svc._handle_get_pending_action_items({})
+        ids = [p["id"] for p in result["pending"]]
+        self.assertIn(item1.id, ids)
+        self.assertIn(item2.id, ids)
+        self.assertEqual(result["count"], 2)
 
-    def test_batch_extract_action_items_in_heavy_methods(self):
-        self.assertIn("batch_extract_action_items", HEAVY_METHODS)
+    def test_get_pending_filters_already_extracted(self):
+        svc, store = self._make_service()
+        item1 = store.add_history_item(text="Meeting one")
+        item2 = store.add_history_item(text="Meeting two")
+        # Mark item1 as extracted
+        store.update_history_item_action_items(item1.id, [], [], [])
+        result = svc._handle_get_pending_action_items({})
+        ids = [p["id"] for p in result["pending"]]
+        self.assertNotIn(item1.id, ids)
+        self.assertIn(item2.id, ids)
 
+    def test_get_pending_filters_by_min_duration(self):
+        svc, store = self._make_service()
+        short_item = store.add_history_item(text="Quick note", audio_duration_sec=30.0)
+        long_item = store.add_history_item(text="Long meeting", audio_duration_sec=120.0)
+        result = svc._handle_get_pending_action_items({"min_duration_sec": 60.0})
+        ids = [p["id"] for p in result["pending"]]
+        self.assertNotIn(short_item.id, ids)
+        self.assertIn(long_item.id, ids)
 
-# ---------------------------------------------------------------------------
-# Тест 12: Персистентность через delta-журнал
-# ---------------------------------------------------------------------------
+    def test_batch_extract_raises_when_llm_disabled(self):
+        svc, store = self._make_service()
+        item = store.add_history_item(text="Meeting")
+        with self.assertRaises(RuntimeError) as ctx:
+            svc._handle_batch_extract_action_items({"ids": [item.id]})
+        self.assertIn("LLM", str(ctx.exception))
 
-class TestDeltaJournalPersistence(unittest.TestCase):
-    """action_items сохраняются в delta-журнал и читаются обратно."""
-
-    def setUp(self):
-        self.data_dir = Path(tempfile.mkdtemp())
-
-    def test_save_and_retrieve(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        item = store.add_history_item(text="Встреча по проекту")
-
-        action_items = [{"text": "Написать отчёт", "assignee": "Дмитрий", "due": None, "priority": "high"}]
-        decisions = ["Принять решение по бюджету"]
-        questions = ["Когда следующая встреча?"]
-
-        saved = store.update_history_item_action_items(
-            item_id=item.id,
-            action_items=action_items,
-            decisions=decisions,
-            questions=questions,
-        )
-        self.assertTrue(saved)
-
-        # Читаем обратно
-        retrieved = store.get_history_item_action_items(item.id)
-        self.assertIsNotNone(retrieved)
-        self.assertEqual(len(retrieved["action_items"]), 1)
-        self.assertEqual(retrieved["action_items"][0]["text"], "Написать отчёт")
-        self.assertEqual(retrieved["decisions"], ["Принять решение по бюджету"])
-        self.assertEqual(retrieved["questions"], ["Когда следующая встреча?"])
-
-    def test_not_found_for_nonexistent_item(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        result = store.get_history_item_action_items("nonexistent-id")
-        self.assertIsNone(result)
-
-    def test_delta_journal_file_created(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        self.assertTrue(store.action_items_path.exists())
-
-
-# ---------------------------------------------------------------------------
-# Тест 13: get_pending_action_items возвращает только не-done
-# ---------------------------------------------------------------------------
-
-class TestGetPendingActionItems(unittest.TestCase):
-    """get_pending_action_items возвращает только action items без done=True."""
-
-    def setUp(self):
-        self.data_dir = Path(tempfile.mkdtemp())
-
-    def test_pending_items_returned(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        item1 = store.add_history_item(text="Встреча 1")
-        item2 = store.add_history_item(text="Встреча 2")
-
-        # Item1: с action items (pending)
-        store.update_history_item_action_items(
-            item_id=item1.id,
-            action_items=[
-                {"text": "Задача 1", "assignee": None, "due": None, "priority": None},
-            ],
-            decisions=["Решение 1"],
-            questions=[],
-        )
-        # Item2: с action items помечены как done
-        store.update_history_item_action_items(
-            item_id=item2.id,
-            action_items=[
-                {"text": "Выполненная задача", "assignee": None, "due": None, "priority": None, "done": True},
-            ],
-            decisions=[],
-            questions=[],
-        )
-
-        pending = store.get_all_pending_action_items()
-        # item2 не должен попасть в pending (все action items done=True)
-        pending_ids = {p["item_id"] for p in pending}
-        self.assertIn(item1.id, pending_ids)
-
-    def test_empty_when_no_action_items(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        store.add_history_item(text="Просто запись без задач")
-        pending = store.get_all_pending_action_items()
-        self.assertEqual(pending, [])
-
-
-# ---------------------------------------------------------------------------
-# Тест 14: Отметить как done через update
-# ---------------------------------------------------------------------------
-
-class TestMarkActionItemAsDone(unittest.TestCase):
-    """Обновление action item: добавить done=True через update."""
-
-    def setUp(self):
-        self.data_dir = Path(tempfile.mkdtemp())
-
-    def test_mark_as_done_via_update(self):
-        from backend.state_store import StateStore
-
-        store = StateStore(data_dir=self.data_dir)
-        item = store.add_history_item(text="Рабочая встреча")
-
-        # Сохраняем с задачей
-        store.update_history_item_action_items(
-            item_id=item.id,
-            action_items=[
-                {"text": "Подготовить презентацию", "assignee": "Алексей", "due": None, "priority": "medium"},
-            ],
-            decisions=[],
-            questions=[],
-        )
-
-        # Обновляем — помечаем как done
-        store.update_history_item_action_items(
-            item_id=item.id,
-            action_items=[
-                {
-                    "text": "Подготовить презентацию",
-                    "assignee": "Алексей",
-                    "due": None,
-                    "priority": "medium",
-                    "done": True,
-                },
-            ],
-            decisions=[],
-            questions=[],
-        )
-
-        # Проверяем pending (done=True должен быть исключён)
-        pending = store.get_all_pending_action_items()
-        pending_ids = {p["item_id"] for p in pending}
-        self.assertNotIn(item.id, pending_ids)
-
-
-# ---------------------------------------------------------------------------
-# Тест 15: Несколько action items в одном транскрипте
-# ---------------------------------------------------------------------------
-
-class TestMultipleActionItems(unittest.TestCase):
-    """Несколько задач в одном транскрипте → все извлечены."""
-
-    def test_multiple_items_extracted(self):
-        expected = {
-            "action_items": [
-                {"text": "Написать техзадание", "assignee": "Сергей", "due": "15 апреля", "priority": "high"},
-                {"text": "Согласовать бюджет с финансами", "assignee": None, "due": "18 апреля", "priority": "medium"},
-                {"text": "Провести ревью кода", "assignee": "Команда", "due": None, "priority": "low"},
-            ],
-            "decisions": ["Переходим на микросервисную архитектуру", "Используем PostgreSQL вместо MongoDB"],
-            "questions": ["Когда будет готов дизайн?", "Нужен ли нам отдельный сервер для кеша?"],
-        }
-        extractor = _make_extractor(response_json=expected)
-        result = extractor.extract(
-            "Большой транскрипт технического совещания...",
-            language="ru"
-        )
-
-        self.assertEqual(len(result["action_items"]), 3)
-        self.assertEqual(len(result["decisions"]), 2)
-        self.assertEqual(len(result["questions"]), 2)
-
-        # Проверяем конкретные данные
-        self.assertEqual(result["action_items"][0]["priority"], "high")
-        self.assertEqual(result["action_items"][1]["due"], "18 апреля")
-        self.assertEqual(result["action_items"][2]["assignee"], "Команда")
-
-
-# ---------------------------------------------------------------------------
-# Юнит-тесты вспомогательных функций
-# ---------------------------------------------------------------------------
-
-class TestHelperFunctions(unittest.TestCase):
-    """Тесты вспомогательных функций."""
-
-    def test_empty_result_structure(self):
-        result = _empty_result()
-        self.assertIn("action_items", result)
-        self.assertIn("decisions", result)
-        self.assertIn("questions", result)
-        self.assertEqual(result["action_items"], [])
-        self.assertEqual(result["decisions"], [])
-        self.assertEqual(result["questions"], [])
-
-    def test_normalize_result_valid(self):
-        raw = {
-            "action_items": [
-                {"text": "Do something", "assignee": "John", "due": "Monday", "priority": "high"}
-            ],
-            "decisions": ["Decision made"],
-            "questions": ["Open question?"],
-        }
-        result = _normalize_result(raw)
-        self.assertEqual(len(result["action_items"]), 1)
-        self.assertEqual(result["action_items"][0]["priority"], "high")
-
-    def test_normalize_result_invalid_priority(self):
-        raw = {
-            "action_items": [
-                {"text": "Task", "assignee": None, "due": None, "priority": "URGENT"}
-            ],
-            "decisions": [],
-            "questions": [],
-        }
-        result = _normalize_result(raw)
-        # "URGENT" не валидный priority → должен быть None
-        self.assertIsNone(result["action_items"][0]["priority"])
-
-    def test_normalize_result_null_strings(self):
-        raw = {
-            "action_items": [
-                {"text": "Task", "assignee": "null", "due": "null", "priority": "null"}
-            ],
-            "decisions": [],
-            "questions": [],
-        }
-        result = _normalize_result(raw)
-        self.assertIsNone(result["action_items"][0]["assignee"])
-        self.assertIsNone(result["action_items"][0]["due"])
-        self.assertIsNone(result["action_items"][0]["priority"])
-
-    def test_strip_json_markdown(self):
-        markdown_wrapped = "```json\n{\"key\": \"value\"}\n```"
-        stripped = _strip_json_markdown(markdown_wrapped)
-        self.assertEqual(stripped, '{"key": "value"}')
-
-    def test_strip_json_markdown_no_wrap(self):
-        raw_json = '{"key": "value"}'
-        stripped = _strip_json_markdown(raw_json)
-        self.assertEqual(stripped, raw_json)
-
-    def test_extractor_empty_transcript(self):
-        extractor = _make_extractor(response_json={"action_items": [], "decisions": [], "questions": []})
-        result = extractor.extract("", language="ru")
-        self.assertEqual(result, _empty_result())
-
-    def test_extractor_no_llm_rewriter(self):
-        extractor = ActionItemsExtractor(llm_rewriter=None, settings={})
-        result = extractor.extract("Some text", language="ru")
-        self.assertEqual(result, _empty_result())
-        self.assertEqual(extractor._last_error, "no_llm_rewriter")
-
-    def test_extractor_status(self):
-        extractor = _make_extractor(response_json={"action_items": [], "decisions": [], "questions": []})
-        status = extractor.status()
-        self.assertIn("available", status)
-        self.assertIn("circuit_state", status)
-        self.assertTrue(status["available"])
-
-    def test_normalize_skips_empty_text_items(self):
-        raw = {
-            "action_items": [
-                {"text": "", "assignee": None},
-                {"text": "  ", "assignee": None},
-                {"text": "Real task", "assignee": None, "due": None, "priority": None},
-            ],
-            "decisions": [],
-            "questions": [],
-        }
-        result = _normalize_result(raw)
-        self.assertEqual(len(result["action_items"]), 1)
-        self.assertEqual(result["action_items"][0]["text"], "Real task")
-
-    def test_normalize_non_dict_returns_empty(self):
-        result = _normalize_result("not a dict")
-        self.assertEqual(result, _empty_result())
+    def test_batch_extract_handles_not_found(self):
+        svc, store = self._make_service()
+        extractor = make_extractor()
+        svc._action_items_extractor = extractor
+        with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_EN)):
+            result = svc._handle_batch_extract_action_items({
+                "ids": ["nonexistent-id"],
+                "language": "en",
+            })
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["results"][0]["ok"], False)
+        self.assertEqual(result["results"][0]["error"], "not_found")
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()
