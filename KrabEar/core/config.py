@@ -526,6 +526,17 @@ class Settings(BaseSettings):
 
     # --- Нормализация дат и времени (DateTimeNormalizer, core/datetime_normalizer.py) ---
     DATETIME_NORMALIZATION_ENABLED: bool = True
+    # --- Семантический поиск по истории транскрипций ---
+    # Opt-in: по умолчанию выключено — не хотим тащить sentence-transformers в базовый
+    # install. При SEMANTIC_SEARCH_ENABLED=True активируется SemanticSearcher.
+    # Требует: pip install sentence-transformers
+    # Рекомендуемые модели (мультиязычные, включая RU/ES/EN):
+    #   intfloat/multilingual-e5-base  (~560 MB, точнее)
+    #   mixedbread-ai/mxbai-embed-large-v1  (~670 MB, чуть быстрее на M-серии)
+    SEMANTIC_SEARCH_ENABLED: bool = False
+    SEMANTIC_SEARCH_MODEL: str = "intfloat/multilingual-e5-base"
+    # При True: автоиндексация после каждой транскрибации (фоновый поток).
+    SEMANTIC_SEARCH_AUTO_INDEX: bool = True
 
     @property
     def model_max_list(self) -> List[str]:
@@ -799,4 +810,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "action_items_min_duration_sec": 60.0,
     "number_normalization_enabled": True,
     "datetime_normalization_enabled": True,
+    # --- Семантический поиск ---
+    "semantic_search_enabled": False,
+    "semantic_search_model": "intfloat/multilingual-e5-base",
+    "semantic_search_auto_index": True,
 }

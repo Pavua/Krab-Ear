@@ -31,6 +31,15 @@ flask-cors>=4.0.0
 #   pip install openwakeword
 # openwakeword
 
+# --- Optional: sentence-transformers для семантического поиска (opt-in) ---
+# Требуется если KRAB_EAR_SEMANTIC_SEARCH_ENABLED=true.
+# Рекомендуемые мультиязычные модели (RU/ES/EN):
+#   intfloat/multilingual-e5-base   (~560 MB, по умолчанию)
+#   mixedbread-ai/mxbai-embed-large-v1  (~670 MB)
+# Установи вручную: pip install sentence-transformers
+# После установки включи: KRAB_EAR_SEMANTIC_SEARCH_ENABLED=true
+# sentence-transformers>=3.0
+
 # --- Sentry SDK for crash/error telemetry (no-op без DSN в settings) ---
 sentry-sdk>=2.0
 
