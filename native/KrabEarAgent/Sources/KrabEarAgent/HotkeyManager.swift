@@ -8,6 +8,7 @@
  Режимы hotkey (hotkeyMode):
  - "toggle": однократное нажатие — старт, следующее — стоп (существующее поведение).
  - "hold": зажал — пишет, отпустил — стоп. Нажатия < holdMinDurationMs игнорируются.
+ 3) Quick replay (Cmd+Option+V): onQuickReplay callback → PasteService.repastLast().
 */
 
 import AppKit
@@ -29,7 +30,8 @@ enum HotkeyMode: String {
 }
 
 /// Нативный hotkey менеджер для Option key toggle / hold.
-/// Также управляет DoubleTapDetector для запуска «Разговора с AI» (PR 1.5).
+/// Также управляет DoubleTapDetector для запуска «Разговора с AI» (PR 1.5)
+/// и глобальным Cmd+Option+V для быстрого повтора вставки.
 @MainActor
 final class HotkeyManager {
     private var globalMonitor: Any?
@@ -63,6 +65,14 @@ final class HotkeyManager {
 
     /// Колбэк на double-tap (задаётся при запуске из main.swift).
     var onConversationDoubleTap: (@MainActor () -> Void)?
+
+    // MARK: Quick replay — Cmd+Option+V
+
+    /// Глобальный монитор keyDown для обнаружения Cmd+Option+V (быстрый повтор вставки).
+    private var replayMonitor: Any?
+
+    /// Callback на Cmd+Option+V — задаётся из main.swift.
+    var onQuickReplay: (@MainActor () -> Void)?
 
     init(
         variant: String,
@@ -99,6 +109,13 @@ final class HotkeyManager {
             detector.start()
             doubleTapDetector = detector
         }
+
+        // Quick replay: глобальный монитор Cmd+Option+V
+        replayMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleKeyDown(event: event)
+            }
+        }
     }
 
     func stop() {
@@ -109,6 +126,10 @@ final class HotkeyManager {
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
+        }
+        if let replayMonitor {
+            NSEvent.removeMonitor(replayMonitor)
+            self.replayMonitor = nil
         }
         doubleTapDetector?.stop()
         doubleTapDetector = nil
@@ -162,7 +183,21 @@ final class HotkeyManager {
         }
     }
 
-    // MARK: - Тест-хук
+    // MARK: - Quick replay key handling
+
+    private func handleKeyDown(event: NSEvent) {
+        guard isQuickReplayHotkey(event) else { return }
+        onQuickReplay?()
+    }
+
+    /// Возвращает true если событие — Cmd+Option+V (быстрый повтор вставки).
+    /// Cmd+Shift+V — системный «Paste and Match Style», намеренно не использован.
+    func isQuickReplayHotkey(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return flags == [.command, .option] && event.keyCode == Keycode.v.rawValue
+    }
+
+    // MARK: - Тест-хуки
 
     /// Инжектировать синтетическое событие клавиши в логику фильтрации.
     /// Используется только из тестового таргета — имитирует флаги keyCode и option.
@@ -218,5 +253,23 @@ final class HotkeyManager {
         holdPressedAt = nil
         guard pressDuration >= Double(holdMinDurationMs) else { return }
         onHoldStop?()
+    }
+
+    /// Инжектировать синтетическое keyDown событие — для тестирования быстрого повтора.
+    @MainActor
+    func injectKeyDownLogic(keyCode: UInt16, flags: NSEvent.ModifierFlags) {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: flags,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { return }
+        handleKeyDown(event: event)
     }
 }

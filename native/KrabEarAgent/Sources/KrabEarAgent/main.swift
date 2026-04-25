@@ -232,6 +232,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         )
 
         hotkeyManager = makeHotkeyManager(settings: settings)
+        // Quick replay: Cmd+Option+V → повторить последнюю вставку
+        hotkeyManager?.onQuickReplay = { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleQuickReplayPaste()
+            }
+        }
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован (mode=\(settings.hotkeyMode))")
 
