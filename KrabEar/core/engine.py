@@ -518,6 +518,7 @@ class AudioEngine:
         progress_callback: Callable[[str], None] | None = None,
         history_context: list[Any] | None = None,
         stt_hotwords: list[str] | None = None,
+        silence_ranges: list[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -533,6 +534,9 @@ class AudioEngine:
                        None / [] → контекст не используется.
             stt_hotwords: Пользовательские термины для Glossary-префикса в initial_prompt.
                        None / [] → Glossary-блок не добавляется.
+            silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
+                       Семплы в этих диапазонах будут обнулены перед STT (не удалены — таймстемпы сохранены).
+                       Не применяется для preview-транскрибации.
         """
         def _report(stage: str) -> None:
             if progress_callback is not None:
@@ -642,6 +646,18 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
+            # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
+            # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
+            if silence_ranges and isinstance(audio_data, np.ndarray) and not is_preview:
+                try:
+                    from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
+                    audio_data = _zero_sr(audio_data, silence_ranges, sample_rate=16000)
+                    logger.debug(
+                        "transcribe: silence_ranges применены (%d диапазонов)", len(silence_ranges)
+                    )
+                except Exception:
+                    logger.debug("transcribe: ошибка применения silence_ranges, пропускаем")
+
             # 2.5 Адаптивное шумоподавление (применяется только к numpy-массивам,
             #     т.е. к живым записям; файловые импорты пропускаются для скорости).
             if (
