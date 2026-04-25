@@ -79,6 +79,8 @@ struct AgentSettings {
     var diarizationEnabled: Bool
     var llmRewriteEnabled: Bool
     var llmModel: String
+    // Recording bookmarks hotkey (Cmd+Shift+B)
+    var bookmarksHotkeyEnabled: Bool
     // Phase 3.4 — Call Automation / Telnyx
     var telnyxAPIKey: String
     var telnyxFromNumber: String
@@ -126,6 +128,7 @@ struct AgentSettings {
         diarizationEnabled: true,
         llmRewriteEnabled: false,
         llmModel: "qwen3.5-9b@6bit",
+        bookmarksHotkeyEnabled: true,
         telnyxAPIKey: "",
         telnyxFromNumber: "",
         callMaxDurationMin: 30,
@@ -194,6 +197,7 @@ struct AgentSettings {
         self.diarizationEnabled = (payload["diarization_enabled"] as? Bool) ?? Self.default.diarizationEnabled
         self.llmRewriteEnabled = (payload["llm_rewrite_enabled"] as? Bool) ?? Self.default.llmRewriteEnabled
         self.llmModel = (payload["llm_model"] as? String) ?? Self.default.llmModel
+        self.bookmarksHotkeyEnabled = (payload["bookmarks_hotkey_enabled"] as? Bool) ?? Self.default.bookmarksHotkeyEnabled
         self.telnyxAPIKey = (payload["telnyx_api_key"] as? String) ?? Self.default.telnyxAPIKey
         self.telnyxFromNumber = (payload["telnyx_from_number"] as? String) ?? Self.default.telnyxFromNumber
         self.callMaxDurationMin = (payload["call_max_duration_min"] as? Int) ?? Self.default.callMaxDurationMin
@@ -242,7 +246,8 @@ struct AgentSettings {
         telnyxFromNumber: String,
         callMaxDurationMin: Int,
         callCostWarnUSD: Double,
-        callAutoEndOnSilence: Bool
+        callAutoEndOnSilence: Bool,
+        bookmarksHotkeyEnabled: Bool = true
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -285,6 +290,7 @@ struct AgentSettings {
         self.callMaxDurationMin = callMaxDurationMin
         self.callCostWarnUSD = callCostWarnUSD
         self.callAutoEndOnSilence = callAutoEndOnSilence
+        self.bookmarksHotkeyEnabled = bookmarksHotkeyEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -330,6 +336,7 @@ struct AgentSettings {
             "call_max_duration_min": callMaxDurationMin,
             "call_cost_warn_usd": callCostWarnUSD,
             "call_auto_end_on_silence": callAutoEndOnSilence,
+            "bookmarks_hotkey_enabled": bookmarksHotkeyEnabled,
         ]
     }
 }

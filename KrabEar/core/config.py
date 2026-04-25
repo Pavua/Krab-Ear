@@ -408,6 +408,9 @@ class Settings(BaseSettings):
     # (plain/markdown/html/...) для каждого приложения по bundle_id.
     # При следующей вставке в то же приложение профиль применяется автоматически.
     PASTE_APP_MEMORY_ENABLED: bool = True
+    # --- Recording bookmarks ---
+    # Cmd+Shift+B global hotkey creates a bookmark at the current recording position.
+    BOOKMARKS_HOTKEY_ENABLED: bool = True
 
     @property
     def model_max_list(self) -> List[str]:
@@ -589,4 +592,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Per-app paste profile memory: auto-apply profile (markdown/plain/etc)
     # на основе bundle_id активного приложения при вставке.
     "paste_app_memory_enabled": True,
+    # --- Recording bookmarks ---
+    "bookmarks_hotkey_enabled": True,
 }
