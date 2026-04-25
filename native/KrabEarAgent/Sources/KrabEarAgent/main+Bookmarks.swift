@@ -31,9 +31,7 @@ extension AgentAppDelegate {
             logger.info("Bookmark hotkey нажат вне записи — игнорируем")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.createBookmarkDuringRecording()
-        }
+        createBookmarkDuringRecording()
     }
 
     // MARK: - Bookmark creation

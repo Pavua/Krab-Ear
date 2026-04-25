@@ -34,18 +34,13 @@ extension AgentAppDelegate {
     }
 
     func applyRecordingPreset(_ presetId: String, source: String = "menu") {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try self.ipcClient.call(method: "apply_profile_preset", params: ["profile": presetId])
-                DispatchQueue.main.async {
-                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
-                    self.refreshStatusItemTitle()
-                    self.rebuildStatusMenu()
-                }
-            } catch {
-                self.logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
-            }
+        do {
+            _ = try callWithRecovery(method: "apply_profile_preset", params: ["profile": presetId])
+            UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+        } catch {
+            logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
         }
     }
 
