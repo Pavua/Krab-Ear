@@ -116,7 +116,6 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
-from backend.action_items_extractor import ActionItemsExtractor
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
@@ -172,6 +171,7 @@ class BackendService:
     ) -> None:
         self.store = store
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
+
         def _emit_audio_level(rms: float) -> None:
             """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
             event_bus.emit("recording.audio_level", {"rms": rms})
@@ -599,72 +599,6 @@ class BackendService:
                 self._bulk_tasks[task_id]["status"] = "cancelled"
         return {"requested": True, "task_id": task_id}
 
-
-    # ------------------------------------------------------------------
-    # Action Items handlers
-    # ------------------------------------------------------------------
-
-    def _handle_extract_action_items(self, params: dict) -> dict:
-        """Извлекает action items из одной записи истории."""
-        item_id = str(params.get("item_id", "")).strip()
-        language = str(params.get("language", "ru")).strip().lower() or "ru"
-        if not item_id:
-            return {"error": "item_id required"}
-        item = self.store.get_history_item_by_id(item_id)
-        if item is None:
-            return {"error": f"item not found: {item_id}"}
-        text = (item.cleaned_text or item.text or "").strip()
-        result = self._action_items_extractor.extract(text, language=language)
-        saved = self.store.update_history_item_action_items(
-            item_id=item_id,
-            action_items=result["action_items"],
-            decisions=result["decisions"],
-            questions=result["questions"],
-        )
-        return {"item_id": item_id, "action_items": result["action_items"], "decisions": result["decisions"], "questions": result["questions"], "saved": saved}
-
-    def _handle_batch_extract_action_items(self, params: dict) -> dict:
-        return {
-            "item_id": item_id,
-            "action_items": result["action_items"],
-            "decisions": result["decisions"],
-            "questions": result["questions"],
-            "saved": saved,
-        }
-
-    def _handle_batch_extract_action_items(self, params: dict) -> dict:
-        """Пакетное извлечение action items (max 20)."""
-        item_ids = params.get("item_ids", [])
-        if not isinstance(item_ids, list):
-            item_ids = []
-        item_ids = [str(i).strip() for i in item_ids if str(i).strip()][:20]
-        language = str(params.get("language", "ru")).strip().lower() or "ru"
-        results = []
-        errors = 0
-        for iid in item_ids:
-            r = self._handle_extract_action_items({"item_id": iid, "language": language})
-            if "error" in r:
-                errors += 1
-            results.append(r)
-        return {"results": results, "total": len(results), "errors": errors}
-
-    def _handle_get_pending_action_items(self, params: dict) -> dict:
-        pending = self.store.get_all_pending_action_items()
-        return {"pending": pending, "count": len(pending)}
-
-    def _trigger_auto_extract_action_items(self, item_id, text, language, duration_sec):
-        import threading as _ait
-        def _run():
-            try:
-                result = self._action_items_extractor.extract(text, language=language)
-                if result["action_items"] or result["decisions"] or result["questions"]:
-                    self.store.update_history_item_action_items(item_id=item_id, action_items=result["action_items"], decisions=result["decisions"], questions=result["questions"])
-            except Exception:
-                logger.exception("Auto-extract action items failed for item=%s", item_id)
-        """Возвращает все незакрытые action items."""
-        pending = self.store.get_all_pending_action_items()
-        return {"pending": pending, "count": len(pending)}
-
     def _trigger_auto_extract_action_items(
         self, item_id: str, text: str, language: str, duration_sec: float
     ) -> None:
@@ -1070,9 +1004,6 @@ class BackendService:
             "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # запуск массового перетранскрибирования
             "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус задания массового перетранскрибирования
             "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отмена задания массового перетранскрибирования
-            "extract_action_items": self._handle_extract_action_items,
-            "batch_extract_action_items": self._handle_batch_extract_action_items,
-            "get_pending_action_items": self._handle_get_pending_action_items,
             # --- Recording bookmarks (Cmd+Shift+B) ---
             "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
             "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
@@ -3692,7 +3623,6 @@ class BackendService:
         """Возвращает статус планировщика дайджеста: last_sent_date, next_run и т.д."""
         return self._recap_scheduler.get_status()
 
-
     def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует полный Markdown-отчёт статистики использования за период."""
         days = int(params.get("days", 30))
@@ -4957,7 +4887,6 @@ class BackendService:
             self._settings_svc.handle_set_settings(patch)
 
         return {"updated": len(patch), "fields": list(patch.keys())}
-
 
     # ------------------------------------------------------------------ #
     # Calendar auto-link IPC handlers                                     #
