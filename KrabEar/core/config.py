@@ -17,6 +17,9 @@ _SECRETS_FILE = Path.home() / "Library" / "Application Support" / "KrabEar" / ".
 
 
 class Settings(BaseSettings):
+    # --- Bulk re-process history (backend/bulk_reprocess.py) ---
+    BULK_REPROCESS_BATCH_SIZE: int = 5
+
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
         env_file=(".env", str(_SECRETS_FILE)),
@@ -77,6 +80,9 @@ class Settings(BaseSettings):
 
     # Авто-экспорт истории по расписанию
     AUTO_EXPORT_ENABLED: bool = False
+    # Включать метки спикеров в экспортах (MD/SRT/JSON/CSV/Obsidian).
+    # False = обратная совместимость. include_speaker_labels в IPC-запросе имеет приоритет.
+    EXPORT_INCLUDE_SPEAKER_LABELS: bool = False
 
     # Формат логов: "text" (стандартный) или "json" (структурированный JSON)
     LOG_FORMAT: str = "text"
@@ -506,4 +512,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- STT speaker-aware initial_prompt hint ---
     "stt_speaker_aware_prompt_enabled": True,
     "stt_dialogue_hint_threshold": 2,
+    # --- Bulk re-process history ---
+    "bulk_reprocess_batch_size": 5,
 }

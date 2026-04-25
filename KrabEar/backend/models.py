@@ -55,6 +55,10 @@ class HistoryItem:
     # Каждый элемент: {"speaker": str, "start": float, "end": float}.
     # None для записей без WhisperX diarization.
     speaker_turns: list | None = None
+    # Audio file path (for re-transcription support)
+    audio_path: str = ""
+    # Protected items are excluded from bulk operations
+    is_protected: bool = False
     # Voxtral reasoning output (Phase 4.4).
     # Заполняется когда VOXTRAL_ENABLED=True + VOXTRAL_REASONING_ENABLED=True.
     # Содержит summary или Q&A ответ от Mistral Voxtral LM-decoder.
@@ -87,6 +91,8 @@ class HistoryItem:
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
         reasoning: str | None = None,
+        audio_path: str = "",
+        is_protected: bool = False,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -115,6 +121,8 @@ class HistoryItem:
             word_timestamps=list(word_timestamps) if word_timestamps else None,
             speaker_turns=list(speaker_turns) if speaker_turns else None,
             reasoning=(str(reasoning).strip() or None) if reasoning else None,
+            audio_path=str(audio_path).strip(),
+            is_protected=bool(is_protected),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -150,6 +158,8 @@ class HistoryItem:
             word_timestamps=payload.get("word_timestamps") if isinstance(payload.get("word_timestamps"), list) else None,
             speaker_turns=payload.get("speaker_turns") if isinstance(payload.get("speaker_turns"), list) else None,
             reasoning=(str(payload["reasoning"]).strip() or None) if payload.get("reasoning") else None,
+            audio_path=str(payload.get("audio_path", "")).strip(),
+            is_protected=bool(payload.get("is_protected", False)),
         )
 
 
