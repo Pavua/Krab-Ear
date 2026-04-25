@@ -233,6 +233,21 @@ class Settings(BaseSettings):
     SENTRY_DSN: str = ""
     SENTRY_ENVIRONMENT: str = "production"
 
+    # --- STT punctuation-only LLM pass (opt-in) ---
+    # При True: после STT + cleanup и ПЕРЕД полным LLM rewrite, текст прогоняется
+    # через минимальный pass с строгим prompt'ом "только пунктуация".
+    # Word-set и word-count guards гарантируют, что слова не меняются.
+    # Opt-in: False по умолчанию до завершения burn-in периода.
+    STT_PUNCTUATION_LLM_PASS_ENABLED: bool = False
+
+    # --- STT quality: speaker-aware initial_prompt hint ---
+    STT_SPEAKER_AWARE_PROMPT_ENABLED: bool = True
+    STT_DIALOGUE_HINT_THRESHOLD: int = 2
+
+    # --- Russian Whisper fine-tune ---
+    STT_USE_RU_FINETUNE: bool = False
+    STT_RU_FINETUNE_MODEL: str = "antony66/whisper-large-v3-russian"
+
     # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
     # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
     # При TTS_ENABLED=True включается Silero (RU primary) + Kokoro (EN fallback) цепочка.
@@ -385,6 +400,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # D.10a runtime toggle: юзер может включать/выключать LLM rewriter через
     # IPC update_settings без рестарта. Дефолт False — safety.
     "llm_rewrite_enabled": False,
+    # Punctuation-only LLM pass: минимальный pass только для запятых/точек.
+    # Opt-in: False по умолчанию (burn-in период). Word-set guard = безопасность.
+    "stt_punctuation_llm_pass_enabled": False,
     # Автосохранение каждой транскрибации в .md файл в transcripts/.
     "auto_save_transcripts": False,
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
