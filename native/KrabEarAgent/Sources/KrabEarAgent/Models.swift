@@ -338,6 +338,8 @@ struct HistoryItem {
     let translatedText: String
     let translationMode: String
     let translationStatus: String
+    /// Уверенность STT: 0.0–1.0, nil если метаданные отсутствуют (например импорт без анализа).
+    let confidence: Double?
 
     init?(payload: [String: Any]) {
         guard
@@ -356,5 +358,13 @@ struct HistoryItem {
         self.translatedText = (payload["translated_text"] as? String) ?? ""
         self.translationMode = (payload["translation_mode"] as? String) ?? "off"
         self.translationStatus = (payload["translation_status"] as? String) ?? "not_requested"
+        // confidence может быть Float или Double в зависимости от backend JSON сериализации
+        if let c = payload["confidence"] as? Double {
+            self.confidence = c
+        } else if let c = payload["confidence"] as? Float {
+            self.confidence = Double(c)
+        } else {
+            self.confidence = nil
+        }
     }
 }
