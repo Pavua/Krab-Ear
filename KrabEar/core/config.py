@@ -487,4 +487,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_device": "mps",
     # --- STT hotwords (initial_prompt boost) ---
     "stt_hotwords": [],
+    # --- STT speaker-aware initial_prompt hint ---
+    "stt_speaker_aware_prompt_enabled": True,
+    "stt_dialogue_hint_threshold": 2,
 }
