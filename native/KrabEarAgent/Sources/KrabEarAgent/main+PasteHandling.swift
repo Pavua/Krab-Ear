@@ -89,13 +89,12 @@ extension AgentAppDelegate {
         let targetPID = activateTargetForPaste(targetApp)
 
         // Применяем per-app профиль вставки если настроен
-        let (textToInsert, appliedProfile) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
+        let (textToInsert, appliedProfile) = applyPasteProfileIfNeeded(text: text, targetApp: targetApp)
         if let prof = appliedProfile {
             logger.info("PasteAppMemory: применён профиль '\(prof)' для \(targetApp.bundleIdentifier ?? "unknown")")
         }
 
         let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
-        let pasteResult = pasteService.pasteToFrontmostApp(text, targetPID: targetPID)
         logger.info(
             "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
         )

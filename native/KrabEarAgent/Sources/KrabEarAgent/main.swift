@@ -206,10 +206,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
             settingsProvider: { [weak self] in
-                self?.settings ?? .default
+                (self as? AgentAppDelegate)?.settings ?? .default
             },
             settingsUpdater: { [weak self] payload in
-                self?.updateSettingsFromPanel(payload) ?? .default
+                (self as? AgentAppDelegate)?.updateSettingsFromPanel(payload) ?? .default
             },
             onToggleRecording: { [weak self] in
                 self?.handleRecordToggleRequest()

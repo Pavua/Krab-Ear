@@ -34,18 +34,13 @@ extension AgentAppDelegate {
     }
 
     func applyRecordingPreset(_ presetId: String, source: String = "menu") {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try self.ipcClient.call(method: "apply_profile_preset", params: ["profile": presetId])
-                DispatchQueue.main.async {
-                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
-                    self.refreshStatusItemTitle()
-                    self.rebuildStatusMenu()
-                }
-            } catch {
-                self.logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
-            }
+        do {
+            _ = try callWithRecovery(method: "apply_profile_preset", params: ["profile": presetId])
+            UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
+        } catch {
+            logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
         }
     }
 
@@ -91,6 +86,12 @@ extension AgentAppDelegate {
         let presetItem = NSMenuItem(title: "Пресет записи", action: nil, keyEquivalent: "")
         menu.addItem(presetItem)
         menu.setSubmenu(buildPresetSubmenu(), for: presetItem)
+    }
+
+    @objc func onOpenSettings() {
+        // Open main panel; user can switch to Settings tab.
+        // Defined here as fallback for "Открыть настройки…" menu item from preset submenu.
+        openHistoryPanel(forceMenubar: false)
     }
 
     @objc func onPresetMenuItemClicked(_ sender: NSMenuItem) {

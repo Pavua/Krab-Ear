@@ -31,9 +31,7 @@ extension AgentAppDelegate {
             logger.info("Bookmark hotkey нажат вне записи — игнорируем")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.createBookmarkDuringRecording()
-        }
+        createBookmarkDuringRecording()
     }
 
     // MARK: - Bookmark creation
@@ -54,7 +52,7 @@ extension AgentAppDelegate {
             "offset_sec": offsetSec,
             "note": "",
         ]
-        guard try? callWithRecovery(method: "add_bookmark", params: params) != nil else {
+        guard (try? callWithRecovery(method: "add_bookmark", params: params)) != nil else {
             logger.warn("Ошибка создания закладки")
             return
         }

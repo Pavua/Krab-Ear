@@ -249,12 +249,12 @@ struct AgentSettings {
         diarizationEnabled: Bool,
         llmRewriteEnabled: Bool,
         llmModel: String,
+        bookmarksHotkeyEnabled: Bool = true,
         telnyxAPIKey: String,
         telnyxFromNumber: String,
         callMaxDurationMin: Int,
         callCostWarnUSD: Double,
         callAutoEndOnSilence: Bool,
-        bookmarksHotkeyEnabled: Bool = true
         quickEditEnabled: Bool,
         quickEditTimeoutSec: Double
     ) {
@@ -294,12 +294,12 @@ struct AgentSettings {
         self.diarizationEnabled = diarizationEnabled
         self.llmRewriteEnabled = llmRewriteEnabled
         self.llmModel = llmModel
+        self.bookmarksHotkeyEnabled = bookmarksHotkeyEnabled
         self.telnyxAPIKey = telnyxAPIKey
         self.telnyxFromNumber = telnyxFromNumber
         self.callMaxDurationMin = callMaxDurationMin
         self.callCostWarnUSD = callCostWarnUSD
         self.callAutoEndOnSilence = callAutoEndOnSilence
-        self.bookmarksHotkeyEnabled = bookmarksHotkeyEnabled
         self.quickEditEnabled = quickEditEnabled
         self.quickEditTimeoutSec = quickEditTimeoutSec
     }

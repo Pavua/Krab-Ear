@@ -176,21 +176,31 @@ extension HistoryPanelController {
             return
         }
         let item = items[selected]
-        guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось построить summary для записи.")
-            return
-        }
-        let summary = result["summary"] as? String ?? "(нет текста)"
-        let isLLM = result["llm"] as? Bool ?? false
-        let sourceChars = result["source_chars"] as? Int ?? 0
-        let text = """
-        === Summary (ID: \(item.id.prefix(8))…) ===
-        \(summary)
+        showDiagnosticsOutput("Summary: обрабатываю запись \(item.id.prefix(8))…")
 
-        [LLM: \(isLLM ? "да" : "нет"), источник: \(sourceChars) символов]
-        """
-        showDiagnosticsOutput(text)
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let itemID = item.id
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": itemID]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось построить summary для записи.")
+                }
+                return
+            }
+            let summary = result["summary"] as? String ?? "(нет текста)"
+            let isLLM = result["llm"] as? Bool ?? false
+            let sourceChars = result["source_chars"] as? Int ?? 0
+            let text = """
+            === Summary (ID: \(itemID.prefix(8))…) ===
+            \(summary)
+
+            [LLM: \(isLLM ? "да" : "нет"), источник: \(sourceChars) символов]
+            """
+            DispatchQueue.main.async {
+                self?.showDiagnosticsOutput(text)
+            }
+        }
     }
 
     func updateHistoryFiltersBadge() {
