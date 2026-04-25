@@ -676,6 +676,7 @@ class AudioEngine:
     _PARAKEET_MARKER: str = "parakeet:adapter"
     _WHISPERX_MARKER: str = "whisperx:adapter"
     _VOXTRAL_MARKER: str = "voxtral:adapter"
+    _RU_FINETUNE_MARKER: str = "ru_finetune:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -685,6 +686,20 @@ class AudioEngine:
             candidates = list(dict.fromkeys(settings.model_max_list))
 
         balanced_model = settings.MODEL_BALANCED
+
+        # --- RU fine-tune adapter: позиция 0 (перед balanced, только для языка "ru") ---
+        # antony66/whisper-large-v3-russian — fine-tune на русском Common Voice/OpenSTT.
+        # Даёт ~2pp WER improvement vs базового whisper-large-v3 на русской речи.
+        # Работает через тот же mlx_whisper.transcribe (drop-in checkpoint).
+        # Активируется только если язык определён как "ru" (не None, не "es", не "en").
+        # При ошибке загрузки маркер помечается недоступным, chain продолжается без него.
+        _effective_lang = language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        if (
+            settings.STT_USE_RU_FINETUNE
+            and _effective_lang == "ru"
+            and self._RU_FINETUNE_MARKER not in self._unavailable_models
+        ):
+            candidates = [self._RU_FINETUNE_MARKER] + candidates
 
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
@@ -744,7 +759,14 @@ class AudioEngine:
             candidates = candidates[:vx_insert_pos] + [self._VOXTRAL_MARKER] + candidates[vx_insert_pos:]
 
         # Таблица маркеров адаптеров: marker → (span_prefix, model_setting, transcribe_fn)
+        _ru_finetune_model = settings.STT_RU_FINETUNE_MODEL
         _adapter_dispatch = [
+            (
+                self._RU_FINETUNE_MARKER,
+                "stt_ru_finetune",
+                _ru_finetune_model,
+                lambda: self._transcribe_model(audio_data, _ru_finetune_model, prompt, language),
+            ),
             (
                 self._PARAKEET_MARKER,
                 "stt_parakeet",

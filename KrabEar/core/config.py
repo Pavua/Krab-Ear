@@ -193,6 +193,26 @@ class Settings(BaseSettings):
     # При False Voxtral работает только как STT (без reasoning overhead).
     VOXTRAL_REASONING_ENABLED: bool = False
 
+    # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
+    # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
+    # русскоязычной речи. WER на Common Voice RU:
+    #   GigaAM-RNNT v2: ~3.8%  vs  whisper-large-v3: ~9.8% (≈2.5× улучшение).
+    # Лицензия: MIT — коммерческое использование разрешено.
+    # PyPI: pip install gigaam  (официальный пакет от salute-developers)
+    # HuggingFace: salute-developers/GigaAM
+    # Opt-in: по умолчанию выключено до проверки установки gigaam.
+    # Когда STT_GIGAAM_ENABLED=True И STT_LANGUAGE_ROUTING_ENABLED=True:
+    #   detected_lang == "ru" → GigaAM → fallback whisper-large-v3.
+    # Использует PyTorch + MPS (не MLX) → mlx_lock НЕ нужен.
+    # Потребление памяти: ~1 GB (244M float32 params) + ~200 MB torch runtime.
+    STT_GIGAAM_ENABLED: bool = False
+    # Режим модели: "rnnt" (выше качество, RNNT decoder) или "ctc" (быстрее, CTC decoder).
+    # Полные имена тоже поддерживаются: "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc".
+    STT_GIGAAM_MODE: str = "rnnt"
+    # Устройство для инференса: "mps" (Apple Silicon GPU) или "cpu".
+    # На M4 Max рекомендуется "mps" — ~3× быстрее CPU при том же потреблении памяти.
+    STT_GIGAAM_DEVICE: str = "mps"
+
     # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
     # Мост для отправки транскрипций напрямую в Telegram через main Krab web-панель.
     # False = функция "Отправить в Telegram" в UI скрыта / недоступна.
@@ -256,6 +276,15 @@ class Settings(BaseSettings):
     # Повышают точность распознавания специфичной лексики (~10-15% на непрерывной диктовке).
     # Управляется через IPC: add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
     STT_HOTWORDS: List[str] = []
+
+    # --- Russian Whisper fine-tune (antony66/whisper-large-v3-russian) ---
+    # Drop-in upgrade для русского STT: тот же mlx-whisper pipeline, другой checkpoint.
+    # Модель: antony66/whisper-large-v3-russian, Apache-2.0, ~3 GB, fine-tuned на RU Common Voice.
+    # При STT_USE_RU_FINETUNE=True и определённом языке "ru" — пробуется первым в chain.
+    # При ошибке загрузки (модель не скачана, OOM) — автоматический fallback на стандартную модель.
+    # Opt-in: False по умолчанию — существующий whisper chain не меняется.
+    STT_USE_RU_FINETUNE: bool = False
+    STT_RU_FINETUNE_MODEL: str = "antony66/whisper-large-v3-russian"
 
     @property
     def model_max_list(self) -> List[str]:
@@ -376,4 +405,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Пользовательские термины для boosting'а точности Whisper.
     # Управляется через IPC add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
     "stt_hotwords": [],
+    # --- Russian Whisper fine-tune (antony66/whisper-large-v3-russian) ---
+    # Drop-in upgrade для русского STT без нового адаптера.
+    "stt_use_ru_finetune": False,
+    "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",
 }
