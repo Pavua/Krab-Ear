@@ -24,6 +24,21 @@ class Settings(BaseSettings):
     REALTIME_PARTIAL_ENABLED: bool = True
     RT_PARTIAL_INTERVAL_SEC: float = 3.0
     RT_PARTIAL_BUFFER_SEC: float = 8.0
+    # --- Мониторинг дискового пространства (backend/disk_monitor.py) ---
+    # True = фоновый поток DiskSpaceMonitor запускается при старте backend.
+    DISK_MONITOR_ENABLED: bool = True
+    # Интервал проверки в минутах.
+    DISK_CHECK_INTERVAL_MIN: int = 30
+    # Порог для события disk.warning (свободно меньше N GB).
+    DISK_WARNING_GB: float = 5.0
+    # Порог для события disk.critical (свободно меньше N GB).
+    DISK_CRITICAL_GB: float = 1.0
+    # Порог для события disk.history_large (history.ndjson > N MB).
+    HISTORY_LARGE_MB: int = 500
+    # Авто-очистка записей: opt-in, по умолчанию выключена.
+    AUTO_CLEANUP_ENABLED: bool = False
+    # Удалять записи старше N дней при авто-очистке.
+    AUTO_CLEANUP_AFTER_DAYS: int = 365
 
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
@@ -96,6 +111,10 @@ class Settings(BaseSettings):
     # Пустая строка = аутентификация отключена (обратная совместимость).
     # Если задан, защищённые эндпоинты требуют заголовок: Authorization: Bearer <key>
     REST_API_KEY: str = ""
+
+    # Включить расширенное управление токенами (create/list/revoke через IPC).
+    # Когда True, require_api_key использует RestAuth вместо одиночного ключа.
+    REST_API_AUTH_ENABLED: bool = False
 
     # Rate limiting для REST API (flask-limiter).
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
@@ -442,6 +461,52 @@ class Settings(BaseSettings):
     AUTO_GLOSSARY_WINDOW_DAYS: int = 7
     AUTO_GLOSSARY_TOP_N: int = 30
     AUTO_GLOSSARY_REFRESH_HOURS: int = 6
+    # --- Quick Preset Switcher ---
+    # Горячая клавиша для быстрого переключения пресетов записи из меню.
+    # Placeholder — фактическое поведение регулируется в native/Swift.
+    # Формат: modifier+key, например "cmd+shift+p".
+    PRESET_QUICK_SWITCH_HOTKEY: str = "cmd+shift+p"
+
+    # --- STT code-switching detection (RU+EN mix) ---
+    # При STT_CODE_SWITCHING_DETECT=True: последний элемент истории анализируется
+    # на наличие смешения кириллицы и латиницы (технические разговоры: «запушил коммит в main»).
+    # Если обнаружено code-switching → в initial_prompt добавляется hint:
+    # "В записи может звучать смесь русского и английского (технические термины)."
+    # STT_CODE_SWITCHING_THRESHOLD: минимальная доля латинских слов (0.1 = 10%).
+    STT_CODE_SWITCHING_DETECT: bool = True
+    STT_CODE_SWITCHING_THRESHOLD: float = 0.1
+
+    # --- Realtime silence filter (skip long silence in final transcribe) ---
+    # При REALTIME_SILENCE_FILTER_ENABLED=True: фоновый поток каждые
+    # RT_SILENCE_CHECK_SEC секунд анализирует последние RT_SILENCE_WINDOW_SEC
+    # секунд буфера. Если обнаруженная тишина превышает RT_SILENCE_MAX_SEC —
+    # диапазон помечается и пропускается при финальной транскрибации.
+    # Opt-in: False по умолчанию до завершения burn-in периода.
+    REALTIME_SILENCE_FILTER_ENABLED: bool = False
+    # Интервал между проверками тишины в фоновом потоке (секунды).
+    RT_SILENCE_CHECK_SEC: float = 5.0
+    # Длина окна буфера для анализа тишины (секунды).
+    RT_SILENCE_WINDOW_SEC: float = 10.0
+    # Максимально допустимая тишина в окне — при превышении диапазон помечается.
+    RT_SILENCE_MAX_SEC: float = 8.0
+
+    # --- Action Items auto-extraction (LLM-based) ---
+    # Opt-in: False по умолчанию до завершения burn-in периода.
+    # При True: после финализации транскрибации (audio_duration_sec > threshold)
+    # action items автоматически извлекаются в фоновом потоке через LM Studio.
+    ACTION_ITEMS_AUTO_EXTRACT: bool = False
+    # Минимальная длительность записи (секунды) для авто-извлечения.
+    # Записи короче этого порога пропускаются (избегаем коротких диктовок).
+    ACTION_ITEMS_MIN_DURATION_SEC: float = 60.0
+
+    # --- Per-app paste profile memory ---
+    # При True: для каждого bundle_id приложения запоминается последний выбранный
+    # профиль форматирования и применяется автоматически при следующей вставке.
+    PASTE_APP_MEMORY_ENABLED: bool = True
+
+    # --- Calendar auto-link (osascript, opt-in) ---
+    CALENDAR_LINK_ENABLED: bool = False
+    CALENDAR_LINK_CACHE_MIN: int = 5
 
     @property
     def model_max_list(self) -> List[str]:
@@ -645,4 +710,38 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "realtime_partial_enabled": True,
     "rt_partial_interval_sec": 3.0,
     "rt_partial_buffer_sec": 8.0,
+    # --- Quick Preset Switcher ---
+    # Текущий активный профиль пресета (default/meeting/translation/call_recording).
+    # Отражается в иконке строки меню как буква (D/M/T/C).
+    "active_preset": "default",
+    # Горячая клавиша быстрого переключения пресетов.
+    "preset_quick_switch_hotkey": "cmd+shift+p",
+    # --- STT code-switching detection (RU+EN mix) ---
+    # Включено по умолчанию; threshold 10% покрывает типичные технические разговоры.
+    "stt_code_switching_detect": True,
+    "stt_code_switching_threshold": 0.1,
+    # --- Мониторинг дискового пространства (backend/disk_monitor.py) ---
+    "disk_monitor_enabled": True,
+    "disk_check_interval_min": 30,
+    "disk_warning_gb": 5.0,
+    "disk_critical_gb": 1.0,
+    "history_large_mb": 500,
+    "auto_cleanup_enabled": False,
+    "auto_cleanup_after_days": 365,
+    # --- Action Items auto-extraction (LLM-based) ---
+    # Opt-in: False по умолчанию (burn-in период).
+    "action_items_auto_extract": False,
+    # Минимальная длительность записи в секундах для авто-извлечения.
+    "action_items_min_duration_sec": 60.0,
+    # --- Inline translation toggle in history items (Swift GUI) ---
+    # Target language for inline preview button. "auto" = opposite of detected lang
+    # (RU->ES, ES->RU, EN->RU). Other valid values: "ru", "es", "en".
+    "inline_translation_target": "auto",
+    # --- Calendar auto-link (osascript, opt-in) ---
+    "calendar_link_enabled": False,
+    "calendar_link_cache_min": 5,
+    # --- Per-app paste profile memory ---
+    "paste_app_memory_enabled": True,
+    # REST API token store
+    "rest_api_auth_enabled": False,
 }

@@ -25,6 +25,7 @@ from werkzeug.utils import secure_filename
 from core.config import settings
 from core.engine import AudioEngine
 from backend.event_bus import bus as event_bus, sse_stream
+from backend.rest_auth import RestAuth
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
@@ -112,23 +113,57 @@ _WS_POLL_SEC = 5.0
 
 # ---------------------------------------------------------------------------
 # Auth decorator — optional Bearer token.
-# Если REST_API_KEY пустой, аутентификация пропускается (обратная совместимость).
+# Three modes:
+#   1. REST_API_AUTH_ENABLED=True  -> RestAuth token store
+#   2. REST_API_KEY set (legacy)   -> single-key check
+#   3. both disabled               -> pass through
 # ---------------------------------------------------------------------------
 
+# Module-level RestAuth singleton (lazy-initialized on first auth request)
+_rest_auth = None
+
+
+def _get_rest_auth():
+    """Return or create the module-level RestAuth instance."""
+    global _rest_auth
+    if _rest_auth is None:
+        _rest_auth = RestAuth(data_dir=str(settings.DATA_DIR))
+    return _rest_auth
+
+
+def _log_unauthorized(endpoint):
+    logger.warning("Unauthorized REST request to %s from %s",
+                   endpoint, request.remote_addr)
+
+
 def require_api_key(f):
-    """Decorator: enforce Bearer token auth when REST_API_KEY is configured."""
+    """Decorator: enforce Bearer token auth when configured."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        api_key = settings.REST_API_KEY
-        if not api_key:
-            # Auth disabled — pass through
+        if getattr(settings, "REST_API_AUTH_ENABLED", False):
+            # Mode 1: token-store auth
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                _log_unauthorized(request.path)
+                return jsonify({"error": "Missing or invalid Authorization header"}), 401
+            raw_token = auth_header[len("Bearer "):]
+            meta = _get_rest_auth().verify_token(raw_token)
+            if meta is None:
+                _log_unauthorized(request.path)
+                return jsonify({"error": "Invalid or revoked API token"}), 401
             return f(*args, **kwargs)
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
-        token = auth_header[len("Bearer "):]
-        if token != api_key:
-            return jsonify({"error": "Invalid API key"}), 401
+        # Mode 2: legacy single-key auth
+        api_key = settings.REST_API_KEY
+        if api_key:
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                _log_unauthorized(request.path)
+                return jsonify({"error": "Missing or invalid Authorization header"}), 401
+            token = auth_header[len("Bearer "):]
+            if token != api_key:
+                _log_unauthorized(request.path)
+                return jsonify({"error": "Invalid API key"}), 401
+        # Mode 3: auth disabled — pass through
         return f(*args, **kwargs)
     return decorated
 
