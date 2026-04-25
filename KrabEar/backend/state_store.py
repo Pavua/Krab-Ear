@@ -47,6 +47,7 @@ class StateStore:
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
         self.text_updates_path = self.data_dir / "history_text_updates.ndjson"
         self.action_items_path = self.data_dir / "history_action_items.ndjson"
+        self.calendar_links_path = self.data_dir / "history_calendar_links.ndjson"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -60,6 +61,8 @@ class StateStore:
                 self.vocabulary_path,
                 self.text_updates_path,
                 self.action_items_path):
+                self.action_items_path,
+                self.calendar_links_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
@@ -1082,6 +1085,7 @@ class StateStore:
         self, item_id: str, action_items: list, decisions: list, questions: list
     ) -> bool:
         """Записывает action items для записи в журнал (last-write-wins по id)."""
+    def update_history_item_action_items(self, item_id, action_items, decisions, questions):
         clean_id = item_id.strip()
         if not clean_id:
             return False
@@ -1102,6 +1106,12 @@ class StateStore:
 
     def get_history_item_action_items(self, item_id: str):
         """Возвращает последние action items для записи или None."""
+            import json as _j
+            entry = {"id": clean_id, "action_items": list(action_items), "decisions": list(decisions), "questions": list(questions), "ts": _dt.now().isoformat(timespec="seconds")}
+            self._append_ndjson(self.action_items_path, entry)
+        return True
+
+    def get_history_item_action_items(self, item_id):
         clean_id = item_id.strip()
         if not clean_id:
             return None
@@ -1120,12 +1130,16 @@ class StateStore:
         result = {}
         try:
             import json as _json
+        result = {}
+        try:
+            import json as _j
             for line in self.action_items_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     entry = _json.loads(line)
+                    entry = _j.loads(line)
                     if isinstance(entry, dict) and entry.get("id"):
                         result[entry["id"]] = entry
                 except (ValueError, KeyError):
@@ -1155,3 +1169,58 @@ class StateStore:
                     logger.info("Обнаружен дубликат запроса: chat=%s, msg=%s", cid, mid)
                     return True
         return False
+
+    # ------------------------------------------------------------------ #
+    # Calendar auto-link delta journal                                     #
+    # ------------------------------------------------------------------ #
+
+    def update_history_item_calendar(self, item_id: str, event: "dict[str, Any]") -> bool:
+        """Сохраняет ссылку на событие Calendar для записи (last-write-wins по id)."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        if not isinstance(event, dict) or not event.get("title"):
+            return False
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return False
+            self._append_ndjson(
+                self.calendar_links_path,
+                {"id": clean_id, "calendar_event": event},
+            )
+        return True
+
+    def get_history_item_calendar(self, item_id: str) -> "dict[str, Any] | None":
+        """Возвращает словарь события Calendar для записи или None."""
+        clean_id = item_id.strip()
+        if not clean_id:
+            return None
+        with self._lock():
+            active = self._load_active_items_unlocked()
+            if not any(item.id == clean_id for item in active):
+                return None
+            overrides = self._load_calendar_overrides_unlocked()
+        return overrides.get(clean_id)
+
+    def search_by_calendar_event(self, event_title: str) -> "list[dict[str, Any]]":
+        """Ищет записи, связанные с событием Calendar по подстроке в названии."""
+        needle = event_title.strip().lower()
+        with self._lock():
+            overrides = self._load_calendar_overrides_unlocked()
+        results = []
+        for item_id, cal_event in overrides.items():
+            title = str(cal_event.get("title", "")).lower()
+            if not needle or needle in title:
+                results.append({"item_id": item_id, "calendar_event": cal_event})
+        return results
+
+    def _load_calendar_overrides_unlocked(self) -> "dict[str, dict[str, Any]]":
+        """Собирает последние ссылки на события Calendar (last-write-wins по id)."""
+        result: "dict[str, dict[str, Any]]" = {}
+        for payload in self._read_ndjson_unlocked(self.calendar_links_path):
+            item_id = str(payload.get("id", "")).strip()
+            cal_event = payload.get("calendar_event")
+            if item_id and isinstance(cal_event, dict) and cal_event.get("title"):
+                result[item_id] = cal_event
+        return result
