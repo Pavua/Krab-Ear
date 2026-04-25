@@ -47,6 +47,7 @@ def _make_engine(
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
     engine._unavailable_models = set()
+    engine._router = None
     if whisperx_marker_unavailable:
         engine._unavailable_models.add(engine._WHISPERX_MARKER)
     if sensevoice_marker_unavailable:

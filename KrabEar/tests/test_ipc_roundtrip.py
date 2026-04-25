@@ -55,7 +55,8 @@ class FakeTranscriber:
 
     def transcribe(self, audio_data, quality_profile: str = "balanced",
                    cleanup_profile: str = "soft", domain: str = "casual",
-                   extra_vocabulary=None, lang_hint=None) -> str:
+                   extra_vocabulary=None, lang_hint=None,
+                   history_context=None, stt_hotwords=None) -> str:
         self.counter += 1
         return f"тест #{self.counter}"
 

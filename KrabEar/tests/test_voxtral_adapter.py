@@ -37,6 +37,7 @@ def _make_engine(
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
     engine._unavailable_models = set()
+    engine._router = None
     if voxtral_marker_unavailable:
         engine._unavailable_models.add(engine._VOXTRAL_MARKER)
     engine._voxtral_model = None

@@ -55,6 +55,9 @@ class FakeAudioEngine:
         domain: str = "casual",
         extra_vocabulary: list[str] | None = None,
         lang_hint: str | None = None,
+        history_context: list[Any] | None = None,
+        stt_hotwords: list[str] | None = None,
+        progress_callback: Any = None,
     ) -> dict[str, Any]:
         record = {
             "audio_data": audio_data,

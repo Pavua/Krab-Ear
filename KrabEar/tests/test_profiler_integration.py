@@ -68,6 +68,8 @@ class _FakeTranscriber:
         domain: str = "casual",
         extra_vocabulary=None,
         lang_hint=None,
+        history_context=None,
+        stt_hotwords=None,
     ) -> str:
         self.counter += 1
         return "fake text"
