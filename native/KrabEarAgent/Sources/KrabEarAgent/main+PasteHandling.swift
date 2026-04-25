@@ -52,8 +52,35 @@ extension AgentAppDelegate {
             return
         }
 
+        // Quick Edit: показываем мини-оверлей для правки перед вставкой (если включено).
+        if settings.quickEditEnabled {
+            quickEditOverlay.show(text: cleanText, timeoutSec: settings.quickEditTimeoutSec) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .paste(let editedText):
+                    self.logger.info("QuickEdit: пользователь отредактировал текст, paste")
+                    self.performAutoPaste(text: editedText, historyId: effectiveHistoryId)
+                case .cancel:
+                    self.logger.info("QuickEdit: пользователь отменил вставку")
+                    self.markPasteStatus(historyId: effectiveHistoryId, status: "failed")
+                    self.historyPanel?.onHistoryDidUpdate()
+                    self.notify(title: "Krab Ear", body: "Вставка отменена")
+                case .timeout(let originalText):
+                    self.logger.info("QuickEdit: таймаут — вставляем исходный текст")
+                    self.performAutoPaste(text: originalText, historyId: effectiveHistoryId)
+                }
+            }
+            return
+        }
+
+        performAutoPaste(text: cleanText, historyId: effectiveHistoryId)
+    }
+
+    // MARK: - Core paste helper
+
+    func performAutoPaste(text: String, historyId: String?) {
         guard let targetApp = resolvePreferredPasteTargetApp() else {
-            markPasteStatus(historyId: effectiveHistoryId, status: "failed")
+            markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
             logger.warn("Не найден target app для вставки")
             handlePasteFailure(reason: "no_external_target")
@@ -68,14 +95,15 @@ extension AgentAppDelegate {
         }
 
         let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
+        let pasteResult = pasteService.pasteToFrontmostApp(text, targetPID: targetPID)
         logger.info(
             "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
         )
-        markPasteStatus(historyId: effectiveHistoryId, status: pasteResult.ok ? "ok" : "failed")
+        markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
         historyPanel?.onHistoryDidUpdate()
 
         if !pasteResult.ok {
-            handlePasteFailure(reason: pasteResult.reason, text: cleanText)
+            handlePasteFailure(reason: pasteResult.reason, text: text)
         }
 
         // Звук завершения транскрибации.
