@@ -48,6 +48,8 @@ HEAVY_METHODS: Set[str] = {
     "convert_audio",            # конвертация аудио
     "bulk_reprocess_start",     # массовое перетранскрибирование (запуск фонового задания)
     "auto_cleanup_old",         # удаление старых записей истории (CPU + disk I/O)
+    "extract_action_items",       # LLM извлечение action items из одной записи
+    "batch_extract_action_items",  # LLM пакетное извлечение action items
 }
 
 MEDIUM_METHODS: Set[str] = {

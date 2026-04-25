@@ -1056,4 +1056,68 @@ extension HistoryPanelController {
         default:          vaBrainSelector.selectItem(at: 0)
         }
     }
+
+    // MARK: - Quick Preset Section
+
+    func buildQuickPresetSection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "settings_quick_presets",
+            title: "Пресеты записи",
+            isExpanded: true
+        )
+        let card = ThemeCardView()
+        let buttonStack = NSStackView()
+        buttonStack.orientation = .horizontal
+        buttonStack.distribution = .fillEqually
+        buttonStack.spacing = KrabEarTheme.Metrics.standard
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+        let presetIds = ["default", "meeting", "translation", "call_recording"]
+        let presetLabels = ["Default (D)", "Meeting (M)", "Translation (T)", "Call (C)"]
+        let activePreset = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        for tag in 0..<presetIds.count {
+            let btn = NSButton()
+            btn.title = presetLabels[tag]
+            btn.bezelStyle = .rounded
+            btn.tag = tag
+            btn.target = self
+            btn.action = #selector(onQuickPresetButtonClicked(_:))
+            btn.state = presetIds[tag] == activePreset ? .on : .off
+            buttonStack.addArrangedSubview(btn)
+        }
+        let descLabel = NSTextField(labelWithString: "Cmd+Shift+P — следующий пресет")
+        descLabel.font = KrabEarTheme.Typography.caption
+        descLabel.textColor = KrabEarTheme.Colors.textSecondary
+        descLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.contentStackView.addArrangedSubview(buttonStack)
+        card.contentStackView.addArrangedSubview(descLabel)
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    @objc func onQuickPresetButtonClicked(_ sender: NSButton) {
+        let presetIds = ["default", "meeting", "translation", "call_recording"]
+        guard sender.tag >= 0, sender.tag < presetIds.count else { return }
+        let presetId = presetIds[sender.tag]
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let response = try self.ipcClient.call(method: "apply_profile_preset", params: ["profile": presetId])
+                guard let result = response["result"] as? [String: Any] else { return }
+                DispatchQueue.main.async {
+                    let updated = self.settingsUpdater(result)
+                    self.syncSettingsControls(using: updated)
+                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+                    if let appDelegate = NSApp.delegate as? AgentAppDelegate {
+                        appDelegate.refreshStatusItemTitle()
+                        appDelegate.rebuildStatusMenu()
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showInfoAlert(title: "Ошибка пресета", body: error.localizedDescription)
+                }
+            }
+        }
+    }
+
 }

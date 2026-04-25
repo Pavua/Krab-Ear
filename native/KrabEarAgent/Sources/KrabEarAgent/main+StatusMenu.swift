@@ -31,12 +31,13 @@ extension AgentAppDelegate {
         guard let button = statusItem?.button else {
             return
         }
+        let badge = activePresetBadge()
         if isRecording {
-            button.title = "KE ●"
+            button.title = "KE ● [\(badge)]"
         } else if isProcessing {
-            button.title = "KE …"
+            button.title = "KE … [\(badge)]"
         } else {
-            button.title = "KE"
+            button.title = "KE [\(badge)]"
         }
     }
 
@@ -370,6 +371,9 @@ extension AgentAppDelegate {
         profileTranslationItem.state = settings.hotkeyProfile == "translation" ? .on : .off
         hotkeyProfileSubmenu.addItem(profileTranslationItem)
         menu.setSubmenu(hotkeyProfileSubmenu, for: hotkeyProfileItem)
+
+        // Быстрое переключение пресетов записи
+        addPresetMenuEntry(to: menu)
 
         let updateChannelItem = NSMenuItem(title: "Update Channel", action: nil, keyEquivalent: "")
         menu.addItem(updateChannelItem)

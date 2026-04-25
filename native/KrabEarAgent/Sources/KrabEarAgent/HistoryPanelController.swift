@@ -1811,6 +1811,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaBrainSelector.action = #selector(onVABrainSelectorChanged)
         settingsBar.addArrangedSubview(vaSection)
 
+        // --- QUICK RECORDING PRESET SECTION ---
+        let quickPresetSection = buildQuickPresetSection()
+        settingsBar.addArrangedSubview(quickPresetSection)
+
         // --- SELECTION TRANSLATOR SECTION (Phase 2A) ---
         let selTransSection = buildSelectionTranslatorSection()
         settingsBar.addArrangedSubview(selTransSection)

@@ -579,6 +579,12 @@ class BackendService:
 
 
     def _handle_extract_action_items(self, params: dict) -> dict:
+    # ------------------------------------------------------------------
+    # Action Items handlers
+    # ------------------------------------------------------------------
+
+    def _handle_extract_action_items(self, params: dict) -> dict:
+        """Извлекает action items из одной записи истории."""
         item_id = str(params.get("item_id", "")).strip()
         language = str(params.get("language", "ru")).strip().lower() or "ru"
         if not item_id:
@@ -597,6 +603,16 @@ class BackendService:
         return {"item_id": item_id, "action_items": result["action_items"], "decisions": result["decisions"], "questions": result["questions"], "saved": saved}
 
     def _handle_batch_extract_action_items(self, params: dict) -> dict:
+        return {
+            "item_id": item_id,
+            "action_items": result["action_items"],
+            "decisions": result["decisions"],
+            "questions": result["questions"],
+            "saved": saved,
+        }
+
+    def _handle_batch_extract_action_items(self, params: dict) -> dict:
+        """Пакетное извлечение action items (max 20)."""
         item_ids = params.get("item_ids", [])
         if not isinstance(item_ids, list):
             item_ids = []
@@ -624,6 +640,30 @@ class BackendService:
                     self.store.update_history_item_action_items(item_id=item_id, action_items=result["action_items"], decisions=result["decisions"], questions=result["questions"])
             except Exception:
                 logger.exception("Auto-extract action items failed for item=%s", item_id)
+        """Возвращает все незакрытые action items."""
+        pending = self.store.get_all_pending_action_items()
+        return {"pending": pending, "count": len(pending)}
+
+    def _trigger_auto_extract_action_items(
+        self, item_id: str, text: str, language: str, duration_sec: float
+    ) -> None:
+        """Авто-извлечение в daemon-потоке."""
+        import threading as _ait
+
+        def _run() -> None:
+            try:
+                logger.info("Auto-extract action items: item=%s dur=%.1fs", item_id, duration_sec)
+                result = self._action_items_extractor.extract(text, language=language)
+                if result["action_items"] or result["decisions"] or result["questions"]:
+                    self.store.update_history_item_action_items(
+                        item_id=item_id,
+                        action_items=result["action_items"],
+                        decisions=result["decisions"],
+                        questions=result["questions"],
+                    )
+            except Exception:
+                logger.exception("Auto-extract action items failed for item=%s", item_id)
+
         _ait.Thread(target=_run, daemon=True, name=f"ai-{item_id[:8]}").start()
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1604,6 +1644,17 @@ class BackendService:
             _ai_min = float(_ai_s.get("action_items_min_duration_sec", 60.0))
             if display_text.strip() and duration_sec is not None and duration_sec >= _ai_min:
                 self._trigger_auto_extract_action_items(item_id=item.id, text=display_text, language=(_ai_s.get("source_lang") or "ru"), duration_sec=duration_sec)
+        # Авто-извлечение action items (opt-in, fire-and-forget)
+        _ai_settings = self._cached_settings()
+        if self._coerce_bool(_ai_settings.get("action_items_auto_extract", False), default=False):
+            _ai_min = float(_ai_settings.get("action_items_min_duration_sec", 60.0))
+            if display_text.strip() and duration_sec is not None and duration_sec >= _ai_min:
+                self._trigger_auto_extract_action_items(
+                    item_id=item.id,
+                    text=display_text,
+                    language=(_ai_settings.get("source_lang") or "ru"),
+                    duration_sec=duration_sec,
+                )
 
         return result_payload
 
