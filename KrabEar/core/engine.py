@@ -354,6 +354,14 @@ class AudioEngine:
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
         self._confidence_calibrator = ConfidenceCalibrator()
 
+        # Language-aware STT router scaffold (available for future routing).
+        # Полная интеграция в transcribe() запланирована на follow-up PR после
+        # завершения research по RU-специализированным моделям (GigaAM, Parakeet-RU и др.).
+        # Инициализация через core.stt_router.STTRouter(settings, ...) выполняется
+        # в follow-up PR — здесь только заглушка для обратной совместимости.
+        # See: docs/STT_ROUTER.md
+        self._router = None  # type: ignore[assignment]  # noqa: E501
+
         logger.info(
             "AudioEngine инициализирован. Профиль=%s, Модель=%s, Max Candidates=%d, LLM=%s",
             self.quality_profile,
@@ -367,6 +375,12 @@ class AudioEngine:
         if self._llm_rewriter is None:
             return False
         return bool(self._settings_get("llm_rewrite_enabled", False))
+
+    def _punctuation_pass_allowed(self) -> bool:
+        """Runtime check: включён ли punctuation-only LLM pass."""
+        if self._llm_rewriter is None:
+            return False
+        return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
@@ -538,6 +552,18 @@ class AudioEngine:
             if extra_vocabulary:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
 
+            # Добавляем speaker-aware dialogue hint если включено и спикеров ≥ threshold.
+            if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and settings.DIARIZATION_ENABLED:
+                try:
+                    _speaker_cache: dict[str, Any] = {}
+                    num_spk = self._estimate_num_speakers(audio_data, cache=_speaker_cache)
+                    if num_spk is not None and num_spk >= settings.STT_DIALOGUE_HINT_THRESHOLD:
+                        spk_hint = self._build_speaker_context_prompt(num_spk, resolved_lang)
+                        if spk_hint:
+                            dynamic_prompt = f"{dynamic_prompt}\n{spk_hint}"
+                except Exception as _spk_exc:
+                    logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
+
         # 2. Routing: chunked path для длинных записей (если включён)
         # Для numpy-буферов определяем длительность через len/sample_rate.
         # Для файлов — через soundfile.info (lazy import, мягкий fallback).
@@ -647,6 +673,21 @@ class AudioEngine:
             _report("cleanup")
             cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
             text = cleaned_text
+
+            # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
+            if self._punctuation_pass_allowed():
+                _report("punctuation_pass")
+                punct_result = self._llm_rewriter.fix_punctuation_only(
+                    text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
+                )
+                if punct_result is not None:
+                    logger.info(
+                        "Punctuation pass: %d chars -> %d chars",
+                        len(text), len(punct_result),
+                    )
+                    text = punct_result
+                else:
+                    logger.debug("Punctuation pass: rejected or unavailable, keeping original")
 
             # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
             llm_result = None
@@ -1252,6 +1293,7 @@ class AudioEngine:
     _PARAKEET_MARKER: str = "parakeet:adapter"
     _WHISPERX_MARKER: str = "whisperx:adapter"
     _VOXTRAL_MARKER: str = "voxtral:adapter"
+    _RU_FINETUNE_MARKER: str = "ru_finetune:adapter"
 
     def _transcribe_with_fallback_impl(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Внутренняя реализация fallback chain. Отделена от публичной _transcribe_with_fallback
@@ -1261,6 +1303,20 @@ class AudioEngine:
             candidates = list(dict.fromkeys(settings.model_max_list))
 
         balanced_model = settings.MODEL_BALANCED
+
+        # --- RU fine-tune adapter: позиция 0 (перед balanced, только для языка "ru") ---
+        # antony66/whisper-large-v3-russian — fine-tune на русском Common Voice/OpenSTT.
+        # Даёт ~2pp WER improvement vs базового whisper-large-v3 на русской речи.
+        # Работает через тот же mlx_whisper.transcribe (drop-in checkpoint).
+        # Активируется только если язык определён как "ru" (не None, не "es", не "en").
+        # При ошибке загрузки маркер помечается недоступным, chain продолжается без него.
+        _effective_lang = language if language is not None else settings.TRANSCRIBE_LANGUAGE
+        if (
+            settings.STT_USE_RU_FINETUNE
+            and _effective_lang == "ru"
+            and self._RU_FINETUNE_MARKER not in self._unavailable_models
+        ):
+            candidates = [self._RU_FINETUNE_MARKER] + candidates
 
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
@@ -2016,6 +2072,110 @@ class AudioEngine:
             "segments": [],
             "reasoning": reasoning,
         }
+
+    # ------------------------------------------------------------------
+    # Speaker-aware initial_prompt helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_speaker_context_prompt(num_speakers: int | None, language: str | None) -> str:
+        """Строит подсказку для Whisper о диалоговом характере записи.
+
+        Args:
+            num_speakers: Оценённое количество спикеров (None или <2 → пустая строка).
+            language: ISO 639-1 код языка ("ru", "es", "en") или None.
+
+        Returns:
+            Строку-подсказку на языке записи, или пустую строку если спикеров < 2.
+        """
+        if not num_speakers or num_speakers < 2:
+            return ""
+
+        lang = (language or "").lower()
+
+        if lang == "ru":
+            if num_speakers == 2:
+                return "Запись диалога двух собеседников."
+            return "Запись беседы нескольких участников."
+
+        if lang == "es":
+            if num_speakers == 2:
+                return "Grabación del diálogo de dos interlocutores."
+            return "Grabación de una conversación de varios participantes."
+
+        # Default: English (also covers None / unknown languages)
+        if num_speakers == 2:
+            return "Recording of a dialogue between two speakers."
+        return "Recording of a multi-speaker conversation."
+
+    def _estimate_num_speakers(
+        self,
+        audio_data: Any,
+        sample_rate: int = 16000,
+        *,
+        cache: dict[str, Any] | None = None,
+    ) -> int | None:
+        """Оценивает количество спикеров lightweight методом до Whisper STT.
+
+        Использует pyannote VAD-based сегментацию без полного speaker embedding —
+        быстро и дёшево по памяти. Результат кешируется в `cache` словаре
+        (ключ "_estimated_num_speakers") чтобы не пересчитывать дважды.
+
+        Args:
+            audio_data: Путь к аудиофайлу или numpy array.
+            sample_rate: Частота дискретизации для numpy array (игнорируется для файлов).
+            cache: Опциональный словарь для кеширования результата.
+
+        Returns:
+            Целое число ≥ 1 (количество спикеров), или None если оценка не удалась.
+        """
+        _CACHE_KEY = "_estimated_num_speakers"
+        if cache is not None and _CACHE_KEY in cache:
+            return cache[_CACHE_KEY]  # type: ignore[return-value]
+
+        result: int | None = None
+        tmp_path_to_cleanup: str | None = None
+        try:
+            audio_path = self._resolve_audio_path(audio_data)
+            if audio_path is None:
+                # numpy array path: write to temp WAV for pyannote
+                if hasattr(audio_data, "shape") and sf is not None:
+                    import tempfile as _tempfile
+                    with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                        tmp_path_to_cleanup = tmp.name
+                    sf.write(tmp_path_to_cleanup, audio_data, sample_rate)
+                    audio_path = tmp_path_to_cleanup
+
+            if audio_path is None:
+                return None
+
+            pipeline = self._load_diarization_pipeline()
+            prepared_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
+            try:
+                annotation = pipeline(prepared_path)
+                if hasattr(annotation, "speaker_diarization"):
+                    annotation = annotation.speaker_diarization
+                speakers: set[str] = set()
+                for _, _, speaker in annotation.itertracks(yield_label=True):
+                    speakers.add(str(speaker))
+                result = max(1, len(speakers))
+            finally:
+                if should_cleanup:
+                    Path(prepared_path).unlink(missing_ok=True)
+
+        except Exception as exc:
+            logger.debug("_estimate_num_speakers: не удалось оценить спикеров: %s", exc)
+            result = None
+        finally:
+            if tmp_path_to_cleanup is not None:
+                try:
+                    Path(tmp_path_to_cleanup).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        if cache is not None:
+            cache[_CACHE_KEY] = result
+        return result
 
     def _maybe_run_diarization(
         self,

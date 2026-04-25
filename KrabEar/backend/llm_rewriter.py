@@ -144,6 +144,30 @@ class CircuitBreaker:
             self._half_open_probe_in_flight = False
 
 
+_PUNCTUATION_SYSTEM_PROMPTS = {
+    "ru": (
+        "Ты редактор пунктуации. Тебе дают сырой STT-текст без запятых. "
+        "Добавь только запятые, точки, тире, вопросительные/восклицательные знаки. "
+        "ЗАПРЕЩЕНО менять или удалять любые слова. "
+        "ЗАПРЕЩЕНО менять регистр (кроме первой буквы предложения после точки). "
+        "Верни тот же текст с пунктуацией. Без пояснений. Без кавычек."
+    ),
+    "es": (
+        "Eres un editor de puntuación. Se te da un texto STT sin comas. "
+        "Añade únicamente comas, puntos, guiones, signos de interrogación/exclamación. "
+        "PROHIBIDO cambiar o eliminar palabras. "
+        "PROHIBIDO cambiar mayúsculas (excepto la primera letra tras un punto). "
+        "Devuelve el mismo texto con puntuación. Sin explicaciones. Sin comillas."
+    ),
+    "en": (
+        "You are a punctuation editor. You are given raw STT text without commas. "
+        "Add only commas, periods, dashes, question marks, and exclamation marks. "
+        "FORBIDDEN to change or delete any words. "
+        "FORBIDDEN to change capitalisation (except the first letter after a period). "
+        "Return the same text with punctuation. No explanations. No quotes."
+    ),
+}
+
 SYSTEM_PROMPT = """Ты — редактор русской диктовки. Твоя задача — исправить пунктуацию, орфографию и грамматику в тексте, сохранив смысл и стиль автора.
 
 Жёсткие правила:
@@ -411,6 +435,110 @@ class LLMRewriter:
         return LLMRewriteResult(
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
+
+    def fix_punctuation_only(self, text: str, language: str = "ru") -> Optional[str]:
+        """Минимальный LLM pass: только пунктуация, слова не меняются.
+
+        В отличие от rewrite(), который допускает лёгкую редактуру, этот метод
+        применяет строгие word-set и word-count guards: любое расхождение слов
+        означает, что LLM что-то изменил, и результат отвергается.
+
+        Контракт: НИКОГДА не raises. Возвращает строку с пунктуацией или None.
+        - None если circuit open, LM Studio недоступен, слова изменились,
+          количество слов изменилось, или любая другая ошибка.
+        - Пустой input (после strip) → возвращает оригинальный text без изменений.
+        """
+        cleaned_input = (text or "").strip()
+        if not cleaned_input:
+            return text
+
+        if not self._circuit.allow_request():
+            logger.debug("fix_punctuation_only: circuit open, skip")
+            return None
+
+        lang_key = (language or "ru").lower()
+        if lang_key not in _PUNCTUATION_SYSTEM_PROMPTS:
+            lang_key = "ru"
+        system_prompt = _PUNCTUATION_SYSTEM_PROMPTS[lang_key]
+
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": cleaned_input},
+            ],
+            "temperature": 0.0,
+            "max_tokens": self._estimate_max_tokens(cleaned_input),
+            "stream": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        start = time.monotonic()
+        try:
+            response = self._session.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self._timeout,
+            )
+        except requests.Timeout:
+            self._circuit.record_failure()
+            logger.debug("fix_punctuation_only: timeout")
+            return None
+        except (requests.ConnectionError, requests.RequestException) as exc:
+            self._circuit.record_failure()
+            logger.debug("fix_punctuation_only: connection error: %s", exc)
+            return None
+
+        latency_ms = int((time.monotonic() - start) * 1000)
+        self._last_latency_ms = latency_ms
+
+        if response.status_code != 200:
+            self._circuit.record_failure()
+            logger.debug("fix_punctuation_only: http %d", response.status_code)
+            return None
+
+        try:
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            self._circuit.record_failure()
+            logger.debug("fix_punctuation_only: parse error: %s", exc)
+            return None
+
+        result_text = self._postprocess(content)
+        if not result_text:
+            self._circuit.record_failure()
+            return None
+
+        # Word-count guard: word count must be identical (punctuation adds no words)
+        input_words = cleaned_input.split()
+        result_words = result_text.split()
+        if len(input_words) != len(result_words):
+            logger.warning(
+                "fix_punctuation_only: word count mismatch (%d -> %d), rejecting",
+                len(input_words), len(result_words),
+            )
+            return None
+
+        # Word-set guard: exact vocabulary must match (case-insensitive, strip punct)
+        _punct_chars = ".,!?;:-—"
+        input_set = {w.lower().strip(_punct_chars) for w in input_words}
+        result_set = {w.lower().strip(_punct_chars) for w in result_words}
+        if input_set != result_set:
+            logger.warning(
+                "fix_punctuation_only: word set mismatch, LLM changed words, rejecting"
+            )
+            return None
+
+        self._circuit.record_success()
+        logger.info(
+            "fix_punctuation_only: ok, %d words, %d ms", len(result_words), latency_ms
+        )
+        return result_text
 
     def summarize(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
         """Генерирует краткое summary текста через LLM.
