@@ -475,6 +475,10 @@ class Settings(BaseSettings):
     # При STT_CODE_SWITCHING_DETECT=True: последний элемент истории анализируется
     # на наличие смешения кириллицы и латиницы (технические разговоры: «запушил коммит в main»).
     # Если обнаружено code-switching → в initial_prompt добавляется hint:
+    # --- STT code-switching detection (RU+EN mix) ---
+    # При STT_CODE_SWITCHING_DETECT=True: последний элемент истории анализируется
+    # на наличие смешения кириллицы и латиницы (технические разговоры: «запушил коммит в main»).
+    # Если обнаружено code-switching -> в initial_prompt добавляется hint:
     # "В записи может звучать смесь русского и английского (технические термины)."
     # STT_CODE_SWITCHING_THRESHOLD: минимальная доля латинских слов (0.1 = 10%).
     STT_CODE_SWITCHING_DETECT: bool = True
