@@ -125,12 +125,17 @@ public final class RealtimeOverlayController {
     private let audioLevelMeter = AudioLevelMeter()
 
     /// Основной текст (preview / stage text)
-    private let primaryLabel = NSTextField(wrappingLabelWithString: "")
+    /// internal — доступен из RealtimeOverlayController+PartialSSE.swift
+    let primaryLabel = NSTextField(wrappingLabelWithString: "")
 
     // MARK: State
 
     private var overlayState: OverlayState = .hidden
     private var opacityPercent: Int = 100
+
+    /// Флаг — текущий текст является частичной транскрипцией (SSE partial).
+    /// internal — используется RealtimeOverlayController+PartialSSE.swift
+    var _isShowingPartial: Bool = false
 
     private var targetAlpha: CGFloat {
         CGFloat(opacityPercent) / 100.0
@@ -609,7 +614,8 @@ public final class RealtimeOverlayController {
         borderLayer.frame = effectView.bounds
     }
 
-    private func adjustHeight() {
+    /// internal — доступен из RealtimeOverlayController+PartialSSE.swift
+    func adjustHeight() {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
         let insets: CGFloat = 14 * 2
         let topRowH: CGFloat = 26

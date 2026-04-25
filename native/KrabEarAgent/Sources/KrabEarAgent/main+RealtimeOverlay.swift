@@ -15,6 +15,7 @@ extension AgentAppDelegate {
         guard settings.realtimePreviewEnabled else { return }
 
         realtimeOverlay.show()
+        realtimeOverlay.startPartialSSE()
         realtimeOverlayTimer = Timer.scheduledTimer(withTimeInterval: 0.85, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
@@ -37,6 +38,7 @@ extension AgentAppDelegate {
         lastPreviewTranslationFailureAt = 0
         lastPreviewTranslationFailures = 0
         lastPreviewTranslationSuccessAt = 0
+        realtimeOverlay.stopPartialSSE()
         realtimeOverlay.hide()
     }
 

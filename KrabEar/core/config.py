@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # --- Bulk re-process history (backend/bulk_reprocess.py) ---
     BULK_REPROCESS_BATCH_SIZE: int = 5
 
+    # --- Realtime partial transcription overlay ---
+    REALTIME_PARTIAL_ENABLED: bool = True
+    RT_PARTIAL_INTERVAL_SEC: float = 3.0
+    RT_PARTIAL_BUFFER_SEC: float = 8.0
+
     model_config = SettingsConfigDict(
         env_prefix="KRAB_EAR_",
         env_file=(".env", str(_SECRETS_FILE)),
@@ -625,4 +630,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_glossary_window_days": 7,
     "auto_glossary_top_n": 30,
     "auto_glossary_refresh_hours": 6,
+    # --- Realtime partial transcription overlay ---
+    "realtime_partial_enabled": True,
+    "rt_partial_interval_sec": 3.0,
+    "rt_partial_buffer_sec": 8.0,
 }
