@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from typing import Callable
 
 import numpy as np
 
@@ -21,11 +22,13 @@ except Exception:
 
 logger = logging.getLogger("KrabEar.Backend.Recorder")
 
+_AUDIO_LEVEL_EMIT_INTERVAL_SEC = 0.033  # ~30 Hz для VU meter
+
 
 class AudioRecorder:
     """Потокобезопасный рекордер c режимом start/stop."""
 
-    def __init__(self, sample_rate: int = 16000, channels: int = 1) -> None:
+    def __init__(self, sample_rate: int = 16000, channels: int = 1, on_audio_level: Callable[[float], None] | None = None) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_size = int(self.sample_rate * 0.1)
@@ -36,6 +39,7 @@ class AudioRecorder:
         self._chunks: list[np.ndarray] = []
         self._is_recording = False
         self._started_at: float = 0.0
+        self._on_audio_level = on_audio_level
 
     @property
     def is_recording(self) -> bool:
@@ -114,6 +118,18 @@ class AudioRecorder:
                 audio = audio[-max_samples:]
         return audio, duration
 
+    def snapshot_rms(self) -> float:
+        """Возвращает RMS последнего записанного чанка (0.0-1.0) без остановки записи."""
+        with self._lock:
+            if not self._is_recording or not self._chunks:
+                return 0.0
+            last_chunk = self._chunks[-1]
+        flat = last_chunk.reshape(-1).astype(np.float32)
+        if flat.size == 0:
+            return 0.0
+        rms = float(np.sqrt(np.mean(flat ** 2)))
+        return max(0.0, min(1.0, rms))
+
     def _worker(self) -> None:
         """Фоновый цикл чтения чанков из микрофона."""
         try:
@@ -123,12 +139,24 @@ class AudioRecorder:
                 dtype="float32",
                 blocksize=self.chunk_size,
             ) as stream:
+                last_level_emit_at = 0.0
                 while not self._stop_event.is_set():
                     data, overflowed = stream.read(self.chunk_size)
                     if overflowed:
                         logger.warning("Переполнение аудиобуфера во время записи")
                     with self._lock:
                         self._chunks.append(data.copy())
+                    if self._on_audio_level is not None:
+                        now = time.monotonic()
+                        if now - last_level_emit_at >= _AUDIO_LEVEL_EMIT_INTERVAL_SEC:
+                            last_level_emit_at = now
+                            flat = data.reshape(-1).astype(np.float32)
+                            rms = float(np.sqrt(np.mean(flat ** 2))) if flat.size > 0 else 0.0
+                            rms_clamped = max(0.0, min(1.0, rms))
+                            try:
+                                self._on_audio_level(rms_clamped)
+                            except Exception:
+                                logger.debug("Ошибка в on_audio_level callback", exc_info=True)
         except Exception:
             logger.exception("Ошибка в потоке аудиозаписи")
         finally:

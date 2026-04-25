@@ -112,6 +112,7 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
+from backend.action_items_extractor import ActionItemsExtractor
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
@@ -121,6 +122,7 @@ from backend.observability import (
     add_breadcrumb,
     init_sentry,
 )
+from backend.calendar_link import CalendarLinker
 
 import argparse
 from datetime import datetime, timedelta
@@ -165,10 +167,19 @@ class BackendService:
     ) -> None:
         self.store = store
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
-        self.recorder = recorder or AudioRecorder()
+        def _emit_audio_level(rms: float) -> None:
+            """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
+            event_bus.emit("recording.audio_level", {"rms": rms})
+
+        self.recorder = recorder or AudioRecorder(on_audio_level=_emit_audio_level)
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
+
+        self._action_items_extractor = ActionItemsExtractor(
+            llm_rewriter=self._llm_rewriter,
+            settings=self._cached_settings,
+        )
 
         if transcriber is None:
             self.transcriber = Transcriber(
@@ -348,6 +359,9 @@ class BackendService:
         self._job_tracker = JobTracker()
         self._bulk_tasks: dict[str, dict] = {}  # task_id -> {reprocessor, status, result}
         self._bulk_tasks_lock = threading.Lock()
+        self._calendar_linker = CalendarLinker(
+            cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
+        )
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -535,6 +549,55 @@ class BackendService:
             if task_id in self._bulk_tasks:
                 self._bulk_tasks[task_id]["status"] = "cancelled"
         return {"requested": True, "task_id": task_id}
+
+
+    def _handle_extract_action_items(self, params: dict) -> dict:
+        item_id = str(params.get("item_id", "")).strip()
+        language = str(params.get("language", "ru")).strip().lower() or "ru"
+        if not item_id:
+            return {"error": "item_id required"}
+        item = self.store.get_history_item_by_id(item_id)
+        if item is None:
+            return {"error": f"item not found: {item_id}"}
+        text = (item.cleaned_text or item.text or "").strip()
+        result = self._action_items_extractor.extract(text, language=language)
+        saved = self.store.update_history_item_action_items(
+            item_id=item_id,
+            action_items=result["action_items"],
+            decisions=result["decisions"],
+            questions=result["questions"],
+        )
+        return {"item_id": item_id, "action_items": result["action_items"], "decisions": result["decisions"], "questions": result["questions"], "saved": saved}
+
+    def _handle_batch_extract_action_items(self, params: dict) -> dict:
+        item_ids = params.get("item_ids", [])
+        if not isinstance(item_ids, list):
+            item_ids = []
+        item_ids = [str(i).strip() for i in item_ids if str(i).strip()][:20]
+        language = str(params.get("language", "ru")).strip().lower() or "ru"
+        results = []
+        errors = 0
+        for iid in item_ids:
+            r = self._handle_extract_action_items({"item_id": iid, "language": language})
+            if "error" in r:
+                errors += 1
+            results.append(r)
+        return {"results": results, "total": len(results), "errors": errors}
+
+    def _handle_get_pending_action_items(self, params: dict) -> dict:
+        pending = self.store.get_all_pending_action_items()
+        return {"pending": pending, "count": len(pending)}
+
+    def _trigger_auto_extract_action_items(self, item_id, text, language, duration_sec):
+        import threading as _ait
+        def _run():
+            try:
+                result = self._action_items_extractor.extract(text, language=language)
+                if result["action_items"] or result["decisions"] or result["questions"]:
+                    self.store.update_history_item_action_items(item_id=item_id, action_items=result["action_items"], decisions=result["decisions"], questions=result["questions"])
+            except Exception:
+                logger.exception("Auto-extract action items failed for item=%s", item_id)
+        _ait.Thread(target=_run, daemon=True, name=f"ai-{item_id[:8]}").start()
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
@@ -849,6 +912,9 @@ class BackendService:
             "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # запуск массового перетранскрибирования
             "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус задания массового перетранскрибирования
             "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отмена задания массового перетранскрибирования
+            "extract_action_items": self._handle_extract_action_items,
+            "batch_extract_action_items": self._handle_batch_extract_action_items,
+            "get_pending_action_items": self._handle_get_pending_action_items,
         }
 
         handler = handlers.get(method)
@@ -1426,16 +1492,28 @@ class BackendService:
             except Exception:
                 logger.exception("Не удалось автосохранить транскрибацию в .md")
 
+        _ai_s = self._cached_settings()
+        if self._coerce_bool(_ai_s.get("action_items_auto_extract", False), default=False):
+            _ai_min = float(_ai_s.get("action_items_min_duration_sec", 60.0))
+            if display_text.strip() and duration_sec is not None and duration_sec >= _ai_min:
+                self._trigger_auto_extract_action_items(item_id=item.id, text=display_text, language=(_ai_s.get("source_lang") or "ru"), duration_sec=duration_sec)
+
         return result_payload
 
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
+        audio_rms = (
+            self.recorder.snapshot_rms()
+            if hasattr(self.recorder, "snapshot_rms")
+            else 0.0
+        )
         return {
             "is_recording": bool(getattr(self.recorder, "is_recording", False)),
             "duration_sec": preview_duration,
             "preview_text": preview_text,
+            "audio_rms": audio_rms,
         }
 
     def _handle_get_session_history(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4431,6 +4509,25 @@ class BackendService:
             self._settings_svc.handle_set_settings(patch)
 
         return {"updated": len(patch), "fields": list(patch.keys())}
+
+
+    # ------------------------------------------------------------------ #
+    # Calendar auto-link IPC handlers                                     #
+    # ------------------------------------------------------------------ #
+
+    def _handle_get_calendar_link(self, params: dict) -> dict:
+        """Возвращает событие Calendar, связанное с транскрипцией."""
+        item_id = str(params.get("item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "error": "item_id_required"}
+        event = self.store.get_history_item_calendar(item_id)
+        return {"ok": True, "item_id": item_id, "calendar_event": event}
+
+    def _handle_search_by_calendar_event(self, params: dict) -> dict:
+        """Ищет транскрипции, связанные с событием Calendar по подстроке в названии."""
+        event_title = str(params.get("event_title", "")).strip()
+        results = self.store.search_by_calendar_event(event_title)
+        return {"ok": True, "results": results, "count": len(results)}
 
 
 class IPCServer:
