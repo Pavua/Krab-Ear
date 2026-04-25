@@ -52,6 +52,7 @@ struct AgentSettings {
     var networkMode: String
     var hotkey: String
     var hotkeyProfile: String
+    var hotkeyMode: String
     var historyPolicy: String
     var historyPageSize: Int
     var historyTextDensity: String
@@ -95,6 +96,7 @@ struct AgentSettings {
         networkMode: "offline_default",
         hotkey: "right_option_toggle",
         hotkeyProfile: "default",
+        hotkeyMode: "toggle",
         historyPolicy: "unlimited",
         historyPageSize: 50,
         historyTextDensity: "normal",
@@ -141,6 +143,7 @@ struct AgentSettings {
         self.networkMode = (payload["network_mode"] as? String) ?? Self.default.networkMode
         self.hotkey = (payload["hotkey"] as? String) ?? Self.default.hotkey
         self.hotkeyProfile = (payload["hotkey_profile"] as? String) ?? Self.default.hotkeyProfile
+        self.hotkeyMode = (payload["hotkey_mode"] as? String) ?? Self.default.hotkeyMode
         self.historyPolicy = (payload["history_policy"] as? String) ?? Self.default.historyPolicy
         self.historyPageSize = (payload["history_page_size"] as? Int) ?? Self.default.historyPageSize
         self.historyTextDensity = (payload["history_text_density"] as? String) ?? Self.default.historyTextDensity
@@ -208,6 +211,7 @@ struct AgentSettings {
         networkMode: String,
         hotkey: String,
         hotkeyProfile: String,
+        hotkeyMode: String,
         historyPolicy: String,
         historyPageSize: Int,
         historyTextDensity: String,
@@ -249,6 +253,7 @@ struct AgentSettings {
         self.networkMode = networkMode
         self.hotkey = hotkey
         self.hotkeyProfile = hotkeyProfile
+        self.hotkeyMode = hotkeyMode
         self.historyPolicy = historyPolicy
         self.historyPageSize = historyPageSize
         self.historyTextDensity = historyTextDensity
@@ -293,6 +298,7 @@ struct AgentSettings {
             "network_mode": networkMode,
             "hotkey": hotkey,
             "hotkey_profile": hotkeyProfile,
+            "hotkey_mode": hotkeyMode,
             "history_policy": historyPolicy,
             "history_page_size": historyPageSize,
             "history_text_density": historyTextDensity,
