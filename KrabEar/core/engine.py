@@ -1376,7 +1376,14 @@ class AudioEngine:
             candidates = candidates[:vx_insert_pos] + [self._VOXTRAL_MARKER] + candidates[vx_insert_pos:]
 
         # Таблица маркеров адаптеров: marker → (span_prefix, model_setting, transcribe_fn)
+        _ru_finetune_model = settings.STT_RU_FINETUNE_MODEL
         _adapter_dispatch = [
+            (
+                self._RU_FINETUNE_MARKER,
+                "stt_ru_finetune",
+                _ru_finetune_model,
+                lambda: self._transcribe_model(audio_data, _ru_finetune_model, prompt, language),
+            ),
             (
                 self._PARAKEET_MARKER,
                 "stt_parakeet",

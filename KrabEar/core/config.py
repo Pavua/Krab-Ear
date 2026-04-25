@@ -467,4 +467,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
+    # --- Russian Whisper fine-tune ---
+    "stt_use_ru_finetune": False,
+    "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",
 }
