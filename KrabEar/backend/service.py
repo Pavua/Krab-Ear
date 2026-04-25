@@ -43,6 +43,7 @@ from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
 from backend.bulk_reprocess import BulkReprocessor
+from backend.realtime_partial import RealtimePartialTranscriber
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -368,6 +369,10 @@ class BackendService:
         )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
+        # Realtime partial transcription (запускается при start_recording).
+        self._rt_partial: RealtimePartialTranscriber | None = None
+        self._rt_session_id: str = ""
+
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
         self._bulk_tasks: dict[str, dict] = {}  # task_id -> {reprocessor, status, result}
@@ -1105,6 +1110,27 @@ class BackendService:
         if bool(settings.get("realtime_preview_enabled", True)):
             quality_profile = str(settings.get("quality_profile", "balanced"))
             self._start_preview_worker(quality_profile=quality_profile)
+        if bool(settings.get("realtime_partial_enabled", True)):
+            import uuid as _uuid
+            self._rt_session_id = _uuid.uuid4().hex
+            _interval = float(settings.get("rt_partial_interval_sec", 3.0))
+            _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
+            _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
+            try:
+                self._rt_partial = RealtimePartialTranscriber(
+                    transcriber=self.transcriber,
+                    recorder=self.recorder,
+                    event_bus=event_bus,
+                    interval_sec=_interval,
+                    buffer_sec=_buffer,
+                )
+                self._rt_partial.start(
+                    session_id=self._rt_session_id,
+                    sample_rate=_sample_rate,
+                )
+            except Exception:
+                logger.exception("Не удалось запустить RealtimePartialTranscriber")
+                self._rt_partial = None
         return {"status": "recording"}
 
     @staticmethod
@@ -1202,6 +1228,14 @@ class BackendService:
 
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         self._stop_preview_worker()
+        _rt_session_id = self._rt_session_id
+        if self._rt_partial is not None:
+            try:
+                self._rt_partial.stop()
+            except Exception:
+                logger.exception("Ошибка при остановке RealtimePartialTranscriber")
+            finally:
+                self._rt_partial = None
         settings = self._cached_settings()
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
@@ -1521,6 +1555,19 @@ class BackendService:
             language=tp.get("language"),
             confidence=tp.get("confidence"),
         ))
+        if _rt_session_id:
+            try:
+                event_bus.emit(
+                    "realtime.final_transcript",
+                    {
+                        "session_id": _rt_session_id,
+                        "text": final_text,
+                        "is_partial": False,
+                        "ts": time.time(),
+                    },
+                )
+            except Exception:
+                logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
 
         # Автосохранение транскрибации в .md файл
         if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
