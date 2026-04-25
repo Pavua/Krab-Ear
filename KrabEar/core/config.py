@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
 
+    # --- Realtime silence filter (RealtimeSilenceFilter) ---
+    REALTIME_SILENCE_FILTER_ENABLED: bool = False
+    RT_SILENCE_CHECK_SEC: float = 5.0
+    RT_SILENCE_WINDOW_SEC: float = 10.0
+    RT_SILENCE_MAX_SEC: float = 8.0
+
     # --- Confidence-driven multi-pass STT retry ---
     # Если первый pass (balanced) вернул уверенность ниже порога → пробуем тяжелее.
     # Threshold 0.65 покрывает типичные "плохие" результаты (0.3-0.6) без лишних ретраев.
@@ -532,6 +538,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_save_transcripts": False,
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     "smart_silence_skip_enabled": False,
+    # --- Realtime silence filter ---
+    "realtime_silence_filter_enabled": False,
+    "rt_silence_check_sec": 5.0,
+    "rt_silence_window_sec": 10.0,
+    "rt_silence_max_sec": 8.0,
     # --- Confidence-driven multi-pass STT retry ---
     "stt_multipass_enabled": True,
     "stt_min_confidence_threshold": 0.65,
