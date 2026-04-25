@@ -330,6 +330,17 @@ class Settings(BaseSettings):
     STT_ES_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
     STT_OTHER_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
 
+    # --- Audio-level Language ID (AudioLanguageID, core/audio_lang_id.py) ---
+    # Быстрый encoder-only forward pass через mlx-whisper для определения языка аудио.
+    # Берёт первые STT_AUDIO_LANG_ID_PREVIEW_SEC секунд → log-mel → detect_language().
+    # Оборачивается в mlx_lock() (thread-safety, CLAUDE.md).
+    # При STT_AUDIO_LANG_ID_ENABLED=False или любой ошибке → graceful None → placeholder.
+    STT_AUDIO_LANG_ID_ENABLED: bool = True
+    # Длина audio preview (секунды) для detect_language inference.
+    # Больше = точнее детекция (меньше шанс ошибки на коротких utterances).
+    # Меньше = быстрее (~50ms @ 5s vs ~100ms @ 30s).
+    STT_AUDIO_LANG_ID_PREVIEW_SEC: float = 5.0
+
     # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
     # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
     # Лицензия: MIT. PyPI: pip install gigaam. HuggingFace: salute-developers/GigaAM
@@ -478,6 +489,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
+    # --- Audio-level Language ID (AudioLanguageID) ---
+    # Encoder-only mlx-whisper forward pass для автодетекции языка аудио (~50ms).
+    # Включено по умолчанию; используется router'ом когда hint_language=None.
+    "stt_audio_lang_id_enabled": True,
+    "stt_audio_lang_id_preview_sec": 5.0,
     # --- Russian Whisper fine-tune ---
     "stt_use_ru_finetune": False,
     "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",

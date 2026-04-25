@@ -10,10 +10,10 @@
     1. Если STT_LANGUAGE_ROUTING_ENABLED=False → возвращает STT_OTHER_PRIMARY_MODEL
        (текущий whisper-large-v3 generalist — обратная совместимость).
     2. Если hint_language задан явно → использует его напрямую.
-    3. Иначе → определяет язык по первым 5 секундам аудио через LanguageDetector.
-       Поскольку LanguageDetector работает на тексте, а не на аудио, на данном этапе
-       применяется placeholder: возвращает "ru" (primary user language).
-       Когда research выберет модель с audio-level LID — заменить этот блок.
+    3. Иначе → определяет язык через AudioLanguageID (core/audio_lang_id.py):
+       encoder-only mlx-whisper forward pass, ~50ms. При STT_AUDIO_LANG_ID_ENABLED=False,
+       слишком коротком аудио или ошибке mlx-whisper — graceful fallback placeholder "ru"
+       (primary user language, 80%+ RU).
     4. Маппинг language → model_id через конфиг:
        ru → STT_RU_PRIMARY_MODEL, en → STT_EN_PRIMARY_MODEL,
        es → STT_ES_PRIMARY_MODEL, * → STT_OTHER_PRIMARY_MODEL.
@@ -46,8 +46,11 @@ _LANG_TO_CONFIG_ATTR: dict[str, str] = {
     "es": "STT_ES_PRIMARY_MODEL",
 }
 
-# Первые N секунд аудио для эвристики определения языка
+# Первые N секунд аудио для эвристики определения языка (fallback placeholder)
 _AUDIO_SAMPLE_SECONDS = 5
+
+# Минимальная длина аудио (секунды) для попытки audio-level LID
+_AUDIO_LID_MIN_SEC = 1.0
 
 
 class STTRouter:
@@ -56,9 +59,8 @@ class STTRouter:
     Параметры:
         settings: объект конфига (core.config.Settings или duck-typed stub).
         language_detector: экземпляр LanguageDetector (передаётся извне для DI).
-                           Используется когда hint_language не задан и routing включён.
-                           На данном этапе применяется как placeholder — реальный
-                           audio-level LID добавится в follow-up PR.
+                           Устаревший параметр — audio-level LID реализован через
+                           AudioLanguageID (core/audio_lang_id.py).
         adapter_factory: callable(model_id: str) -> adapter.
                          Вызывается router'ом когда нужно верифицировать/загрузить
                          адаптер под выбранную модель. Может быть None — тогда
@@ -74,6 +76,8 @@ class STTRouter:
         self._settings = settings
         self._language_detector = language_detector
         self._adapter_factory = adapter_factory
+        # Lazy-init AudioLanguageID (создаётся при первом использовании)
+        self._lang_id: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -185,19 +189,33 @@ class STTRouter:
     # Внутренние методы
     # ------------------------------------------------------------------
 
+    def _get_lang_id(self) -> Any:
+        """Lazy-init AudioLanguageID singleton (один на router instance)."""
+        if self._lang_id is None:
+            try:
+                from core.audio_lang_id import AudioLanguageID
+                self._lang_id = AudioLanguageID()
+            except Exception as exc:
+                logger.warning("STTRouter: не удалось создать AudioLanguageID: %s", exc)
+                self._lang_id = None
+        return self._lang_id
+
     def _resolve_language(
         self,
         audio_data: Optional[np.ndarray],
         sample_rate: int,
         hint_language: Optional[str],
     ) -> str:
-        """Определяет язык из hint или через detection.
+        """Определяет язык из hint или через audio-level LID.
 
-        Текущая реализация:
-        - hint_language != None → возвращаем его (нормализованный в lowercase).
-        - hint_language == None, audio_data доступен → placeholder "ru"
-          (пользователь говорит 80%+ по-русски; реальный audio LID — в follow-up PR).
-        - audio_data == None → возвращаем "und" (undetermined → OTHER_PRIMARY).
+        Приоритет:
+        1. hint_language != None → возвращаем его (нормализованный в lowercase).
+        2. audio_data == None → возвращаем "und" (undetermined → OTHER_PRIMARY).
+        3. Аудио слишком короткое (< 1с) → placeholder "ru".
+        4. STT_AUDIO_LANG_ID_ENABLED=True → AudioLanguageID.detect():
+           - Возвращает ISO 639-1 код → используем его.
+           - Возвращает None (ошибка/тишина/mlx_whisper недоступен) → placeholder.
+        5. STT_AUDIO_LANG_ID_ENABLED=False → placeholder "ru".
         """
         if hint_language is not None:
             return hint_language.strip().lower()
@@ -206,31 +224,63 @@ class STTRouter:
             logger.debug("STTRouter: no audio_data and no hint → fallback 'und'")
             return "und"
 
-        # Placeholder: реальный audio-level language detection будет добавлен
-        # в follow-up PR после выбора конкретной RU-специализированной модели.
-        # Пользователь говорит 80%+ по-русски → "ru" как best-effort default.
-        # TODO(follow-up): заменить на audio-level LID (VAD + краткий inference).
+        # Минимальная длина аудио для LID
+        min_frames = int(sample_rate * _AUDIO_LID_MIN_SEC)
+        if len(audio_data) < min_frames:
+            logger.debug(
+                "STTRouter: audio too short (%d frames < %d) → placeholder 'ru'",
+                len(audio_data),
+                min_frames,
+            )
+            return "ru"
+
+        # Пробуем audio-level LID если включён в настройках
+        lang_id_enabled = getattr(self._settings, "STT_AUDIO_LANG_ID_ENABLED", True)
+        if lang_id_enabled:
+            detected = self._try_audio_lid(audio_data, sample_rate)
+            if detected is not None:
+                logger.debug("STTRouter: audio LID detected → %s", detected)
+                return detected
+            # LID вернул None → fallback на placeholder
+            logger.debug(
+                "STTRouter: audio LID returned None → placeholder 'ru'"
+            )
+            return "ru"
+
+        # LID отключён → placeholder
         try:
             sample_frames = min(
                 len(audio_data), _AUDIO_SAMPLE_SECONDS * sample_rate
             )
             audio_snippet = audio_data[:sample_frames]
-            # Если аудио слишком тихое — LanguageDetector бессмысленен для аудио;
-            # используем RU как primary language placeholder.
             rms = float(np.sqrt(np.mean(audio_snippet ** 2))) if len(audio_snippet) > 0 else 0.0
             if rms < 1e-6:
                 logger.debug(
                     "STTRouter: near-silence audio (rms=%.2e), using 'und'", rms
                 )
                 return "und"
-            # Placeholder: вернуть "ru" пока нет реального audio LID
             logger.debug(
-                "STTRouter: audio detection placeholder → 'ru' (rms=%.4f)", rms
+                "STTRouter: LID disabled, placeholder → 'ru' (rms=%.4f)", rms
             )
             return "ru"
         except Exception as exc:
             logger.warning("STTRouter: language detection failed: %s", exc)
             return "und"
+
+    def _try_audio_lid(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int,
+    ) -> Optional[str]:
+        """Запускает AudioLanguageID.detect(). Возвращает язык или None при ошибке."""
+        try:
+            lang_id = self._get_lang_id()
+            if lang_id is None:
+                return None
+            return lang_id.detect(audio_data, sample_rate=sample_rate)
+        except Exception as exc:
+            logger.warning("STTRouter._try_audio_lid: %s", exc)
+            return None
 
     def _lang_to_model(self, lang: str) -> str:
         """Маппинг ISO 639-1 кода языка → идентификатор модели из конфига.
