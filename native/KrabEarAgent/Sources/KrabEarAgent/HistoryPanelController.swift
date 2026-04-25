@@ -358,6 +358,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let dictationStack = NSStackView()
     private let dictationHistoryHeaderRow = NSStackView()
     private let dictationHistoryPreviewScroll = NSScrollView()
+    // Width constraints recreated by applyVisualTheme() on each invocation.
+    // Tracked here so previous batch can be deactivated before new one is built —
+    // иначе после повторного applyVisualTheme() стэйл-constraints держат ссылки на
+    // отдельные view и валятся NSGenericException 'no common ancestor' (KRAB-EAR-AGENT-2).
+    private var themeWidthConstraints: [NSLayoutConstraint] = []
     // MARK: - Collapsible section references
     private var dictationRecordingSection: CollapsibleSectionView?
     private var dictationSystemSection: CollapsibleSectionView?
@@ -1724,6 +1729,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         guard let window = self.window else { return }
         KrabEarTheme.applyTheme(to: window)
 
+        // Деактивируем width constraints из прошлого вызова — view уже могут быть
+        // удалены из иерархии, и активация новых поверх стейл-constraint крашит
+        // NSGenericException 'no common ancestor' (KRAB-EAR-AGENT-2).
+        NSLayoutConstraint.deactivate(themeWidthConstraints)
+        themeWidthConstraints.removeAll()
+
         // Clear existing layouts
         for stack in [dictationStack, liveStack, historyStack, settingsBar, primaryActionsRow, secondaryActionsRow, statusRow] {
             for view in stack.arrangedSubviews {
@@ -1842,7 +1853,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.addArrangedSubview(diagSection)
 
         // Now that diagCard is in the view hierarchy, activate the width constraint
-        diagnosticsOutputScroll.widthAnchor.constraint(equalTo: diagCard.contentStackView.widthAnchor).isActive = true
+        let diagWidthC = diagnosticsOutputScroll.widthAnchor.constraint(equalTo: diagCard.contentStackView.widthAnchor)
+        diagWidthC.isActive = true
+        themeWidthConstraints.append(diagWidthC)
 
         // --- PROFILE PRESETS & AUDIO DEVICES SECTION ---
         let profAudioSection = CollapsibleSectionView(sectionId: "dictation_profile_audio", title: "Профили и устройства", isExpanded: false)
@@ -1916,7 +1929,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             dictationStack.addArrangedSubview(settingsBarCD)
             // Width constraint must be activated AFTER addArrangedSubview so that
             // settingsBarCD and dictationStack share a common ancestor. (Fixes KRAB-EAR-AGENT-2)
-            settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor).isActive = true
+            let cdWidthC = settingsBarCD.widthAnchor.constraint(equalTo: dictationStack.widthAnchor)
+            cdWidthC.isActive = true
+            themeWidthConstraints.append(cdWidthC)
         } else {
             settingsBarCD.isHidden = true
             dictationStack.addArrangedSubview(settingsBar)
@@ -1973,7 +1988,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Width constraints for all live translation children (consistent with historyStack pattern)
         for child in liveStack.arrangedSubviews {
-            child.widthAnchor.constraint(equalTo: liveStack.widthAnchor).isActive = true
+            let c = child.widthAnchor.constraint(equalTo: liveStack.widthAnchor)
+            c.isActive = true
+            themeWidthConstraints.append(c)
         }
 
         // --- HISTORY TAB ---
@@ -2114,12 +2131,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // Width constraints for history children
         for child in historyStack.arrangedSubviews {
-            child.widthAnchor.constraint(equalTo: historyStack.widthAnchor).isActive = true
+            let c = child.widthAnchor.constraint(equalTo: historyStack.widthAnchor)
+            c.isActive = true
+            themeWidthConstraints.append(c)
         }
 
         // Width constraints for settingsBar children (Dictation tab sections)
         for child in settingsBar.arrangedSubviews {
-            child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor).isActive = true
+            let c = child.widthAnchor.constraint(equalTo: settingsBar.widthAnchor)
+            c.isActive = true
+            themeWidthConstraints.append(c)
         }
 
         // Width constraints for settingsBarCD children (Claude Design variant).
@@ -2129,12 +2150,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // once settingsBarCD is later replaced — partial guard against KRAB-EAR-AGENT-2.
         if settingsBarCD.superview != nil {
             for child in settingsBarCD.arrangedSubviews {
-                child.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor).isActive = true
+                let c = child.widthAnchor.constraint(equalTo: settingsBarCD.widthAnchor)
+                c.isActive = true
+                themeWidthConstraints.append(c)
             }
         }
 
         for child in dictationStack.arrangedSubviews {
-            child.widthAnchor.constraint(equalTo: dictationStack.widthAnchor).isActive = true
+            let c = child.widthAnchor.constraint(equalTo: dictationStack.widthAnchor)
+            c.isActive = true
+            themeWidthConstraints.append(c)
         }
 
         // --- BUTTON STYLING ---
