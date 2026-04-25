@@ -365,6 +365,13 @@ extension HistoryPanelController {
         autoPasteButton.setButtonType(.switch)
         let pasteRow = cdMakeRow(label: "Авто-вставка", control: autoPasteButton)
 
+        // Quick Edit before paste
+        quickEditButton.title = ""
+        quickEditButton.setButtonType(.switch)
+        quickEditButton.target = self
+        quickEditButton.action = #selector(onQuickEditChanged)
+        let quickEditRow = cdMakeRow(label: "Быстрое редактирование перед вставкой", control: quickEditButton)
+
         // Realtime preview
         realtimePreviewButton.title = ""
         realtimePreviewButton.setButtonType(.switch)
@@ -405,6 +412,8 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(overlayRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(pasteRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(quickEditRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(realtimeRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())

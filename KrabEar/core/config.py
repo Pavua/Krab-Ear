@@ -273,6 +273,10 @@ class Settings(BaseSettings):
     # По умолчанию выключено (opt-in); требует pyannote.audio.
     VOICE_FINGERPRINT_ENABLED: bool = False
     VOICE_FINGERPRINT_MATCH_THRESHOLD: float = 0.75
+    # --- Quick Edit before paste ---
+    # Показывать мини-оверлей для правки текста перед вставкой.
+    QUICK_EDIT_BEFORE_PASTE_ENABLED: bool = False
+    QUICK_EDIT_TIMEOUT_SEC: float = 5.0
 
     # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
     # Мост для отправки транскрипций напрямую в Telegram через main Krab web-панель.
@@ -777,4 +781,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Инлайн-перевод в истории (кнопка-флаг у каждой записи) ---
     # "auto" = использовать активный translation_mode, иначе явный язык: "ru", "es", "en".
     "inline_translation_target": "auto",
+    # Quick Edit before paste
+    "quick_edit_enabled": False,
+    "quick_edit_timeout_sec": 5.0,
 }

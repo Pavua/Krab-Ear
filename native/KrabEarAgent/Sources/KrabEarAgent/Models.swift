@@ -87,6 +87,9 @@ struct AgentSettings {
     var callMaxDurationMin: Int
     var callCostWarnUSD: Double
     var callAutoEndOnSilence: Bool
+    // Quick Edit before paste
+    var quickEditEnabled: Bool
+    var quickEditTimeoutSec: Double
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -133,7 +136,9 @@ struct AgentSettings {
         telnyxFromNumber: "",
         callMaxDurationMin: 30,
         callCostWarnUSD: 5.0,
-        callAutoEndOnSilence: true
+        callAutoEndOnSilence: true,
+        quickEditEnabled: false,
+        quickEditTimeoutSec: 5.0
     )
 
     init(from payload: [String: Any]) {
@@ -203,6 +208,8 @@ struct AgentSettings {
         self.callMaxDurationMin = (payload["call_max_duration_min"] as? Int) ?? Self.default.callMaxDurationMin
         self.callCostWarnUSD = (payload["call_cost_warn_usd"] as? Double) ?? Self.default.callCostWarnUSD
         self.callAutoEndOnSilence = (payload["call_auto_end_on_silence"] as? Bool) ?? Self.default.callAutoEndOnSilence
+        self.quickEditEnabled = (payload["quick_edit_enabled"] as? Bool) ?? Self.default.quickEditEnabled
+        self.quickEditTimeoutSec = (payload["quick_edit_timeout_sec"] as? Double) ?? Self.default.quickEditTimeoutSec
     }
 
     init(
@@ -248,6 +255,8 @@ struct AgentSettings {
         callCostWarnUSD: Double,
         callAutoEndOnSilence: Bool,
         bookmarksHotkeyEnabled: Bool = true
+        quickEditEnabled: Bool,
+        quickEditTimeoutSec: Double
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -291,6 +300,8 @@ struct AgentSettings {
         self.callCostWarnUSD = callCostWarnUSD
         self.callAutoEndOnSilence = callAutoEndOnSilence
         self.bookmarksHotkeyEnabled = bookmarksHotkeyEnabled
+        self.quickEditEnabled = quickEditEnabled
+        self.quickEditTimeoutSec = quickEditTimeoutSec
     }
 
     func toPayload() -> [String: Any] {
@@ -337,6 +348,8 @@ struct AgentSettings {
             "call_cost_warn_usd": callCostWarnUSD,
             "call_auto_end_on_silence": callAutoEndOnSilence,
             "bookmarks_hotkey_enabled": bookmarksHotkeyEnabled,
+            "quick_edit_enabled": quickEditEnabled,
+            "quick_edit_timeout_sec": quickEditTimeoutSec,
         ]
     }
 }

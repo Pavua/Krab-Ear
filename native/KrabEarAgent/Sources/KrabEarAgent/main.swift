@@ -107,6 +107,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var ipcClient: IPCClient
 
     let pasteService = PasteService()
+    let quickEditOverlay = QuickEditOverlay()
     let audioDuckingService = SystemAudioDuckingService()
     private let notificationService = NotificationService()
     let realtimeOverlay = RealtimeOverlayController()

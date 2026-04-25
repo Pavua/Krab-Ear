@@ -100,6 +100,12 @@ extension HistoryPanelController {
         applySettingsPatch(["auto_paste": autoPaste])
     }
 
+    @objc func onQuickEditChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = quickEditButton.state == .on
+        applySettingsPatch(["quick_edit_enabled": enabled])
+    }
+
     @objc func onStartSoundChanged() {
         guard !isSyncingSettings else { return }
         let playStartSound = startSoundButton.state == .on
@@ -378,6 +384,7 @@ extension HistoryPanelController {
         }
         modeSelector.selectItem(at: settings.mode == "menubar" ? 1 : 0)
         autoPasteButton.state = settings.autoPaste ? .on : .off
+        quickEditButton.state = settings.quickEditEnabled ? .on : .off
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
         translateAndPasteButton.state = settings.translateAndPaste ? .on : .off
