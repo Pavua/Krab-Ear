@@ -538,7 +538,36 @@ class AudioEngine:
             if extra_vocabulary:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
 
-        # 2. Проверка лимитов и iCloud workaround для файлов
+        # 2. Routing: chunked path для длинных записей (если включён)
+        # Для numpy-буферов определяем длительность через len/sample_rate.
+        # Для файлов — через soundfile.info (lazy import, мягкий fallback).
+        if not is_preview and settings.STT_STREAMING_ENABLED:
+            audio_duration_hint: float | None = None
+            if isinstance(audio_data, np.ndarray):
+                audio_duration_hint = len(audio_data) / 16000.0
+            elif isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)):
+                try:
+                    import soundfile as _sf_hint
+                    audio_duration_hint = _sf_hint.info(str(audio_data)).duration
+                except Exception:
+                    pass
+            if (
+                audio_duration_hint is not None
+                and audio_duration_hint > settings.STT_STREAMING_MIN_AUDIO_SEC
+            ):
+                return self.transcribe_chunked(
+                    audio_data,
+                    sample_rate=16000,
+                    chunk_sec=settings.STT_STREAMING_CHUNK_SEC,
+                    overlap_sec=settings.STT_STREAMING_OVERLAP_SEC,
+                    cleanup_profile=cleanup_profile,
+                    domain=domain,
+                    extra_vocabulary=extra_vocabulary,
+                    lang_hint=lang_hint,
+                    progress_callback=progress_callback,
+                )
+
+        # 3. Проверка лимитов и iCloud workaround для файлов
         _report("audio_load")
         _temp_copy_path: str | None = None
         if isinstance(audio_data, (str, Path)) and os.path.exists(audio_data):
@@ -920,6 +949,295 @@ class AudioEngine:
 
         best_result["multipass_attempts"] = attempts
         return best_result
+
+    # ------------------------------------------------------------------
+    # Streaming chunked transcription
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lcs_length(a: list[str], b: list[str]) -> int:
+        """Длина наибольшей общей подпоследовательности (LCS) двух списков слов."""
+        m, n = len(a), len(b)
+        if m == 0 or n == 0:
+            return 0
+        # Используем два ряда DP для экономии памяти.
+        prev = [0] * (n + 1)
+        curr = [0] * (n + 1)
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if a[i - 1] == b[j - 1]:
+                    curr[j] = prev[j - 1] + 1
+                else:
+                    curr[j] = max(prev[j], curr[j - 1])
+            prev, curr = curr, [0] * (n + 1)
+        return prev[n]
+
+    @staticmethod
+    def _stitch_overlap(text_prev: str, text_next: str, overlap_words: int) -> str:
+        """Сшивает два текстовых фрагмента, удаляя дублирующиеся слова на шве.
+
+        Алгоритм:
+        1. Берём хвост text_prev (последние overlap_words слов) и голову text_next
+           (первые overlap_words слов).
+        2. Ищем наибольшую общую подпоследовательность (LCS) двух окон.
+        3. Если LCS ≥ половины overlap_words — считаем, что шов найден, и
+           отрезаем у text_next всё до конца совпавшего участка.
+        4. Иначе — просто соединяем через пробел.
+        """
+        if not text_prev:
+            return text_next
+        if not text_next:
+            return text_prev
+
+        words_prev = text_prev.split()
+        words_next = text_next.split()
+
+        window = max(1, overlap_words)
+        tail = words_prev[-window:]
+        head = words_next[:window * 2]
+
+        lcs = AudioEngine._lcs_length(tail, head)
+        if lcs >= max(1, window // 2):
+            # Находим конец последнего совпадения в head через обратный поиск
+            # последнего слова tail['s LCS в head.
+            # Подход: найти наибольший суффикс tail, который является подпоследовательностью
+            # head, и запомнить позицию в head после него.
+            matched_up_to = 0
+            best_coverage = 0
+            # Пробуем разные стартовые позиции tail чтобы найти лучшее выравнивание
+            for tail_start in range(len(tail)):
+                sub_tail = tail[tail_start:]
+                ti, hi = 0, 0
+                last_matched_hi = -1
+                while ti < len(sub_tail) and hi < len(head):
+                    if sub_tail[ti] == head[hi]:
+                        ti += 1
+                        last_matched_hi = hi
+                    hi += 1
+                matched = ti  # сколько слов из sub_tail нашли в head
+                if matched > best_coverage:
+                    best_coverage = matched
+                    matched_up_to = last_matched_hi + 1
+            # Отбрасываем совпавшую часть head из text_next
+            remaining = words_next[matched_up_to:]
+            joined = text_prev.rstrip()
+            if remaining:
+                joined = joined + " " + " ".join(remaining)
+            return joined
+        else:
+            separator = " " if text_prev.endswith((".", "!", "?", ",")) else " "
+            return text_prev.rstrip() + separator + text_next.lstrip()
+
+    def transcribe_chunked(
+        self,
+        audio_data: Any,
+        sample_rate: int = 16000,
+        chunk_sec: float = 15.0,
+        overlap_sec: float = 2.0,
+        cleanup_profile: str = "soft",
+        domain: str = "casual",
+        extra_vocabulary: Optional[list[str]] = None,
+        lang_hint: Optional[str] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Any]:
+        """Транскрибирует длинное аудио чанками с перекрытием.
+
+        Разбивает numpy-массив или аудиофайл на чанки по chunk_sec секунд
+        с перекрытием overlap_sec. Транскрибирует каждый чанк независимо
+        через `_transcribe_with_fallback`, затем сшивает результаты, удаляя
+        дублирующиеся слова на швах (LCS-based seam detection).
+
+        Args:
+            audio_data: numpy.ndarray (16 kHz, mono, float32) или путь к файлу.
+            sample_rate: частота дискретизации для ndarray. Файлы читаются через soundfile.
+            chunk_sec: длительность одного чанка в секундах.
+            overlap_sec: перекрытие между соседними чанками в секундах.
+            cleanup_profile: "soft" | "strict" — профиль постобработки текста.
+            domain: доменная подсказка для промпта (casual, medical, …).
+            extra_vocabulary: дополнительные слова для промпта.
+            lang_hint: ISO-639-1 код языка или None для автоопределения.
+            progress_callback: вызывается со строкой-именем этапа.
+
+        Returns:
+            dict с полями: text, chunks (list[dict]), confidence, duration_ms,
+            engine, model, language, segments (пустой — no diarization per chunk).
+        """
+        def _report(stage: str) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(stage)
+                except Exception:
+                    pass
+
+        start_time = time.time()
+        resolved_lang = (
+            self._resolve_language(lang_hint)
+            if lang_hint is not None
+            else settings.TRANSCRIBE_LANGUAGE
+        )
+        domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
+        dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
+        if extra_vocabulary:
+            dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
+
+        # --- Загрузка аудио в numpy-массив ---
+        _report("audio_load")
+        audio_array: np.ndarray
+        effective_sr: int
+        if isinstance(audio_data, np.ndarray):
+            audio_array = audio_data
+            effective_sr = sample_rate
+        elif isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)):
+            try:
+                import soundfile as _sf_chunk
+                audio_array, effective_sr = _sf_chunk.read(str(audio_data), dtype="float32", always_2d=False)
+            except Exception as exc:
+                logger.error("transcribe_chunked: не удалось загрузить файл: %s", exc)
+                return {"text": "", "chunks": [], "error": str(exc), "status": "error"}
+        else:
+            logger.error("transcribe_chunked: неподдерживаемый тип audio_data: %s", type(audio_data))
+            return {
+                "text": "",
+                "chunks": [],
+                "error": f"unsupported audio_data type {type(audio_data).__name__}",
+                "status": "error",
+            }
+
+        # --- Разбивка на чанки ---
+        chunk_samples = int(chunk_sec * effective_sr)
+        overlap_samples = int(overlap_sec * effective_sr)
+        step_samples = max(1, chunk_samples - overlap_samples)
+        total_samples = len(audio_array)
+        overlap_words = max(1, int(overlap_sec * 3))  # ~3 слова/с как эвристика
+
+        chunks_info: list[dict[str, Any]] = []
+        start = 0
+        chunk_idx = 0
+        while start < total_samples:
+            end = min(start + chunk_samples, total_samples)
+            chunk_audio = audio_array[start:end]
+            chunk_start_sec = start / effective_sr
+            chunk_end_sec = end / effective_sr
+            chunks_info.append({
+                "idx": chunk_idx,
+                "start_sec": round(chunk_start_sec, 3),
+                "end_sec": round(chunk_end_sec, 3),
+                "audio": chunk_audio,
+            })
+            if end >= total_samples:
+                break
+            start += step_samples
+            chunk_idx += 1
+
+        logger.info(
+            "transcribe_chunked: %d чанков, chunk=%.1fs, overlap=%.1fs, total=%.1fs",
+            len(chunks_info),
+            chunk_sec,
+            overlap_sec,
+            total_samples / effective_sr,
+        )
+
+        # --- Транскрибирование каждого чанка ---
+        _report("stt")
+        chunk_results: list[dict[str, Any]] = []
+        for info in chunks_info:
+            _report(f"stt_chunk_{info['idx']}")
+            try:
+                raw_result = self._transcribe_with_fallback(
+                    info["audio"], prompt=dynamic_prompt, language=resolved_lang
+                )
+                raw_text = str(raw_result.get("text", "")).strip()
+                cleaned = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
+                segs = raw_result.get("segments", [])
+                conf = 0.0
+                if segs:
+                    conf = float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segs]))
+                chunk_results.append({
+                    "idx": info["idx"],
+                    "start_sec": info["start_sec"],
+                    "end_sec": info["end_sec"],
+                    "text": cleaned,
+                    "confidence": round(conf, 3),
+                    "engine": raw_result.get("engine", "mlx-whisper"),
+                    "model": raw_result.get("model_used", self.current_model),
+                    "language": raw_result.get("language", resolved_lang),
+                    "ok": True,
+                })
+                logger.debug(
+                    "Chunk %d/%.1f-%.1fs: %d chars, conf=%.2f",
+                    info["idx"],
+                    info["start_sec"],
+                    info["end_sec"],
+                    len(cleaned),
+                    conf,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chunk %d failed: %s", info["idx"], exc
+                )
+                chunk_results.append({
+                    "idx": info["idx"],
+                    "start_sec": info["start_sec"],
+                    "end_sec": info["end_sec"],
+                    "text": "",
+                    "confidence": 0.0,
+                    "engine": "mlx-whisper",
+                    "model": self.current_model,
+                    "language": resolved_lang,
+                    "ok": False,
+                    "error": str(exc),
+                })
+
+        # --- Сшивание результатов ---
+        _report("cleanup")
+        stitched = ""
+        ok_chunks = [c for c in chunk_results if c["ok"] and c["text"]]
+        for i, chunk in enumerate(ok_chunks):
+            if i == 0:
+                stitched = chunk["text"]
+            else:
+                stitched = AudioEngine._stitch_overlap(stitched, chunk["text"], overlap_words)
+
+        # Итоговая уверенность — среднее по успешным чанкам
+        confidences = [c["confidence"] for c in chunk_results if c["ok"]]
+        avg_confidence = float(np.mean(confidences)) if confidences else 0.0
+        engine_used = ok_chunks[0]["engine"] if ok_chunks else "mlx-whisper"
+        model_used = ok_chunks[0]["model"] if ok_chunks else self.current_model
+        lang_used = ok_chunks[0]["language"] if ok_chunks else resolved_lang
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            "transcribe_chunked готово: %d/%d чанков ОК, %d chars, %.1fs",
+            len(ok_chunks),
+            len(chunk_results),
+            len(stitched),
+            duration_ms / 1000,
+        )
+
+        # Очищаем большие numpy-массивы из результатов (экономим память)
+        for c in chunk_results:
+            c.pop("audio", None)
+
+        return {
+            "text": stitched,
+            "raw_text": stitched,
+            "cleaned_text": stitched,
+            "chunks": chunk_results,
+            "confidence": round(avg_confidence, 3),
+            "raw_confidence": round(avg_confidence, 3),
+            "duration_ms": duration_ms,
+            "engine": engine_used,
+            "model": model_used,
+            "language": lang_used,
+            "segments": [],
+            "diarization": None,
+            "llm_applied": False,
+            "llm_latency_ms": None,
+            "llm_fallback_reason": None,
+            "llm_diff": None,
+            "confidence_adjustments": [],
+            "emotion": None,
+        }
 
     def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).

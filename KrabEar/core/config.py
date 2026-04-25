@@ -282,6 +282,22 @@ class Settings(BaseSettings):
     # сжимаются до 0.5s padding. По умолчанию 2.0s.
     STT_VAD_SILENCE_TRIM_THRESHOLD_SEC: float = 2.0
 
+    # --- Streaming chunked transcription (long-form recordings) ---
+    # При включённом режиме аудио длиннее stt_streaming_min_audio_sec сек
+    # разбивается на чанки с перекрытием и транскрибируется последовательно.
+    # Позволяет снизить задержку получения первых результатов и повысить
+    # качество на длинных записях (Whisper теряет контекст >30 с).
+    # False = выключено по умолчанию (single-pass быстрее для коротких записей).
+    STT_STREAMING_ENABLED: bool = False
+    # Порог длительности аудио (в секундах), при превышении которого включается
+    # chunked режим (если STT_STREAMING_ENABLED=True).
+    STT_STREAMING_MIN_AUDIO_SEC: float = 30.0
+    # Длина одного чанка в секундах.
+    STT_STREAMING_CHUNK_SEC: float = 15.0
+    # Перекрытие между соседними чанками в секундах.
+    # Используется для детектирования и удаления дублей на швах.
+    STT_STREAMING_OVERLAP_SEC: float = 2.0
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -408,4 +424,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voxtral_enabled": False,
     "voxtral_model": "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit",
     "voxtral_reasoning_enabled": False,
+    # --- Streaming chunked transcription ---
+    "stt_streaming_enabled": False,
+    "stt_streaming_min_audio_sec": 30.0,
+    "stt_streaming_chunk_sec": 15.0,
+    "stt_streaming_overlap_sec": 2.0,
 }
