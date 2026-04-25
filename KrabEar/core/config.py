@@ -396,6 +396,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""       # Лучше хранить в Keychain, не здесь
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool = False
+    # --- Per-app paste profile memory ---
+    # Когда включено, Krab Ear запоминает предпочтительный профиль вставки
+    # (plain/markdown/html/...) для каждого приложения по bundle_id.
+    # При следующей вставке в то же приложение профиль применяется автоматически.
+    PASTE_APP_MEMORY_ENABLED: bool = True
 
     @property
     def model_max_list(self) -> List[str]:
@@ -573,4 +578,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "smtp_user": "",
     "smtp_use_tls": True,
     "smtp_use_ssl": False,
+    # Per-app paste profile memory: auto-apply profile (markdown/plain/etc)
+    # на основе bundle_id активного приложения при вставке.
+    "paste_app_memory_enabled": True,
 }

@@ -114,6 +114,7 @@ from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
+from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
@@ -303,6 +304,10 @@ class BackendService:
             RequestSigner() if settings.IPC_SIGNING_ENABLED else None
         )
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
+        self._paste_app_memory = PasteAppMemory(
+            data_dir=self.store.data_dir,
+            enabled=settings.PASTE_APP_MEMORY_ENABLED,
+        )
         self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
@@ -635,6 +640,12 @@ class BackendService:
             "list_settings_backups": self._settings_svc.handle_list_settings_backups,  # список rolling-бэкапов настроек
             "restore_settings_backup": self._settings_svc.handle_restore_settings_backup,  # восстановить из бэкапа
             "create_manual_settings_backup": self._settings_svc.handle_create_manual_settings_backup,  # ручной бэкап настроек
+            # --- Per-app paste profile memory ---
+            "get_paste_profile_for_app": self._paste_app_memory.handle_get_paste_profile_for_app,  # VERIFIED: called from Swift (PasteService)
+            "record_paste_app_profile": self._paste_app_memory.handle_record_paste_app_profile,  # VERIFIED: called from Swift (PasteService)
+            "list_app_profiles": self._paste_app_memory.handle_list_app_profiles,  # список сохранённых профилей по приложениям
+            "delete_app_profile": self._paste_app_memory.handle_delete_app_profile,  # удалить профиль приложения
+            "cleanup_stale_app_profiles": self._paste_app_memory.handle_cleanup_stale_app_profiles,  # удалить устаревшие записи
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
