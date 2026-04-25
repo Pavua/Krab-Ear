@@ -326,6 +326,13 @@ class Settings(BaseSettings):
     STT_ES_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
     STT_OTHER_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
 
+    # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
+    # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
+    # Лицензия: MIT. PyPI: pip install gigaam. HuggingFace: salute-developers/GigaAM
+    STT_GIGAAM_ENABLED: bool = False
+    STT_GIGAAM_MODE: str = "rnnt"
+    STT_GIGAAM_DEVICE: str = "mps"
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -470,4 +477,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Russian Whisper fine-tune ---
     "stt_use_ru_finetune": False,
     "stt_ru_finetune_model": "antony66/whisper-large-v3-russian",
+    # --- GigaAM-RNNT v2 adapter ---
+    "stt_gigaam_enabled": False,
+    "stt_gigaam_mode": "rnnt",
+    "stt_gigaam_device": "mps",
 }
