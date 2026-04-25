@@ -380,6 +380,23 @@ class Settings(BaseSettings):
     STT_GIGAAM_MODE: str = "rnnt"
     STT_GIGAAM_DEVICE: str = "mps"
 
+    # --- Ежедневный дайджест на email (opt-in) ---
+    # При RECAP_EMAIL_ENABLED=True: каждый день в RECAP_TIME_HOUR (локальное время)
+    # автоматически генерируется DailyDigest и отправляется на RECAP_EMAIL_TO.
+    # RECAP_BACKEND: "smtp" (smtplib) или "mail_app" (macOS Mail.app через osascript).
+    # SMTP-пароль считывается из macOS Keychain (ключ "KrabEar SMTP password").
+    RECAP_EMAIL_ENABLED: bool = False
+    RECAP_EMAIL_TO: str = ""
+    RECAP_TIME_HOUR: int = 20
+    RECAP_BACKEND: str = "smtp"   # "smtp" | "mail_app"
+    # SMTP-конфигурация (используется при RECAP_BACKEND="smtp")
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""       # Лучше хранить в Keychain, не здесь
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -545,4 +562,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Voice fingerprint matching ---
     "voice_fingerprint_enabled": False,
     "voice_fingerprint_match_threshold": 0.75,
+    # --- Ежедневный дайджест на email (opt-in) ---
+    # Opt-in: False по умолчанию — приватность, требует SMTP-конфигурации.
+    "recap_email_enabled": False,
+    "recap_email_to": "",
+    "recap_time_hour": 20,
+    "recap_backend": "smtp",
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_user": "",
+    "smtp_use_tls": True,
+    "smtp_use_ssl": False,
 }

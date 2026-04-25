@@ -110,6 +110,8 @@ from backend.call_silence_probe import CallSilenceProbe
 from backend.call_auto_end import CallAutoEnd
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
+from backend.email_sender import EmailSender
+from backend.recap_scheduler import RecapScheduler
 from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
@@ -254,6 +256,18 @@ class BackendService:
         self._transcription_counter: int = 0
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
+        # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting)
+        self._recap_scheduler = RecapScheduler(
+            email_sender=EmailSender.from_settings(settings),
+            digest_generator=self._daily_digest,
+            store=self.store,
+            data_dir=self.store.data_dir,
+            recap_email_to=settings.RECAP_EMAIL_TO,
+            recap_time_hour=settings.RECAP_TIME_HOUR,
+            enabled=settings.RECAP_EMAIL_ENABLED,
+        )
+        if settings.RECAP_EMAIL_ENABLED:
+            self._recap_scheduler.start()
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
@@ -661,6 +675,8 @@ class BackendService:
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
+            "send_recap_now": self._handle_send_recap_now,  # отправить ежедневный дайджест прямо сейчас (ручной триггер)
+            "get_recap_status": self._handle_get_recap_status,  # статус планировщика дайджеста: last_sent_date, next_run
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
@@ -3165,6 +3181,17 @@ class BackendService:
             "highlights": digest.highlights,
             "markdown": digest.formatted_markdown,
         }
+
+    def _handle_send_recap_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Ручная отправка ежедневного дайджеста прямо сейчас."""
+        target_date = params.get("date")  # None -> today
+        result = self._recap_scheduler.send_recap(target_date=target_date)
+        return result
+
+    def _handle_get_recap_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус планировщика дайджеста: last_sent_date, next_run и т.д."""
+        return self._recap_scheduler.get_status()
+
 
     def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует полный Markdown-отчёт статистики использования за период."""
