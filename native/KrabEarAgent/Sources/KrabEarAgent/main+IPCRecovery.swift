@@ -32,6 +32,9 @@ extension AgentAppDelegate {
         switch error {
         case .socketCreateFailed, .socketConnectFailed, .writeFailed, .readFailed:
             return true
+        case .timeout:
+            // Timeout means backend is alive but slow — do NOT trigger restart.
+            return false
         case .invalidResponse, .backendError:
             return false
         }
