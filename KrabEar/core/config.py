@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
 
+    # --- Confidence-driven multi-pass STT retry ---
+    # Если первый pass (balanced) вернул уверенность ниже порога → пробуем тяжелее.
+    # Threshold 0.65 покрывает типичные "плохие" результаты (0.3-0.6) без лишних ретраев.
+    # Установить в 0.0 — никогда не ретраить. 1.0 — ретраить всегда.
+    STT_MULTIPASS_ENABLED: bool = True
+    STT_MIN_CONFIDENCE_THRESHOLD: float = 0.65
+    # Максимальное число дополнительных попыток поверх первого pass (balanced).
+    # 2 = balanced + max + remote (при network_mode != offline_strict).
+    STT_MAX_RETRIES: int = 2
+
     # Pipeline v2 feature flag.
     # True = BackendService использует transcribe_v2() (pipeline-based path).
     # False = legacy path через AudioEngine.transcribe() напрямую (по умолчанию).
@@ -350,6 +360,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_save_transcripts": False,
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     "smart_silence_skip_enabled": False,
+    # --- Confidence-driven multi-pass STT retry ---
+    "stt_multipass_enabled": True,
+    "stt_min_confidence_threshold": 0.65,
+    "stt_max_retries": 2,
     # --- Настройки уведомлений ---
     # Мастер-переключатель уведомлений.
     "notifications_enabled": True,
