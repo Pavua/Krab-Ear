@@ -89,6 +89,7 @@ from backend.history_service import HistoryService
 from backend.error_reporter import ErrorReporter
 from backend.recording_scheduler import RecordingScheduler
 from backend.recording_merger import RecordingMerger
+from backend.bookmarks import BookmarkManager
 from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
@@ -210,6 +211,7 @@ class BackendService:
         self._collections = CollectionManager(store=self.store)
         self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
         self._chains = RecordingChainManager(store=self.store)
+        self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
         self._history = HistoryService(
             store=self.store,
@@ -915,6 +917,12 @@ class BackendService:
             "extract_action_items": self._handle_extract_action_items,
             "batch_extract_action_items": self._handle_batch_extract_action_items,
             "get_pending_action_items": self._handle_get_pending_action_items,
+            # --- Recording bookmarks (Cmd+Shift+B) ---
+            "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
+            "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
+            "list_all_bookmarks": self._bookmarks.handle_list_all_bookmarks,  # все активные закладки
+            "delete_bookmark": self._bookmarks.handle_delete_bookmark,  # удалить закладку (tombstone)
+            "jump_to_bookmark": self._bookmarks.handle_jump_to_bookmark,  # перейти к закладке (эмитит playback.seek)
         }
 
         handler = handlers.get(method)
@@ -1509,11 +1517,21 @@ class BackendService:
             if hasattr(self.recorder, "snapshot_rms")
             else 0.0
         )
+        active_session = self._session_tracker._active_session
+        session_id = (active_session.get("session_id", "__live__") if active_session else "__live__")
+        elapsed_sec = 0.0
+        if hasattr(self.recorder, "get_duration_sec"):
+            try:
+                elapsed_sec = float(self.recorder.get_duration_sec() or 0.0)
+            except Exception:
+                elapsed_sec = preview_duration or 0.0
         return {
             "is_recording": bool(getattr(self.recorder, "is_recording", False)),
             "duration_sec": preview_duration,
             "preview_text": preview_text,
             "audio_rms": audio_rms,
+            "elapsed_sec": elapsed_sec,
+            "session_id": session_id,
         }
 
     def _handle_get_session_history(self, params: dict[str, Any]) -> dict[str, Any]:

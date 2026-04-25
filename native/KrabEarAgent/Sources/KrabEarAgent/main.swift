@@ -245,6 +245,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
         // Phase 2B: Live субтитры — Cmd+Shift+L через menu item (main+StatusMenu + main+LiveSubs).
 
+        // Recording bookmarks: Cmd+Shift+B (feat/recording-bookmarks)
+        if settings.bookmarksHotkeyEnabled {
+            startBookmarkHotkeyMonitor()
+            logger.info("Bookmark hotkey активирован (Cmd+Shift+B)")
+        }
+
         // PR 1.5: Wake word listener (default OFF — toggle в Settings)
         setupWakeWordListenerIfEnabled()
 
