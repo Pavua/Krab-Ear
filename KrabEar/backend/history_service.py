@@ -43,6 +43,8 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
+        # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
+        self._speaker_manager = None
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
@@ -616,15 +618,20 @@ class HistoryService:
                 sections.append(" | ".join(meta_parts))
                 sections.append("")
 
+            include_labels = self._should_include_speaker_labels(params)
             if diar and isinstance(diar, dict) and diar.get("enabled"):
                 turns = diar.get("speaker_turns", [])
                 speakers = {t.get("speaker") for t in turns if t.get("speaker")}
                 if len(speakers) >= 2 and turns:
                     for turn in turns:
-                        speaker = turn.get("speaker", "?")
+                        sid = turn.get("speaker", "SPEAKER_00")
                         turn_text = str(turn.get("text", "")).strip()
                         if turn_text:
-                            sections.append(f"[{speaker}]: {turn_text}")
+                            if include_labels:
+                                lbl = self._resolve_speaker_name(sid, lang=item.source_lang)
+                                sections.append(f"**{lbl}:** {turn_text}")
+                            else:
+                                sections.append(f"[{sid}]: {turn_text}")
                 else:
                     sections.append(item.text)
             else:
@@ -722,7 +729,11 @@ class HistoryService:
             end_sec = float(turn.get("end", start_sec + 1.0) or start_sec + 1.0)
             srt_lines.append(str(seq))
             srt_lines.append(f"{self._srt_timestamp(start_sec)} --> {self._srt_timestamp(end_sec)}")
-            srt_lines.append(f"[{speaker}]: {turn_text}")
+            if self._should_include_speaker_labels(params):
+                lbl = self._resolve_speaker_name(speaker, lang=getattr(target_item, "source_lang", None))
+                srt_lines.append(f"{lbl}: {turn_text}")
+            else:
+                srt_lines.append(f"[{speaker}]: {turn_text}")
             srt_lines.append("")
 
         srt_content = "\n".join(srt_lines)
@@ -995,10 +1006,24 @@ class HistoryService:
                 turns = diar.get("speaker_turns", [])
                 segments = diar.get("speaker_segments", [])
                 speakers = {t.get("speaker") for t in turns if t.get("speaker")}
+                include_labels = self._should_include_speaker_labels(params)
+                if include_labels and (turns or segments):
+                    seg_list = turns or segments
+                    resolved_segs = []
+                    for seg in seg_list:
+                        seg_copy = dict(seg)
+                        sid = seg_copy.get("speaker", "")
+                        if sid:
+                            seg_copy["speaker_name"] = self._resolve_speaker_name(
+                                sid, lang=None
+                            )
+                        resolved_segs.append(seg_copy)
+                else:
+                    resolved_segs = turns or segments
                 diarization_block = {
                     "enabled": bool(diar.get("enabled", False)),
                     "speakers": len(speakers),
-                    "segments": turns or segments,
+                    "segments": resolved_segs,
                 }
 
             entry: dict = {
@@ -1098,6 +1123,7 @@ class HistoryService:
 
         output = io.StringIO()
         writer = csv.writer(output, delimiter=delimiter)
+        include_labels = self._should_include_speaker_labels(params)
         columns = ["timestamp", "text", "translation", "language", "confidence",
                    "duration_sec", "paste_status", "speakers"]
         if include_header:
@@ -1107,12 +1133,22 @@ class HistoryService:
             translation = ""
             if item.get("translation_status") == "ok":
                 translation = item.get("translated_text") or item.get("translation", "")
-            speakers = ""
+            speaker_val = ""
             diar = item.get("diarization")
             if diar and isinstance(diar, dict):
-                segs = diar.get("speaker_segments", [])
-                speaker_set = {s.get("speaker", "") for s in segs if isinstance(s, dict)}
-                speakers = ", ".join(sorted(speaker_set))
+                turns = diar.get("speaker_turns", diar.get("speaker_segments", []))
+                speaker_ids = sorted({
+                    s.get("speaker", "") for s in turns
+                    if isinstance(s, dict) and s.get("speaker")
+                })
+                if include_labels:
+                    item_lang = item.get("source_lang") or item.get("lang") or None
+                    speaker_val = ", ".join(
+                        self._resolve_speaker_name(sid, lang=item_lang)
+                        for sid in speaker_ids
+                    )
+                else:
+                    speaker_val = ", ".join(speaker_ids)
             writer.writerow([
                 item.get("ts", ""),
                 item.get("text", ""),
@@ -1121,7 +1157,7 @@ class HistoryService:
                 item.get("confidence", ""),
                 item.get("duration", ""),
                 item.get("paste_status", ""),
-                speakers,
+                speaker_val,
             ])
 
         csv_text = output.getvalue()
@@ -1760,6 +1796,38 @@ class HistoryService:
         return max(min_value, min(parsed, max_value))
 
     # ------------------------------------------------------------------
+    # Speaker label helpers
+    # ------------------------------------------------------------------
+
+    _SPEAKER_LABEL_PREFIXES = {"ru": "Спикер", "es": "Hablante", "en": "Speaker"}
+    _SPEAKER_LABEL_DEFAULT = "Спикер"
+
+    def _resolve_speaker_name(self, speaker_id: str, lang=None) -> str:
+        """Возвращает читаемое имя спикера (псевдоним или 'Спикер N')."""
+        import re as _re
+        if self._speaker_manager is not None:
+            try:
+                alias = self._speaker_manager.get_alias(speaker_id)
+                if alias:
+                    return alias
+            except Exception:
+                pass
+        m = _re.search(r"(\d+)$", speaker_id)
+        n = (int(m.group(1)) + 1) if m else 1
+        prefix = self._SPEAKER_LABEL_PREFIXES.get(
+            (lang or "").lower()[:2], self._SPEAKER_LABEL_DEFAULT
+        )
+        return f"{prefix} {n}"
+
+    def _should_include_speaker_labels(self, params: dict) -> bool:
+        """True если нужно включать метки спикеров в экспорт."""
+        param_val = params.get("include_speaker_labels")
+        if param_val is not None:
+            return self._coerce_bool(param_val, default=False)
+        from core.config import settings
+        return settings.EXPORT_INCLUDE_SPEAKER_LABELS
+
+    # ------------------------------------------------------------------
     # Экспорт в формат Obsidian
     # ------------------------------------------------------------------
 
@@ -1850,6 +1918,21 @@ class HistoryService:
         else:
             doc_title = f"Транскрибации ({title_date_str})"
 
+        include_labels = self._should_include_speaker_labels(params)
+
+        # Collect all speaker IDs across all items for frontmatter when include_labels
+        all_speaker_ids: list[str] = []
+        if include_labels:
+            seen_speakers: dict[str, int] = {}
+            for _it in items:
+                _diar = _it.diarization
+                if _diar and isinstance(_diar, dict) and _diar.get("enabled"):
+                    for _t in _diar.get("speaker_turns", []):
+                        _sid = _t.get("speaker", "")
+                        if _sid and _sid not in seen_speakers:
+                            seen_speakers[_sid] = len(seen_speakers)
+            all_speaker_ids = sorted(seen_speakers.keys(), key=lambda s: seen_speakers[s])
+
         # --- Строим YAML frontmatter ---
         fm_lines = [
             "---",
@@ -1858,6 +1941,12 @@ class HistoryService:
             f"tags: [{tags_yaml}]",
             f"entries: {len(items)}",
         ]
+        if include_labels and all_speaker_ids:
+            resolved_names = [
+                self._resolve_speaker_name(sid) for sid in all_speaker_ids
+            ]
+            speakers_yaml = ", ".join(f'\"{n}\"' for n in resolved_names)
+            fm_lines.append(f"speakers: [{speakers_yaml}]")
         if total_dur_sec > 0:
             fm_lines.append(
                 f"duration: \"{self._format_duration_human(total_dur_sec)}\""
@@ -1939,17 +2028,26 @@ class HistoryService:
 
             if has_diarization and diar_turns:
                 for turn in diar_turns:
-                    speaker = turn.get("speaker", "SPEAKER_00")
+                    sid = turn.get("speaker", "SPEAKER_00")
                     turn_text = str(turn.get("text", "")).strip()
                     if not turn_text:
                         continue
                     start_sec = turn.get("start")
-                    if start_sec is not None:
-                        ts_mark = self._srt_timestamp(float(start_sec))[:8]  # HH:MM:SS
-                        body_lines.append(f"[{speaker} ({ts_mark})]")
+                    if include_labels:
+                        lbl = self._resolve_speaker_name(sid, lang=item.source_lang)
+                        if start_sec is not None:
+                            ts_mark = self._srt_timestamp(float(start_sec))[:8]
+                            body_lines.append(f"**{lbl}** ({ts_mark}):")
+                        else:
+                            body_lines.append(f"**{lbl}** ({ts_human}):")
+                        body_lines.append(turn_text)
                     else:
-                        body_lines.append(f"[{speaker} ({ts_human})]")
-                    body_lines.append(turn_text)
+                        if start_sec is not None:
+                            ts_mark = self._srt_timestamp(float(start_sec))[:8]  # HH:MM:SS
+                            body_lines.append(f"[{sid} ({ts_mark})]")
+                        else:
+                            body_lines.append(f"[{sid} ({ts_human})]")
+                        body_lines.append(turn_text)
                     body_lines.append("")
             else:
                 body_lines.append(f"[Спикер ({ts_human})]")
