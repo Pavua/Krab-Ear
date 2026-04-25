@@ -60,7 +60,14 @@ extension AgentAppDelegate {
             return
         }
         let targetPID = activateTargetForPaste(targetApp)
-        let pasteResult = pasteService.pasteToFrontmostApp(cleanText, targetPID: targetPID)
+
+        // Применяем per-app профиль вставки если настроен
+        let (textToInsert, appliedProfile) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
+        if let prof = appliedProfile {
+            logger.info("PasteAppMemory: применён профиль '\(prof)' для \(targetApp.bundleIdentifier ?? "unknown")")
+        }
+
+        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
         logger.info(
             "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
         )
@@ -109,7 +116,11 @@ extension AgentAppDelegate {
         }
 
         let targetPID = activateTargetForPaste(targetApp)
-        let pasteResult = pasteService.pasteToFrontmostApp(cleanText, targetPID: targetPID)
+
+        // Применяем per-app профиль вставки если настроен
+        let (textToInsert, _) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
+
+        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
         logger.info(
             "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
         )
