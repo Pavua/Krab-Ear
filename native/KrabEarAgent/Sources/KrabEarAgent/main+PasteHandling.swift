@@ -257,6 +257,28 @@ extension AgentAppDelegate {
         return result["id"] as? String
     }
 
+
+    // MARK: - Quick replay (Cmd+Option+V)
+
+    func handleQuickReplayPaste() {
+        let result = pasteService.repastLast()
+        switch result.reason {
+        case "no_last_paste":
+            notify(title: "Krab Ear", body: "Нет сохранённой вставки для повтора")
+            logger.info("Quick replay: нет сохранённого текста")
+        case "repaste_too_soon":
+            notify(title: "Krab Ear", body: "Слишком быстро — подождите секунду")
+            logger.info("Quick replay: повтор слишком быстрый (cooldown)")
+        default:
+            if result.ok {
+                logger.info("Quick replay: успешно вставлен текст (reason=\(result.reason))")
+                NSSound(named: "Purr")?.play()
+            } else {
+                handlePasteFailure(reason: result.reason)
+            }
+        }
+    }
+
     func normalizePlainText(_ text: String) -> String {
         // Plain режим: убираем табы/лишние переносы и схлопываем повторяющиеся пробелы.
         let replaced = text

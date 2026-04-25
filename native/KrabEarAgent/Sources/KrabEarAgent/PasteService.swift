@@ -3,6 +3,7 @@
 
  Связи модуля:
  1) main.swift: использует сервис после получения транскрибации.
+ 2) Quick replay (Cmd+Option+V): repastLast() / recordLastPaste() / lastPastedText.
 */
 
 import AppKit
@@ -36,6 +37,39 @@ final class PasteService {
     /// пользователь может вставить вручную Cmd+V.
     private var lastAXPromptAt: Date?
     private let axPromptCooldownSec: TimeInterval = 600
+
+    // MARK: - Quick replay (Cmd+Option+V)
+
+    private let lastPastedTextKey = "KrabEar_LastPastedText"
+    /// Кулдаун между повторными вставками, предотвращает случайный дубль.
+    let repasteCooldownSec: TimeInterval = 1.0
+    private var lastPastedAt: Date?
+
+    /// Последний успешно вставленный текст. Читается из/записывается в UserDefaults.
+    var lastPastedText: String? {
+        get { UserDefaults.standard.string(forKey: lastPastedTextKey) }
+        set { UserDefaults.standard.set(newValue, forKey: lastPastedTextKey) }
+    }
+
+    /// Запоминает успешно вставленный текст для возможного быстрого повтора.
+    func recordLastPaste(_ text: String) {
+        lastPastedText = text
+        lastPastedAt = Date()
+    }
+
+    /// Повторяет последнюю вставку через `pasteToFrontmostApp`.
+    /// Возвращает PasteAttemptResult с reason "no_last_paste" или "repaste_too_soon"
+    /// при неудовлетворённых предусловиях.
+    func repastLast() -> PasteAttemptResult {
+        guard let text = lastPastedText, !text.isEmpty else {
+            return PasteAttemptResult(ok: false, reason: "no_last_paste")
+        }
+        if let lastAt = lastPastedAt,
+           Date().timeIntervalSince(lastAt) < repasteCooldownSec {
+            return PasteAttemptResult(ok: false, reason: "repaste_too_soon")
+        }
+        return pasteToFrontmostApp(text)
+    }
 
     private enum FocusState {
         case editable
@@ -108,6 +142,9 @@ final class PasteService {
         if axTrusted {
             collapseSelectionIfNeeded(pid: resolvedPID)
         }
+
+        // Запоминаем вставленный текст для быстрого повтора (Cmd+Option+V).
+        recordLastPaste(cleanText)
 
         // Если фокус определить не удалось, считаем попытку условно успешной:
         // в этом случае UI покажет статус ok, но в логе останется подробная диагностика.
