@@ -245,6 +245,14 @@ class SettingsService:
             overlay_percent = 45
         settings["overlay_opacity_percent"] = max(15, min(overlay_percent, 90))
 
+        # Нормализация STT hotwords: убираем пустые строки и дублирование.
+        raw_hotwords = settings.get("stt_hotwords", [])
+        if not isinstance(raw_hotwords, list):
+            raw_hotwords = []
+        settings["stt_hotwords"] = list(dict.fromkeys(
+            w.strip() for w in raw_hotwords if str(w).strip()
+        ))
+
         # Final validation pass before persisting — raises on hard errors
         vr = self._validator.validate(settings)
         if not vr.valid:

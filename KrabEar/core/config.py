@@ -250,6 +250,13 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
 
+    # --- STT quality: user hotwords for initial_prompt boost ---
+    # Пользовательские термины (имена, бренды, технические слова), которые
+    # включаются в initial_prompt Whisper как "Glossary: term1, term2."
+    # Повышают точность распознавания специфичной лексики (~10-15% на непрерывной диктовке).
+    # Управляется через IPC: add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
+    STT_HOTWORDS: List[str] = []
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -365,4 +372,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voxtral_enabled": False,
     "voxtral_model": "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit",
     "voxtral_reasoning_enabled": False,
+    # --- STT hotwords (initial_prompt boost) ---
+    # Пользовательские термины для boosting'а точности Whisper.
+    # Управляется через IPC add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
+    "stt_hotwords": [],
 }

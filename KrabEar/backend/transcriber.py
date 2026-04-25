@@ -51,11 +51,15 @@ class Transcriber:
         domain: str = "casual",
         extra_vocabulary: list[str] | None = None,
         lang_hint: str | None = None,
+        history_context: list[Any] | None = None,
+        stt_hotwords: list[str] | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
         Args:
             lang_hint: ISO 639-1 код языка или None/"auto" для авто-определения whisper'ом.
+            history_context: Последние HistoryItem'ы для построения initial_prompt в Whisper.
+            stt_hotwords: Пользовательские термины для Glossary-префикса в initial_prompt.
         """
         self.engine.set_quality_profile(quality_profile)
         return self.engine.transcribe(
@@ -65,6 +69,8 @@ class Transcriber:
             domain=domain,
             extra_vocabulary=extra_vocabulary,
             lang_hint=lang_hint,
+            history_context=history_context,
+            stt_hotwords=stt_hotwords,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
