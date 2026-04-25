@@ -303,6 +303,9 @@ class TestIPCHandlerScoreTranscription(unittest.TestCase):
             def start(self): pass
             def stop(self): return b""
             is_recording = False
+            def snapshot_audio(self, max_duration_sec: float = 12.0):
+                import numpy as np
+                return np.zeros(int(max_duration_sec * 16000), dtype=np.float32), max_duration_sec
 
         class _FakeTranscriber:
             def transcribe(self, audio): return "fake"
