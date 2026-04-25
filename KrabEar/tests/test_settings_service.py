@@ -482,5 +482,48 @@ class TestCacheMultipleCalls(unittest.TestCase):
             store.load_settings.assert_called_once()
 
 
+
+
+class TestPresetChangedEvent(unittest.TestCase):
+    """Проверяет, что handle_apply_profile_preset эмитит preset.changed через EventBus."""
+
+    def _make_service(self):
+        store = _make_store()
+        svc = SettingsService(store=store)
+        return svc, store
+
+    def test_apply_profile_preset_emits_preset_changed_event(self):
+        svc, _ = self._make_service()
+        with patch("backend.event_bus.bus") as mock_bus:
+            svc.handle_apply_profile_preset({"profile": "meeting"})
+            mock_bus.emit.assert_called_once()
+            event_name, payload = mock_bus.emit.call_args[0]
+            self.assertEqual(event_name, "preset.changed")
+            self.assertEqual(payload["profile"], "meeting")
+
+    def test_apply_profile_preset_saves_active_preset_field(self):
+        svc, store = self._make_service()
+        with patch("backend.event_bus.bus"):
+            svc.handle_apply_profile_preset({"profile": "translation"})
+        saved_settings = store.save_settings.call_args[0][0]
+        self.assertEqual(saved_settings.get("active_preset"), "translation")
+
+    def test_apply_profile_preset_event_emit_failure_does_not_raise(self):
+        svc, _ = self._make_service()
+        with patch("backend.event_bus.bus") as mock_bus:
+            mock_bus.emit.side_effect = RuntimeError("bus down")
+            result = svc.handle_apply_profile_preset({"profile": "default"})
+            self.assertIsNotNone(result)
+
+    def test_apply_profile_preset_active_preset_for_all_profiles(self):
+        for preset_id in ["default", "meeting", "translation", "call_recording"]:
+            with self.subTest(preset=preset_id):
+                svc, store = self._make_service()
+                with patch("backend.event_bus.bus"):
+                    svc.handle_apply_profile_preset({"profile": preset_id})
+                saved_settings = store.save_settings.call_args[0][0]
+                self.assertEqual(saved_settings.get("active_preset"), preset_id)
+
+
 if __name__ == "__main__":
     unittest.main()

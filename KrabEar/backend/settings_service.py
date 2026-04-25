@@ -275,7 +275,10 @@ class SettingsService:
         return result
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Применяет пресет настроек профиля, сохраняет и сбрасывает кэш."""
+        """Применяет пресет настроек профиля, сохраняет и сбрасывает кэш.
+
+        После успешного применения эмитирует preset.changed через EventBus.
+        """
         profile = str(params.get("profile", "")).strip()
         preset = self._PROFILE_PRESETS.get(profile)
         if preset is None:
@@ -284,8 +287,17 @@ class SettingsService:
 
         settings = self.cached_settings()
         settings.update(preset)
+        settings["active_preset"] = profile
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        try:
+            import backend.event_bus as _ebus  # noqa: PLC0415
+            _ebus.bus.emit("preset.changed", {
+                "profile": profile,
+                "description": self._PROFILE_PRESET_DESCRIPTIONS.get(profile, ""),
+            })
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
         return result
 
     def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
