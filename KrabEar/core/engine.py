@@ -601,6 +601,13 @@ class AudioEngine:
                 audio_data = vad_result
 
             result = self._transcribe_with_fallback(audio_data, prompt=dynamic_prompt, language=resolved_lang)
+
+            # 3a. Confidence-driven multi-pass retry (только для финальных транскрибаций)
+            if not is_preview and settings.STT_MULTIPASS_ENABLED:
+                result = self._maybe_multipass_retry(
+                    audio_data, dynamic_prompt, resolved_lang, result,
+                )
+
             raw_text = str(result.get("text", "")).strip()
             segments = result.get("segments", [])
             if not is_preview and settings.DIARIZATION_ENABLED:
@@ -695,6 +702,9 @@ class AudioEngine:
                     if settings.SENSEVOICE_EMOTION_TO_HISTORY
                     else None
                 ),
+                # Multi-pass debug metadata: список попыток {model, confidence, latency_ms}.
+                # Присутствует только если STT_MULTIPASS_ENABLED=True и не preview.
+                "multipass_attempts": result.get("multipass_attempts"),
             }
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
@@ -798,6 +808,118 @@ class AudioEngine:
 
         filtered = np.concatenate(merged_parts)
         return filtered
+
+    @staticmethod
+    def _raw_confidence_from_result(result: dict[str, Any]) -> float:
+        """Вычисляет сырую уверенность из segments dict, возвращает 0.0 если нет данных."""
+        segments = result.get("segments", [])
+        if not segments:
+            return 0.0
+        return float(np.mean([np.exp(s.get("avg_logprob", -1.0)) for s in segments]))
+
+    def _maybe_multipass_retry(
+        self,
+        audio_data: Any,
+        prompt: str,
+        language: str | None,
+        first_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Confidence-driven multi-pass retry.
+
+        Если первый pass (balanced) вернул уверенность ниже
+        settings.STT_MIN_CONFIDENCE_THRESHOLD — пробует тяжелее модели.
+        Записывает каждую попытку в result["multipass_attempts"].
+        Возвращает результат с наибольшей уверенностью среди всех попыток.
+        """
+        threshold = settings.STT_MIN_CONFIDENCE_THRESHOLD
+        max_retries = settings.STT_MAX_RETRIES
+
+        # threshold == 0 → никогда не ретраить
+        if threshold <= 0.0 or max_retries <= 0:
+            return first_result
+
+        first_conf = self._raw_confidence_from_result(first_result)
+        t0 = time.time()
+        attempts = [
+            {
+                "model": first_result.get("model_used", self.current_model),
+                "confidence": round(first_conf, 4),
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
+        ]
+
+        if first_conf >= threshold:
+            first_result["multipass_attempts"] = attempts
+            return first_result
+
+        # Строим список кандидатов для retry: max-model(s) + optional remote
+        retry_candidates: list[dict[str, Any]] = []
+        for model in settings.model_max_list:
+            if model not in self._unavailable_models:
+                retry_candidates.append({"kind": "model", "name": model})
+        if settings.NETWORK_MODE != "offline_strict":
+            retry_candidates.append({"kind": "remote", "name": "remote"})
+
+        best_result = first_result
+        best_conf = first_conf
+
+        retries_done = 0
+        for candidate in retry_candidates:
+            if retries_done >= max_retries:
+                break
+
+            model_label = candidate["name"]
+            logger.info(
+                "[STT] balanced→%s retry: confidence %.2f < %.2f threshold",
+                model_label, best_conf, threshold,
+            )
+
+            attempt_start = time.time()
+            try:
+                if candidate["kind"] == "model":
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(
+                            self._transcribe_model, audio_data, model_label, prompt, language,
+                        )
+                        attempt_result = future.result(timeout=settings.TRANSCRIBE_TIMEOUT_SEC)
+                    attempt_result["model_used"] = model_label
+                else:
+                    attempt_result = self._transcribe_remote(audio_data, prompt)
+
+                attempt_conf = self._raw_confidence_from_result(attempt_result)
+                latency_ms = int((time.time() - attempt_start) * 1000)
+                attempts.append({
+                    "model": model_label,
+                    "confidence": round(attempt_conf, 4),
+                    "latency_ms": latency_ms,
+                })
+
+                if attempt_conf > best_conf:
+                    best_conf = attempt_conf
+                    best_result = attempt_result
+
+                if best_conf >= threshold:
+                    logger.info(
+                        "[STT] multipass: %s достиг порога %.2f >= %.2f",
+                        model_label, best_conf, threshold,
+                    )
+                    break
+
+            except Exception as exc:
+                latency_ms = int((time.time() - attempt_start) * 1000)
+                logger.warning("[STT] multipass retry %s не сработал: %s", model_label, exc)
+                attempts.append({
+                    "model": model_label,
+                    "confidence": 0.0,
+                    "latency_ms": latency_ms,
+                    "error": str(exc),
+                })
+                self._unavailable_models.add(model_label)
+
+            retries_done += 1
+
+        best_result["multipass_attempts"] = attempts
+        return best_result
 
     def _transcribe_with_fallback(self, audio_data: Any, prompt: str, language: str | None = None) -> dict[str, Any]:
         """Пробует несколько моделей при возникновении ошибок (например, нехватка VRAM).
