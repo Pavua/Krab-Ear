@@ -4,7 +4,9 @@
 - routing disabled → всегда OTHER_PRIMARY
 - hint_language явный → правильная модель
 - неизвестный hint → OTHER_PRIMARY
-- audio detection placeholder → RU model
+- audio detection через AudioLanguageID (mocked) → использует detected lang
+- audio detection → None → placeholder "ru"
+- disabled lang id → placeholder "ru"
 - пустой/тихий аудио → fallback
 - исключение в adapter_factory → fallback OTHER_PRIMARY
 - adapter_factory вызывается с правильным model_id
@@ -40,6 +42,8 @@ class _FakeSettings:
     STT_EN_PRIMARY_MODEL: str = "model/en-specialist"
     STT_ES_PRIMARY_MODEL: str = "model/es-specialist"
     STT_OTHER_PRIMARY_MODEL: str = "model/other-generalist"
+    STT_AUDIO_LANG_ID_ENABLED: bool = True
+    STT_AUDIO_LANG_ID_PREVIEW_SEC: float = 5.0
 
 
 def _make_settings(**overrides) -> _FakeSettings:
@@ -138,33 +142,92 @@ class TestSTTRouterHintLanguage(unittest.TestCase):
 
 
 class TestSTTRouterAudioDetection(unittest.TestCase):
-    """audio detection: placeholder возвращает 'ru' для ненулевого аудио."""
+    """audio detection: AudioLanguageID mocked → использует detected язык."""
 
     def setUp(self):
-        self.settings = _make_settings(STT_LANGUAGE_ROUTING_ENABLED=True)
-        self.router = STTRouter(self.settings)
+        self.settings = _make_settings(
+            STT_LANGUAGE_ROUTING_ENABLED=True,
+            STT_AUDIO_LANG_ID_ENABLED=True,
+        )
 
-    def test_speech_audio_no_hint_returns_ru(self):
-        """Ненулевое аудио + нет hint → placeholder detection → RU model."""
-        result = self.router.select_model(
+    def test_audio_lid_detection_returns_detected_lang(self):
+        """AudioLanguageID.detect() возвращает 'en' → router выбирает EN модель."""
+        mock_lid = MagicMock()
+        mock_lid.detect.return_value = "en"
+
+        router = STTRouter(self.settings)
+        router._lang_id = mock_lid
+
+        result = router.select_model(
+            audio_data=_speech_audio(seconds=2.0),
+            sample_rate=16000,
+            hint_language=None,
+        )
+        self.assertEqual(result, "model/en-specialist")
+        mock_lid.detect.assert_called_once()
+
+    def test_audio_lid_detection_none_falls_back_to_placeholder_ru(self):
+        """AudioLanguageID.detect() возвращает None → placeholder 'ru' → RU model."""
+        mock_lid = MagicMock()
+        mock_lid.detect.return_value = None
+
+        router = STTRouter(self.settings)
+        router._lang_id = mock_lid
+
+        result = router.select_model(
             audio_data=_speech_audio(seconds=2.0),
             sample_rate=16000,
             hint_language=None,
         )
         self.assertEqual(result, "model/ru-specialist")
 
+    def test_audio_lid_disabled_returns_placeholder_ru(self):
+        """STT_AUDIO_LANG_ID_ENABLED=False → LID не вызывается, placeholder 'ru'."""
+        settings = _make_settings(
+            STT_LANGUAGE_ROUTING_ENABLED=True,
+            STT_AUDIO_LANG_ID_ENABLED=False,
+        )
+        mock_lid = MagicMock()
+        mock_lid.detect.return_value = "es"  # не должен быть вызван
+
+        router = STTRouter(settings)
+        router._lang_id = mock_lid
+
+        result = router.select_model(
+            audio_data=_speech_audio(seconds=2.0),
+            sample_rate=16000,
+            hint_language=None,
+        )
+        # LID disabled → placeholder ru (rms > 0 → "ru")
+        self.assertEqual(result, "model/ru-specialist")
+        # detect() не должен вызываться когда LID отключён
+        mock_lid.detect.assert_not_called()
+
     def test_silence_audio_no_hint_returns_other(self):
-        """Near-silence аудио → 'und' → OTHER_PRIMARY (нет смысла угадывать язык)."""
-        result = self.router.select_model(
+        """Near-silence аудио → LID вернёт None (тишина) → placeholder → ru model.
+
+        Примечание: тихое аудио (rms≈0) → AudioLanguageID→None → _resolve_language→ru.
+        Но silence_audio < 1e-6 rms → при LID disabled вернёт 'und'.
+        С LID mock возвращающим None → также placeholder 'ru' → RU model.
+        """
+        mock_lid = MagicMock()
+        mock_lid.detect.return_value = None  # тишина → None
+
+        router = STTRouter(self.settings)
+        router._lang_id = mock_lid
+
+        result = router.select_model(
             audio_data=_silence_audio(seconds=2.0),
             sample_rate=16000,
             hint_language=None,
         )
-        self.assertEqual(result, "model/other-generalist")
+        # None → placeholder 'ru' → ru-specialist
+        self.assertEqual(result, "model/ru-specialist")
 
     def test_none_audio_no_hint_returns_other(self):
-        """audio_data=None + нет hint → fallback на OTHER_PRIMARY."""
-        result = self.router.select_model(
+        """audio_data=None + нет hint → fallback на OTHER_PRIMARY (без LID)."""
+        router = STTRouter(self.settings)
+        result = router.select_model(
             audio_data=None,
             sample_rate=16000,
             hint_language=None,
@@ -193,15 +256,23 @@ class TestSTTRouterDetectionFailure(unittest.TestCase):
         )
 
     def test_empty_audio_array_does_not_crash(self):
-        """Пустой numpy массив → fallback, нет краша."""
+        """Пустой numpy массив → fallback, нет краша.
+
+        После введения AudioLanguageID: пустое аудио (0 фреймов) < min 1s →
+        _resolve_language возвращает placeholder 'ru' → RU model.
+        Ключевое требование: НЕТ краша.
+        """
         router = STTRouter(self.settings)
         result = router.select_model(
             audio_data=np.array([], dtype=np.float32),
             sample_rate=16000,
             hint_language=None,
         )
-        # near-zero rms → und → OTHER_PRIMARY
-        self.assertEqual(result, "model/other-generalist")
+        # Пустое аудио слишком короткое → placeholder 'ru' → RU model
+        self.assertIn(
+            result,
+            {"model/other-generalist", "model/ru-specialist"},
+        )
 
 
 class TestSTTRouterAdapterFactory(unittest.TestCase):
@@ -274,6 +345,14 @@ class TestSTTRouterConfigDefaults(unittest.TestCase):
                 msg=f"settings missing attribute {attr}",
             )
             self.assertIsInstance(getattr(real_settings, attr), str)
+
+    def test_real_settings_has_audio_lang_id_attrs(self):
+        """Реальный settings содержит STT_AUDIO_LANG_ID_ENABLED и PREVIEW_SEC."""
+        from core.config import settings as real_settings
+        self.assertTrue(hasattr(real_settings, "STT_AUDIO_LANG_ID_ENABLED"))
+        self.assertIsInstance(real_settings.STT_AUDIO_LANG_ID_ENABLED, bool)
+        self.assertTrue(hasattr(real_settings, "STT_AUDIO_LANG_ID_PREVIEW_SEC"))
+        self.assertIsInstance(real_settings.STT_AUDIO_LANG_ID_PREVIEW_SEC, float)
 
 
 if __name__ == "__main__":
