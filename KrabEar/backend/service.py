@@ -182,11 +182,6 @@ class BackendService:
         self._llm_rewriter = self._init_llm_rewriter()
         self._action_items_extractor = self._init_action_items_extractor()
 
-        self._action_items_extractor = ActionItemsExtractor(
-            llm_rewriter=self._llm_rewriter,
-            settings=self._cached_settings,
-        )
-
         if transcriber is None:
             self.transcriber = Transcriber(
                 llm_rewriter=self._llm_rewriter,
@@ -362,6 +357,7 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
+        )
         # Семантический поиск (opt-in, lazy model load)
         self._semantic_searcher = SemanticSearcher(
             data_dir=self.store.data_dir,
@@ -604,7 +600,6 @@ class BackendService:
         return {"requested": True, "task_id": task_id}
 
 
-    def _handle_extract_action_items(self, params: dict) -> dict:
     # ------------------------------------------------------------------
     # Action Items handlers
     # ------------------------------------------------------------------
@@ -1518,9 +1513,9 @@ class BackendService:
         # Результат кэшируется 6 часов; при disabled — пустой список.
         _auto_glossary_terms: list[str] = []
         _cached_settings_ag = self._settings_svc.cached_settings()
-        _ag_window_days = int(_cached_settings_ag.get("auto_glossary_window_days", settings.AUTO_GLOSSARY_WINDOW_DAYS))
-        _ag_top_n = int(_cached_settings_ag.get("auto_glossary_top_n", settings.AUTO_GLOSSARY_TOP_N))
-        if _cached_settings_ag.get("auto_glossary_enabled", settings.AUTO_GLOSSARY_ENABLED):
+        _ag_window_days = int(_cached_settings_ag.get("auto_glossary_window_days", DEFAULT_SETTINGS.get("auto_glossary_window_days", 7)))
+        _ag_top_n = int(_cached_settings_ag.get("auto_glossary_top_n", DEFAULT_SETTINGS.get("auto_glossary_top_n", 30)))
+        if _cached_settings_ag.get("auto_glossary_enabled", DEFAULT_SETTINGS.get("auto_glossary_enabled", True)):
             try:
                 _auto_glossary_terms = self._auto_glossary.build(
                     window_days=_ag_window_days, top_n=_ag_top_n

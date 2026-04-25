@@ -656,7 +656,6 @@ class AudioEngine:
                     from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
                     audio_data = _zero_sr(audio_data, silence_ranges, sample_rate=16000)
                     logger.debug(
-                        "transcribe: silence_ranges применены (%d диапазонов)", len(silence_ranges)
                         "transcribe: silence_ranges применены (%d диапазонов)",
                         len(silence_ranges),
                     )

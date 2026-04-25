@@ -60,7 +60,6 @@ class StateStore:
                 self.annotations_path,
                 self.vocabulary_path,
                 self.text_updates_path,
-                self.action_items_path):
                 self.action_items_path,
                 self.calendar_links_path):
             path.touch(exist_ok=True)
@@ -1155,13 +1154,6 @@ class StateStore:
             self._append_ndjson(self.action_items_path, entry)
         return True
 
-    def get_history_item_action_items(self, item_id: str):
-        """Возвращает последние action items для записи или None."""
-            import json as _j
-            entry = {"id": clean_id, "action_items": list(action_items), "decisions": list(decisions), "questions": list(questions), "ts": _dt.now().isoformat(timespec="seconds")}
-            self._append_ndjson(self.action_items_path, entry)
-        return True
-
     def get_history_item_action_items(self, item_id):
         clean_id = item_id.strip()
         if not clean_id:
@@ -1180,16 +1172,12 @@ class StateStore:
         """Читает журнал action_items, last-write-wins по id."""
         result = {}
         try:
-            import json as _json
-        result = {}
-        try:
             import json as _j
             for line in self.action_items_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    entry = _json.loads(line)
                     entry = _j.loads(line)
                     if isinstance(entry, dict) and entry.get("id"):
                         result[entry["id"]] = entry

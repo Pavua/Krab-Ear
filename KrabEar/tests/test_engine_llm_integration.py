@@ -121,7 +121,7 @@ class AudioEngineLLMHookTestCase(unittest.TestCase):
         )
         engine = self._make_engine_with_rewriter(
             fake_rewriter,
-            lambda k, d: True,
+            lambda k, d: True if isinstance(d, bool) else d,
         )
 
         result = engine.transcribe(audio_data="fake.wav")
