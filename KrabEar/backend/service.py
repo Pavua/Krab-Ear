@@ -415,7 +415,6 @@ class BackendService:
         except Exception:
             return default
 
-
     # ---------------------------------------------------------------------------
     # Bulk re-process handlers (bulk_reprocess.py)
     # ---------------------------------------------------------------------------
