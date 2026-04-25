@@ -705,6 +705,20 @@ class AudioEngine:
             cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
             text = cleaned_text
 
+            # 4.3 Голосовые команды диктовки (opt-in, перед punctuation pass)
+            # «запятая» → «,», «новый абзац» → «\n\n», «удалить последнее слово» и т.д.
+            from core.voice_commands import VoiceCommandProcessor  # lazy — avoid circular
+            _vc_processor = VoiceCommandProcessor(settings_get=self._settings_get)
+            _vc_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+            _vc_result = _vc_processor.process(text, language=_vc_lang)
+            if _vc_result != text:
+                _report("voice_commands")
+                logger.info(
+                    "VoiceCommands: %d chars → %d chars (lang=%s)",
+                    len(text), len(_vc_result), _vc_lang,
+                )
+                text = _vc_result
+
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
             if self._punctuation_pass_allowed():
                 _report("punctuation_pass")
