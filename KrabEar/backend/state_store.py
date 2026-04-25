@@ -45,6 +45,7 @@ class StateStore:
         self.favorites_path = self.data_dir / "history_favorites.ndjson"
         self.annotations_path = self.data_dir / "history_annotations.ndjson"
         self.vocabulary_path = self.data_dir / "vocabulary.txt"
+        self.text_updates_path = self.data_dir / "history_text_updates.ndjson"
         self.lock_path = self.data_dir / "history.lock"
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,8 @@ class StateStore:
                 self.tags_path,
                 self.favorites_path,
                 self.annotations_path,
-                self.vocabulary_path):
+                self.vocabulary_path,
+                self.text_updates_path):
             path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
@@ -659,6 +661,7 @@ class StateStore:
         self.status_path.write_text("", encoding="utf-8")
         self.tags_path.write_text("", encoding="utf-8")
         self.favorites_path.write_text("", encoding="utf-8")
+        self.text_updates_path.write_text("", encoding="utf-8")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -681,11 +684,12 @@ class StateStore:
         }
 
     def _load_active_items_unlocked(self) -> list[HistoryItem]:
-        """Читает активные записи с применением tombstone, status-override, tags-override и favorites-override."""
+        """Читает активные записи с применением tombstone, status-override, tags-override, favorites-override и text-override."""
         deleted = self._load_deleted_ids_unlocked()
         statuses = self._load_status_overrides_unlocked()
         tags_overrides = self._load_tags_overrides_unlocked()
         favorites_overrides = self._load_favorites_overrides_unlocked()
+        text_overrides = self._load_text_overrides_unlocked()
 
         items: list[HistoryItem] = []
         for item in self._iter_history_items_unlocked():
@@ -697,8 +701,48 @@ class StateStore:
                 item.tags = tags_overrides[item.id]
             if item.id in favorites_overrides:
                 item.favorite = favorites_overrides[item.id]
+            if item.id in text_overrides:
+                override = text_overrides[item.id]
+                item.text = override["text"]
+                if override.get("confidence") is not None:
+                    item.confidence = float(override["confidence"])
             items.append(item)
         return items
+
+
+    def _load_text_overrides_unlocked(self) -> dict[str, dict]:
+        """Собирает последние text/confidence overrides из журнала bulk-reprocess."""
+        result: dict[str, dict] = {}
+        if not self.text_updates_path.exists():
+            return result
+        for payload in self._read_ndjson_unlocked(self.text_updates_path):
+            item_id = str(payload.get("id", "")).strip()
+            if item_id and "text" in payload:
+                result[item_id] = {
+                    "text": str(payload["text"]),
+                    "confidence": payload.get("confidence"),
+                }
+        return result
+
+    def update_history_item_text(self, item_id: str, text: str, confidence: float | None = None) -> bool:
+        """Сохраняет text/confidence override для записи через delta-журнал bulk-reprocess.
+
+        Returns True если запись с таким id существует, False иначе.
+        """
+        clean_id = item_id.strip()
+        if not clean_id:
+            return False
+        with self._lock():
+            # Verify item exists
+            active_ids = {item.id for item in self._load_active_items_unlocked()}
+            if clean_id not in active_ids:
+                return False
+            entry = {"id": clean_id, "text": text}
+            if confidence is not None:
+                entry["confidence"] = round(float(confidence), 4)
+            with self.text_updates_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            return True
 
     def _load_tags_overrides_unlocked(self) -> dict[str, list[str]]:
         """Собирает последние значения tags по id из журнала тегов."""

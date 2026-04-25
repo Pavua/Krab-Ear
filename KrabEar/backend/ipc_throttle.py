@@ -46,6 +46,7 @@ HEAVY_METHODS: Set[str] = {
     "analyze_silence",          # анализ тишины в аудио
     "get_waveform",             # генерация waveform-данных
     "convert_audio",            # конвертация аудио
+    "bulk_reprocess_start",     # массовое перетранскрибирование (запуск фонового задания)
 }
 
 MEDIUM_METHODS: Set[str] = {
