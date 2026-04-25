@@ -250,6 +250,19 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
 
+    # --- VAD pre-filter перед STT ---
+    # При STT_VAD_PREFILTER_ENABLED=True аудио пропускается через VoiceActivityDetector
+    # ДО передачи в Whisper. Это устраняет галлюцинации на тишине
+    # ("спасибо за просмотр", "subscribe to the channel" и т.п.).
+    # Алгоритм:
+    #   1. VAD делит аудио на речь/тишину (30ms фреймы, адаптивный порог).
+    #   2. Паузы длиннее STT_VAD_SILENCE_TRIM_THRESHOLD_SEC обрезаются до 0.5s.
+    #   3. Если суммарная речь < 0.3s → возврат пустого результата без вызова STT.
+    STT_VAD_PREFILTER_ENABLED: bool = True
+    # Пороговая длина тишины для обрезки (секунды). Паузы длиннее этого значения
+    # сжимаются до 0.5s padding. По умолчанию 2.0s.
+    STT_VAD_SILENCE_TRIM_THRESHOLD_SEC: float = 2.0
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -292,6 +305,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Обрезка хвоста после stop (мс), чтобы не захватывать шум/хвост от фонового аудио.
     "stop_tail_trim_ms": 180,
     # Защита от ложной транскрибации на тишине/фоновом шуме.
+    # VAD pre-filter перед STT
+    "stt_vad_prefilter_enabled": True,
+    "stt_vad_silence_trim_threshold_sec": 2.0,
     "silence_guard_enabled": True,
     "silence_guard_rms_threshold": 0.0020,
     "silence_guard_peak_threshold": 0.0120,
