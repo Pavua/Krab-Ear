@@ -104,6 +104,18 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var previewPollTick = 0
     var isRecoveringHistoryFromFilters = false
 
+    // MARK: - Inline translation (per-item toggle)
+    /// NSCache<NSString, NSString>: itemID → translated text.  Capacity 100 items.
+    let inlineTranslationCache: NSCache<NSString, NSString> = {
+        let c = NSCache<NSString, NSString>()
+        c.countLimit = 100
+        return c
+    }()
+    /// Set of item IDs currently showing their translation (toggled ON).
+    var inlineTranslationVisible: Set<String> = []
+    /// Set of item IDs that have an IPC request in-flight.
+    var inlineTranslationLoading: Set<String> = []
+
     let mainTabView = NSTabView()
     let tableView = NSTableView()
     let searchField = NSSearchField()
