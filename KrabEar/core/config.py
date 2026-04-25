@@ -313,6 +313,19 @@ class Settings(BaseSettings):
     # Используется для детектирования и удаления дублей на швах.
     STT_STREAMING_OVERLAP_SEC: float = 2.0
 
+    # --- Language-aware STT router (scaffold, Phase 5 future) ---
+    # Маршрутизация на языково-специализированные STT модели.
+    # По умолчанию выключено — используется единый whisper-large-v3 для всех языков.
+    # При STT_LANGUAGE_ROUTING_ENABLED=True router выбирает модель по определённому языку:
+    # RU → STT_RU_PRIMARY_MODEL, EN → STT_EN_PRIMARY_MODEL, ES → STT_ES_PRIMARY_MODEL,
+    # другие → STT_OTHER_PRIMARY_MODEL. Интеграция в engine.py — в follow-up PR.
+    STT_LANGUAGE_ROUTING_ENABLED: bool = False
+    # Модель по умолчанию для каждого языка. Текущий дефолт = whisper-large-v3 (generalist).
+    STT_RU_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
+    STT_EN_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
+    STT_ES_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
+    STT_OTHER_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -447,4 +460,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_streaming_min_audio_sec": 30.0,
     "stt_streaming_chunk_sec": 15.0,
     "stt_streaming_overlap_sec": 2.0,
+    # --- Language-aware STT router (scaffold, Phase 5 future) ---
+    # Выключено до выбора RU-специализированной модели по результатам research.
+    "stt_language_routing_enabled": False,
+    "stt_ru_primary_model": "mlx-community/whisper-large-v3-mlx",
+    "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
+    "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
+    "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
 }
