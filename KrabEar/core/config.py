@@ -238,6 +238,12 @@ class Settings(BaseSettings):
     # На M4 Max рекомендуется "mps" — ~3× быстрее CPU при том же потреблении памяти.
     STT_GIGAAM_DEVICE: str = "mps"
 
+    # --- Voice fingerprint matching ---
+    # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
+    # По умолчанию выключено (opt-in); требует pyannote.audio.
+    VOICE_FINGERPRINT_ENABLED: bool = False
+    VOICE_FINGERPRINT_MATCH_THRESHOLD: float = 0.75
+
     # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
     # Мост для отправки транскрипций напрямую в Telegram через main Krab web-панель.
     # False = функция "Отправить в Telegram" в UI скрыта / недоступна.
@@ -536,4 +542,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "bulk_reprocess_batch_size": 5,
     # Export speaker labels
     "export_include_speaker_labels": False,
+    # --- Voice fingerprint matching ---
+    "voice_fingerprint_enabled": False,
+    "voice_fingerprint_match_threshold": 0.75,
 }
