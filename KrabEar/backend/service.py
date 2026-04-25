@@ -4359,6 +4359,8 @@ class IPCServer:
                 }
                 try:
                     conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                except BrokenPipeError:
+                    logger.debug("Клиент закрыл соединение до получения invalid_json-ответа")
                 except Exception:
                     logger.exception("Ошибка отправки invalid_json-ответа")
                 return
@@ -4374,6 +4376,8 @@ class IPCServer:
                 }
             try:
                 conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            except BrokenPipeError:
+                logger.debug("Клиент закрыл соединение до получения ответа")
             except Exception:
                 logger.exception("Ошибка отправки ответа клиенту")
 
