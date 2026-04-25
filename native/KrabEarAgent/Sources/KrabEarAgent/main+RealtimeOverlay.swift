@@ -62,6 +62,11 @@ extension AgentAppDelegate {
             durationText: durationText,
             modeHint: modeHint
         )
+
+        // VU meter: обновляем уровень RMS (~0.85 Hz из polling)
+        if let audioRms = result["audio_rms"] as? Double {
+            realtimeOverlay.setAudioLevel(Float(audioRms))
+        }
     }
 
     func previewTranslationModeHint() -> String {

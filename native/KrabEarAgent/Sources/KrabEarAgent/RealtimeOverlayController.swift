@@ -121,6 +121,9 @@ public final class RealtimeOverlayController {
     /// 4c: Stage badge (pill) для reveal animation ("Распознано" / "Очищено" / "LLM")
     private let stageBadge   = StageBadgeView()
 
+    /// VU meter — visualizes RMS audio level during recording
+    private let audioLevelMeter = AudioLevelMeter()
+
     /// Основной текст (preview / stage text)
     private let primaryLabel = NSTextField(wrappingLabelWithString: "")
 
@@ -195,6 +198,7 @@ public final class RealtimeOverlayController {
         if overlayState == .hidden { return }
         overlayState = .hidden
         recordingDot.isHidden = true
+        audioLevelMeter.setLevel(0.0)
         tintView.tintColor = .clear
         animateHide { [weak self] in
             Task { @MainActor [weak self] in
@@ -232,6 +236,11 @@ public final class RealtimeOverlayController {
         if panel.isVisible && overlayState != .hidden {
             panel.alphaValue = targetAlpha
         }
+    }
+
+    public func setAudioLevel(_ rms: Float) {
+        guard overlayState == .live else { return }
+        audioLevelMeter.setLevel(rms)
     }
 
     // MARK: - Reveal Animation API
@@ -387,10 +396,12 @@ public final class RealtimeOverlayController {
         primaryLabel.wantsLayer      = true
         primaryLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        audioLevelMeter.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(modeLabel)
         effectView.addSubview(statusLabel)
         effectView.addSubview(recordingDot)
         effectView.addSubview(stageBadge)
+        effectView.addSubview(audioLevelMeter)
         effectView.addSubview(primaryLabel)
 
         NSLayoutConstraint.activate([
@@ -406,8 +417,14 @@ public final class RealtimeOverlayController {
             recordingDot.trailingAnchor.constraint(equalTo: modeLabel.leadingAnchor, constant: -6),
             recordingDot.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
 
-            // 4c: stage badge — right of recordingDot / below modeLabel row in reveal
-            stageBadge.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 8),
+            // VU meter — below modeLabel row, full width
+            audioLevelMeter.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 6),
+            audioLevelMeter.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
+            audioLevelMeter.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -14),
+            audioLevelMeter.heightAnchor.constraint(equalToConstant: 4),
+
+            // 4c: stage badge — below VU meter in reveal
+            stageBadge.topAnchor.constraint(equalTo: audioLevelMeter.bottomAnchor, constant: 6),
             stageBadge.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: KrabEarTheme.Metrics.comfortable),
 
             primaryLabel.topAnchor.constraint(equalTo: stageBadge.bottomAnchor, constant: 2),
@@ -596,12 +613,13 @@ public final class RealtimeOverlayController {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
         let insets: CGFloat = 14 * 2
         let topRowH: CGFloat = 26
+        let vuMeterH: CGFloat = 4 + 6 + 6  // height + topSpacing + bottomSpacing
         let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
-        let padding: CGFloat = 10 + 8 + 2 + 12
+        let padding: CGFloat = 10 + 2 + 12
         let textWidth = width - insets
 
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
-        let total = topRowH + stageLabelH + padding + textH
+        let total = topRowH + vuMeterH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
         var frame = panel.frame
@@ -615,11 +633,12 @@ public final class RealtimeOverlayController {
         let width: CGFloat = 520
         let insets: CGFloat = 14 * 2
         let topRowH: CGFloat = 26
+        let vuMeterH: CGFloat = 4 + 6 + 6  // height + topSpacing + bottomSpacing
         let stageLabelH: CGFloat = stageBadge.isHidden ? 0 : 18
-        let padding: CGFloat = 10 + 8 + 2 + 12
+        let padding: CGFloat = 10 + 2 + 12
         let textWidth = width - insets
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
-        let total = topRowH + stageLabelH + padding + textH
+        let total = topRowH + vuMeterH + stageLabelH + padding + textH
         return clamp(value: total, min: minHeight, max: maxHeight)
     }
 
