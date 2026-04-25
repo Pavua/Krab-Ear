@@ -500,8 +500,11 @@ class TestAnalyticsDashboardIPCMethod(unittest.TestCase):
 
         class _FakeRecorder:
             is_recording = False
+
             def start(self): pass
+
             def stop(self): return b""
+
             def snapshot_audio(self, max_duration_sec: float = 12.0):
                 import numpy as np
                 return np.zeros(int(max_duration_sec * 16000), dtype=np.float32), max_duration_sec
@@ -510,6 +513,7 @@ class TestAnalyticsDashboardIPCMethod(unittest.TestCase):
             engine = MagicMock()
             engine._llm_rewriter = None
             engine._settings_get = None
+
             def transcribe(self, *a, **kw): return ("", 0.0)
 
         svc = BackendService(
@@ -610,8 +614,11 @@ class TestGenerateHtmlReportIPCMethod(unittest.TestCase):
 
         class _FakeRecorder:
             is_recording = False
+
             def start(self): pass
+
             def stop(self): return b""
+
             def snapshot_audio(self, max_duration_sec: float = 12.0):
                 import numpy as np
                 return np.zeros(int(max_duration_sec * 16000), dtype=np.float32), max_duration_sec
@@ -620,6 +627,7 @@ class TestGenerateHtmlReportIPCMethod(unittest.TestCase):
             engine = MagicMock()
             engine._llm_rewriter = None
             engine._settings_get = None
+
             def transcribe(self, *a, **kw): return ("", 0.0)
 
         return BackendService(

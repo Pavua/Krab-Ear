@@ -81,6 +81,8 @@ class FakeTranscriber:
         domain: str = "casual",
         extra_vocabulary: Any = None,
         lang_hint: Any = None,
+        history_context: Any = None,
+        stt_hotwords: Any = None,
     ) -> str:
         self.counter += 1
         return f"transcript #{self.counter}"

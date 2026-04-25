@@ -72,7 +72,8 @@ class FakeTranscriber:
         self.preview_counter = 0
 
     def transcribe(self, audio_data, quality_profile="balanced", cleanup_profile="soft",
-                   domain="casual", extra_vocabulary=None, lang_hint=None) -> str:
+                   domain="casual", extra_vocabulary=None, lang_hint=None,
+                   history_context=None, stt_hotwords=None) -> str:
         self.counter += 1
         return f"тест #{self.counter}"
 

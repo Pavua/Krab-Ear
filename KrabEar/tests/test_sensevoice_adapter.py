@@ -35,6 +35,7 @@ class TestSenseVoiceAdapterDisabled(unittest.TestCase):
         mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
 
         engine = AudioEngine.__new__(AudioEngine)
+        engine._router = None
         engine.quality_profile = "balanced"
         engine.current_model = "mlx-community/whisper-large-v3-turbo"
         engine._unavailable_models = set()
@@ -78,6 +79,7 @@ class TestSenseVoiceAdapterEnabled(unittest.TestCase):
         mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
 
         engine = AudioEngine.__new__(AudioEngine)
+        engine._router = None
         engine.quality_profile = "balanced"
         engine.current_model = "mlx-community/whisper-large-v3-turbo"
         # Помечаем balanced whisper как недоступный — SenseVoice должен сработать
@@ -118,6 +120,7 @@ class TestSenseVoiceAdapterEnabled(unittest.TestCase):
         ]
 
         engine = AudioEngine.__new__(AudioEngine)
+        engine._router = None
         engine.quality_profile = "max"
         engine.current_model = "mlx-community/whisper-large-v3-mlx"
         engine._unavailable_models = set()
@@ -163,6 +166,7 @@ class TestSenseVoiceAdapterEnabled(unittest.TestCase):
         mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
 
         engine = AudioEngine.__new__(AudioEngine)
+        engine._router = None
         engine.quality_profile = "balanced"
         engine.current_model = "mlx-community/whisper-large-v3-turbo"
         # Маркер уже помечен недоступным после предыдущего сбоя

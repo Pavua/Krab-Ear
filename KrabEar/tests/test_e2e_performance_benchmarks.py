@@ -90,6 +90,8 @@ class _FakeTranscriber:
         domain: str = "casual",
         extra_vocabulary=None,
         lang_hint=None,
+        history_context=None,
+        stt_hotwords=None,
     ) -> str:
         if self._delay:
             time.sleep(self._delay)

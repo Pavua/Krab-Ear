@@ -709,7 +709,6 @@ class StateStore:
             items.append(item)
         return items
 
-
     def _load_text_overrides_unlocked(self) -> dict[str, dict]:
         """Собирает последние text/confidence overrides из журнала bulk-reprocess."""
         result: dict[str, dict] = {}
