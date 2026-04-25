@@ -36,6 +36,7 @@ except Exception:
     mlx_whisper = None  # type: ignore[assignment]
 
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
+from core.transcript_context import build_initial_prompt
 
 try:
     import soundfile as sf  # type: ignore
@@ -516,6 +517,8 @@ class AudioEngine:
         extra_vocabulary: list[str] | None = None,
         lang_hint: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        history_context: list[Any] | None = None,
+        stt_hotwords: list[str] | None = None,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -526,6 +529,11 @@ class AudioEngine:
                        этапа ("audio_load", "normalize", "stt", "cleanup", "diarize", "llm_rewrite").
                        Исключения внутри колбэка подавляются — отчёт о прогрессе не должен ломать
                        транскрибацию.
+            history_context: Последние элементы истории (HistoryItem или dict) для построения
+                       initial_prompt. Передаются из BackendService; engine не знает про StateStore.
+                       None / [] → контекст не используется.
+            stt_hotwords: Пользовательские термины для Glossary-префикса в initial_prompt.
+                       None / [] → Glossary-блок не добавляется.
         """
         def _report(stage: str) -> None:
             if progress_callback is not None:
@@ -551,6 +559,14 @@ class AudioEngine:
             dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
             if extra_vocabulary:
                 dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
+            # Обогащаем prompt контекстом недавней истории и пользовательскими hotwords.
+            # build_initial_prompt возвращает пустую строку если нет ни контекста, ни hotwords.
+            context_suffix = build_initial_prompt(
+                history_items=history_context or [],
+                hotwords=stt_hotwords or [],
+            )
+            if context_suffix:
+                dynamic_prompt = f"{context_suffix} {dynamic_prompt}"
 
             # Добавляем speaker-aware dialogue hint если включено и спикеров ≥ threshold.
             if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and settings.DIARIZATION_ENABLED:

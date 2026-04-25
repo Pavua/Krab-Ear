@@ -313,6 +313,10 @@ class Settings(BaseSettings):
     # Используется для детектирования и удаления дублей на швах.
     STT_STREAMING_OVERLAP_SEC: float = 2.0
 
+    # --- STT quality: user hotwords for initial_prompt boost ---
+    # Управляется через IPC: add_stt_hotword / remove_stt_hotword / list_stt_hotwords.
+    STT_HOTWORDS: List[str] = []
+
     # --- Language-aware STT router (scaffold, Phase 5 future) ---
     # Маршрутизация на языково-специализированные STT модели.
     # По умолчанию выключено — используется единый whisper-large-v3 для всех языков.
@@ -481,4 +485,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_enabled": False,
     "stt_gigaam_mode": "rnnt",
     "stt_gigaam_device": "mps",
+    # --- STT hotwords (initial_prompt boost) ---
+    "stt_hotwords": [],
 }
