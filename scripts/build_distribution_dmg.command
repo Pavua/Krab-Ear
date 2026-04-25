@@ -204,6 +204,19 @@ HASH_VALUE="$(awk '{print $1}' "$HASH_FILE")"
 ok "SHA256: $HASH_VALUE"
 ok "Hash file: $HASH_FILE"
 
+# ── Step 7: Sentry release tracking ──────────────────────────────
+SENTRY_RELEASE_SCRIPT="$ROOT_DIR/scripts/sentry_create_release.py"
+if [[ -f "$SENTRY_RELEASE_SCRIPT" ]]; then
+  log "Creating Sentry release for version $VERSION..."
+  if python3 "$SENTRY_RELEASE_SCRIPT" --version "$VERSION" --env production; then
+    ok "Sentry release created"
+  else
+    warn "Sentry release creation failed (non-fatal — build is still valid)"
+  fi
+else
+  warn "sentry_create_release.py not found — skipping Sentry release tracking"
+fi
+
 # ── Final report ──────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

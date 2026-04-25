@@ -8,10 +8,33 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 _sentry_initialized = False
+
+
+def release_from_git() -> str:
+    """Determine release version from git describe.
+
+    Returns a string like 'v2.0.0-87-gabcdef' or 'krab-ear@unknown' on failure.
+    Runs git describe --tags --always --dirty.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            if version:
+                return version
+    except Exception:  # noqa: BLE001
+        pass
+    return "krab-ear@unknown"
 
 
 def init_sentry(
@@ -23,6 +46,9 @@ def init_sentry(
 
     Returns True if SDK was initialized, False if DSN absent or import fails.
     Compatible with any Sentry-protocol server (sentry.io, self-hosted GlitchTip, etc.).
+
+    If *release* is None, calls :func:`release_from_git` to determine the
+    release string automatically from the current git commit/tag.
     """
     global _sentry_initialized
 
@@ -30,20 +56,23 @@ def init_sentry(
         logger.debug("Sentry: DSN не задан — telemetry отключена")
         return False
 
+    resolved_release = release if release is not None else release_from_git()
+
     try:
         import sentry_sdk  # noqa: PLC0415  (lazy import — optional dep)
 
         sentry_sdk.init(
             dsn=dsn,
             environment=environment,
-            release=release or "krab-ear@unknown",
+            release=resolved_release,
             traces_sample_rate=0.05,
             send_default_pii=False,  # конфиденциальность
         )
         _sentry_initialized = True
         logger.info(
-            "Sentry инициализирован",
-            extra={"environment": environment, "release": release or "krab-ear@unknown"},
+            "Sentry инициализирован release=%s env=%s",
+            resolved_release,
+            environment,
         )
         return True
 
