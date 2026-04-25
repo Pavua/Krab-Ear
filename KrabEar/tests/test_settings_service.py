@@ -482,8 +482,6 @@ class TestCacheMultipleCalls(unittest.TestCase):
             store.load_settings.assert_called_once()
 
 
-
-
 class TestPresetChangedEvent(unittest.TestCase):
     """Проверяет, что handle_apply_profile_preset эмитит preset.changed через EventBus."""
 

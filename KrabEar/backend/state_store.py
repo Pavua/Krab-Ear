@@ -60,7 +60,6 @@ class StateStore:
                 self.annotations_path,
                 self.vocabulary_path,
                 self.text_updates_path,
-                self.action_items_path):
                 self.action_items_path,
                 self.calendar_links_path):
             path.touch(exist_ok=True)
@@ -1127,41 +1126,6 @@ class StateStore:
                 return item
         return None
 
-
-    # ------------------------------------------------------------------
-    # Action Items delta journal
-    # ------------------------------------------------------------------
-
-    def update_history_item_action_items(
-        self, item_id: str, action_items: list, decisions: list, questions: list
-    ) -> bool:
-        """Записывает action items для записи в журнал (last-write-wins по id)."""
-    def update_history_item_action_items(self, item_id, action_items, decisions, questions):
-        clean_id = item_id.strip()
-        if not clean_id:
-            return False
-        with self._lock():
-            active = self._load_active_items_unlocked()
-            if not any(item.id == clean_id for item in active):
-                return False
-            from datetime import datetime as _dt
-            entry = {
-                "id": clean_id,
-                "action_items": list(action_items),
-                "decisions": list(decisions),
-                "questions": list(questions),
-                "ts": _dt.now().isoformat(timespec="seconds"),
-            }
-            self._append_ndjson(self.action_items_path, entry)
-        return True
-
-    def get_history_item_action_items(self, item_id: str):
-        """Возвращает последние action items для записи или None."""
-            import json as _j
-            entry = {"id": clean_id, "action_items": list(action_items), "decisions": list(decisions), "questions": list(questions), "ts": _dt.now().isoformat(timespec="seconds")}
-            self._append_ndjson(self.action_items_path, entry)
-        return True
-
     def get_history_item_action_items(self, item_id):
         clean_id = item_id.strip()
         if not clean_id:
@@ -1175,29 +1139,6 @@ class StateStore:
         with self._lock():
             overrides = self._load_action_items_overrides_unlocked()
         return [a for a in overrides.values() if not a.get("done", False)]
-
-    def _load_action_items_overrides_unlocked(self):
-        """Читает журнал action_items, last-write-wins по id."""
-        result = {}
-        try:
-            import json as _json
-        result = {}
-        try:
-            import json as _j
-            for line in self.action_items_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = _json.loads(line)
-                    entry = _j.loads(line)
-                    if isinstance(entry, dict) and entry.get("id"):
-                        result[entry["id"]] = entry
-                except (ValueError, KeyError):
-                    continue
-        except OSError:
-            pass
-        return result
 
     def is_idempotent(self, chat_id: str | int | None, message_id: str | int | None) -> bool:
         """Проверяет, было ли уже успешно обработано сообщение с такими ID.

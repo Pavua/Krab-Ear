@@ -150,8 +150,15 @@ class TestAllDefaultSettingsHaveDefaults(unittest.TestCase):
 
     def test_default_settings_string_values_not_empty(self):
         """Строковые значения не должны быть пустыми строками (кроме разрешённых)."""
-        # voice_gateway_api_key и hf_token ожидаемо пустые
-        allowed_empty = {"voice_gateway_api_key", "hf_token"}
+        # voice_gateway_api_key и hf_token ожидаемо пустые;
+        # SMTP и recap поля пустые по умолчанию (пользователь вводит сам)
+        allowed_empty = {
+            "voice_gateway_api_key",
+            "hf_token",
+            "recap_email_to",
+            "smtp_host",
+            "smtp_user",
+        }
         empty_strings = [
             k
             for k, v in DEFAULT_SETTINGS.items()

@@ -346,8 +346,7 @@ class TestGigaAMFallbackOnTranscribeError(unittest.TestCase):
         fake_adapter = _make_fake_adapter()
         fake_router = _make_fake_router(adapter=fake_adapter)
 
-        import sys
-        mlx_stub = sys.modules.get("mlx_whisper", MagicMock())
+        mlx_stub = MagicMock()
         mlx_stub.transcribe.return_value = {
             "text": "whisper fallback result",
             "language": "ru",

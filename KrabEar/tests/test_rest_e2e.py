@@ -388,6 +388,7 @@ class AuthFlowTest(unittest.TestCase):
     def test_metrics_accessible_without_key_when_key_not_configured(self):
         with patch("backend.rest_server.settings") as mock_settings:
             mock_settings.REST_API_KEY = ""
+            mock_settings.REST_API_AUTH_ENABLED = False
             mock_settings.RATE_LIMIT_ENABLED = False
             mock_settings.LOG_FORMAT = "text"
             resp = self.client.get("/metrics")
@@ -396,6 +397,7 @@ class AuthFlowTest(unittest.TestCase):
     def test_prometheus_accessible_without_key_when_key_not_configured(self):
         with patch("backend.rest_server.settings") as mock_settings:
             mock_settings.REST_API_KEY = ""
+            mock_settings.REST_API_AUTH_ENABLED = False
             mock_settings.RATE_LIMIT_ENABLED = False
             mock_settings.LOG_FORMAT = "text"
             resp = self.client.get("/metrics/prometheus")
@@ -435,6 +437,7 @@ class AuthFlowTest(unittest.TestCase):
     def test_metrics_returns_200_for_correct_bearer_token(self):
         with patch("backend.rest_server.settings") as mock_settings:
             mock_settings.REST_API_KEY = "secret-key"
+            mock_settings.REST_API_AUTH_ENABLED = False
             mock_settings.RATE_LIMIT_ENABLED = False
             mock_settings.LOG_FORMAT = "text"
             resp = self.client.get(

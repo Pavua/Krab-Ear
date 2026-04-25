@@ -778,44 +778,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "paste_app_memory_enabled": True,
     # REST API token store
     "rest_api_auth_enabled": False,
-}
-    "bulk_reprocess_batch_size": 5,,
-    "voice_fingerprint_enabled": False,
-    "voice_fingerprint_match_threshold": 0.75,
-    # REST API token store (расширенное управление токенами)
-    "rest_api_auth_enabled": False,
-    # --- Semantic search ---
-    "semantic_search_enabled": False,
-    "semantic_search_model": "intfloat/multilingual-e5-base",
-    "semantic_search_auto_index": True,
-    # --- Быстрое переключение пресетов ---
-    "active_preset": "default",
-    "preset_quick_switch_hotkey": "cmd+shift+p",
-    # --- Мониторинг дискового пространства ---
-    "disk_monitor_enabled": True,
-    "disk_check_interval_min": 30,
-    "disk_warning_gb": 5.0,
-    "disk_critical_gb": 1.0,
-    "history_large_mb": 500,
-    "auto_cleanup_enabled": False,
-    "auto_cleanup_after_days": 365,
-    # --- Инлайн-перевод в истории (кнопка-флаг у каждой записи) ---
-    # "auto" = использовать активный translation_mode, иначе явный язык: "ru", "es", "en".
-    "inline_translation_target": "auto",
-    # Quick Edit before paste
-    "quick_edit_enabled": False,
-    "quick_edit_timeout_sec": 5.0,
-    # --- Action items / decisions / questions extraction ---
-    # Opt-in: автоматически извлекать задачи/решения/вопросы после транскрибации.
-    # Срабатывает только если длительность > action_items_min_duration_sec.
-    "action_items_auto_extract": False,
-    # Минимальная длительность записи (сек) для авто-извлечения.
-    # Короткие записи (диктовка, фраза) не анализируются.
-    "action_items_min_duration_sec": 60.0,
+    # --- Number / datetime normalization (text post-processing) ---
     "number_normalization_enabled": True,
     "datetime_normalization_enabled": True,
-    # --- Семантический поиск ---
+    # --- Semantic search (opt-in, lazy model load) ---
     "semantic_search_enabled": False,
     "semantic_search_model": "intfloat/multilingual-e5-base",
     "semantic_search_auto_index": True,
+    # --- Quick Edit before paste ---
+    "quick_edit_enabled": False,
+    "quick_edit_timeout_sec": 5.0,
 }
