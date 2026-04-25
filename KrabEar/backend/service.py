@@ -42,6 +42,7 @@ from core.auto_title import AutoTitleGenerator
 from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
+from backend.bulk_reprocess import BulkReprocessor
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -298,6 +299,8 @@ class BackendService:
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
+        # Wire speaker_manager into HistoryService for name resolution during exports
+        self._history._speaker_manager = self._speaker_manager
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
@@ -324,6 +327,8 @@ class BackendService:
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
+        self._bulk_tasks: dict[str, dict] = {}  # task_id -> {reprocessor, status, result}
+        self._bulk_tasks_lock = threading.Lock()
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -409,6 +414,109 @@ class BackendService:
             return self._cached_settings().get(key, default)
         except Exception:
             return default
+
+
+    # ---------------------------------------------------------------------------
+    # Bulk re-process handlers (bulk_reprocess.py)
+    # ---------------------------------------------------------------------------
+
+    def _handle_bulk_reprocess_start(self, params: dict) -> dict:
+        """Запускает массовое перетранскрибирование в фоновом потоке.
+
+        Params:
+            filter_kwargs   — дополнительные фильтры (опционально)
+            only_low_confidence — True = только записи с confidence < threshold
+            threshold       — порог confidence (default 0.7)
+            dry_run         — True = только подсчёт без STT
+        Returns:
+            {"task_id": str}
+        """
+        import uuid as _uuid
+        task_id = "br-" + str(_uuid.uuid4())
+        only_low = bool(params.get("only_low_confidence", True))
+        threshold = float(params.get("threshold", 0.7))
+        dry_run = bool(params.get("dry_run", False))
+        filter_kwargs = params.get("filter_kwargs") or {}
+
+        reprocessor = BulkReprocessor(
+            store=self.store,
+            transcriber=self._transcriber,
+            version_manager=self._transcript_versioning,
+            event_bus=getattr(self, "_event_bus", None),
+        )
+
+        with self._bulk_tasks_lock:
+            self._bulk_tasks[task_id] = {
+                "reprocessor": reprocessor,
+                "status": "running",
+                "result": None,
+            }
+
+        def _run() -> None:
+            try:
+                result = reprocessor.reprocess(
+                    filter_kwargs=filter_kwargs,
+                    only_low_confidence=only_low,
+                    threshold=threshold,
+                    dry_run=dry_run,
+                    task_id=task_id,
+                )
+                with self._bulk_tasks_lock:
+                    if task_id in self._bulk_tasks:
+                        self._bulk_tasks[task_id]["status"] = "done"
+                        self._bulk_tasks[task_id]["result"] = result
+            except Exception as exc:
+                logger.exception("bulk_reprocess task %s failed", task_id)
+                with self._bulk_tasks_lock:
+                    if task_id in self._bulk_tasks:
+                        self._bulk_tasks[task_id]["status"] = "error"
+                        self._bulk_tasks[task_id]["result"] = {"error": str(exc)}
+
+        import threading as _threading
+        t = _threading.Thread(target=_run, daemon=True, name=f"bulk_reprocess_{task_id[:8]}")
+        t.start()
+        return {"task_id": task_id}
+
+    def _handle_bulk_reprocess_status(self, params: dict) -> dict:
+        """Возвращает статус задания массового перетранскрибирования.
+
+        Params:
+            task_id — идентификатор задания
+        Returns:
+            {"task_id": str, "status": "running"|"done"|"error"|"cancelled", "result": dict|None}
+        """
+        task_id = str(params.get("task_id", "")).strip()
+        with self._bulk_tasks_lock:
+            task = self._bulk_tasks.get(task_id)
+        if task is None:
+            return {"task_id": task_id, "status": "not_found", "result": None}
+        return {
+            "task_id": task_id,
+            "status": task["status"],
+            "result": task.get("result"),
+        }
+
+    def _handle_bulk_reprocess_cancel(self, params: dict) -> dict:
+        """Отменяет активное задание массового перетранскрибирования.
+
+        Params:
+            task_id — идентификатор задания
+        Returns:
+            {"cancelled": bool}
+        """
+        task_id = str(params.get("task_id", "")).strip()
+        with self._bulk_tasks_lock:
+            task = self._bulk_tasks.get(task_id)
+        if task is None:
+            return {"requested": False, "task_id": task_id}
+        reprocessor: BulkReprocessor = task.get("reprocessor")
+        if reprocessor is None:
+            return {"requested": False, "task_id": task_id}
+        reprocessor.cancel()
+        with self._bulk_tasks_lock:
+            if task_id in self._bulk_tasks:
+                self._bulk_tasks[task_id]["status"] = "cancelled"
+        return {"requested": True, "task_id": task_id}
 
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
@@ -712,6 +820,9 @@ class BackendService:
             "add_stt_hotword": self._handle_add_stt_hotword,  # добавить термин в STT hotwords список
             "remove_stt_hotword": self._handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
             "list_stt_hotwords": self._handle_list_stt_hotwords,  # получить весь список STT hotwords
+            "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # запуск массового перетранскрибирования
+            "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус задания массового перетранскрибирования
+            "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отмена задания массового перетранскрибирования
         }
 
         handler = handlers.get(method)
@@ -1104,7 +1215,7 @@ class BackendService:
         # Загружаем контекст из последних 10 записей истории и STT hotwords.
         # Контекст передаётся в AudioEngine для построения initial_prompt Whisper
         # (точность непрерывной диктовки +10-15%).
-        _recent_history = self.store.get_history(limit=10)
+        _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
         _stt_hotwords: list[str] = self._settings_svc.cached_settings().get(
             "stt_hotwords", []
         )
