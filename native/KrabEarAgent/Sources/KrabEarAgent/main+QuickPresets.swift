@@ -1,0 +1,105 @@
+/*
+ main+QuickPresets.swift
+ AgentAppDelegate extension: быстрое переключение пресетов записи через menu bar и Cmd+Shift+P.
+*/
+
+import AppKit
+import Foundation
+
+struct RecordingPreset {
+    let id: String
+    let label: String
+    let menuLabel: String
+    let badge: String
+}
+
+extension AgentAppDelegate {
+
+    static let recordingPresets: [RecordingPreset] = [
+        RecordingPreset(id: "default",       label: "Default",        menuLabel: "Default (D)",        badge: "D"),
+        RecordingPreset(id: "meeting",        label: "Meeting",        menuLabel: "Meeting (M)",        badge: "M"),
+        RecordingPreset(id: "translation",    label: "Translation",    menuLabel: "Translation (T)",    badge: "T"),
+        RecordingPreset(id: "call_recording", label: "Call Recording", menuLabel: "Call Recording (C)", badge: "C"),
+    ]
+
+    func startPresetHotkeyMonitor() {
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let isCmdShiftP = event.modifierFlags.contains([.command, .shift])
+                && !event.modifierFlags.contains(.option)
+                && !event.modifierFlags.contains(.control)
+                && event.keyCode == 35
+            guard isCmdShiftP else { return }
+            DispatchQueue.main.async { self?.cycleToNextPreset() }
+        }
+    }
+
+    func applyRecordingPreset(_ presetId: String, source: String = "menu") {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try self.ipcClient.call(method: "apply_profile_preset", params: ["profile": presetId])
+                DispatchQueue.main.async {
+                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+                    self.refreshStatusItemTitle()
+                    self.rebuildStatusMenu()
+                }
+            } catch {
+                self.logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func cycleToNextPreset() {
+        let currentPreset = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        let ids = AgentAppDelegate.recordingPresets.map { $0.id }
+        let currentIdx = ids.firstIndex(of: currentPreset) ?? 0
+        let nextIdx = (currentIdx + 1) % ids.count
+        applyRecordingPreset(ids[nextIdx], source: "hotkey")
+    }
+
+    func activePresetBadge() -> String {
+        let active = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        return AgentAppDelegate.recordingPresets.first { $0.id == active }?.badge ?? "D"
+    }
+
+    func buildPresetSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let active = UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") ?? "default"
+        for (idx, preset) in AgentAppDelegate.recordingPresets.enumerated() {
+            let item = NSMenuItem(
+                title: preset.menuLabel,
+                action: #selector(onPresetMenuItemClicked(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = idx
+            item.state = preset.id == active ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        let openSettingsItem = NSMenuItem(
+            title: "Открыть настройки…",
+            action: #selector(onOpenSettings),
+            keyEquivalent: ","
+        )
+        openSettingsItem.target = self
+        submenu.addItem(openSettingsItem)
+        return submenu
+    }
+
+    func addPresetMenuEntry(to menu: NSMenu) {
+        let presetItem = NSMenuItem(title: "Пресет записи", action: nil, keyEquivalent: "")
+        menu.addItem(presetItem)
+        menu.setSubmenu(buildPresetSubmenu(), for: presetItem)
+    }
+
+    @objc func onPresetMenuItemClicked(_ sender: NSMenuItem) {
+        let presets = AgentAppDelegate.recordingPresets
+        guard sender.tag >= 0, sender.tag < presets.count else { return }
+        applyRecordingPreset(presets[sender.tag].id, source: "menu")
+    }
+
+    @objc func onCyclePreset() {
+        cycleToNextPreset()
+    }
+}

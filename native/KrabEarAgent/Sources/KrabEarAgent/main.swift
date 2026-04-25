@@ -243,6 +243,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.start()
         logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
 
+        // UserDefaults preset seed
+        if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
+            UserDefaults.standard.set("default", forKey: "KrabEar_ActivePreset")
+        }
+        startPresetHotkeyMonitor()
+        logger.info("Quick preset hotkey monitor запущен (Cmd+Shift+P)")
+
         // Phase 2B: Live субтитры — Cmd+Shift+L через menu item (main+StatusMenu + main+LiveSubs).
 
         // Recording bookmarks: Cmd+Shift+B (feat/recording-bookmarks)
