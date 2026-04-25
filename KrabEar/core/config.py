@@ -534,4 +534,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_dialogue_hint_threshold": 2,
     # --- Bulk re-process history ---
     "bulk_reprocess_batch_size": 5,
+    # Export speaker labels
+    "export_include_speaker_labels": False,
 }
