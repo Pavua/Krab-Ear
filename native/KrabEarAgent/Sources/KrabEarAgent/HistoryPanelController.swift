@@ -154,6 +154,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let dockIconButton = NSButton(checkboxWithTitle: "Иконка в Dock", target: nil, action: nil)
     let hotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let hotkeyProfileSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    let hotkeyModeToggleRadio = NSButton(radioButtonWithTitle: "Toggle (одно нажатие)", target: nil, action: nil)
+    let hotkeyModeHoldRadio = NSButton(radioButtonWithTitle: "Hold (зажать → пишет)", target: nil, action: nil)
     let realtimeStatusLabel = NSTextField(labelWithString: "Realtime: ожидание")
     let callAssistStatusLabel = NSTextField(labelWithString: "Call Assist: idle")
     let realtimeTextView = NSTextView()

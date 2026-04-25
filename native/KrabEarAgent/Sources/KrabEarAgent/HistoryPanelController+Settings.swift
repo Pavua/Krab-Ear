@@ -213,6 +213,12 @@ extension HistoryPanelController {
         applySettingsPatch(["hotkey_profile": val])
     }
 
+    @objc func onHotkeyModeChanged() {
+        guard !isSyncingSettings else { return }
+        let mode = hotkeyModeHoldRadio.state == .on ? "hold" : "toggle"
+        applySettingsPatch(["hotkey_mode": mode])
+    }
+
     @objc func onCaptureSourceModeChanged() {
         guard !isSyncingSettings else { return }
         applySettingsPatch(["capture_source_mode": selectedCaptureSourceMode()])
@@ -434,6 +440,15 @@ extension HistoryPanelController {
             hotkeyProfileSelector.selectItem(at: 2)
         default:
             hotkeyProfileSelector.selectItem(at: 0)
+        }
+
+        // Sync hotkey mode radio buttons
+        if settings.hotkeyMode == "hold" {
+            hotkeyModeHoldRadio.state = .on
+            hotkeyModeToggleRadio.state = .off
+        } else {
+            hotkeyModeToggleRadio.state = .on
+            hotkeyModeHoldRadio.state = .off
         }
 
         isSyncingTabs = true
@@ -730,7 +745,7 @@ extension HistoryPanelController {
     // MARK: - Hotkey Section
 
     /// Секция «Горячие клавиши» в Dictation tab.
-    /// Строки: hotkey selector + hotkey profile.
+    /// Строки: hotkey selector + hotkey mode (toggle/hold) + hotkey profile.
     /// Переписана через makeSettingRow / makeSeparator (Path A).
     func buildHotkeySection() -> CollapsibleSectionView {
         let section = CollapsibleSectionView(
@@ -744,11 +759,29 @@ extension HistoryPanelController {
         hotkeySelector.setAccessibilityLabel("Выбор клавиши-триггера: Right Option, Left Option или любой Option")
         let hotkeyRow = makeSettingRow(
             label: "Клавиша записи",
-            description: "Удержание клавиши — запись. Отпускание — транскрипция + вставка.",
+            description: "Выберите клавишу для управления записью.",
             control: hotkeySelector
         )
 
-        // 2. Hotkey profile
+        // 2. Hotkey mode: toggle vs hold
+        hotkeyModeToggleRadio.target = self
+        hotkeyModeToggleRadio.action = #selector(onHotkeyModeChanged)
+        hotkeyModeToggleRadio.setAccessibilityLabel("Режим Toggle: нажать — старт, нажать снова — стоп")
+        hotkeyModeHoldRadio.target = self
+        hotkeyModeHoldRadio.action = #selector(onHotkeyModeChanged)
+        hotkeyModeHoldRadio.setAccessibilityLabel("Режим Hold: зажать — пишет, отпустить — стоп")
+        // Группируем в вертикальный стек
+        let radioStack = NSStackView(views: [hotkeyModeToggleRadio, hotkeyModeHoldRadio])
+        radioStack.orientation = .vertical
+        radioStack.alignment = .leading
+        radioStack.spacing = 4
+        let modeRow = makeSettingRow(
+            label: "Режим клавиши",
+            description: "Toggle — классический режим. Hold — зажал клавишу → пишет, отпустил → транскрибирует.",
+            control: radioStack
+        )
+
+        // 3. Hotkey profile
         hotkeyProfileSelector.setAccessibilityLabel("Профиль горячей клавиши: Default, Meeting или Translation")
         let profileRow = makeSettingRow(
             label: "Профиль",
@@ -757,6 +790,8 @@ extension HistoryPanelController {
         )
 
         card.contentStackView.addArrangedSubview(hotkeyRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(modeRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(profileRow)
 

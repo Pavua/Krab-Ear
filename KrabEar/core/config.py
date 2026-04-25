@@ -279,6 +279,13 @@ class Settings(BaseSettings):
     # --- Russian Whisper fine-tune ---
     STT_USE_RU_FINETUNE: bool = False
     STT_RU_FINETUNE_MODEL: str = "antony66/whisper-large-v3-russian"
+    # --- Push-to-talk (hold) режим ---
+    # "toggle": одно нажатие — старт, следующее — стоп (классический режим).
+    # "hold":   зажал клавишу — запись; отпустил — стоп + транскрибация.
+    HOTKEY_MODE: str = "toggle"
+    # Минимальная длительность удержания в hold-режиме (мс).
+    # Нажатия короче этого порога игнорируются (случайные касания).
+    HOLD_MIN_DURATION_MS: int = 200
 
     # --- Dual-mode TTS (Silero RU + Kokoro EN) ---
     # Opt-in: по умолчанию отключено — существующий macOS `say` workflow не меняется.
@@ -425,6 +432,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "network_mode": "offline_default",
     "hotkey": "right_option_toggle",
     "hotkey_profile": "default",
+    "hotkey_mode": "toggle",
     "history_policy": "unlimited",
     "history_page_size": 50,
     "history_text_density": "normal",

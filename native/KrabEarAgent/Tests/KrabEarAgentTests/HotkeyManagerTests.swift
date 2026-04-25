@@ -156,4 +156,99 @@ final class HotkeyManagerTests: XCTestCase {
         manager.start()
         manager.stop()
     }
+
+    // MARK: - HotkeyMode enum
+
+    func test_hotkeyMode_toggle_isDefault() {
+        let manager = HotkeyManager(variant: "right_option", onToggle: {})
+        XCTAssertEqual(manager.mode, .toggle)
+    }
+
+    func test_hotkeyMode_hold_parsedCorrectly() {
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold")
+        XCTAssertEqual(manager.mode, .hold)
+    }
+
+    func test_hotkeyMode_unknown_fallsBackToToggle() {
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "unknown_mode")
+        XCTAssertEqual(manager.mode, .toggle)
+    }
+
+    // MARK: - Toggle mode: не вызывает onHoldStart/onHoldStop
+
+    func test_toggleMode_doesNotFireHoldCallbacks() {
+        var startCount = 0
+        var stopCount = 0
+        var toggleCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: { toggleCount += 1 }, mode: "toggle")
+        manager.onHoldStart = { startCount += 1 }
+        manager.onHoldStop = { stopCount += 1 }
+
+        manager.injectEventLogic(keyCode: Keycode.rightOption.rawValue, isOptionDown: true)
+        manager.injectEventLogic(keyCode: Keycode.rightOption.rawValue, isOptionDown: false)
+
+        XCTAssertEqual(toggleCount, 1, "Toggle mode должен вызывать onToggle при DOWN")
+        XCTAssertEqual(startCount, 0, "Toggle mode не должен вызывать onHoldStart")
+        XCTAssertEqual(stopCount, 0, "Toggle mode не должен вызывать onHoldStop")
+    }
+
+    // MARK: - Hold mode: DOWN → onHoldStart, UP (≥200ms) → onHoldStop
+
+    func test_holdMode_downFiresHoldStart() {
+        var startCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
+        manager.onHoldStart = { startCount += 1 }
+
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        XCTAssertEqual(startCount, 1, "Hold DOWN должен вызывать onHoldStart")
+    }
+
+    func test_holdMode_upAfterSufficientDuration_firesHoldStop() {
+        var stopCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
+        manager.onHoldStop = { stopCount += 1 }
+
+        let pressTime = Date(timeIntervalSinceNow: -0.3)  // 300ms ago
+        let releaseTime = Date()
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue, overridePressTime: pressTime)
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: releaseTime)
+
+        XCTAssertEqual(stopCount, 1, "Удержание ≥200ms должно вызывать onHoldStop")
+    }
+
+    func test_holdMode_upAfterTooShortDuration_ignoresRelease() {
+        var stopCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold", holdMinDurationMs: 200)
+        manager.onHoldStop = { stopCount += 1 }
+
+        let pressTime = Date(timeIntervalSinceNow: -0.05)  // 50ms ago — слишком короткое
+        let releaseTime = Date()
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue, overridePressTime: pressTime)
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: releaseTime)
+
+        XCTAssertEqual(stopCount, 0, "Удержание <200ms должно игнорироваться (не вызывать onHoldStop)")
+    }
+
+    func test_holdMode_doesNotFireOnToggle() {
+        var toggleCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: { toggleCount += 1 }, mode: "hold")
+
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        let pressTime = Date(timeIntervalSinceNow: -0.3)
+        manager.simulateHoldUp(keyCode: Keycode.rightOption.rawValue, overrideReleaseTime: Date())
+        _ = pressTime  // suppress warning
+
+        XCTAssertEqual(toggleCount, 0, "Hold mode не должен вызывать onToggle")
+    }
+
+    func test_holdMode_secondDownIgnoredWhileHeld() {
+        var startCount = 0
+        let manager = HotkeyManager(variant: "right_option", onToggle: {}, mode: "hold")
+        manager.onHoldStart = { startCount += 1 }
+
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)
+        manager.simulateHoldDown(keyCode: Keycode.rightOption.rawValue)  // второй DOWN — должен игнорироваться
+
+        XCTAssertEqual(startCount, 1, "Повторный DOWN во время удержания должен игнорироваться")
+    }
 }

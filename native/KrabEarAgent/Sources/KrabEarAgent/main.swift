@@ -231,21 +231,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
-        hotkeyManager = HotkeyManager(variant: settings.hotkey, onToggle: { [weak self] in
-            DispatchQueue.main.async {
-                self?.handleRecordToggleRequest()
-            }
-        })
-
-        // PR 1.5: Wire Right Option double-tap → Разговор с AI trigger
-        hotkeyManager?.onConversationDoubleTap = { [weak self] in
-            DispatchQueue.main.async {
-                self?.historyPanel?.triggerConversationStart()
-            }
-        }
-
+        hotkeyManager = makeHotkeyManager(settings: settings)
         hotkeyManager?.start()
-        logger.info("Глобальный hotkey активирован")
+        logger.info("Глобальный hotkey активирован (mode=\(settings.hotkeyMode))")
 
         // Phase 2A: Selection translator — Cmd+Shift+T
         selectionTranslator = SelectionTranslator(
@@ -807,6 +795,36 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Hotkey recording (see main+HotkeyRecording.swift)
+
+    /// Фабрика HotkeyManager: конфигурирует toggle или hold-режим.
+    func makeHotkeyManager(settings: AgentSettings) -> HotkeyManager {
+        let manager = HotkeyManager(
+            variant: settings.hotkey,
+            onToggle: { [weak self] in
+                DispatchQueue.main.async { self?.handleRecordToggleRequest() }
+            },
+            mode: settings.hotkeyMode,
+            holdMinDurationMs: 200
+        )
+        // Hold-режим: DOWN → startRecording, UP (после >200ms) → stopRecording
+        manager.onHoldStart = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.isRecording else { return }
+                self.startRecording()
+            }
+        }
+        manager.onHoldStop = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.isRecording else { return }
+                self.stopRecording()
+            }
+        }
+        // PR 1.5: Wire Right Option double-tap → Разговор с AI trigger
+        manager.onConversationDoubleTap = { [weak self] in
+            DispatchQueue.main.async { self?.historyPanel?.triggerConversationStart() }
+        }
+        return manager
+    }
 
     // MARK: - Paste handling (see main+PasteHandling.swift)
 
