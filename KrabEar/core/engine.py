@@ -648,12 +648,17 @@ class AudioEngine:
         try:
             # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
             # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
+            # 2.4 Silence ranges pre-processing (от RealtimeSilenceFilter).
+            # Обнуляем семплы в помеченных диапазонах тишины — Whisper обрабатывает
+            # нулевые блоки быстрее, с меньшим количеством галлюцинаций.
             if silence_ranges and isinstance(audio_data, np.ndarray) and not is_preview:
                 try:
                     from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
                     audio_data = _zero_sr(audio_data, silence_ranges, sample_rate=16000)
                     logger.debug(
                         "transcribe: silence_ranges применены (%d диапазонов)", len(silence_ranges)
+                        "transcribe: silence_ranges применены (%d диапазонов)",
+                        len(silence_ranges),
                     )
                 except Exception:
                     logger.debug("transcribe: ошибка применения silence_ranges, пропускаем")
@@ -718,6 +723,34 @@ class AudioEngine:
                     len(text), len(_vc_result), _vc_lang,
                 )
                 text = _vc_result
+
+            # 4.4a Нормализация числительных и дат/времени (post-STT, pre-LLM)
+            # «сто двадцать три» → «123», «третье ноября» → «03.11» и т.д.
+            _norm_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+            if settings.NUMBER_NORMALIZATION_ENABLED or self._settings_get(
+                "number_normalization_enabled", settings.NUMBER_NORMALIZATION_ENABLED
+            ):
+                from core.number_normalizer import NumberNormalizer  # lazy
+                _nn_result = NumberNormalizer().normalize(text, language=_norm_lang)
+                if _nn_result != text:
+                    _report("number_normalization")
+                    logger.info(
+                        "NumberNormalizer: %d chars → %d chars (lang=%s)",
+                        len(text), len(_nn_result), _norm_lang,
+                    )
+                    text = _nn_result
+            if settings.DATETIME_NORMALIZATION_ENABLED or self._settings_get(
+                "datetime_normalization_enabled", settings.DATETIME_NORMALIZATION_ENABLED
+            ):
+                from core.datetime_normalizer import DateTimeNormalizer  # lazy
+                _dt_result = DateTimeNormalizer().normalize(text, language=_norm_lang)
+                if _dt_result != text:
+                    _report("datetime_normalization")
+                    logger.info(
+                        "DateTimeNormalizer: %d chars → %d chars (lang=%s)",
+                        len(text), len(_dt_result), _norm_lang,
+                    )
+                    text = _dt_result
 
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
             if self._punctuation_pass_allowed():

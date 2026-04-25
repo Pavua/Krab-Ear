@@ -521,6 +521,12 @@ class Settings(BaseSettings):
     AUTO_CLEANUP_ENABLED: bool = False
     AUTO_CLEANUP_AFTER_DAYS: int = 365
 
+    # --- Нормализация числительных (NumberNormalizer, core/number_normalizer.py) ---
+    NUMBER_NORMALIZATION_ENABLED: bool = True
+
+    # --- Нормализация дат и времени (DateTimeNormalizer, core/datetime_normalizer.py) ---
+    DATETIME_NORMALIZATION_ENABLED: bool = True
+
     @property
     def model_max_list(self) -> List[str]:
         """Возвращает список кандидатов для max-профиля."""
@@ -791,4 +797,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Минимальная длительность записи (сек) для авто-извлечения.
     # Короткие записи (диктовка, фраза) не анализируются.
     "action_items_min_duration_sec": 60.0,
+    "number_normalization_enabled": True,
+    "datetime_normalization_enabled": True,
 }
