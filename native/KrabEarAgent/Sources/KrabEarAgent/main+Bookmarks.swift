@@ -54,7 +54,7 @@ extension AgentAppDelegate {
             "offset_sec": offsetSec,
             "note": "",
         ]
-        guard try? callWithRecovery(method: "add_bookmark", params: params) != nil else {
+        guard (try? callWithRecovery(method: "add_bookmark", params: params)) != nil else {
             logger.warn("Ошибка создания закладки")
             return
         }

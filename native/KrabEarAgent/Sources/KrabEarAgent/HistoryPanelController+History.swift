@@ -290,32 +290,40 @@ extension HistoryPanelController {
             showInfoAlert(title: "Summary", body: "У выбранной записи пустой текст.")
             return
         }
-        guard
-            let response = try? ipcClient.call(
-                method: "summarize_text",
-                params: [
-                    "text": cleanSource,
-                    "mode": "summary_short",
-                    "max_points": 4,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Summary", body: "Не удалось построить summary.")
-            return
-        }
-        let summary = (result["summary"] as? String) ?? ""
-        let bullets = (result["bullets"] as? [String]) ?? []
-        let bulletText = bullets.isEmpty ? "- (нет пунктов)" : bullets.prefix(6).map { "- \($0)" }.joined(separator: "\n")
-        let text = """
-        \(summary.isEmpty ? "—" : summary)
 
-        Пункты:
-        \(bulletText)
-        """
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        showInfoAlert(title: "Summary", body: "\(text)\n\n(Скопировано в буфер)")
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "summarize_text",
+                    params: [
+                        "text": cleanSource,
+                        "mode": "summary_short",
+                        "max_points": 4,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Summary", body: "Не удалось построить summary.")
+                }
+                return
+            }
+            let summary = (result["summary"] as? String) ?? ""
+            let bullets = (result["bullets"] as? [String]) ?? []
+            let bulletText = bullets.isEmpty ? "- (нет пунктов)" : bullets.prefix(6).map { "- \($0)" }.joined(separator: "\n")
+            let text = """
+            \(summary.isEmpty ? "—" : summary)
+
+            Пункты:
+            \(bulletText)
+            """
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                self?.showInfoAlert(title: "Summary", body: "\(text)\n\n(Скопировано в буфер)")
+            }
+        }
     }
 
     // MARK: - Delete / Compact / Transcripts

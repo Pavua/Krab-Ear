@@ -93,6 +93,12 @@ extension AgentAppDelegate {
         menu.setSubmenu(buildPresetSubmenu(), for: presetItem)
     }
 
+    @objc func onOpenSettings() {
+        // Open main panel; user can switch to Settings tab.
+        // Defined here as fallback for "Открыть настройки…" menu item from preset submenu.
+        openHistoryPanel(forceMenubar: false)
+    }
+
     @objc func onPresetMenuItemClicked(_ sender: NSMenuItem) {
         let presets = AgentAppDelegate.recordingPresets
         guard sender.tag >= 0, sender.tag < presets.count else { return }
