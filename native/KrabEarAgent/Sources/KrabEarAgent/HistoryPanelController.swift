@@ -124,6 +124,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let historyPasteStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyTranslationModeFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyTranslationStatusFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Filter: 0 = Все, 1 = Только с action items, 2 = Только без.
+    /// Применяется client-side (action_items хранятся в HistoryItem fields из PR #295).
+    let historyActionItemsFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     let historyFromDateField = NSTextField(frame: .zero)
     let historyToDateField = NSTextField(frame: .zero)
     let historyFocusModeButton: ThemeSecondaryButton = {
@@ -776,6 +779,17 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyToDateField.font = KrabEarTheme.Typography.caption
         historyToDateField.widthAnchor.constraint(equalToConstant: 96).isActive = true
         filterRow2.addArrangedSubview(historyToDateField)
+
+        // Action items filter (PR feat/action-items-filter-ui, depends on #295 HistoryItem fields).
+        // Применяется client-side через applyClientActionItemsFilter — backend
+        // get_history_page не поддерживает has_action_items query.
+        filterRow2.addArrangedSubview(NSTextField(labelWithString: "Action items:"))
+        historyActionItemsFilter.addItems(
+            withTitles: ["Все", "Только с action items", "Только без"]
+        )
+        historyActionItemsFilter.target = self
+        historyActionItemsFilter.action = #selector(onActionItemsFilterChanged)
+        filterRow2.addArrangedSubview(historyActionItemsFilter)
         filterRow2.addArrangedSubview(NSView())
 
         historyQuickPresetRow.addArrangedSubview(NSTextField(labelWithString: "Быстрые фильтры:"))
