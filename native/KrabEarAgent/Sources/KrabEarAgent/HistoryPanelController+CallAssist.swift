@@ -75,7 +75,7 @@ extension HistoryPanelController {
                 self.applyCallAssistState(result)
                 if let summaryStatus = result["summary_status"] as? String {
                     if summaryStatus == "ok", let summary = result["summary"] as? [String: Any] {
-                        self.appendCallAssistOutput(title: "Summary звонка", body: self.formatCallSummary(summary))
+                        self.appendCallAssistOutput(title: "Summary звонка", body: HistoryPanelController.formatCallSummary(summary))
                         if let historyId = result["summary_history_id"] as? String, !historyId.isEmpty {
                             self.appendCallAssistOutput(title: "Summary сохранён", body: "Добавлено в историю. id: \(historyId)")
                         }
@@ -212,7 +212,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.appendCallAssistOutput(title: "Summary", body: self.formatCallSummary(summaryPayload))
+                self.appendCallAssistOutput(title: "Summary", body: HistoryPanelController.formatCallSummary(summaryPayload))
             }
         }
     }
@@ -328,7 +328,7 @@ extension HistoryPanelController {
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let report = self.formatCallCostEstimate(result)
+                let report = HistoryPanelController.formatCallCostEstimate(result)
                 self.appendCallAssistOutput(title: "Оценка стоимости", body: report)
                 self.showInfoAlert(title: "Оценка стоимости", body: report)
             }
@@ -396,7 +396,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let preview = self.formatCallTimelinePreview(items: Array(items.prefix(12)))
+                let preview = HistoryPanelController.formatCallTimelinePreview(items: Array(items.prefix(12)))
                 self.appendCallAssistOutput(
                     title: "Timeline",
                     body: "Событий: \(items.count)\n\(summaryText)\(statsText)\(preview)"
@@ -535,7 +535,7 @@ extension HistoryPanelController {
         return Int(digits) ?? 1
     }
 
-    func formatCallTimelinePreview(items: [[String: Any]]) -> String {
+    nonisolated static func formatCallTimelinePreview(items: [[String: Any]]) -> String {
         var lines: [String] = []
         for item in items {
             let ts = (item["ts"] as? String) ?? "-"
@@ -554,7 +554,7 @@ extension HistoryPanelController {
         return lines.joined(separator: "\n")
     }
 
-    func formatCallSummary(_ payload: [String: Any]) -> String {
+    nonisolated static func formatCallSummary(_ payload: [String: Any]) -> String {
         let summaryText = ((payload["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let rawTasks = (payload["tasks"] as? [Any]) ?? []
         var tasks: [String] = []
@@ -585,7 +585,7 @@ extension HistoryPanelController {
         """
     }
 
-    func formatCallCostEstimate(_ payload: [String: Any]) -> String {
+    nonisolated static func formatCallCostEstimate(_ payload: [String: Any]) -> String {
         let country = (payload["country"] as? String) ?? "n/a"
         let ratesSource = (payload["rates_source"] as? String) ?? "unknown"
         let ratesNote = ((payload["rates_note"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

@@ -410,8 +410,8 @@ extension HistoryPanelController {
                 let afterActive = (result["after_active_count"] as? Int) ?? 0
                 let body = """
                 Активных записей: \(beforeActive) -> \(afterActive)
-                Размер: \(self?.formatBytes(beforeBytes) ?? "?") -> \(self?.formatBytes(afterBytes) ?? "?")
-                Освобождено: \(self?.formatBytes(max(0, reclaimed)) ?? "?")
+                Размер: \(HistoryPanelController.formatBytes(beforeBytes) ?? "?") -> \(HistoryPanelController.formatBytes(afterBytes) ?? "?")
+                Освобождено: \(HistoryPanelController.formatBytes(max(0, reclaimed)) ?? "?")
                 """
                 DispatchQueue.main.async {
                     self?.showInfoAlert(title: "Оптимизация истории", body: body)
@@ -770,7 +770,7 @@ extension HistoryPanelController {
     /// Pure helper — может вызываться из любого thread (nonisolated).
     /// Используется в onCompact() из background closure для форматирования
     /// строки до перехода на main thread (избегаем race на @MainActor).
-    nonisolated func formatBytes(_ value: Int) -> String {
+    nonisolated static func formatBytes(_ value: Int) -> String {
         let safe = max(0, value)
         if safe < 1024 {
             return "\(safe) B"
@@ -917,7 +917,7 @@ extension HistoryPanelController {
         case "status":
             text = item.pasteStatus
         default:
-            let translationBadge = buildTranslationBadge(item)
+            let translationBadge = HistoryPanelController.buildTranslationBadge(item)
             text = translationBadge + item.text
         }
 
@@ -1154,7 +1154,7 @@ extension HistoryPanelController {
         return height
     }
 
-    func buildTranslationBadge(_ item: HistoryItem) -> String {
+    nonisolated static func buildTranslationBadge(_ item: HistoryItem) -> String {
         guard item.translationMode != "off" else { return "" }
         let statusMark: String
         switch item.translationStatus {
