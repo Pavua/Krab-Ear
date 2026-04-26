@@ -65,11 +65,13 @@ extension HistoryPanelController {
         let card = ThemeCardView()
 
         let extractButton = ThemePrimaryButton(title: "Извлечь из выбранной записи", target: self, action: #selector(extractActionItemsAction))
+        let exportButton = ThemeSecondaryButton(title: "Экспорт всех в .md", target: self, action: #selector(exportAllActionItemsAction))
+        exportButton.applyThemeSecondary()
         let helpLabel = NSTextField(labelWithString: "LLM (qwen3-4b) ⇒ задачи · решения · вопросы")
         helpLabel.font = KrabEarTheme.Typography.caption
         helpLabel.textColor = NSColor.tertiaryLabelColor
 
-        let actionsRow = NSStackView(views: [extractButton, actionItemsLanguageSelector, helpLabel, NSView()])
+        let actionsRow = NSStackView(views: [extractButton, exportButton, actionItemsLanguageSelector, helpLabel, NSView()])
         actionsRow.orientation = .horizontal
         actionsRow.spacing = KrabEarTheme.Metrics.standard
         actionsRow.distribution = .fill
@@ -218,5 +220,146 @@ extension HistoryPanelController {
         case "low": return "⚪"
         default: return "🟡"
         }
+    }
+
+    // MARK: - Markdown export
+
+    /// Экспортирует все existing action_items / decisions / questions из истории в .md.
+    /// Загружает страницу истории через `get_history_page` (item-уровневые поля
+    /// уже включают `action_items`/`decisions`/`questions` если их извлекали ранее).
+    @objc func exportAllActionItemsAction() {
+        actionItemsStatusLabel.stringValue = "Загружаю историю…"
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(
+                method: "get_history_page",
+                params: ["limit": 500]
+            ),
+            let result = response["result"] as? [String: Any],
+            let rawItems = result["items"] as? [[String: Any]] else {
+                DispatchQueue.main.async {
+                    self?.actionItemsStatusLabel.stringValue = "Ошибка: не удалось загрузить историю."
+                }
+                return
+            }
+
+            let markdown = HistoryPanelController.formatHistoryItemsAsMarkdown(items: rawItems)
+            let withContent = HistoryPanelController.countItemsWithActionContent(items: rawItems)
+
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if withContent == 0 {
+                    self.actionItemsStatusLabel.stringValue = "Нет записей с action items / решениями / вопросами. Сначала «Извлечь»."
+                    return
+                }
+                self.actionItemsStatusLabel.stringValue = "Загружено \(rawItems.count) записей; с action data: \(withContent)."
+
+                let panel = NSSavePanel()
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyyMMdd_HHmmss"
+                panel.nameFieldStringValue = "krab_action_items_\(formatter.string(from: Date())).md"
+                panel.canCreateDirectories = true
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                do {
+                    try markdown.write(to: url, atomically: true, encoding: .utf8)
+                    self.actionItemsStatusLabel.stringValue = "Сохранено: \(url.path)"
+                    NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
+                } catch {
+                    self.actionItemsStatusLabel.stringValue = "Ошибка записи: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Подсчитывает записи у которых есть хотя бы один action_item / decision / question.
+    /// Используется UI'ем чтобы сообщить «нечего экспортировать» до открытия NSSavePanel.
+    nonisolated static func countItemsWithActionContent(items: [[String: Any]]) -> Int {
+        var n = 0
+        for item in items {
+            let actionItems = (item["action_items"] as? [[String: Any]]) ?? []
+            let decisions = (item["decisions"] as? [String]) ?? []
+            let questions = (item["questions"] as? [String]) ?? []
+            if !actionItems.isEmpty || !decisions.isEmpty || !questions.isEmpty {
+                n += 1
+            }
+        }
+        return n
+    }
+
+    /// Формирует Markdown из items (raw IPC response) с action_items / decisions / questions.
+    /// Pure helper — `nonisolated`, тестируем без instance.
+    nonisolated static func formatHistoryItemsAsMarkdown(items: [[String: Any]]) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+
+        var lines: [String] = []
+        lines.append("# Krab Ear — Action Items / Decisions / Questions")
+        lines.append("")
+        lines.append("_Экспортировано: \(formatter.string(from: Date()))_")
+        lines.append("")
+
+        var emittedAny = false
+        for item in items {
+            let actionItems = (item["action_items"] as? [[String: Any]]) ?? []
+            let decisions = (item["decisions"] as? [String]) ?? []
+            let questions = (item["questions"] as? [String]) ?? []
+            if actionItems.isEmpty && decisions.isEmpty && questions.isEmpty {
+                continue
+            }
+            emittedAny = true
+
+            let id = (item["id"] as? String) ?? "?"
+            let ts = (item["ts"] as? String) ?? ""
+            let textRaw = (item["text"] as? String) ?? ""
+            let textSnippet: String = textRaw.count > 200
+                ? String(textRaw.prefix(200)) + "…"
+                : textRaw
+
+            lines.append("## Запись \(String(id.prefix(8)))…  (\(ts))")
+            lines.append("")
+            if !textSnippet.isEmpty {
+                lines.append("> \(textSnippet.replacingOccurrences(of: "\n", with: " "))")
+                lines.append("")
+            }
+
+            if !actionItems.isEmpty {
+                lines.append("### Задачи (\(actionItems.count))")
+                for ai in actionItems {
+                    let text = (ai["text"] as? String) ?? ""
+                    let assignee = (ai["assignee"] as? String) ?? ""
+                    let due = (ai["due"] as? String) ?? ""
+                    let priority = (ai["priority"] as? String) ?? "medium"
+                    let prio = priorityMarker(priority)
+                    var meta: [String] = []
+                    if !assignee.isEmpty { meta.append("@\(assignee)") }
+                    if !due.isEmpty { meta.append("⏰ \(due)") }
+                    let metaSuffix = meta.isEmpty ? "" : "  *(\(meta.joined(separator: ", ")))*"
+                    lines.append("- [ ] \(prio) \(text)\(metaSuffix)")
+                }
+                lines.append("")
+            }
+            if !decisions.isEmpty {
+                lines.append("### Решения (\(decisions.count))")
+                for d in decisions {
+                    lines.append("- ✓ \(d)")
+                }
+                lines.append("")
+            }
+            if !questions.isEmpty {
+                lines.append("### Вопросы (\(questions.count))")
+                for q in questions {
+                    lines.append("- ? \(q)")
+                }
+                lines.append("")
+            }
+            lines.append("---")
+            lines.append("")
+        }
+
+        if !emittedAny {
+            lines.append("_(Нет записей с извлечёнными action items.)_")
+        }
+        return lines.joined(separator: "\n")
     }
 }
