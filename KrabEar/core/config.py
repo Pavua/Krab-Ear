@@ -650,6 +650,36 @@ def _build_settings() -> Settings:
 
 settings = _build_settings()
 
+
+def reload_settings_from_json() -> int:
+    """Hot-reload settings.json overrides into live `settings` instance.
+
+    Used после IPC `set_settings` чтобы pydantic Settings подтянул новые
+    значения без backend restart. Возвращает количество updated fields.
+
+    Note: env vars НЕ переопределяются (env wins on initial load всё ещё).
+    Mutating через setattr на pydantic v2 instance подтверждено works для
+    primitive types — validation runs through __setattr__.
+    """
+    import os as _os
+    overrides = _load_settings_json_overrides()
+    updated = 0
+    for key, value in overrides.items():
+        if not hasattr(settings, key):
+            continue
+        # Env wins forever — pydantic не получит JSON value если env set.
+        if f"KRAB_EAR_{key}" in _os.environ:
+            continue
+        try:
+            current = getattr(settings, key)
+            if current != value:
+                setattr(settings, key, value)
+                updated += 1
+        except Exception:
+            # Non-coercible types (e.g. complex Path) silently skip.
+            pass
+    return updated
+
 # Дефолтные настройки для UI и логики (из legacy моделей)
 DEFAULT_SETTINGS: dict[str, Any] = {
     "mode": "headless",
