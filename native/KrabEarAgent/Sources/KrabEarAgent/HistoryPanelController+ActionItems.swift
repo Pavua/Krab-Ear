@@ -65,11 +65,13 @@ extension HistoryPanelController {
         let card = ThemeCardView()
 
         let extractButton = ThemePrimaryButton(title: "Извлечь из выбранной записи", target: self, action: #selector(extractActionItemsAction))
+        let showExistingButton = ThemeSecondaryButton(title: "Показать сохранённые", target: self, action: #selector(showExistingActionItemsAction))
+        showExistingButton.applyThemeSecondary()
         let helpLabel = NSTextField(labelWithString: "LLM (qwen3-4b) ⇒ задачи · решения · вопросы")
         helpLabel.font = KrabEarTheme.Typography.caption
         helpLabel.textColor = NSColor.tertiaryLabelColor
 
-        let actionsRow = NSStackView(views: [extractButton, actionItemsLanguageSelector, helpLabel, NSView()])
+        let actionsRow = NSStackView(views: [extractButton, showExistingButton, actionItemsLanguageSelector, helpLabel, NSView()])
         actionsRow.orientation = .horizontal
         actionsRow.spacing = KrabEarTheme.Metrics.standard
         actionsRow.distribution = .fill
@@ -217,6 +219,70 @@ extension HistoryPanelController {
         case "high": return "🔴"
         case "low": return "⚪"
         default: return "🟡"
+        }
+    }
+
+    // MARK: - Show existing (без re-extract через LLM)
+
+    /// Показывает уже извлечённые action_items / decisions / questions для
+    /// выбранной записи без повторного вызова LLM. Если запись ещё не
+    /// extract'или — сообщает что нужно нажать «Извлечь» сначала.
+    ///
+    /// Это значительно дешевле чем re-extract: IPC `get_history_item` —
+    /// чтение NDJSON, ~10 мс, нет LLM latency 5-20 сек.
+    @objc func showExistingActionItemsAction() {
+        let selectedRow = self.tableView.selectedRow
+        guard selectedRow >= 0, selectedRow < items.count else {
+            actionItemsStatusLabel.stringValue = "Сначала выделите запись в таблице."
+            return
+        }
+        let item = items[selectedRow]
+        let itemID = item.id
+
+        actionItemsStatusLabel.stringValue = "Загружаю сохранённые данные \(String(itemID.prefix(8)))…"
+        actionItemsResultsView.string = ""
+
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": itemID]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.actionItemsStatusLabel.stringValue = "Ошибка: не удалось загрузить запись."
+                }
+                return
+            }
+
+            // Эмулируем ту же shape что extract_action_items возвращает,
+            // чтобы переиспользовать formatActionItemsResult без изменений.
+            let actionItems = (result["action_items"] as? [[String: Any]]) ?? []
+            let decisions = (result["decisions"] as? [String]) ?? []
+            let questions = (result["questions"] as? [String]) ?? []
+            let hasAny = !actionItems.isEmpty || !decisions.isEmpty || !questions.isEmpty
+
+            let synthetic: [String: Any] = [
+                "ok": hasAny,
+                "action_items": actionItems,
+                "decisions": decisions,
+                "questions": questions,
+                "fallback_reason": hasAny ? "" : "no_existing_data",
+            ]
+            let formatted: String
+            if hasAny {
+                formatted = HistoryPanelController.formatActionItemsResult(result: synthetic, itemID: itemID)
+            } else {
+                formatted = "У этой записи ещё нет извлечённых action items.\nНажми «Извлечь из выбранной записи» — LLM прогонит транскрипт и сохранит результат."
+            }
+            let status: String
+            if hasAny {
+                status = "Сохранённых: задач=\(actionItems.count) · решений=\(decisions.count) · вопросов=\(questions.count) (без LLM)"
+            } else {
+                status = "Нет сохранённых данных. Нажми «Извлечь»."
+            }
+
+            DispatchQueue.main.async {
+                self?.actionItemsStatusLabel.stringValue = status
+                self?.actionItemsResultsView.string = formatted
+            }
         }
     }
 }
