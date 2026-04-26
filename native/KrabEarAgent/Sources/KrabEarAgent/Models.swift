@@ -78,6 +78,9 @@ struct AgentSettings {
     var onboardingCompleted: Bool
     var diarizationEnabled: Bool
     var llmRewriteEnabled: Bool
+    /// GigaAM-RNNT v2 — RU специализированный STT (PR feat/agent-settings-gigaam-field).
+    /// Соответствует backend `STT_GIGAAM_ENABLED`. Toggle: Settings → Аудио-пайплайн.
+    var gigaamEnabled: Bool
     var llmModel: String
     // Recording bookmarks hotkey (Cmd+Shift+B)
     var bookmarksHotkeyEnabled: Bool
@@ -130,6 +133,7 @@ struct AgentSettings {
         onboardingCompleted: false,
         diarizationEnabled: true,
         llmRewriteEnabled: false,
+        gigaamEnabled: false,
         llmModel: "qwen3.5-9b@6bit",
         bookmarksHotkeyEnabled: true,
         telnyxAPIKey: "",
@@ -201,6 +205,7 @@ struct AgentSettings {
         self.onboardingCompleted = (payload["onboarding_completed"] as? Bool) ?? Self.default.onboardingCompleted
         self.diarizationEnabled = (payload["diarization_enabled"] as? Bool) ?? Self.default.diarizationEnabled
         self.llmRewriteEnabled = (payload["llm_rewrite_enabled"] as? Bool) ?? Self.default.llmRewriteEnabled
+        self.gigaamEnabled = (payload["stt_gigaam_enabled"] as? Bool) ?? Self.default.gigaamEnabled
         self.llmModel = (payload["llm_model"] as? String) ?? Self.default.llmModel
         self.bookmarksHotkeyEnabled = (payload["bookmarks_hotkey_enabled"] as? Bool) ?? Self.default.bookmarksHotkeyEnabled
         self.telnyxAPIKey = (payload["telnyx_api_key"] as? String) ?? Self.default.telnyxAPIKey
@@ -248,6 +253,7 @@ struct AgentSettings {
         onboardingCompleted: Bool,
         diarizationEnabled: Bool,
         llmRewriteEnabled: Bool,
+        gigaamEnabled: Bool,
         llmModel: String,
         bookmarksHotkeyEnabled: Bool = true,
         telnyxAPIKey: String,
@@ -293,6 +299,7 @@ struct AgentSettings {
         self.onboardingCompleted = onboardingCompleted
         self.diarizationEnabled = diarizationEnabled
         self.llmRewriteEnabled = llmRewriteEnabled
+        self.gigaamEnabled = gigaamEnabled
         self.llmModel = llmModel
         self.bookmarksHotkeyEnabled = bookmarksHotkeyEnabled
         self.telnyxAPIKey = telnyxAPIKey
@@ -341,6 +348,7 @@ struct AgentSettings {
             "onboarding_completed": onboardingCompleted,
             "diarization_enabled": diarizationEnabled,
             "llm_rewrite_enabled": llmRewriteEnabled,
+            "stt_gigaam_enabled": gigaamEnabled,
             "llm_model": llmModel,
             "telnyx_api_key": telnyxAPIKey,
             "telnyx_from_number": telnyxFromNumber,
