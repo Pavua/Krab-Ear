@@ -149,21 +149,27 @@ if [ -n "$RUNNING_PID" ]; then
   /bin/sleep 2
 fi
 
-# 2. Source binary preference order: .build > .app > runtime.
+# 2. Source binary picked by **newest mtime** (avoid возврат к старому).
+# Раньше preference order был .build > .app > runtime — но если .build/release/
+# содержал старый build (например после `git checkout` старой ветки без rebuild),
+# script revert'нул .app к старому. Теперь mtime-based — newest wins.
+get_mtime() {
+  /usr/bin/stat -f '%m' "$1" 2>/dev/null || echo 0
+}
+APP_MT="$(get_mtime "$APP_BIN")"
+RUNTIME_MT="$(get_mtime "$RUNTIME_BIN")"
+BUILD_MT="$(get_mtime "$BUILD_BIN")"
 SOURCE_BIN=""
-if [ "$BUILD_HASH" != "MISSING" ]; then
-  SOURCE_BIN="$BUILD_BIN"
-  echo "  → using freshest source: .build/release/"
-elif [ "$APP_HASH" != "MISSING" ]; then
-  SOURCE_BIN="$APP_BIN"
-  echo "  → using source: .app/Contents/MacOS/"
-elif [ "$RUNTIME_HASH" != "MISSING" ]; then
-  SOURCE_BIN="$RUNTIME_BIN"
-  echo "  → using source: native/runtime/"
-else
+SOURCE_MT=0
+[ "$APP_MT" -gt "$SOURCE_MT" ] && [ "$APP_HASH" != "MISSING" ] && { SOURCE_BIN="$APP_BIN"; SOURCE_MT="$APP_MT"; }
+[ "$RUNTIME_MT" -gt "$SOURCE_MT" ] && [ "$RUNTIME_HASH" != "MISSING" ] && { SOURCE_BIN="$RUNTIME_BIN"; SOURCE_MT="$RUNTIME_MT"; }
+[ "$BUILD_MT" -gt "$SOURCE_MT" ] && [ "$BUILD_HASH" != "MISSING" ] && { SOURCE_BIN="$BUILD_BIN"; SOURCE_MT="$BUILD_MT"; }
+
+if [ -z "$SOURCE_BIN" ]; then
   echo "  ❌ No source binary found. Run 'make build' first."
   exit 2
 fi
+echo "  → using newest source ($(/bin/date -r "$SOURCE_MT" '+%H:%M:%S')): $SOURCE_BIN"
 
 # 3. Copy + sign both.
 /bin/cp -f "$SOURCE_BIN" "$APP_BIN"
