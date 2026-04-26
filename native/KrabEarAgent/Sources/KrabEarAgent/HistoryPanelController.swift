@@ -1746,6 +1746,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         llmModelSelector.action = #selector(onLlmModelChanged)
         self.dictationAISection = llmSection
 
+        // Hero card — Phase 2 IA refactor (Gemini 3.1 Pro design 2026-04-26):
+        // visual hierarchy для частых параметров вверху таба, всегда видим.
+        settingsBar.addArrangedSubview(buildDictationHeroCard())
         settingsBar.addArrangedSubview(recordingSection)
         settingsBar.addArrangedSubview(hotkeySection)
         settingsBar.addArrangedSubview(builtSystemSection)
