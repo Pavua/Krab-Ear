@@ -691,13 +691,16 @@ extension HistoryPanelController {
     }
 
     /// Pure helper — форматирует ответ `get_history_overview` в overview label.
+    /// Включает все поля: today/24h counts + paste ok/err + translation ok/err.
     /// `nonisolated static` — тестируется без instance.
     nonisolated static func formatHistoryOverview(result: [String: Any]) -> String {
         let todayCount = (result["today_count"] as? Int) ?? 0
         let last24hCount = (result["last_24h_count"] as? Int) ?? 0
         let pasteOk = (result["paste_ok"] as? Int) ?? 0
         let pasteFailed = (result["paste_failed"] as? Int) ?? 0
-        return "Сегодня: \(todayCount) | 24ч: \(last24hCount) | Paste: ✓\(pasteOk) ✗\(pasteFailed)"
+        let translatedOk = (result["translated_ok"] as? Int) ?? 0
+        let translatedError = (result["translated_error"] as? Int) ?? 0
+        return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
     }
 
     func updateDictationHistoryPreview() {
@@ -759,21 +762,10 @@ extension HistoryPanelController {
         )
     }
 
-    func buildHistoryOverviewLabel() -> String {
-        guard
-            let response = try? ipcClient.call(method: "get_history_overview", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            return "Обзор: недоступен"
-        }
-        let todayCount = (result["today_count"] as? Int) ?? 0
-        let last24hCount = (result["last_24h_count"] as? Int) ?? 0
-        let pasteOk = (result["paste_ok"] as? Int) ?? 0
-        let pasteFailed = (result["paste_failed"] as? Int) ?? 0
-        let translatedOk = (result["translated_ok"] as? Int) ?? 0
-        let translatedError = (result["translated_error"] as? Int) ?? 0
-        return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
-    }
+    // buildHistoryOverviewLabel() удалена в этом PR — заменена inline IPC fetch +
+    // pure helper `formatHistoryOverview(result:)` в updateHistoryStatusLabel
+    // (см. PR #315). Все поля сохранены (в т.ч. translated_ok/error добавлены
+    // в formatHistoryOverview этим PR).
 
     /// Pure helper — может вызываться из любого thread (nonisolated).
     /// Используется в onCompact() из background closure для форматирования

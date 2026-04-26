@@ -13,7 +13,7 @@ final class HistoryPanelOverviewFormatTests: XCTestCase {
 
     func test_emptyResult_defaultsToZeros() {
         let s = HistoryPanelController.formatHistoryOverview(result: [:])
-        XCTAssertEqual(s, "Сегодня: 0 | 24ч: 0 | Paste: ✓0 ✗0")
+        XCTAssertEqual(s, "Обзор: сегодня 0, 24ч 0, вставка ok/err 0/0, перевод ok/err 0/0")
     }
 
     func test_fullResult() {
@@ -22,18 +22,19 @@ final class HistoryPanelOverviewFormatTests: XCTestCase {
             "last_24h_count": 12,
             "paste_ok": 8,
             "paste_failed": 1,
+            "translated_ok": 4,
+            "translated_error": 0,
         ]
         let s = HistoryPanelController.formatHistoryOverview(result: r)
-        XCTAssertEqual(s, "Сегодня: 5 | 24ч: 12 | Paste: ✓8 ✗1")
+        XCTAssertEqual(s, "Обзор: сегодня 5, 24ч 12, вставка ok/err 8/1, перевод ok/err 4/0")
     }
 
     func test_partialResult_missingFieldsDefault0() {
         let r: [String: Any] = ["today_count": 3]
         let s = HistoryPanelController.formatHistoryOverview(result: r)
-        XCTAssertTrue(s.contains("Сегодня: 3"))
-        XCTAssertTrue(s.contains("24ч: 0"))
-        XCTAssertTrue(s.contains("✓0"))
-        XCTAssertTrue(s.contains("✗0"))
+        XCTAssertTrue(s.contains("сегодня 3"))
+        XCTAssertTrue(s.contains("24ч 0"))
+        XCTAssertTrue(s.contains("ok/err 0/0"))
     }
 
     func test_largeNumbers() {
@@ -42,30 +43,36 @@ final class HistoryPanelOverviewFormatTests: XCTestCase {
             "last_24h_count": 9876,
             "paste_ok": 9999,
             "paste_failed": 100,
+            "translated_ok": 500,
+            "translated_error": 50,
         ]
         let s = HistoryPanelController.formatHistoryOverview(result: r)
-        XCTAssertTrue(s.contains("Сегодня: 1234"))
-        XCTAssertTrue(s.contains("24ч: 9876"))
-        XCTAssertTrue(s.contains("✓9999"))
-        XCTAssertTrue(s.contains("✗100"))
+        XCTAssertTrue(s.contains("сегодня 1234"))
+        XCTAssertTrue(s.contains("24ч 9876"))
+        XCTAssertTrue(s.contains("вставка ok/err 9999/100"))
+        XCTAssertTrue(s.contains("перевод ok/err 500/50"))
     }
 
     func test_wrongTypes_fallbackToZero() {
-        // Строки вместо Int — fallback на 0.
         let r: [String: Any] = [
             "today_count": "not a number",
             "last_24h_count": ["nested": "dict"],
-            "paste_ok": 3.14,  // Double — не Int → fallback 0
-            "paste_failed": true,  // Bool — не Int → fallback 0
+            "paste_ok": 3.14,
+            "paste_failed": true,
         ]
         let s = HistoryPanelController.formatHistoryOverview(result: r)
-        XCTAssertEqual(s, "Сегодня: 0 | 24ч: 0 | Paste: ✓0 ✗0")
+        XCTAssertEqual(s, "Обзор: сегодня 0, 24ч 0, вставка ok/err 0/0, перевод ok/err 0/0")
     }
 
-    func test_unicodeCheckmarks_present() {
-        let s = HistoryPanelController.formatHistoryOverview(result: ["paste_ok": 1, "paste_failed": 1])
-        XCTAssertTrue(s.contains("✓"))
-        XCTAssertTrue(s.contains("✗"))
+    func test_translationFieldsIncluded() {
+        let r: [String: Any] = ["translated_ok": 7, "translated_error": 2]
+        let s = HistoryPanelController.formatHistoryOverview(result: r)
+        XCTAssertTrue(s.contains("перевод ok/err 7/2"))
+    }
+
+    func test_overviewPrefix_present() {
+        let s = HistoryPanelController.formatHistoryOverview(result: [:])
+        XCTAssertTrue(s.hasPrefix("Обзор:"))
     }
 
     // MARK: - formatBytesIfStatic helper
