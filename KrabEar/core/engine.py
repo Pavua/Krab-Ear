@@ -2146,7 +2146,39 @@ class AudioEngine:
         else:
             raise TypeError(f"Неподдерживаемый тип audio_data для GigaAM: {type(audio_data)}")
 
-        result = adapter.transcribe(audio_data_np)
+        # GigaAM `transcribe()` имеет hard limit ~25 сек на одну операцию.
+        # Для длинных аудио используем `transcribe_longform()` (через pyannote VAD).
+        # Threshold 24s consvервативный (gigaam падает на ~26s+).
+        # Требует pyannote.audio + HF token; см. config.STT_GIGAAM_HF_TOKEN.
+        duration_sec = len(audio_data_np) / 16000.0
+        use_longform = duration_sec > 24.0
+        hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
+
+        try:
+            if use_longform:
+                logger.info(
+                    "GigaAM longform path: duration=%.1fs (> 24s), hf_token=%s",
+                    duration_sec,
+                    "set" if hf_token else "cached",
+                )
+                result = adapter.transcribe(audio_data_np, longform=True, hf_token=hf_token)
+            else:
+                result = adapter.transcribe(audio_data_np)
+        except Exception as exc:
+            # Longform может упасть из-за pyannote gated repo (TOS not accepted)
+            # или missing HF token. Fallback на короткий transcribe не имеет смысла
+            # (тот же error на длинном audio). Возвращаем dict с error чтобы
+            # AudioEngine fallback chain переключился на whisper.
+            logger.warning(
+                "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
+                duration_sec, use_longform, str(exc)[:200],
+            )
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "engine": "gigaam-error",
+                "error": str(exc)[:300],
+            }
 
         # Нормализуем формат ответа адаптера
         text = result.get("text", "") if isinstance(result, dict) else str(result)
