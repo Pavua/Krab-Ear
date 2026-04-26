@@ -378,6 +378,87 @@ Voice Assistant Mode — это полноценный разговор с ло�
 
 **Когда использовать словарь:** если вы часто упоминаете имена, названия лекарств, медицинские термины или торговые марки — добавьте их. Это значительно улучшает точность.
 
+### Секция: GigaAM-RNNT v2 (опционально, RU-специализированная)
+
+GigaAM — модель распознавания русскоязычной речи от Sber (salute-developers, лицензия MIT). На стандартном тесте Common Voice RU даёт **WER ~3.8%** против ~9.8% у whisper-large-v3 — то есть **в 2.5 раза меньше ошибок** на русском. По умолчанию выключена; включается опционально, для пользователей с активной русскоязычной диктовкой.
+
+#### Когда включать
+
+- 80%+ диктовок на русском
+- Часто диктуете имена/термины/специальную лексику (Whisper их часто слышит «как в литературе»)
+- Готовы потратить ~630 МБ диска под изолированный venv + ~1 ГБ под веса модели
+
+#### Когда НЕ включать
+
+- Преимущественно EN/ES — GigaAM работает только с русским
+- Хотите идеально lightweight setup (whisper-large-v3 уже есть и работает)
+
+#### Установка (одноразово, ~3-5 мин)
+
+GigaAM нельзя поставить в основной Krab Ear venv: пакет требует `torch<=2.5.1`, что несовместимо с Python 3.14 + torch 2.11. Поэтому используется изолированный venv с Python 3.12 (~/.venv_krab_ear_gigaam).
+
+1. **Убедись что Python 3.12 установлен:**
+   ```bash
+   /opt/homebrew/bin/python3.12 --version
+   # Если нет — установи: brew install python@3.12
+   ```
+
+2. **Запусти one-click installer:**
+   ```bash
+   bash scripts/install_gigaam_venv.command
+   ```
+   Скрипт создаст `~/.venv_krab_ear_gigaam`, поставит torch 2.5.1 + onnxruntime 1.23 + gigaam, и проверит smoke import. На M4 Max занимает ~3 мин (зависит от скорости сети).
+
+3. **Включи через IPC (одноразово):**
+   ```bash
+   python3 -c "
+   import socket, json, os
+   sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+   sock.connect(os.path.expanduser('~/Library/Application Support/KrabEar/krabear.sock'))
+   sock.sendall(json.dumps({'id':'1','method':'set_settings','params':{'stt_gigaam_enabled':True}}).encode()+b'\n')
+   print(sock.recv(4096).decode())
+   "
+   ```
+   Или через GUI Settings (когда добавится; пока через IPC).
+
+#### Как работает
+
+Когда `STT_GIGAAM_ENABLED=true` и detected_lang == "ru":
+1. AudioEngine помещает GigaAM первым в STT chain
+2. Аудио уходит в worker subprocess (запущен из venv_gigaam, держит модель в памяти)
+3. Worker возвращает текст через JSON по stdin/stdout (~50–200 мс на короткую фразу после первой загрузки)
+4. При любой ошибке (worker crash, timeout, недоступность venv) — fallback на whisper-large-v3 без потери транскрипции
+
+Первая транскрипция после старта backend будет **медленнее** (~5-15 сек на загрузку модели в worker'е). Все последующие — быстрые.
+
+#### Параметры (в config.py / env vars)
+
+| Setting (env: `KRAB_EAR_<NAME>`) | Default | Описание |
+|---|---|---|
+| `STT_GIGAAM_ENABLED` | `False` | Включить GigaAM в STT chain |
+| `STT_GIGAAM_MODE` | `"rnnt"` | `"rnnt"` (выше качество) или `"ctc"` (быстрее) |
+| `STT_GIGAAM_DEVICE` | `"mps"` | `"mps"` (Apple Silicon GPU, ~3× быстрее) или `"cpu"` |
+| `STT_GIGAAM_TRANSPORT` | `"auto"` | `"auto"` / `"in_process"` / `"subprocess"` |
+| `STT_GIGAAM_VENV_PYTHON` | `""` | Путь к venv-Python (пусто = `~/.venv_krab_ear_gigaam/bin/python`) |
+
+#### Проверка после включения
+
+После того как enable + первая диктовка на русском прошла:
+```bash
+log show --last 5m --predicate 'eventMessage CONTAINS "GigaAM"' --style compact 2>/dev/null | head -20
+```
+Должна быть строка `GigaAM-RNNT добавлен в chain первым` и `GigaAM транскрибация завершена`.
+
+В транскрибированной записи поле `engine` будет `gigaam-rnnt` (вместо `mlx-whisper-large-v3`).
+
+#### Откат
+
+```bash
+# Через IPC: stt_gigaam_enabled = false
+# Венв можно удалить если больше не нужен:
+rm -rf ~/.venv_krab_ear_gigaam
+```
+
 ### Секция: Перевод
 
 | Параметр | Описание |
