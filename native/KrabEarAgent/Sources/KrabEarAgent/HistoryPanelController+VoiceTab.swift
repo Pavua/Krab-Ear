@@ -78,17 +78,21 @@ extension HistoryPanelController {
 
     /// Вызывается из HotkeyManager (PR 1.5) для старта разговора по hotkey.
     /// При menu-bar mode panel может быть закрытым — открываем + tab switch.
+    /// showPanel() имеет async block который сбрасывает selection на History.
+    /// Поэтому tab switch + startConversation deferred через main.async чтобы
+    /// run AFTER showPanel's internal async (FIFO main queue).
     func triggerConversationStart() {
-        // Ensure panel visible (no-op если уже видим). При menu-bar mode без
-        // showPanel() нет mainTabView в hierarchy → tab switch silent.
         showPanel()
-        // Activate window чтобы user видел переключение (panel может быть behind).
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // Переключить на вкладку «Разговор с AI» (индекс 3).
-        mainTabView.selectTabViewItem(at: 3)
-        tabSelector.selectedSegment = 3
-        conversationVC?.startConversation()
+        // Defer tab switch + conversation start чтобы run после showPanel's
+        // async tab-sync block. Без этого showPanel resets to History tab.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.mainTabView.selectTabViewItem(at: 3)
+            self.tabSelector.selectedSegment = 3
+            self.conversationVC?.startConversation()
+        }
     }
 
     /// Вызывается из wake-word detector (PR 1.5) для старта разговора.
