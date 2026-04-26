@@ -1113,9 +1113,14 @@ extension HistoryPanelController {
         let textColumn = tableView.tableColumns.first { $0.identifier.rawValue == "text" }
         // Оставляем 28pt под кнопку перевода справа.
         let columnWidth = max(180, (textColumn?.width ?? 700) - 36)
+        // Cache key учитывает item.id, columnWidth и состояние inline translation —
+        // при изменении любого пересчитываем (KRAB-EAR-AGENT-5 fix).
+        let translationVisible = inlineTranslationVisible.contains(item.id)
+        let cacheKey = "\(item.id):\(Int(columnWidth)):\(translationVisible ? 1 : 0)"
+        if let cached = rowHeightCache[cacheKey] { return cached }
+
         let sampleText = item.text as NSString
         let bodyFont = historyBodyFont()
-
         let textHeight = sampleText.boundingRect(
             with: NSSize(width: columnWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -1126,7 +1131,7 @@ extension HistoryPanelController {
         var totalHeight = ceil(textHeight) + 10
 
         // Если перевод виден — добавляем высоту второй строки.
-        if inlineTranslationVisible.contains(item.id) {
+        if translationVisible {
             let translationText: String
             if let cached = inlineTranslationCache.object(forKey: item.id as NSString) {
                 translationText = cached as String
@@ -1144,7 +1149,9 @@ extension HistoryPanelController {
             totalHeight += ceil(translationHeight) + 6
         }
 
-        return max(historyMinRowHeight(), totalHeight)
+        let height = max(historyMinRowHeight(), totalHeight)
+        rowHeightCache[cacheKey] = height
+        return height
     }
 
     func buildTranslationBadge(_ item: HistoryItem) -> String {

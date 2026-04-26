@@ -71,7 +71,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let onSwapRuEsDirection: () -> Void
     let notificationService = NotificationService()
 
-    var items: [HistoryItem] = []
+    var rowHeightCache: [String: CGFloat] = [:]
+    var items: [HistoryItem] = [] {
+        didSet { rowHeightCache.removeAll() }
+    }
     var nextCursor: String?
     var currentQuery: String = ""
     var isSyncingSettings = false
