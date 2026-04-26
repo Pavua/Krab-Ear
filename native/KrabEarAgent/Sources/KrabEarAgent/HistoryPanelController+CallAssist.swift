@@ -15,56 +15,75 @@ extension HistoryPanelController {
         let captureMode = selectedCaptureSourceMode()
         let notifyMode = callNotifyButton.state == .on ? "auto_on" : "auto_off"
         let translationMode = settings.translationMode == "off" ? "auto_to_ru" : settings.translationMode
+        let autoSummaryOn = callAutoSummaryButton.state == .on
+        let notifyOn = callNotifyButton.state == .on
 
-        guard
-            let response = try? ipcClient.call(
-                method: "start_call_assist",
-                params: [
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "start_call_assist",
+                    params: [
+                        "capture_source_mode": captureMode,
+                        "notify_mode": notifyMode,
+                        "translation_mode": translationMode,
+                        "tts_mode": "hybrid",
+                        "auto_summary": autoSummaryOn,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Call Assist", body: "Не удалось запустить звонковую сессию.")
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.applySettingsPatch([
                     "capture_source_mode": captureMode,
-                    "notify_mode": notifyMode,
-                    "translation_mode": translationMode,
-                    "tts_mode": "hybrid",
-                    "auto_summary": callAutoSummaryButton.state == .on,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Call Assist", body: "Не удалось запустить звонковую сессию.")
-            return
+                    "call_notify_default": notifyOn,
+                    "call_auto_summary": autoSummaryOn,
+                ])
+                self.applyCallAssistState(result)
+            }
         }
-
-        applySettingsPatch([
-            "capture_source_mode": captureMode,
-            "call_notify_default": callNotifyButton.state == .on,
-            "call_auto_summary": callAutoSummaryButton.state == .on,
-        ])
-        applyCallAssistState(result)
     }
 
     @objc func onStopCallAssist() {
-        guard
-            let response = try? ipcClient.call(
-                method: "stop_call_assist",
-                params: [
-                    "auto_summary": callAutoSummaryButton.state == .on,
-                    "summary_max_items": 60,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Call Assist", body: "Не удалось остановить звонковую сессию.")
-            return
-        }
-        applyCallAssistState(result)
-        if let summaryStatus = result["summary_status"] as? String {
-            if summaryStatus == "ok", let summary = result["summary"] as? [String: Any] {
-                appendCallAssistOutput(title: "Summary звонка", body: formatCallSummary(summary))
-                if let historyId = result["summary_history_id"] as? String, !historyId.isEmpty {
-                    appendCallAssistOutput(title: "Summary сохранён", body: "Добавлено в историю. id: \(historyId)")
+        let autoSummaryOn = callAutoSummaryButton.state == .on
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "stop_call_assist",
+                    params: [
+                        "auto_summary": autoSummaryOn,
+                        "summary_max_items": 60,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Call Assist", body: "Не удалось остановить звонковую сессию.")
                 }
-            } else if summaryStatus == "degraded" {
-                let errorText = (result["summary_error"] as? String) ?? "unknown"
-                appendCallAssistOutput(title: "Summary звонка", body: "Не удалось получить summary: \(errorText)")
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.applyCallAssistState(result)
+                if let summaryStatus = result["summary_status"] as? String {
+                    if summaryStatus == "ok", let summary = result["summary"] as? [String: Any] {
+                        self.appendCallAssistOutput(title: "Summary звонка", body: self.formatCallSummary(summary))
+                        if let historyId = result["summary_history_id"] as? String, !historyId.isEmpty {
+                            self.appendCallAssistOutput(title: "Summary сохранён", body: "Добавлено в историю. id: \(historyId)")
+                        }
+                    } else if summaryStatus == "degraded" {
+                        let errorText = (result["summary_error"] as? String) ?? "unknown"
+                        self.appendCallAssistOutput(title: "Summary звонка", body: "Не удалось получить summary: \(errorText)")
+                    }
+                }
             }
         }
     }
@@ -73,38 +92,45 @@ extension HistoryPanelController {
 
     @objc func onLoadCallPhraseLibrary() {
         let pair = selectedCallPhraseDirection()
-        guard
-            let response = try? ipcClient.call(
-                method: "list_call_assist_quick_phrases",
-                params: [
-                    "source_lang": pair.sourceLang,
-                    "target_lang": pair.targetLang,
-                    "category": "all",
-                    "limit": 60,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Библиотека фраз", body: "Не удалось получить список быстрых фраз.")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "list_call_assist_quick_phrases",
+                    params: [
+                        "source_lang": pair.sourceLang,
+                        "target_lang": pair.targetLang,
+                        "category": "all",
+                        "limit": 60,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Библиотека фраз", body: "Не удалось получить список быстрых фраз.")
+                }
+                return
+            }
+            let items = (result["items"] as? [[String: Any]]) ?? []
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.callPhrasePresets = items
+                self.callPhrasePresetSelector.removeAllItems()
+                if items.isEmpty {
+                    self.callPhrasePresetSelector.addItem(withTitle: "— фразы не найдены —")
+                    self.appendCallAssistOutput(title: "Библиотека фраз", body: "Список пуст.")
+                    return
+                }
+                for item in items {
+                    let text = (item["source_text"] as? String) ?? ""
+                    let category = (item["category"] as? String) ?? "base"
+                    self.callPhrasePresetSelector.addItem(withTitle: "[\(category)] \(text)")
+                }
+                self.callPhrasePresetSelector.selectItem(at: 0)
+                self.onCallPhrasePresetSelected()
+                self.appendCallAssistOutput(title: "Библиотека фраз", body: "Загружено фраз: \(items.count)")
+            }
         }
-
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        callPhrasePresets = items
-        callPhrasePresetSelector.removeAllItems()
-        if items.isEmpty {
-            callPhrasePresetSelector.addItem(withTitle: "— фразы не найдены —")
-            appendCallAssistOutput(title: "Библиотека фраз", body: "Список пуст.")
-            return
-        }
-        for item in items {
-            let text = (item["source_text"] as? String) ?? ""
-            let category = (item["category"] as? String) ?? "base"
-            callPhrasePresetSelector.addItem(withTitle: "[\(category)] \(text)")
-        }
-        callPhrasePresetSelector.selectItem(at: 0)
-        onCallPhrasePresetSelected()
-        appendCallAssistOutput(title: "Библиотека фраз", body: "Загружено фраз: \(items.count)")
     }
 
     @objc func onCallPhrasePresetSelected() {
@@ -135,68 +161,87 @@ extension HistoryPanelController {
             "voice": "default",
             "style": "chat",
         ]
-        guard
-            let response = try? ipcClient.call(method: "call_assist_quick_phrase", params: params),
-            let result = response["result"] as? [String: Any],
-            let quick = result["quick_phrase"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Quick Phrase", body: "Ошибка отправки фразы в Gateway.")
-            return
-        }
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(method: "call_assist_quick_phrase", params: params),
+                let result = response["result"] as? [String: Any],
+                let quick = result["quick_phrase"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Quick Phrase", body: "Ошибка отправки фразы в Gateway.")
+                }
+                return
+            }
 
-        let translated = (quick["translated_text"] as? String) ?? ""
-        let audioURL = (quick["audio_url"] as? String) ?? "-"
-        let cacheHit = (quick["cache_hit"] as? Bool) ?? false
-        appendCallAssistOutput(
-            title: "Quick Phrase",
-            body: """
-            \(pair.sourceLang) -> \(pair.targetLang)
-            source: \(text)
-            translated: \(translated)
-            audio: \(audioURL)
-            cache_hit: \(cacheHit)
-            """
-        )
+            let translated = (quick["translated_text"] as? String) ?? ""
+            let audioURL = (quick["audio_url"] as? String) ?? "-"
+            let cacheHit = (quick["cache_hit"] as? Bool) ?? false
+            DispatchQueue.main.async {
+                self?.appendCallAssistOutput(
+                    title: "Quick Phrase",
+                    body: """
+                    \(pair.sourceLang) -> \(pair.targetLang)
+                    source: \(text)
+                    translated: \(translated)
+                    audio: \(audioURL)
+                    cache_hit: \(cacheHit)
+                    """
+                )
+            }
+        }
     }
 
     // MARK: - Summary / Diagnostics / Cost
 
     @objc func onFetchCallSummary() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_summary",
-                params: ["max_items": 40]
-            ),
-            let result = response["result"] as? [String: Any],
-            let summaryPayload = result["summary"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Summary", body: "Не удалось получить summary звонка.")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_summary",
+                    params: ["max_items": 40]
+                ),
+                let result = response["result"] as? [String: Any],
+                let summaryPayload = result["summary"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Summary", body: "Не удалось получить summary звонка.")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.appendCallAssistOutput(title: "Summary", body: self.formatCallSummary(summaryPayload))
+            }
         }
-        appendCallAssistOutput(title: "Summary", body: formatCallSummary(summaryPayload))
     }
 
     @objc func onFetchCallDiagnostics() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_diagnostics",
-                params: ["include_why": true]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Diagnostics", body: "Не удалось получить diagnostics.")
-            return
-        }
-        let diagnostics = (result["diagnostics"] as? [String: Any]) ?? [:]
-        let whyPayload = (result["why"] as? [String: Any]) ?? [:]
-        let counters = (diagnostics["counters"] as? [String: Any]) ?? [:]
-        let pipeline = (diagnostics["pipeline"] as? [String: Any]) ?? [:]
-        let why = (whyPayload["why"] as? [String: Any]) ?? [:]
-        let whyCode = (why["code"] as? String) ?? "-"
-        let whyMessage = (why["message"] as? String) ?? "-"
-        appendCallAssistOutput(
-            title: "Diagnostics",
-            body: """
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_diagnostics",
+                    params: ["include_why": true]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Diagnostics", body: "Не удалось получить diagnostics.")
+                }
+                return
+            }
+            let diagnostics = (result["diagnostics"] as? [String: Any]) ?? [:]
+            let whyPayload = (result["why"] as? [String: Any]) ?? [:]
+            let counters = (diagnostics["counters"] as? [String: Any]) ?? [:]
+            let pipeline = (diagnostics["pipeline"] as? [String: Any]) ?? [:]
+            let why = (whyPayload["why"] as? [String: Any]) ?? [:]
+            let whyCode = (why["code"] as? String) ?? "-"
+            let whyMessage = (why["message"] as? String) ?? "-"
+            // Собираем тело сообщения на background — на main отправляем только строку
+            // (избегаем capture'а [String: Any] в actor-isolated closure → Swift 6 data race).
+            let body = """
             translation_partial: \(counters["translation_partial"] ?? 0)
             tts_ready: \(counters["tts_ready"] ?? 0)
             cache_hits: \(pipeline["cache_hits"] ?? 0)
@@ -204,7 +249,10 @@ extension HistoryPanelController {
             fallback: \(pipeline["last_fallback"] ?? "-")
             why: \(whyCode) — \(whyMessage)
             """
-        )
+            DispatchQueue.main.async {
+                self?.appendCallAssistOutput(title: "Diagnostics", body: body)
+            }
+        }
     }
 
     @objc func onEstimateCallCost() {
@@ -256,87 +304,105 @@ extension HistoryPanelController {
         let media = Double(mediaField.stringValue) ?? 400
         let useLivePricing = livePricingButton.state == .on
 
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_cost_estimate",
-                params: [
-                    "country": country,
-                    "minutes_inbound": inbound,
-                    "minutes_outbound_landline": landline,
-                    "minutes_outbound_mobile": mobile,
-                    "minutes_media_stream": media,
-                    "use_live_pricing": useLivePricing,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Оценка стоимости", body: "Не удалось получить расчёт от Gateway.")
-            return
-        }
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_cost_estimate",
+                    params: [
+                        "country": country,
+                        "minutes_inbound": inbound,
+                        "minutes_outbound_landline": landline,
+                        "minutes_outbound_mobile": mobile,
+                        "minutes_media_stream": media,
+                        "use_live_pricing": useLivePricing,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Оценка стоимости", body: "Не удалось получить расчёт от Gateway.")
+                }
+                return
+            }
 
-        let report = formatCallCostEstimate(result)
-        appendCallAssistOutput(title: "Оценка стоимости", body: report)
-        showInfoAlert(title: "Оценка стоимости", body: report)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let report = self.formatCallCostEstimate(result)
+                self.appendCallAssistOutput(title: "Оценка стоимости", body: report)
+                self.showInfoAlert(title: "Оценка стоимости", body: report)
+            }
+        }
     }
 
     // MARK: - Timeline
 
     @objc func onFetchCallTimeline() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline",
-                params: ["limit": 50]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline", body: "Не удалось получить timeline.")
-            return
-        }
-
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        if items.isEmpty {
-            appendCallAssistOutput(title: "Timeline", body: "Пока событий нет.")
-            return
-        }
-        var summaryText = ""
-        if
-            let summaryResponse = try? ipcClient.call(
-                method: "call_assist_timeline_summary",
-                params: ["limit": 200, "max_tasks": 5]
-            ),
-            let summaryResult = summaryResponse["result"] as? [String: Any]
-        {
-            let summary = ((summaryResult["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !summary.isEmpty {
-                summaryText = "summary: \(summary)\n\n"
-            }
-        }
-        var statsText = ""
-        if
-            let statsResponse = try? ipcClient.call(
-                method: "call_assist_timeline_stats",
-                params: ["limit": 200]
-            ),
-            let statsResult = statsResponse["result"] as? [String: Any],
-            let stats = statsResult["stats"] as? [String: Any]
-        {
-            let count = (stats["count"] as? Int) ?? 0
-            let chars = (stats["text_chars"] as? Int) ?? 0
-            var kindsChunk = ""
-            if let byKind = stats["by_kind"] as? [String: Any], !byKind.isEmpty {
-                let pairs = byKind.keys.sorted().map { key -> String in
-                    let value = byKind[key] ?? 0
-                    return "\(key)=\(value)"
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_timeline",
+                    params: ["limit": 50]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Timeline", body: "Не удалось получить timeline.")
                 }
-                kindsChunk = pairs.joined(separator: ", ")
+                return
             }
-            statsText = "stats: count=\(count), text_chars=\(chars)\nby_kind: \(kindsChunk)\n\n"
+
+            let items = (result["items"] as? [[String: Any]]) ?? []
+            if items.isEmpty {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Timeline", body: "Пока событий нет.")
+                }
+                return
+            }
+            var summaryText = ""
+            if
+                let summaryResponse = try? ipcClient.call(
+                    method: "call_assist_timeline_summary",
+                    params: ["limit": 200, "max_tasks": 5]
+                ),
+                let summaryResult = summaryResponse["result"] as? [String: Any]
+            {
+                let summary = ((summaryResult["summary"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !summary.isEmpty {
+                    summaryText = "summary: \(summary)\n\n"
+                }
+            }
+            var statsText = ""
+            if
+                let statsResponse = try? ipcClient.call(
+                    method: "call_assist_timeline_stats",
+                    params: ["limit": 200]
+                ),
+                let statsResult = statsResponse["result"] as? [String: Any],
+                let stats = statsResult["stats"] as? [String: Any]
+            {
+                let count = (stats["count"] as? Int) ?? 0
+                let chars = (stats["text_chars"] as? Int) ?? 0
+                var kindsChunk = ""
+                if let byKind = stats["by_kind"] as? [String: Any], !byKind.isEmpty {
+                    let pairs = byKind.keys.sorted().map { key -> String in
+                        let value = byKind[key] ?? 0
+                        return "\(key)=\(value)"
+                    }
+                    kindsChunk = pairs.joined(separator: ", ")
+                }
+                statsText = "stats: count=\(count), text_chars=\(chars)\nby_kind: \(kindsChunk)\n\n"
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let preview = self.formatCallTimelinePreview(items: Array(items.prefix(12)))
+                self.appendCallAssistOutput(
+                    title: "Timeline",
+                    body: "Событий: \(items.count)\n\(summaryText)\(statsText)\(preview)"
+                )
+            }
         }
-        let preview = formatCallTimelinePreview(items: Array(items.prefix(12)))
-        appendCallAssistOutput(
-            title: "Timeline",
-            body: "Событий: \(items.count)\n\(summaryText)\(statsText)\(preview)"
-        )
     }
 
     @objc func onExportCallTimeline() {
@@ -353,87 +419,112 @@ extension HistoryPanelController {
 
         let selected = formatSelector.indexOfSelectedItem
         let exportFormat = selected == 1 ? "ndjson" : "md"
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_export",
-                params: [
-                    "format": exportFormat,
-                    "limit": 400,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline export", body: "Не удалось выгрузить timeline.")
-            return
-        }
-        let content = (result["content"] as? String) ?? ""
-        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appendCallAssistOutput(title: "Timeline export", body: "Timeline пуст, экспортировать нечего.")
-            return
-        }
-
-        let savePanel = NSSavePanel()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let suffix = exportFormat == "ndjson" ? "ndjson" : "md"
-        savePanel.nameFieldStringValue = "krab_call_timeline_\(formatter.string(from: Date())).\(suffix)"
-        savePanel.canCreateDirectories = true
-        if savePanel.runModal() != .OK {
-            return
-        }
-        guard let url = savePanel.url else { return }
-        do {
-            try content.write(to: url, atomically: true, encoding: .utf8)
-            appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
-        } catch {
-            appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_timeline_export",
+                    params: [
+                        "format": exportFormat,
+                        "limit": 400,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Timeline export", body: "Не удалось выгрузить timeline.")
+                }
+                return
+            }
+            let content = (result["content"] as? String) ?? ""
+            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Timeline export", body: "Timeline пуст, экспортировать нечего.")
+                }
+                return
+            }
+            // NSSavePanel + file write — должны идти на main (NSSavePanel требует main).
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let savePanel = NSSavePanel()
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyyMMdd_HHmmss"
+                let suffix = exportFormat == "ndjson" ? "ndjson" : "md"
+                savePanel.nameFieldStringValue = "krab_call_timeline_\(formatter.string(from: Date())).\(suffix)"
+                savePanel.canCreateDirectories = true
+                if savePanel.runModal() != .OK {
+                    return
+                }
+                guard let url = savePanel.url else { return }
+                do {
+                    try content.write(to: url, atomically: true, encoding: .utf8)
+                    self.appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
+                } catch {
+                    self.appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
     @objc func onClearCallTimeline() {
         let keepLast = selectedCallTimelineKeepLast()
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_clear",
-                params: ["keep_last": keepLast]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(title: "Timeline clear", body: "Не удалось очистить timeline.")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_timeline_clear",
+                    params: ["keep_last": keepLast]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(title: "Timeline clear", body: "Не удалось очистить timeline.")
+                }
+                return
+            }
+            let before = (result["before"] as? Int) ?? -1
+            let after = (result["after"] as? Int) ?? -1
+            DispatchQueue.main.async {
+                self?.appendCallAssistOutput(
+                    title: "Timeline clear",
+                    body: "Очистка завершена. keep_last=\(keepLast), before=\(before), after=\(after)"
+                )
+            }
         }
-        let before = (result["before"] as? Int) ?? -1
-        let after = (result["after"] as? Int) ?? -1
-        appendCallAssistOutput(
-            title: "Timeline clear",
-            body: "Очистка завершена. keep_last=\(keepLast), before=\(before), after=\(after)"
-        )
     }
 
     @objc func onSaveCallTimelineToHistory() {
-        guard
-            let response = try? ipcClient.call(
-                method: "call_assist_timeline_to_history",
-                params: [
-                    "format": "md",
-                    "limit": 500,
-                ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            appendCallAssistOutput(
-                title: "Timeline -> история",
-                body: "Не удалось сохранить timeline в историю."
-            )
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "call_assist_timeline_to_history",
+                    params: [
+                        "format": "md",
+                        "limit": 500,
+                    ]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.appendCallAssistOutput(
+                        title: "Timeline -> история",
+                        body: "Не удалось сохранить timeline в историю."
+                    )
+                }
+                return
+            }
+            let historyId = (result["history_id"] as? String) ?? "-"
+            let chars = (result["chars"] as? Int) ?? 0
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.appendCallAssistOutput(
+                    title: "Timeline -> история",
+                    body: "Сохранено в историю. id=\(historyId), chars=\(chars)"
+                )
+                self.loadInitial()
+            }
         }
-        let historyId = (result["history_id"] as? String) ?? "-"
-        let chars = (result["chars"] as? Int) ?? 0
-        appendCallAssistOutput(
-            title: "Timeline -> история",
-            body: "Сохранено в историю. id=\(historyId), chars=\(chars)"
-        )
-        loadInitial()
     }
 
     // MARK: - Helpers

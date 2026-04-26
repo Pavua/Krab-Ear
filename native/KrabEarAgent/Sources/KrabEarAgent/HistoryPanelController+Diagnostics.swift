@@ -2,41 +2,78 @@ import AppKit
 
 extension HistoryPanelController {
     // MARK: - Diagnostics & Metrics handlers
+    //
+    // Все handlers следуют шаблону: synchronous IPC call вынесен на
+    // DispatchQueue.global(qos: .userInitiated), UI update строго на main.
+    // Без этого backend под нагрузкой блокирует main thread → AppHang ≥2000ms
+    // (Sentry KRAB-EAR-AGENT-3, 19 events 2026-04-24). Образец паттерна — +Analytics.swift.
 
     @objc func onDiagnostics() {
-        guard let response = try? ipcClient.call(method: "get_diagnostics", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить диагностику")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_diagnostics", params: [:]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось получить диагностику")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Диагностика"))
+            }
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Диагностика"))
     }
 
     @objc func onMetrics() {
-        guard let response = try? ipcClient.call(method: "get_metrics_dashboard", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить метрики")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_metrics_dashboard", params: [:]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось получить метрики")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Метрики"))
+            }
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Метрики"))
     }
 
     @objc func onRecordingStats() {
-        guard let response = try? ipcClient.call(method: "get_recording_stats", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить статистику")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_recording_stats", params: [:]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось получить статистику")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Статистика записей"))
+            }
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Статистика записей"))
     }
 
     @objc func onStorageInfo() {
-        guard let response = try? ipcClient.call(method: "get_storage_info", params: [:]),
-              let result = response["result"] as? [String: Any] else {
-            showDiagnosticsOutput("Ошибка: не удалось получить информацию о хранилище")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_storage_info", params: [:]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось получить информацию о хранилище")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Хранилище"))
+            }
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Хранилище"))
     }
 
     func showDiagnosticsOutput(_ text: String) {
@@ -70,39 +107,59 @@ extension HistoryPanelController {
         let selectedTitle = profilePresetSelector.titleOfSelectedItem ?? ""
         guard !selectedTitle.isEmpty, selectedTitle != "Загрузка..." else { return }
         let presetName = (profilePresetSelector.selectedItem?.representedObject as? String) ?? selectedTitle.lowercased()
-        guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
-              let result = response["result"] as? [String: Any],
-              result["applied"] as? Bool == true else {
-            showDiagnosticsOutput("Ошибка: не удалось применить профиль '\(selectedTitle)'")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
+                  let result = response["result"] as? [String: Any],
+                  result["applied"] as? Bool == true else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Ошибка: не удалось применить профиль '\(selectedTitle)'")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.showDiagnosticsOutput("Профиль '\(selectedTitle)' применён.")
+                self.syncSettingsControls()
+            }
         }
-        showDiagnosticsOutput("Профиль '\(selectedTitle)' применён.")
-        syncSettingsControls()
     }
 
     func loadProfilePresets() {
-        guard let response = try? ipcClient.call(method: "list_profile_presets", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let presets = result["presets"] as? [[String: Any]] else { return }
-        profilePresetSelector.removeAllItems()
-        for preset in presets {
-            if let name = preset["name"] as? String {
-                let label = (preset["label"] as? String) ?? name
-                profilePresetSelector.addItem(withTitle: label)
-                profilePresetSelector.lastItem?.representedObject = name
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "list_profile_presets", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let presets = result["presets"] as? [[String: Any]] else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.profilePresetSelector.removeAllItems()
+                for preset in presets {
+                    if let name = preset["name"] as? String {
+                        let label = (preset["label"] as? String) ?? name
+                        self.profilePresetSelector.addItem(withTitle: label)
+                        self.profilePresetSelector.lastItem?.representedObject = name
+                    }
+                }
             }
         }
     }
 
     func loadAudioDevices() {
-        guard let response = try? ipcClient.call(method: "get_audio_devices", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let devices = result["devices"] as? [[String: Any]] else { return }
-        audioDeviceSelector.removeAllItems()
-        audioDeviceSelector.addItem(withTitle: "По умолчанию (системный)")
-        for device in devices {
-            if let name = device["name"] as? String {
-                audioDeviceSelector.addItem(withTitle: name)
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_audio_devices", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let devices = result["devices"] as? [[String: Any]] else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.audioDeviceSelector.removeAllItems()
+                self.audioDeviceSelector.addItem(withTitle: "По умолчанию (системный)")
+                for device in devices {
+                    if let name = device["name"] as? String {
+                        self.audioDeviceSelector.addItem(withTitle: name)
+                    }
+                }
             }
         }
     }
@@ -135,34 +192,53 @@ extension HistoryPanelController {
     // MARK: - Clipboard History handlers
 
     @objc func onClipboardHistory() {
-        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let items = result["items"] as? [[String: Any]] else {
-            showDiagnosticsOutput("Буфер обмена пуст")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let items = result["items"] as? [[String: Any]] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Буфер обмена пуст")
+                }
+                return
+            }
+            // Форматирование можно делать на global — оно не трогает UI.
+            var lines: [String] = ["=== Буфер обмена (последние \(items.count)) ==="]
+            for (i, item) in items.enumerated() {
+                let text = String((item["text"] as? String ?? "").prefix(80))
+                let ts = item["ts"] as? String ?? ""
+                lines.append("\(i + 1). [\(ts)] \(text)")
+            }
+            let output = lines.joined(separator: "\n")
+            DispatchQueue.main.async {
+                self?.showDiagnosticsOutput(output)
+            }
         }
-        var lines: [String] = ["=== Буфер обмена (последние \(items.count)) ==="]
-        for (i, item) in items.enumerated() {
-            let text = String((item["text"] as? String ?? "").prefix(80))
-            let ts = item["ts"] as? String ?? ""
-            lines.append("\(i + 1). [\(ts)] \(text)")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
     }
 
     @objc func onRepasteItem() {
-        guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let clipItems = result["items"] as? [[String: Any]],
-              let firstItem = clipItems.first,
-              let itemId = firstItem["id"] as? String else {
-            notificationService.notify(title: "Krab Ear", body: "Нет элементов для вставки")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        nonisolated(unsafe) let notificationService = self.notificationService
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let clipItems = result["items"] as? [[String: Any]],
+                  let firstItem = clipItems.first,
+                  let itemId = firstItem["id"] as? String else {
+                DispatchQueue.main.async {
+                    notificationService.notify(title: "Krab Ear", body: "Нет элементов для вставки")
+                }
+                return
+            }
+            guard let _ = try? ipcClient.call(method: "repaste_item", params: ["id": itemId]) else {
+                DispatchQueue.main.async {
+                    notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                notificationService.notify(title: "Krab Ear", body: "Элемент вставлен повторно")
+            }
         }
-        guard let _ = try? ipcClient.call(method: "repaste_item", params: ["id": itemId]) else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
-            return
-        }
-        notificationService.notify(title: "Krab Ear", body: "Элемент вставлен повторно")
     }
 }
