@@ -107,7 +107,7 @@ final class CallAutomationController: NSViewController {
 
     // MARK: - Dependencies
 
-    nonisolated(unsafe) let ipcClient: IPCClient
+    let ipcClient: IPCClient
 
     // MARK: - State
 
