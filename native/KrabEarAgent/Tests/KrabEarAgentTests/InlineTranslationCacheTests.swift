@@ -11,6 +11,8 @@
 import XCTest
 @testable import KrabEarAgent
 
+// @MainActor: see PR chore/fix-inline-translation-cache-tests-swift6 для обоснования.
+@MainActor
 final class InlineTranslationCacheTests: XCTestCase {
 
     // MARK: - Cache hit / miss
