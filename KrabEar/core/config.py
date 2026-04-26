@@ -264,9 +264,13 @@ class Settings(BaseSettings):
     # Режим модели: "rnnt" (выше качество, RNNT decoder) или "ctc" (быстрее, CTC decoder).
     # Полные имена тоже поддерживаются: "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc".
     STT_GIGAAM_MODE: str = "rnnt"
-    # Устройство для инференса: "mps" (Apple Silicon GPU) или "cpu".
-    # На M4 Max рекомендуется "mps" — ~3× быстрее CPU при том же потреблении памяти.
-    STT_GIGAAM_DEVICE: str = "mps"
+    # Устройство для инференса: "cpu" (default, рекомендуется) или "mps" (Apple Silicon GPU).
+    # Bench 2026-04-26 на M4 Max: CPU 0.62s vs MPS 4.36s на 15-сек fragment (RTF
+    # 0.041 vs 0.291). MPS медленнее из-за warmup + tensor transfer overhead на
+    # коротких inference; для длинных audio (>60s) может быть другая story —
+    # требуется отдельный bench когда longform доступен (HF_TOKEN setup).
+    # См. memory/reference_gigaam_bench_2026-04-26.md.
+    STT_GIGAAM_DEVICE: str = "cpu"
     # Транспорт для запуска инференса:
     #   "in_process" — `import gigaam` в текущем Python. Работает только если gigaam
     #                  установлен в активном venv. В main Krab Ear venv (Python 3.14
@@ -281,6 +285,10 @@ class Settings(BaseSettings):
     # Используется только при transport in {"subprocess", "auto"}.
     # Пустая строка = дефолт ~/.venv_krab_ear_gigaam/bin/python.
     STT_GIGAAM_VENV_PYTHON: str = ""
+    # HuggingFace API token (read access). Нужен для transcribe_longform() в gigaam,
+    # которая использует pyannote VAD для long audio (>30s). Если пустой —
+    # fallback на ~/.cache/huggingface/token. См. reference_gigaam_bench_2026-04-26.
+    STT_GIGAAM_HF_TOKEN: str = ""
 
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.

@@ -149,6 +149,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }()
     let diarizationButton = NSButton(checkboxWithTitle: "Диаризация (определение говорящих)", target: nil, action: nil)
     let llmRewriteButton = NSButton(checkboxWithTitle: "LLM постобработка текста", target: nil, action: nil)
+    /// GigaAM-RNNT v2 — RU-специализированная STT модель (~2.5× меньше WER на русском).
+    /// Требует ~/.venv_krab_ear_gigaam (см. scripts/install_gigaam_venv.command).
+    /// Pre-flight check на наличие venv делается в onGigaamEnabledChanged.
+    let gigaamEnabledButton = NSButton(checkboxWithTitle: "GigaAM-RNNT v2 (RU, опционально)", target: nil, action: nil)
     let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
     let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")
@@ -1080,6 +1084,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         llmRewriteButton.target = self
         llmRewriteButton.action = #selector(onLlmRewriteChanged)
+
+        gigaamEnabledButton.target = self
+        gigaamEnabledButton.action = #selector(onGigaamEnabledChanged)
 
         llmModelSelector.target = self
         llmModelSelector.action = #selector(onLlmModelChanged)
