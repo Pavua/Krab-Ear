@@ -35,6 +35,7 @@ final class HistoryPanelKeyboardShortcutsTests: XCTestCase {
         let s = HistoryPanelController.keyboardShortcutsHelpText()
         XCTAssertTrue(s.contains("⌘D"), "Диагностика shortcut")
         XCTAssertTrue(s.contains("⌘E"), "Экспорт SRT shortcut")
+        XCTAssertTrue(s.contains("⌘M"), "Экспорт Markdown shortcut (handler added in PR #325)")
         XCTAssertTrue(s.contains("⌘I"), "Хранилище shortcut")
     }
 
