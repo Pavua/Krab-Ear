@@ -70,7 +70,21 @@ final class HotkeyManager {
     /// detector ловит second tap. Если timer истёк — fires onToggle().
     private var pendingSingleTapTimer: DispatchSourceTimer?
 
+    /// Timestamp последнего double-tap consumed event. Manager использует чтобы
+    /// **не запускать второй timer** на второй tap события (race fix):
+    /// detector может зарегистрировать double-tap раньше или позже Manager
+    /// processKeyEvent для второго нажатия. Если recent — skip schedule.
+    private var recentDoubleTapAt: Date?
+    /// Окно после double-tap в течении которого Manager игнорирует tap event.
+    private static let doubleTapDebounceMs: Double = 500
+
     private func schedulePendingSingleTap() {
+        // Если только что был double-tap — second tap event приходит сюда тоже
+        // (через independent NSEvent monitor), но мы НЕ должны re-schedule timer.
+        if let lastDT = recentDoubleTapAt,
+           Date().timeIntervalSince(lastDT) * 1000 < Self.doubleTapDebounceMs {
+            return
+        }
         // Cancel предыдущий если был — типичный case при rapid taps.
         cancelPendingSingleTap()
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -86,6 +100,7 @@ final class HotkeyManager {
     private func cancelPendingSingleTap() {
         pendingSingleTapTimer?.cancel()
         pendingSingleTapTimer = nil
+        recentDoubleTapAt = Date()  // mark consumed → debounce next 500ms
     }
 
     // MARK: Quick replay — Cmd+Option+V
