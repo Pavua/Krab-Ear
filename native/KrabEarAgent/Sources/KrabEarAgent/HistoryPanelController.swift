@@ -396,27 +396,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let statusRow = NSStackView()
     // MARK: - Diagnostics & Metrics
     var diagnosticsSection: CollapsibleSectionView?
-    private let diagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
-    private let metricsButton = ThemeSecondaryButton(title: "Метрики", target: nil, action: nil)
-    private let recordingStatsButton = ThemeSecondaryButton(title: "Статистика", target: nil, action: nil)
-    private let storageInfoButton = ThemeSecondaryButton(title: "Хранилище", target: nil, action: nil)
-    private let diagnosticsRow = NSStackView()
-    private let diagnosticsOutputScroll = NSScrollView()
+    let diagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
+    let metricsButton = ThemeSecondaryButton(title: "Метрики", target: nil, action: nil)
+    let recordingStatsButton = ThemeSecondaryButton(title: "Статистика", target: nil, action: nil)
+    let storageInfoButton = ThemeSecondaryButton(title: "Хранилище", target: nil, action: nil)
+    let diagnosticsRow = NSStackView()
+    let diagnosticsOutputScroll = NSScrollView()
     let diagnosticsOutputView = NSTextView()
     // MARK: - Profile Presets & Audio Devices
-    private var profileAudioSection: CollapsibleSectionView?
+    var profileAudioSection: CollapsibleSectionView?
     let profilePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let applyProfileButton = ThemePrimaryButton(title: "Применить", target: nil, action: nil)
+    let applyProfileButton = ThemePrimaryButton(title: "Применить", target: nil, action: nil)
     let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let testMicButton = ThemeSecondaryButton(title: "Тест микрофона", target: nil, action: nil)
+    let testMicButton = ThemeSecondaryButton(title: "Тест микрофона", target: nil, action: nil)
     let micTestResultLabel = NSTextField(labelWithString: "")
-    private let profileRow = NSStackView()
-    private let audioDeviceRow = NSStackView()
+    let profileRow = NSStackView()
+    let audioDeviceRow = NSStackView()
     // MARK: - Clipboard History
-    private var clipboardSection: CollapsibleSectionView?
-    private let clipboardHistoryButton = ThemeSecondaryButton(title: "Буфер обмена", target: nil, action: nil)
-    private let repasteButton = ThemeSecondaryButton(title: "Вставить повторно", target: nil, action: nil)
-    private let clipboardRow = NSStackView()
+    var clipboardSection: CollapsibleSectionView?
+    let clipboardHistoryButton = ThemeSecondaryButton(title: "Буфер обмена", target: nil, action: nil)
+    let repasteButton = ThemeSecondaryButton(title: "Вставить повторно", target: nil, action: nil)
+    let clipboardRow = NSStackView()
     // MARK: - History enhancements
     private let exportSrtButton = ThemeSecondaryButton(title: "Экспорт SRT", target: nil, action: nil)
     private let cleanupHistoryButton = ThemeSecondaryButton(title: "Очистка старых", target: nil, action: nil)
@@ -1837,105 +1837,25 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsBar.addArrangedSubview(selTransSection)
 
         // --- DIAGNOSTICS & METRICS SECTION ---
-        let diagSection = CollapsibleSectionView(sectionId: "dictation_diagnostics", title: "Диагностика и метрики", isExpanded: false)
-        let diagCard = ThemeCardView()
-        diagnosticsRow.orientation = .horizontal
-        diagnosticsRow.spacing = KrabEarTheme.Metrics.standard
-        diagnosticsRow.alignment = .centerY
-        diagnosticsRow.translatesAutoresizingMaskIntoConstraints = false
-        diagnosticsButton.target = self
-        diagnosticsButton.action = #selector(onDiagnostics)
-        metricsButton.target = self
-        metricsButton.action = #selector(onMetrics)
-        recordingStatsButton.target = self
-        recordingStatsButton.action = #selector(onRecordingStats)
-        storageInfoButton.target = self
-        storageInfoButton.action = #selector(onStorageInfo)
-        diagnosticsRow.addArrangedSubview(diagnosticsButton)
-        diagnosticsRow.addArrangedSubview(metricsButton)
-        diagnosticsRow.addArrangedSubview(recordingStatsButton)
-        diagnosticsRow.addArrangedSubview(storageInfoButton)
-        diagCard.contentStackView.addArrangedSubview(diagnosticsRow)
-
-        diagnosticsOutputView.isEditable = false
-        diagnosticsOutputView.isSelectable = true
-        diagnosticsOutputView.font = KrabEarTheme.Typography.monospace
-        diagnosticsOutputView.textColor = KrabEarTheme.Colors.textSecondary
-        diagnosticsOutputView.backgroundColor = .clear
-        diagnosticsOutputView.drawsBackground = false
-        diagnosticsOutputScroll.documentView = diagnosticsOutputView
-        diagnosticsOutputScroll.drawsBackground = false
-        diagnosticsOutputScroll.hasVerticalScroller = true
-        diagnosticsOutputScroll.translatesAutoresizingMaskIntoConstraints = false
-        diagnosticsOutputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
-        // Width constraint moved after diagCard is in hierarchy (below)
-        diagCard.contentStackView.addArrangedSubview(diagnosticsOutputScroll)
-
-        diagSection.contentStackView.addArrangedSubview(diagCard)
-        self.diagnosticsSection = diagSection
+        // Extracted → setupDictationDiagnosticsSection (PR refactor/extract-dictation-tab-sections).
+        // Возвращает tuple (section, diagCard) — diagCard нужен для late width constraint
+        // (NSGenericException 'no common ancestor' guard, см. PR #228 lineage).
+        let (diagSection, diagCard) = setupDictationDiagnosticsSection()
         settingsBar.addArrangedSubview(diagSection)
-
-        // Now that diagCard is in the view hierarchy, activate the width constraint
-        let diagWidthC = diagnosticsOutputScroll.widthAnchor.constraint(equalTo: diagCard.contentStackView.widthAnchor)
+        let diagWidthC = diagnosticsOutputScroll.widthAnchor.constraint(
+            equalTo: diagCard.contentStackView.widthAnchor
+        )
         diagWidthC.isActive = true
         themeWidthConstraints.append(diagWidthC)
 
         // --- PROFILE PRESETS & AUDIO DEVICES SECTION ---
-        let profAudioSection = CollapsibleSectionView(sectionId: "dictation_profile_audio", title: "Профили и устройства", isExpanded: false)
-        let profAudioCard = ThemeCardView()
-        profileRow.orientation = .horizontal
-        profileRow.spacing = KrabEarTheme.Metrics.standard
-        profileRow.alignment = .centerY
-        profileRow.translatesAutoresizingMaskIntoConstraints = false
-        let profileLabel = NSTextField(labelWithString: "Профиль:")
-        profileLabel.font = KrabEarTheme.Typography.body
-        profilePresetSelector.removeAllItems()
-        profilePresetSelector.addItem(withTitle: "Загрузка...")
-        applyProfileButton.target = self
-        applyProfileButton.action = #selector(onApplyProfile)
-        profileRow.addArrangedSubview(profileLabel)
-        profileRow.addArrangedSubview(profilePresetSelector)
-        profileRow.addArrangedSubview(applyProfileButton)
-        profAudioCard.contentStackView.addArrangedSubview(profileRow)
-
-        audioDeviceRow.orientation = .horizontal
-        audioDeviceRow.spacing = KrabEarTheme.Metrics.standard
-        audioDeviceRow.alignment = .centerY
-        audioDeviceRow.translatesAutoresizingMaskIntoConstraints = false
-        let audioLabel = NSTextField(labelWithString: "Микрофон:")
-        audioLabel.font = KrabEarTheme.Typography.body
-        audioDeviceSelector.removeAllItems()
-        audioDeviceSelector.addItem(withTitle: "По умолчанию")
-        testMicButton.target = self
-        testMicButton.action = #selector(onTestMicrophone)
-        micTestResultLabel.font = KrabEarTheme.Typography.caption
-        micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
-        audioDeviceRow.addArrangedSubview(audioLabel)
-        audioDeviceRow.addArrangedSubview(audioDeviceSelector)
-        audioDeviceRow.addArrangedSubview(testMicButton)
-        audioDeviceRow.addArrangedSubview(micTestResultLabel)
-        profAudioCard.contentStackView.addArrangedSubview(audioDeviceRow)
-
-        profAudioSection.contentStackView.addArrangedSubview(profAudioCard)
-        self.profileAudioSection = profAudioSection
+        // Extracted → setupDictationProfileAudioSection.
+        let profAudioSection = setupDictationProfileAudioSection()
         settingsBar.addArrangedSubview(profAudioSection)
 
         // --- CLIPBOARD HISTORY SECTION ---
-        let clipSection = CollapsibleSectionView(sectionId: "dictation_clipboard", title: "Буфер обмена", isExpanded: false)
-        let clipCard = ThemeCardView()
-        clipboardRow.orientation = .horizontal
-        clipboardRow.spacing = KrabEarTheme.Metrics.standard
-        clipboardRow.alignment = .centerY
-        clipboardRow.translatesAutoresizingMaskIntoConstraints = false
-        clipboardHistoryButton.target = self
-        clipboardHistoryButton.action = #selector(onClipboardHistory)
-        repasteButton.target = self
-        repasteButton.action = #selector(onRepasteItem)
-        clipboardRow.addArrangedSubview(clipboardHistoryButton)
-        clipboardRow.addArrangedSubview(repasteButton)
-        clipCard.contentStackView.addArrangedSubview(clipboardRow)
-        clipSection.contentStackView.addArrangedSubview(clipCard)
-        self.clipboardSection = clipSection
+        // Extracted → setupDictationClipboardSection.
+        let clipSection = setupDictationClipboardSection()
         settingsBar.addArrangedSubview(clipSection)
 
         let controlCard = ThemeCardView()
