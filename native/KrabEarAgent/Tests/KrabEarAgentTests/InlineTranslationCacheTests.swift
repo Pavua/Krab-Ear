@@ -11,6 +11,11 @@
 import XCTest
 @testable import KrabEarAgent
 
+// @MainActor: NSCache не Sendable, capture в static `inlineTranslationCacheHit`
+// (которая `nonisolated`) → Swift 6 strict concurrency выдаёт SendingRisksDataRace.
+// Поскольку тесты вызывают static helpers только из синхронных test methods,
+// помечаем класс @MainActor — все вызовы остаются на main, sending не нужен.
+@MainActor
 final class InlineTranslationCacheTests: XCTestCase {
 
     // MARK: - Cache hit / miss
