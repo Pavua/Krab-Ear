@@ -56,6 +56,11 @@ extension HistoryPanelController {
                 case "e":
                     self.onExportSrt()
                     return nil
+                case "m":
+                    // ⌘M упомянут в keyboardShortcutsHelpText() как "Экспорт Markdown"
+                    // но handler был отсутствовал на main — discrepancy fixed в этом PR.
+                    self.onExportHistory()
+                    return nil
                 case "i":
                     self.onStorageInfo()
                     return nil
