@@ -13,34 +13,60 @@ extension HistoryPanelController {
     // MARK: - Pagination
 
     @objc func onLoadMore() {
-        guard let nextCursor else {
+        guard let cursor = nextCursor else {
             updateHistoryStatusLabel()
             return
         }
         let pageSize = settingsProvider().historyPageSize
         if currentQuery.isEmpty {
-            appendPage(
+            appendPageAsync(
                 method: "get_history_page",
-                params: buildHistoryQueryParams(cursor: nextCursor, limit: pageSize)
+                params: buildHistoryQueryParams(cursor: cursor, limit: pageSize),
+                completion: nil
             )
         } else {
-            var params = buildHistoryQueryParams(cursor: nextCursor, limit: pageSize)
+            var params = buildHistoryQueryParams(cursor: cursor, limit: pageSize)
             params["query"] = currentQuery
-            appendPage(method: "search_history", params: params)
+            appendPageAsync(method: "search_history", params: params, completion: nil)
         }
     }
 
+    /// Загружает все доступные страницы по chain. Раньше блокировал main thread
+    /// в while-loop с sync IPC (до 120 sync calls × до 5 сек каждый = AppHang).
+    /// Теперь — recursive async chain: каждая следующая страница load'ится после
+    /// completion предыдущей. UI остаётся responsive; user видит progressive
+    /// заполнение таблицы.
     @objc func onLoadAll() {
-        var guardLoops = 0
-        while nextCursor != nil && guardLoops < 120 {
-            guardLoops += 1
-            onLoadMore()
-        }
-        if guardLoops >= 120 {
+        loadAllPagesRecursive(remaining: 120)
+    }
+
+    private func loadAllPagesRecursive(remaining: Int) {
+        guard let cursor = nextCursor else { return }
+        guard remaining > 0 else {
             showInfoAlert(
                 title: "История",
                 body: "Загружен лимит страниц за один проход. Сузьте фильтр или повторите действие."
             )
+            return
+        }
+        let pageSize = settingsProvider().historyPageSize
+        let method: String
+        let params: [String: Any]
+        if currentQuery.isEmpty {
+            method = "get_history_page"
+            params = buildHistoryQueryParams(cursor: cursor, limit: pageSize)
+        } else {
+            var p = buildHistoryQueryParams(cursor: cursor, limit: pageSize)
+            p["query"] = currentQuery
+            method = "search_history"
+            params = p
+        }
+        appendPageAsync(method: method, params: params) { [weak self] _ in
+            guard let self = self else { return }
+            // Если есть ещё страницы — продолжаем chain; остановка по cursor=nil или counter=0.
+            if self.nextCursor != nil {
+                self.loadAllPagesRecursive(remaining: remaining - 1)
+            }
         }
     }
 
@@ -419,24 +445,81 @@ extension HistoryPanelController {
 
         let pageSize = settingsProvider().historyPageSize
         let hadActiveFilters = hasActiveHistoryFiltersOrQuery()
+        let method: String
+        let params: [String: Any]
         if currentQuery.isEmpty {
-            appendPage(method: "get_history_page", params: buildHistoryQueryParams(cursor: NSNull(), limit: pageSize))
+            method = "get_history_page"
+            params = buildHistoryQueryParams(cursor: NSNull(), limit: pageSize)
         } else {
-            var params = buildHistoryQueryParams(cursor: NSNull(), limit: pageSize)
-            params["query"] = currentQuery
-            appendPage(method: "search_history", params: params)
+            var p = buildHistoryQueryParams(cursor: NSNull(), limit: pageSize)
+            p["query"] = currentQuery
+            method = "search_history"
+            params = p
         }
 
-        recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
+        // recoverHistoryIfFiltersHideAllRows должен сработать ПОСЛЕ загрузки
+        // первой страницы (раньше работал sync — race condition был скрыт).
+        // Теперь зовём из completion callback после async appendPage.
+        appendPageAsync(method: method, params: params) { [weak self] _ in
+            self?.recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
+        }
     }
 
+    /// Async-wrap для get_history_page / search_history IPC. Блокирующий sync IPC
+    /// был последним unmitigated AppHang trigger в hot path (loadInitial, onLoadMore,
+    /// onLoadAll вызывают его при каждой filter change / pagination). После этого
+    /// PR — все основные UI flow non-blocking.
+    ///
+    /// `completion` вызывается на main thread с success-flag. Nil completion = no-op.
+    func appendPageAsync(method: String, params: [String: Any], completion: (@MainActor @Sendable (Bool) -> Void)?) {
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        nonisolated(unsafe) let methodCopy = method
+        nonisolated(unsafe) let paramsCopy = params
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(method: methodCopy, params: paramsCopy),
+                let result = response["result"] as? [String: Any],
+                let rawItems = result["items"] as? [[String: Any]]
+            else {
+                DispatchQueue.main.async {
+                    completion?(false)
+                }
+                return
+            }
+
+            let mapped = rawItems.compactMap(HistoryItem.init(payload:))
+            let newCursor = result["next_cursor"] as? String
+
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    completion?(false)
+                    return
+                }
+                self.items.append(contentsOf: mapped)
+                self.nextCursor = newCursor
+                self.loadMoreButton.isEnabled = (newCursor != nil)
+                self.loadAllButton.isEnabled = (newCursor != nil)
+                self.updateLoadMoreButtonCaption()
+                self.updateHistoryStatusLabel()
+                self.updateDictationHistoryPreview()
+                self.tableView.reloadData()
+                self.updateHistoryPreviewCard()
+                self.jumpToLatestButton.isEnabled = !self.items.isEmpty
+                completion?(true)
+            }
+        }
+    }
+
+    /// Sync wrapper deprecated — оставлен для recoverHistoryIfFiltersHideAllRows
+    /// (control-flow caller). Все hot-path UI callers переведены на appendPageAsync.
+    /// Удалить при следующей итерации после verify recovery работает async.
     func appendPage(method: String, params: [String: Any]) {
         guard let response = try? ipcClient.call(method: method, params: params),
               let result = response["result"] as? [String: Any],
               let rawItems = result["items"] as? [[String: Any]] else {
             return
         }
-
         let mapped = rawItems.compactMap(HistoryItem.init(payload:))
         items.append(contentsOf: mapped)
         nextCursor = result["next_cursor"] as? String
