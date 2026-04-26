@@ -200,22 +200,22 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaBrainSelector = NSPopUpButton(frame: .zero, pullsDown: false)
 
     private let topBar = NSStackView()
-    private let topSearchRow = NSStackView()
-    private let topActionsRow = NSStackView()
-    private let helpButton: ThemeSecondaryButton = {
+    let topSearchRow = NSStackView()
+    let topActionsRow = NSStackView()
+    let helpButton: ThemeSecondaryButton = {
         let b = ThemeSecondaryButton(title: "Справка", target: nil, action: nil)
         b.isTransparentStyle = true
         return b
     }()
-    private let liveTranslatePresetButton: ThemeSecondaryButton = {
+    let liveTranslatePresetButton: ThemeSecondaryButton = {
         let b = ThemeSecondaryButton(title: "Live Translation", target: nil, action: nil)
         b.isTransparentStyle = true
         return b
     }()
-    private let filterRow1 = NSStackView()
-    private let filterRow2 = NSStackView()
-    private let historyQuickPresetRow = NSStackView()
-    private let importRow = NSStackView()
+    let filterRow1 = NSStackView()
+    let filterRow2 = NSStackView()
+    let historyQuickPresetRow = NSStackView()
+    let importRow = NSStackView()
     let toolsRow = NSStackView()
     private let controlRow = NSStackView()
     private let bottomBar1 = NSStackView()
@@ -357,7 +357,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // Promoted from local vars in setupUI() for applyVisualTheme() access
     private let liveSettingsBar = NSStackView()
     let liveStack = NSStackView()
-    private let historyStack = NSStackView()
+    let historyStack = NSStackView()
     let liveHeaderRow = NSStackView()
     let voiceGatewayRow = NSStackView()
     let callAssistConfigRow = NSStackView()
@@ -367,8 +367,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let callTimelineRow = NSStackView()
     let callAssistOutputScroll = NSScrollView()
     let realtimeScroll = NSScrollView()
-    private let historyPreviewContainer = NSStackView()
-    private let scrollView = NSScrollView()
+    let historyPreviewContainer = NSStackView()
+    let scrollView = NSScrollView()
     // Promoted from local vars in setupUI() for applyVisualTheme() access
     private let dictationStack = NSStackView()
     private let dictationHistoryHeaderRow = NSStackView()
@@ -391,9 +391,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // MARK: - Keyboard shortcut monitor
     nonisolated(unsafe) private var keyboardMonitor: Any?
     // MARK: - Reorganized History action rows
-    private let primaryActionsRow = NSStackView()
-    private let secondaryActionsRow = NSStackView()
-    private let statusRow = NSStackView()
+    let primaryActionsRow = NSStackView()
+    let secondaryActionsRow = NSStackView()
+    let statusRow = NSStackView()
     // MARK: - Diagnostics & Metrics
     var diagnosticsSection: CollapsibleSectionView?
     let diagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
@@ -418,12 +418,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let repasteButton = ThemeSecondaryButton(title: "Вставить повторно", target: nil, action: nil)
     let clipboardRow = NSStackView()
     // MARK: - History enhancements
-    private let exportSrtButton = ThemeSecondaryButton(title: "Экспорт SRT", target: nil, action: nil)
-    private let cleanupHistoryButton = ThemeSecondaryButton(title: "Очистка старых", target: nil, action: nil)
+    let exportSrtButton = ThemeSecondaryButton(title: "Экспорт SRT", target: nil, action: nil)
+    let cleanupHistoryButton = ThemeSecondaryButton(title: "Очистка старых", target: nil, action: nil)
     let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
-    private let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
-    private let historyEnhancementsRow = NSStackView()
+    let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
+    let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
+    let historyEnhancementsRow = NSStackView()
 
     init(
         ipcClient: IPCClient,
@@ -1894,147 +1894,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         setupLiveTranslationTab()
 
         // --- HISTORY TAB ---
-        historyPreviewContainer.isHidden = true
-        historyScrollMinHeightConstraint?.constant = 180
-
-        let filtersSection = CollapsibleSectionView(sectionId: "history_filters", title: "Фильтры", isExpanded: false)
-        let filtersCard = ThemeCardView()
-        // Отцепляем rows из предыдущего parent'а (applyVisualTheme вызывается повторно —
-        // rows хранятся как class properties и могут висеть в старой filtersCard).
-        filterRow1.removeFromSuperview()
-        filterRow2.removeFromSuperview()
-        historyQuickPresetRow.removeFromSuperview()
-        filtersCard.contentStackView.addArrangedSubview(filterRow1)
-        filtersCard.contentStackView.addArrangedSubview(filterRow2)
-        filtersCard.contentStackView.addArrangedSubview(historyQuickPresetRow)
-        filtersSection.contentStackView.addArrangedSubview(filtersCard)
-        self.historyFiltersSection = filtersSection
-
-        primaryActionsRow.addArrangedSubview(loadMoreButton)
-        primaryActionsRow.addArrangedSubview(jumpToLatestButton)
-        primaryActionsRow.addArrangedSubview(copyButton)
-        primaryActionsRow.addArrangedSubview(pasteSelectedButton)
-        primaryActionsRow.addArrangedSubview(deleteButton)
-        primaryActionsRow.addArrangedSubview(NSView()) // Spacer
-        primaryActionsRow.addArrangedSubview(historyOverviewLabel)
-        primaryActionsRow.addArrangedSubview(historyStatusLabel)
-
-        let advancedSection = CollapsibleSectionView(sectionId: "history_advanced", title: "Расширенные действия", isExpanded: false)
-        // Move rarely-used buttons from toolbar into advanced section
-        let advancedToolbarRow = NSStackView()
-        advancedToolbarRow.orientation = .horizontal
-        advancedToolbarRow.spacing = KrabEarTheme.Metrics.standard
-        advancedToolbarRow.alignment = .centerY
-        advancedToolbarRow.distribution = .fill
-        advancedToolbarRow.setHuggingPriority(.defaultLow, for: .horizontal)
-        advancedToolbarRow.setClippingResistancePriority(.required, for: .horizontal)
-        helpButton.removeFromSuperview()
-        liveTranslatePresetButton.removeFromSuperview()
-        advancedToolbarRow.addArrangedSubview(helpButton)
-        advancedToolbarRow.addArrangedSubview(liveTranslatePresetButton)
-        advancedToolbarRow.addArrangedSubview(openTranscriptsButton)
-        advancedToolbarRow.addArrangedSubview(NSView()) // Spacer
-        let advancedCard = ThemeCardView()
-        advancedCard.contentStackView.addArrangedSubview(advancedToolbarRow)
-
-        secondaryActionsRow.addArrangedSubview(loadAllButton)
-        secondaryActionsRow.addArrangedSubview(copyOriginalButton)
-        secondaryActionsRow.addArrangedSubview(copyTranslationButton)
-        secondaryActionsRow.addArrangedSubview(retranslateButton)
-        secondaryActionsRow.addArrangedSubview(summarizeSelectedButton)
-        secondaryActionsRow.addArrangedSubview(NSView()) // Spacer
-        advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow)
-
-        // Second row for overflow buttons
-        let secondaryActionsRow2 = NSStackView()
-        secondaryActionsRow2.orientation = .horizontal
-        secondaryActionsRow2.spacing = KrabEarTheme.Metrics.standard
-        secondaryActionsRow2.alignment = .centerY
-        secondaryActionsRow2.distribution = .fill
-        secondaryActionsRow2.setHuggingPriority(.defaultLow, for: .horizontal)
-        secondaryActionsRow2.setClippingResistancePriority(.required, for: .horizontal)
-        secondaryActionsRow2.addArrangedSubview(exportButton)
-        secondaryActionsRow2.addArrangedSubview(exportNdjsonButton)
-        secondaryActionsRow2.addArrangedSubview(importNdjsonButton)
-        secondaryActionsRow2.addArrangedSubview(compactButton)
-        secondaryActionsRow2.addArrangedSubview(NSView()) // Spacer
-        advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow2)
-
-        // History enhancements row
-        historyEnhancementsRow.orientation = .horizontal
-        historyEnhancementsRow.spacing = KrabEarTheme.Metrics.standard
-        historyEnhancementsRow.alignment = .centerY
-        historyEnhancementsRow.translatesAutoresizingMaskIntoConstraints = false
-        historyEnhancementsRow.distribution = .fill
-        historyEnhancementsRow.setHuggingPriority(.defaultLow, for: .horizontal)
-        historyEnhancementsRow.setClippingResistancePriority(.required, for: .horizontal)
-        exportSrtButton.target = self
-        exportSrtButton.action = #selector(onExportSrt)
-        cleanupDaysSelector.removeAllItems()
-        cleanupDaysSelector.addItems(withTitles: ["30 дней", "60 дней", "90 дней", "180 дней", "365 дней"])
-        cleanupHistoryButton.target = self
-        cleanupHistoryButton.action = #selector(onCleanupHistory)
-        vocabSuggestionsButton.target = self
-        vocabSuggestionsButton.action = #selector(onVocabSuggestions)
-        glossarySuggestionsButton.target = self
-        glossarySuggestionsButton.action = #selector(onGlossarySuggestions)
-        historyEnhancementsRow.addArrangedSubview(exportSrtButton)
-        historyEnhancementsRow.addArrangedSubview(cleanupDaysSelector)
-        historyEnhancementsRow.addArrangedSubview(cleanupHistoryButton)
-        historyEnhancementsRow.addArrangedSubview(vocabSuggestionsButton)
-        historyEnhancementsRow.addArrangedSubview(glossarySuggestionsButton)
-        historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
-        advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
-        advancedSection.contentStackView.addArrangedSubview(advancedCard)
-
-        self.historyAdvancedSection = advancedSection
-
-        let importSection = CollapsibleSectionView(sectionId: "history_import", title: "Импорт аудио", isExpanded: false)
-        let importCard = ThemeCardView()
-        importCard.contentStackView.addArrangedSubview(importRow)
-        importCard.contentStackView.addArrangedSubview(dropZoneView)
-        importSection.contentStackView.addArrangedSubview(importCard)
-        self.historyImportSection = importSection
-
-        statusRow.addArrangedSubview(glossaryStatusLabel)
-        statusRow.addArrangedSubview(NSView()) // Spacer
-        statusRow.addArrangedSubview(importStatusLabel)
-
-        // Wrap topSearchRow + topActionsRow together in a frosted glass card
-        let searchActionsCard = ThemeCardView()
-        searchActionsCard.contentStackView.addArrangedSubview(topSearchRow)
-        searchActionsCard.contentStackView.addArrangedSubview(topActionsRow)
-
-        // Wrap scrollView (history table) in a frosted glass card
-        let tableCard = ThemeCardView()
-        tableCard.contentStackView.addArrangedSubview(scrollView)
-
-        // Wrap primaryActionsRow in a frosted glass card
-        let primaryActionsCard = ThemeCardView()
-        primaryActionsCard.contentStackView.addArrangedSubview(primaryActionsRow)
-
-        // Wrap statusRow in a frosted glass card
-        let statusCard = ThemeCardView()
-        statusCard.contentStackView.addArrangedSubview(statusRow)
-
-        historyStack.addArrangedSubview(searchActionsCard)
-        historyStack.addArrangedSubview(filtersSection)
-        historyStack.addArrangedSubview(tableCard)
-        historyStack.addArrangedSubview(primaryActionsCard)
-        historyStack.addArrangedSubview(advancedSection)
-        historyStack.addArrangedSubview(importSection)
-        // Gemini 3.1 Pro: управление + статистика
-        let (managementSection, statsSection) = setupManagementSections()
-        historyStack.addArrangedSubview(managementSection)
-        historyStack.addArrangedSubview(statsSection)
-        historyStack.addArrangedSubview(statusCard)
-
-        // Width constraints for history children
-        for child in historyStack.arrangedSubviews {
-            let c = child.widthAnchor.constraint(equalTo: historyStack.widthAnchor)
-            c.isActive = true
-            themeWidthConstraints.append(c)
-        }
+        // Extracted в HistoryPanelController+ApplyTheme+HistoryTab.swift
+        // (continuing PR #327 / #328 incremental split pattern).
+        setupHistoryTab()
 
         // Width constraints for settingsBar children (Dictation tab sections)
         for child in settingsBar.arrangedSubviews {
