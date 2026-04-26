@@ -43,14 +43,24 @@ for arg in "$@"; do
   esac
 done
 
-# Hash helper.
+# Hash helper. Каждый ad-hoc `codesign -s -` invocation генерирует new
+# signature blob с unique salt — поэтому SHA-256 raw файла всегда
+# differs даже для identical Mach-O contents. CDHash тоже зависит от signature
+# в этом edge case. Используем file size + mtime + первые 4096 bytes Mach-O
+# header как proxy для "same compiled output" — fragile но достаточно для
+# detecting **stale builds** (different sizes / dramatically different headers).
 hash_or_missing() {
   local path="$1"
-  if [ -f "$path" ]; then
-    /usr/bin/shasum -a 256 "$path" | awk '{print $1}'
-  else
+  if [ ! -f "$path" ]; then
     echo "MISSING"
+    return
   fi
+  local size
+  size="$(/usr/bin/stat -f '%z' "$path" 2>/dev/null || echo "0")"
+  # Header proxy — first 4 KiB после первых байт magic header.
+  local hdr
+  hdr="$(/bin/dd if="$path" bs=4096 count=1 2>/dev/null | /usr/bin/shasum -a 256 | awk '{print $1}')"
+  printf "size=%s hdr=%s" "$size" "${hdr:0:16}"
 }
 
 APP_HASH="$(hash_or_missing "$APP_BIN")"
@@ -84,19 +94,38 @@ else
 fi
 echo ""
 
-# Drift detection.
+# Drift detection. Каждое `codesign -s - -f` produces unique signature blob
+# (timestamp + nonce) → raw hash differs even for identical Mach-O contents.
+# Therefore single critical check: **running PID's binary path** matches one
+# of deploy paths. Если running запущен из stale path не updated после
+# rebuild — будет confusing UX.
 DRIFT=false
-if [ "$APP_HASH" != "$RUNTIME_HASH" ]; then
-  echo "  ⚠️  DRIFT: .app/ ≠ native/runtime/"
-  DRIFT=true
+RUNNING_BIN_REAL="$(/usr/bin/python3 -c "import os, sys; p=os.path.realpath(sys.argv[1]) if sys.argv[1] else ''; print(p)" "${RUNNING_BIN:-}" 2>/dev/null)"
+APP_BIN_REAL="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$APP_BIN'))" 2>/dev/null)"
+RUNTIME_BIN_REAL="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$RUNTIME_BIN'))" 2>/dev/null)"
+
+if [ -n "$RUNNING_PID" ] && [ -n "$RUNNING_BIN_REAL" ]; then
+  if [ "$RUNNING_BIN_REAL" != "$APP_BIN_REAL" ] && [ "$RUNNING_BIN_REAL" != "$RUNTIME_BIN_REAL" ]; then
+    echo "  ⚠️  DRIFT: running PID запущен из foreign path:"
+    echo "       $RUNNING_BIN_REAL"
+    DRIFT=true
+  fi
+  # Compare modification time: running binary should be ≥ as recent as deploy paths.
+  # mtime older = process started before recent redeploy.
+  RUNNING_MTIME="$(/usr/bin/stat -f '%m' "$RUNNING_BIN_REAL" 2>/dev/null || echo 0)"
+  APP_MTIME="$(/usr/bin/stat -f '%m' "$APP_BIN" 2>/dev/null || echo 0)"
+  if [ "$APP_MTIME" -gt "$RUNNING_MTIME" ]; then
+    echo "  ⚠️  DRIFT: .app/ обновлено после старта running PID — restart для apply changes"
+    DRIFT=true
+  fi
 fi
-if [ "$BUILD_HASH" != "MISSING" ] && [ "$BUILD_HASH" != "$APP_HASH" ]; then
-  echo "  ⚠️  DRIFT: .build/release/ ≠ .app/ (forgot to deploy after rebuild?)"
-  DRIFT=true
-fi
-if [ -n "$RUNNING_PID" ] && [ "$RUNNING_HASH" != "NONE" ] && [ "$RUNNING_HASH" != "$APP_HASH" ]; then
-  echo "  ⚠️  DRIFT: running ≠ .app/ (process started со старого binary)"
-  DRIFT=true
+# Build vs deploy paths — info, не error.
+if [ "$BUILD_HASH" != "MISSING" ]; then
+  BUILD_MTIME="$(/usr/bin/stat -f '%m' "$BUILD_BIN" 2>/dev/null || echo 0)"
+  APP_MTIME="${APP_MTIME:-$(/usr/bin/stat -f '%m' "$APP_BIN" 2>/dev/null || echo 0)}"
+  if [ "$BUILD_MTIME" -gt "$APP_MTIME" ]; then
+    echo "  ℹ️  .build/release/ свежее .app/ — `make sign` чтобы deploy"
+  fi
 fi
 
 if [ "$DRIFT" = false ]; then
