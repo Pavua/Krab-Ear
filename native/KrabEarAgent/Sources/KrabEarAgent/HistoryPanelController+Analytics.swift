@@ -216,7 +216,7 @@ extension HistoryPanelController {
     }
 
     @objc private func refreshUsageStatsAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "get_usage_stats", params: [:])
@@ -235,7 +235,7 @@ extension HistoryPanelController {
     }
 
     @objc private func fetchErrorStatsAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "get_error_stats", params: [:])
@@ -255,7 +255,7 @@ extension HistoryPanelController {
     @objc private func scoreTranscriptionAction() {
         let selectedRow = self.tableView.selectedRow
         let textToScore = selectedRow >= 0 && selectedRow < items.count ? items[selectedRow].text : items.first?.text ?? ""
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "score_transcription", params: ["text": textToScore])
@@ -272,7 +272,7 @@ extension HistoryPanelController {
     }
 
     @objc private func runHealthCheckAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "health_check", params: [:])
@@ -293,7 +293,7 @@ extension HistoryPanelController {
     }
 
     @objc private func fetchLLMDiffAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "get_last_llm_diff", params: [:])
@@ -310,7 +310,7 @@ extension HistoryPanelController {
     }
 
     @objc private func exportSettingsAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "export_settings", params: [:])
@@ -327,7 +327,7 @@ extension HistoryPanelController {
     }
 
     @objc private func importSettingsAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "import_settings", params: [:])
