@@ -362,6 +362,25 @@ struct AgentSettings {
     }
 }
 
+/// Одна задача (action item), извлечённая LLM (PR #289).
+/// Зеркалит backend `ActionItem` dataclass из backend/action_items_extractor.py.
+struct ActionItem {
+    let text: String
+    let assignee: String
+    let due: String
+    /// "high" | "medium" | "low"
+    let priority: String
+
+    init?(payload: [String: Any]) {
+        guard let text = payload["text"] as? String, !text.isEmpty else { return nil }
+        self.text = text
+        self.assignee = (payload["assignee"] as? String) ?? ""
+        self.due = (payload["due"] as? String) ?? ""
+        let p = (payload["priority"] as? String)?.lowercased() ?? "medium"
+        self.priority = ["high", "medium", "low"].contains(p) ? p : "medium"
+    }
+}
+
 /// Элемент истории транскрибации для нативной панели.
 struct HistoryItem {
     let id: String
@@ -374,6 +393,12 @@ struct HistoryItem {
     let translationStatus: String
     /// Уверенность STT: 0.0–1.0, nil если метаданные отсутствуют (например импорт без анализа).
     let confidence: Double?
+    /// Извлечённые LLM-ом задачи (PR #289). Пусто если ещё не запускали extract.
+    let actionItems: [ActionItem]
+    /// Извлечённые решения (строки).
+    let decisions: [String]
+    /// Извлечённые вопросы (строки).
+    let questions: [String]
 
     init?(payload: [String: Any]) {
         guard
@@ -400,5 +425,14 @@ struct HistoryItem {
         } else {
             self.confidence = nil
         }
+        // Action items / decisions / questions (PR #289 backend, опциональные поля).
+        // Пустой массив вместо nil — упрощает UI код (.isEmpty всегда работает).
+        if let raw = payload["action_items"] as? [[String: Any]] {
+            self.actionItems = raw.compactMap { ActionItem(payload: $0) }
+        } else {
+            self.actionItems = []
+        }
+        self.decisions = (payload["decisions"] as? [String]) ?? []
+        self.questions = (payload["questions"] as? [String]) ?? []
     }
 }
