@@ -396,7 +396,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // MARK: - Tab selector
     var tabSelector: NSSegmentedControl!
     // MARK: - Keyboard shortcut monitor
-    nonisolated(unsafe) private var keyboardMonitor: Any?
+    /// Keyboard event monitor (private use, но `internal` access нужен для
+    /// HistoryPanelController+KeyboardShortcuts.swift extension которое set'ит
+    /// и убирает monitor.
+    nonisolated(unsafe) var keyboardMonitor: Any?
     // MARK: - Reorganized History action rows
     let primaryActionsRow = NSStackView()
     let secondaryActionsRow = NSStackView()
@@ -1677,92 +1680,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         ])
     }
 
-    // MARK: - Keyboard Shortcuts (Cmd+1/2/3/4, Cmd+F, Cmd+R, Cmd+D, Cmd+E, Cmd+I, Esc)
-
-    private func setupKeyboardShortcuts() {
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, self.window?.isKeyWindow == true else { return event }
-
-            if event.modifierFlags.contains(.command) {
-                switch event.charactersIgnoringModifiers {
-                case "1":
-                    self.tabSelector.selectedSegment = 0
-                    self.mainTabView.selectTabViewItem(at: 0)
-                    return nil
-                case "2":
-                    self.tabSelector.selectedSegment = 1
-                    self.mainTabView.selectTabViewItem(at: 1)
-                    return nil
-                case "3":
-                    self.tabSelector.selectedSegment = 2
-                    self.mainTabView.selectTabViewItem(at: 2)
-                    return nil
-                case "4":
-                    self.tabSelector.selectedSegment = 3
-                    self.mainTabView.selectTabViewItem(at: 3)
-                    return nil
-                case "f":
-                    self.tabSelector.selectedSegment = 2
-                    self.mainTabView.selectTabViewItem(at: 2)
-                    self.window?.makeFirstResponder(self.searchField)
-                    return nil
-                case "r":
-                    self.loadInitial()
-                    return nil
-                case "d":
-                    self.onDiagnostics()
-                    return nil
-                case "e":
-                    self.onExportSrt()
-                    return nil
-                case "i":
-                    self.onStorageInfo()
-                    return nil
-                case "/", "?":
-                    self.showKeyboardShortcutsHelp()
-                    return nil
-                default:
-                    break
-                }
-            }
-
-            // Escape — закрыть панель
-            if event.keyCode == Keycode.escape.rawValue {
-                self.window?.orderOut(nil)
-                return nil
-            }
-
-            return event
-        }
-    }
-
-    @MainActor
-    private func showKeyboardShortcutsHelp() {
-        let shortcuts = """
-        ⌘1  Диктовка
-        ⌘2  Live перевод
-        ⌘3  История
-        ⌘4  Разговор с AI
-        ⌘F  Поиск
-        ⌘R  Обновить
-        ⌘D  Диагностика
-        ⌘E  Экспорт SRT
-        ⌘M  Экспорт Markdown
-        ⌘I  Хранилище
-        Esc  Закрыть
-        ⌘/  Эта справка
-        """
-        let alert = NSAlert()
-        alert.messageText = "Горячие клавиши"
-        alert.informativeText = shortcuts
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        if let window = self.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
-    }
+    // Keyboard shortcuts moved → HistoryPanelController+KeyboardShortcuts.swift
+    // (setupKeyboardShortcuts + showKeyboardShortcutsHelp + helper text)
 
     @MainActor
     private func applyVisualTheme() {
