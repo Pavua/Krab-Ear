@@ -634,17 +634,70 @@ extension HistoryPanelController {
 
     // MARK: - Status labels
 
+    /// Обновляет status + overview labels. IPC-запросы (`get_history_stats`,
+    /// `get_history_overview`) делаются на background, UI update — на main.
+    /// Без async wrap эта функция блокировала main thread на каждом
+    /// `loadInitial`/`appendPage`/filter change → AppHang ≥2000ms (KRAB-EAR-AGENT-3).
     func updateHistoryStatusLabel() {
-        let stats = fetchHistoryStats()
-        let statsSuffix = stats.map { " • Активных: \($0.activeCount), \(formatBytes($0.totalBytes))" } ?? ""
+        // Установить базовый текст немедленно (пока IPC stats fetch'атся).
+        let baseText: String
         if items.isEmpty {
-            historyStatusLabel.stringValue = "История пуста\(statsSuffix)"
+            baseText = "История пуста"
         } else if nextCursor == nil {
-            historyStatusLabel.stringValue = "Показаны все: \(items.count)\(statsSuffix)"
+            baseText = "Показаны все: \(items.count)"
         } else {
-            historyStatusLabel.stringValue = "Показано: \(items.count) (есть ещё)\(statsSuffix)"
+            baseText = "Показано: \(items.count) (есть ещё)"
         }
-        historyOverviewLabel.stringValue = buildHistoryOverviewLabel()
+        historyStatusLabel.stringValue = baseText
+
+        // Background: получить stats + overview, потом update labels на main.
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Inline fetch stats (re-implemented because fetchHistoryStats() — instance method).
+            var statsSuffix = ""
+            if let response = try? ipcClient.call(method: "get_history_stats", params: [:]),
+               let result = response["result"] as? [String: Any] {
+                let activeCount = (result["active_count"] as? Int) ?? 0
+                let totalBytes = (result["total_bytes"] as? Int) ?? 0
+                statsSuffix = " • Активных: \(activeCount), \(HistoryPanelController.formatBytesIfStatic(totalBytes))"
+            }
+            // Inline fetch overview.
+            var overview = "Обзор: недоступен"
+            if let response = try? ipcClient.call(method: "get_history_overview", params: [:]),
+               let result = response["result"] as? [String: Any] {
+                overview = HistoryPanelController.formatHistoryOverview(result: result)
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.historyStatusLabel.stringValue = baseText + statsSuffix
+                self.historyOverviewLabel.stringValue = overview
+            }
+        }
+    }
+
+    /// Pure helper — `formatBytes` не доступна на main (instance method).
+    /// Делает то же самое для использования в background closures.
+    /// Если `formatBytes` будет refactor'ена в `nonisolated static` — этот helper
+    /// можно удалить и звать `HistoryPanelController.formatBytes(_:)`.
+    nonisolated static func formatBytesIfStatic(_ value: Int) -> String {
+        let safe = max(0, value)
+        if safe < 1024 { return "\(safe) B" }
+        let kb = Double(safe) / 1024.0
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        let mb = kb / 1024.0
+        if mb < 1024 { return String(format: "%.1f MB", mb) }
+        let gb = mb / 1024.0
+        return String(format: "%.2f GB", gb)
+    }
+
+    /// Pure helper — форматирует ответ `get_history_overview` в overview label.
+    /// `nonisolated static` — тестируется без instance.
+    nonisolated static func formatHistoryOverview(result: [String: Any]) -> String {
+        let todayCount = (result["today_count"] as? Int) ?? 0
+        let last24hCount = (result["last_24h_count"] as? Int) ?? 0
+        let pasteOk = (result["paste_ok"] as? Int) ?? 0
+        let pasteFailed = (result["paste_failed"] as? Int) ?? 0
+        return "Сегодня: \(todayCount) | 24ч: \(last24hCount) | Paste: ✓\(pasteOk) ✗\(pasteFailed)"
     }
 
     func updateDictationHistoryPreview() {
