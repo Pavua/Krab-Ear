@@ -66,6 +66,28 @@ final class HotkeyManager {
     /// Колбэк на double-tap (задаётся при запуске из main.swift).
     var onConversationDoubleTap: (@MainActor () -> Void)?
 
+    /// Pending single-tap action — ждёт окно double-tap. Cancelled когда
+    /// detector ловит second tap. Если timer истёк — fires onToggle().
+    private var pendingSingleTapTimer: DispatchSourceTimer?
+
+    private func schedulePendingSingleTap() {
+        // Cancel предыдущий если был — типичный case при rapid taps.
+        cancelPendingSingleTap()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(310))  // 300ms detector window + 10ms slack
+        timer.setEventHandler { [weak self] in
+            self?.pendingSingleTapTimer = nil
+            self?.onToggle()
+        }
+        timer.resume()
+        pendingSingleTapTimer = timer
+    }
+
+    private func cancelPendingSingleTap() {
+        pendingSingleTapTimer?.cancel()
+        pendingSingleTapTimer = nil
+    }
+
     // MARK: Quick replay — Cmd+Option+V
 
     /// Глобальный монитор keyDown для обнаружения Cmd+Option+V (быстрый повтор вставки).
@@ -101,9 +123,12 @@ final class HotkeyManager {
         }
 
         // PR 1.5: Запустить детектор двойного нажатия Right Option
-        // (только для right_option и right_option_toggle вариантов)
+        // (только для right_option и right_option_toggle вариантов).
+        // При detection — отменяем pending single-tap action и запускаем
+        // conversation. См. processKeyEvent .toggle case.
         if variant == .rightOption || variant == .rightOptionToggle {
             let detector = HotkeyDoubleTapDetector(windowMs: 0.3) { [weak self] in
+                self?.cancelPendingSingleTap()
                 self?.onConversationDoubleTap?()
             }
             detector.start()
@@ -160,7 +185,17 @@ final class HotkeyManager {
         case .toggle:
             if isDown && !isPressed {
                 isPressed = true
-                onToggle()
+                // Defer single-tap action when conversation double-tap is wired —
+                // даём 300ms окно чтобы detector мог cancel single-tap если
+                // user сделал double-tap. Иначе single-tap toggle'ит запись
+                // до того как detector видит второй нажим (ранее эта race
+                // делала double-tap "невидимым" — user видел только recording
+                // start/stop).
+                if onConversationDoubleTap != nil {
+                    schedulePendingSingleTap()
+                } else {
+                    onToggle()
+                }
             } else if !isDown && isPressed {
                 isPressed = false
             }
