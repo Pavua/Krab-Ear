@@ -216,7 +216,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let filterRow2 = NSStackView()
     private let historyQuickPresetRow = NSStackView()
     private let importRow = NSStackView()
-    private let toolsRow = NSStackView()
+    let toolsRow = NSStackView()
     private let controlRow = NSStackView()
     private let bottomBar1 = NSStackView()
     private let bottomBar2 = NSStackView()
@@ -356,17 +356,17 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let historyPreviewHeader = NSTextField(labelWithString: "Последние транскрипты")
     // Promoted from local vars in setupUI() for applyVisualTheme() access
     private let liveSettingsBar = NSStackView()
-    private let liveStack = NSStackView()
+    let liveStack = NSStackView()
     private let historyStack = NSStackView()
-    private let liveHeaderRow = NSStackView()
-    private let voiceGatewayRow = NSStackView()
-    private let callAssistConfigRow = NSStackView()
-    private let callAssistControlRow = NSStackView()
-    private let callPhrasePresetRow = NSStackView()
-    private let callPhraseActionRow = NSStackView()
-    private let callTimelineRow = NSStackView()
+    let liveHeaderRow = NSStackView()
+    let voiceGatewayRow = NSStackView()
+    let callAssistConfigRow = NSStackView()
+    let callAssistControlRow = NSStackView()
+    let callPhrasePresetRow = NSStackView()
+    let callPhraseActionRow = NSStackView()
+    let callTimelineRow = NSStackView()
     let callAssistOutputScroll = NSScrollView()
-    private let realtimeScroll = NSScrollView()
+    let realtimeScroll = NSScrollView()
     private let historyPreviewContainer = NSStackView()
     private let scrollView = NSScrollView()
     // Promoted from local vars in setupUI() for applyVisualTheme() access
@@ -377,12 +377,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // Tracked here so previous batch can be deactivated before new one is built —
     // иначе после повторного applyVisualTheme() стэйл-constraints держат ссылки на
     // отдельные view и валятся NSGenericException 'no common ancestor' (KRAB-EAR-AGENT-2).
-    private var themeWidthConstraints: [NSLayoutConstraint] = []
+    var themeWidthConstraints: [NSLayoutConstraint] = []
     // MARK: - Collapsible section references
     private var dictationRecordingSection: CollapsibleSectionView?
     private var dictationSystemSection: CollapsibleSectionView?
     private var dictationAISection: CollapsibleSectionView?
-    private var liveCallAssistSection: CollapsibleSectionView?
+    var liveCallAssistSection: CollapsibleSectionView?
     var historyFiltersSection: CollapsibleSectionView?
     var historyAdvancedSection: CollapsibleSectionView?
     var historyImportSection: CollapsibleSectionView?
@@ -1889,52 +1889,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
 
         // --- LIVE TRANSLATION TAB ---
-        // Translation section now uses makeSettingRow helpers (Path A).
-        // Wire targets/actions for controls used in buildTranslationSection().
-        translationSelector.target = self
-        translationSelector.action = #selector(onTranslationModeChanged)
-        networkSelector.target = self
-        networkSelector.action = #selector(onNetworkModeChanged)
-        translationStyleSelector.target = self
-        translationStyleSelector.action = #selector(onTranslationStyleChanged)
-        let translationSection = buildTranslationSection()
-
-        let gatewayCard = ThemeCardView()
-        gatewayCard.title = ""  // Section provides the title
-        // toolsRow (swap RU<->ES + glossary buttons) moved here from old translationSettingsCard
-        for view in [toolsRow, voiceGatewayRow, callAssistConfigRow] as [NSView] {
-            view.removeFromSuperview()
-            gatewayCard.contentStackView.addArrangedSubview(view)
-        }
-        let gatewaySection = CollapsibleSectionView(sectionId: "live_gateway", title: "Voice Gateway", isExpanded: true)
-        gatewaySection.contentStackView.addArrangedSubview(gatewayCard)
-
-        let callAssistCard = ThemeCardView()
-        callAssistCard.title = ""  // Title shown by CollapsibleSectionView
-        for view in [callAssistControlRow, callPhrasePresetRow, callPhraseActionRow, callTimelineRow, callAssistOutputScroll] as [NSView] {
-            view.removeFromSuperview()
-            callAssistCard.contentStackView.addArrangedSubview(view)
-        }
-
-        let callAssistSection = CollapsibleSectionView(sectionId: "live_call_assist", title: "Call Assist", isExpanded: false)
-        callAssistSection.contentStackView.addArrangedSubview(callAssistCard)
-        self.liveCallAssistSection = callAssistSection
-
-        liveStack.addArrangedSubview(liveHeaderRow)
-        liveStack.addArrangedSubview(translationSection)
-        liveStack.addArrangedSubview(gatewaySection)
-        liveStack.addArrangedSubview(callAssistSection)
-
-        let realtimeCard = ThemeCardView()
-        realtimeCard.contentStackView.addArrangedSubview(realtimeScroll)
-        liveStack.addArrangedSubview(realtimeCard)
-
-        // Width constraints for all live translation children (consistent with historyStack pattern)
-        for child in liveStack.arrangedSubviews {
-            let c = child.widthAnchor.constraint(equalTo: liveStack.widthAnchor)
-            c.isActive = true
-            themeWidthConstraints.append(c)
-        }
+        // Extracted в HistoryPanelController+ApplyTheme+LiveTab.swift
+        // (continuing PR #327 incremental split pattern).
+        setupLiveTranslationTab()
 
         // --- HISTORY TAB ---
         historyPreviewContainer.isHidden = true
