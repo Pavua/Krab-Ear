@@ -9,7 +9,7 @@ extension HistoryPanelController {
             showDiagnosticsOutput("Ошибка: не удалось получить диагностику")
             return
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Диагностика"))
+        showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Диагностика"))
     }
 
     @objc func onMetrics() {
@@ -18,7 +18,7 @@ extension HistoryPanelController {
             showDiagnosticsOutput("Ошибка: не удалось получить метрики")
             return
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Метрики"))
+        showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Метрики"))
     }
 
     @objc func onRecordingStats() {
@@ -27,7 +27,7 @@ extension HistoryPanelController {
             showDiagnosticsOutput("Ошибка: не удалось получить статистику")
             return
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Статистика записей"))
+        showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Статистика записей"))
     }
 
     @objc func onStorageInfo() {
@@ -36,7 +36,7 @@ extension HistoryPanelController {
             showDiagnosticsOutput("Ошибка: не удалось получить информацию о хранилище")
             return
         }
-        showDiagnosticsOutput(formatNestedResult(result, title: "Хранилище"))
+        showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Хранилище"))
     }
 
     func showDiagnosticsOutput(_ text: String) {
@@ -49,7 +49,9 @@ extension HistoryPanelController {
         }
     }
 
-    func formatNestedResult(_ result: [String: Any], title: String) -> String {
+    /// Pure helper — форматирует вложенный dict в plain-text для diagnostics output.
+    /// `nonisolated static`: не trogает self, тестируем без instance.
+    nonisolated static func formatNestedResult(_ result: [String: Any], title: String) -> String {
         var lines: [String] = ["=== \(title) ==="]
         for (key, value) in result.sorted(by: { $0.key < $1.key }) {
             if let dict = value as? [String: Any] {
