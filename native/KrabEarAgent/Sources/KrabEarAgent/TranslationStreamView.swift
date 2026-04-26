@@ -79,8 +79,14 @@ final class TranslationStreamView: NSView {
     private let translationCard = ThemeCardView()
     private let originalScroll = NSScrollView()
     private let translationScroll = NSScrollView()
-    private let originalText = NSTextView()
-    private let translationText = NSTextView()
+    private let originalText = GlossaryAwareTextView()
+    private let translationText = GlossaryAwareTextView()
+
+    // MARK: - Glossary state
+
+    /// Cached glossary [source.lowercased() → target]. Refreshed on init и
+    /// каждые 60 секунд через timer (cheap IPC call с 5s TTL cache в backend).
+    private var glossaryRefreshTimer: Timer?
 
     // MARK: - SSE
 
@@ -108,6 +114,7 @@ final class TranslationStreamView: NSView {
         captureButton.target = self
         captureButton.action = #selector(onCaptureClick)
         startSSE()
+        startGlossaryRefresh()
     }
 
     required init?(coder: NSCoder) {
@@ -116,10 +123,13 @@ final class TranslationStreamView: NSView {
         captureButton.target = self
         captureButton.action = #selector(onCaptureClick)
         startSSE()
+        startGlossaryRefresh()
     }
 
     deinit {
         sseStreamTask?.cancel()
+        // Note: Timer.invalidate must run on main; deinit not guaranteed main.
+        // Acceptable: Timer holds weak self, becomes no-op после dealloc.
     }
 
     // MARK: - Layout
@@ -321,5 +331,43 @@ final class TranslationStreamView: NSView {
         // Auto-scroll bottom.
         originalText.scrollToEndOfDocument(nil)
         translationText.scrollToEndOfDocument(nil)
+    }
+
+    // MARK: - Glossary refresh
+
+    /// Запускает периодический refresh glossary (60s интервал) + immediate first fetch.
+    private func startGlossaryRefresh() {
+        refreshGlossary()
+        glossaryRefreshTimer?.invalidate()
+        glossaryRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshGlossary()
+            }
+        }
+    }
+
+    /// Получает settings.translation_glossary через IPC + обновляет text views.
+    /// Async (DispatchQueue.global) чтобы не блокировать main thread даже на 5s timeout.
+    private func refreshGlossary() {
+        guard let app = NSApp.delegate as? AgentAppDelegate else { return }
+        nonisolated(unsafe) let ipcClient = app.ipcClient
+        DispatchQueue.global(qos: .utility).async {
+            guard
+                let response = try? ipcClient.call(
+                    method: "get_settings",
+                    params: [:],
+                    timeoutSec: IPCClient.quickTimeoutSec
+                ),
+                let result = response["result"] as? [String: Any],
+                let glossary = result["translation_glossary"] as? [String: String]
+            else {
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.originalText.setGlossary(glossary)
+                self.translationText.setGlossary(glossary)
+            }
+        }
     }
 }
