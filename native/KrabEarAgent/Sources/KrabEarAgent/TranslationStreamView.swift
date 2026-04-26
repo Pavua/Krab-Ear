@@ -140,33 +140,36 @@ final class TranslationStreamView: NSView {
         // Top bar: pair + button + status + duration.
         topBar.orientation = .horizontal
         topBar.alignment = .centerY
-        topBar.spacing = KrabEarTheme.Metrics.standard
+        topBar.spacing = KrabEarTheme.Metrics.comfortable
         topBar.translatesAutoresizingMaskIntoConstraints = false
         topBar.distribution = .fill
 
-        langPairLabel.font = KrabEarTheme.Typography.caption
-        langPairLabel.textColor = KrabEarTheme.Colors.textSecondary
+        langPairLabel.font = KrabEarTheme.Typography.body
+        langPairLabel.textColor = KrabEarTheme.Colors.textPrimary
 
-        let dotImg = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+        let dotImg = NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: nil)
         captureDot.image = dotImg
-        captureDot.contentTintColor = NSColor.systemGray
+        captureDot.contentTintColor = NSColor.tertiaryLabelColor
         captureDot.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            captureDot.widthAnchor.constraint(equalToConstant: 10),
-            captureDot.heightAnchor.constraint(equalToConstant: 10),
+            captureDot.widthAnchor.constraint(equalToConstant: 14),
+            captureDot.heightAnchor.constraint(equalToConstant: 14),
         ])
 
         captureStatusLabel.font = KrabEarTheme.Typography.caption
-        captureStatusLabel.textColor = KrabEarTheme.Colors.textSecondary
+        // De-emphasize secondary status text per Gemini design 2026-04-26 review.
+        captureStatusLabel.textColor = KrabEarTheme.Colors.textSecondary.withAlphaComponent(0.7)
 
-        durationLabel.font = KrabEarTheme.Typography.monospace
+        // Tabular figures (monospaced digits) — стабильная ширина при changes seconds.
+        durationLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         durationLabel.textColor = KrabEarTheme.Colors.textSecondary
 
         topBar.addArrangedSubview(langPairLabel)
+        topBar.addArrangedSubview(NSView()) // small flexible spacer
         topBar.addArrangedSubview(captureButton)
         topBar.addArrangedSubview(captureDot)
         topBar.addArrangedSubview(captureStatusLabel)
-        topBar.addArrangedSubview(NSView()) // spacer
+        topBar.addArrangedSubview(NSView()) // flexible spacer right
         topBar.addArrangedSubview(durationLabel)
 
         // Two scroll panes.
@@ -201,19 +204,34 @@ final class TranslationStreamView: NSView {
 
     private func configurePane(scroll: NSScrollView, text: NSTextView, card: ThemeCardView, title: String) {
         card.title = title
+        // Liquid Glass effect: 0.5pt internal border имитирует свет на ребре стекла.
+        // Gemini design review 2026-04-26: subtle inner edge делает carb visually thinner.
+        card.wantsLayer = true
+        card.layer?.borderWidth = 0.5
+        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
 
         text.isEditable = false
         text.isSelectable = true
         text.drawsBackground = false
         text.backgroundColor = .clear
         text.font = KrabEarTheme.Typography.body
-        text.textContainerInset = NSSize(width: 8, height: 8)
+        // Wider inset (12 vs 8) даёт breathing room для длинных переводов.
+        text.textContainerInset = NSSize(width: 12, height: 12)
+        text.textColor = KrabEarTheme.Colors.textPrimary
+
+        // lineHeight 1.35 + paragraphSpacing 12 — улучшают legibility и
+        // визуально отделяют SSE chunks (Gemini design 2026-04-26).
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineHeightMultiple = 1.35
+        paragraphStyle.paragraphSpacing = 12
+        text.defaultParagraphStyle = paragraphStyle
         text.translatesAutoresizingMaskIntoConstraints = false
 
         scroll.documentView = text
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
+        scroll.autohidesScrollers = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
@@ -231,15 +249,40 @@ final class TranslationStreamView: NSView {
     private func updateCaptureUI() {
         if isCapturing {
             captureButton.title = "Стоп"
-            captureDot.contentTintColor = NSColor.systemGreen
-            captureStatusLabel.stringValue = "Захват: вкл"
+            captureDot.contentTintColor = KrabEarTheme.Colors.accent
+            captureStatusLabel.stringValue = "Захват вкл"
+            captureStatusLabel.textColor = KrabEarTheme.Colors.accent
             startCaptureTimer()
+            startCapturePulse()
         } else {
             captureButton.title = "Старт"
-            captureDot.contentTintColor = NSColor.systemGray
+            captureDot.contentTintColor = NSColor.tertiaryLabelColor
             captureStatusLabel.stringValue = "Не активно"
+            captureStatusLabel.textColor = KrabEarTheme.Colors.textSecondary.withAlphaComponent(0.7)
             stopCaptureTimer()
+            stopCapturePulse()
         }
+    }
+
+    /// Soft pulsing opacity (0.4 ↔ 1.0, 1.2s autoreverse) на waveform icon когда
+    /// захват активен — визуальный сигнал «слушаю» без агрессивного motion.
+    /// Honors Reduce Motion (accessibility). Gemini design 2026-04-26.
+    private func startCapturePulse() {
+        captureDot.wantsLayer = true
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return }
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 1.0
+        anim.toValue = 0.4
+        anim.duration = 1.2
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        captureDot.layer?.add(anim, forKey: "capture-pulse")
+    }
+
+    private func stopCapturePulse() {
+        captureDot.layer?.removeAnimation(forKey: "capture-pulse")
+        captureDot.layer?.opacity = 1.0
     }
 
     private func startCaptureTimer() {
