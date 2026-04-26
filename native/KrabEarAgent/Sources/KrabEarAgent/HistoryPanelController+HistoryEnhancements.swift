@@ -2,6 +2,10 @@ import AppKit
 
 extension HistoryPanelController {
     // MARK: - History Enhancement handlers
+    //
+    // Все sync IPC обёрнуты в DispatchQueue.global(qos: .userInitiated) — без этого
+    // под нагрузкой backend блокирует main thread → AppHang ≥2000ms (Sentry KRAB-EAR-AGENT-3).
+    // NSAlert/NSWorkspace/NSPasteboard остаются на main (требование AppKit).
 
     @objc func onExportSrt() {
         let selectedRow = tableView.selectedRow
@@ -10,14 +14,23 @@ extension HistoryPanelController {
             return
         }
         let item = items[selectedRow]
-        guard let response = try? ipcClient.call(method: "export_history_srt", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any],
-              let path = result["path"] as? String else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка экспорта SRT")
-            return
+        let itemID = item.id
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        nonisolated(unsafe) let notificationService = self.notificationService
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let response = try? ipcClient.call(method: "export_history_srt", params: ["id": itemID]),
+                  let result = response["result"] as? [String: Any],
+                  let path = result["path"] as? String else {
+                DispatchQueue.main.async {
+                    notificationService.notify(title: "Krab Ear", body: "Ошибка экспорта SRT")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                notificationService.notify(title: "Krab Ear", body: "SRT сохранён")
+                NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+            }
         }
-        notificationService.notify(title: "Krab Ear", body: "SRT сохранён")
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
     }
 
     @objc func onCleanupHistory() {
@@ -31,45 +44,71 @@ extension HistoryPanelController {
         alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
-              let result = response["result"] as? [String: Any],
-              let deleted = result["deleted_count"] as? Int else {
-            notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        nonisolated(unsafe) let notificationService = self.notificationService
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
+                  let result = response["result"] as? [String: Any],
+                  let deleted = result["deleted_count"] as? Int else {
+                DispatchQueue.main.async {
+                    notificationService.notify(title: "Krab Ear", body: "Ошибка очистки")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
+                self?.loadInitial()
+            }
         }
-        notificationService.notify(title: "Krab Ear", body: "Удалено записей: \(deleted)")
-        loadInitial()
     }
 
     @objc func onVocabSuggestions() {
-        guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let suggestions = result["suggestions"] as? [String] else {
-            showDiagnosticsOutput("Нет предложений по словарю")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let suggestions = result["suggestions"] as? [String] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Нет предложений по словарю")
+                }
+                return
+            }
+            // Форматируем тело на background (Swift 6 Sendable workaround).
+            var lines: [String] = ["=== Словарь (предложения) ==="]
+            for (i, word) in suggestions.enumerated() {
+                lines.append("\(i + 1). \(word)")
+            }
+            let body = lines.joined(separator: "\n")
+            DispatchQueue.main.async {
+                self?.showDiagnosticsOutput(body)
+            }
         }
-        var lines: [String] = ["=== Словарь (предложения) ==="]
-        for (i, word) in suggestions.enumerated() {
-            lines.append("\(i + 1). \(word)")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
     }
 
     @objc func onGlossarySuggestions() {
-        guard let response = try? ipcClient.call(method: "get_glossary_suggestions", params: [:]),
-              let result = response["result"] as? [String: Any],
-              let suggestions = result["suggestions"] as? [[String: Any]] else {
-            showDiagnosticsOutput("Нет предложений по глоссарию")
-            return
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_glossary_suggestions", params: [:]),
+                  let result = response["result"] as? [String: Any],
+                  let suggestions = result["suggestions"] as? [[String: Any]] else {
+                DispatchQueue.main.async {
+                    self?.showDiagnosticsOutput("Нет предложений по глоссарию")
+                }
+                return
+            }
+            // Форматируем тело на background.
+            var lines: [String] = ["=== Глоссарий (авто-предложения) ==="]
+            for (i, item) in suggestions.enumerated() {
+                let source = item["source"] as? String ?? "?"
+                let target = item["target"] as? String ?? "?"
+                let count = item["count"] as? Int ?? 0
+                lines.append("\(i + 1). \(source) → \(target) (встречалось: \(count))")
+            }
+            let body = lines.joined(separator: "\n")
+            DispatchQueue.main.async {
+                self?.showDiagnosticsOutput(body)
+            }
         }
-        var lines: [String] = ["=== Глоссарий (авто-предложения) ==="]
-        for (i, item) in suggestions.enumerated() {
-            let source = item["source"] as? String ?? "?"
-            let target = item["target"] as? String ?? "?"
-            let count = item["count"] as? Int ?? 0
-            lines.append("\(i + 1). \(source) → \(target) (встречалось: \(count))")
-        }
-        showDiagnosticsOutput(lines.joined(separator: "\n"))
     }
 
     // MARK: - auto_summarize_batch
@@ -134,36 +173,47 @@ extension HistoryPanelController {
         let row = tableView.clickedRow
         guard row >= 0, row < items.count else { return }
         let item = items[row]
-        guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": item.id]),
-              let result = response["result"] as? [String: Any] else {
-            showInfoAlert(title: "Запись", body: "Не удалось загрузить детали записи.")
-            return
-        }
-        let text = result["text"] as? String ?? item.text
-        let ts = result["ts"] as? String ?? ""
-        let wordCount = result["word_count"] as? Int ?? 0
-        let transcriptFile = result["transcript_file"] as? String
-        var info = """
-        \(text)
+        let itemID = item.id
+        let fallbackText = item.text
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": itemID]),
+                  let result = response["result"] as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Запись", body: "Не удалось загрузить детали записи.")
+                }
+                return
+            }
+            // Извлекаем нужные поля на background (Sendable Strings/Int) перед main.
+            let text = result["text"] as? String ?? fallbackText
+            let ts = result["ts"] as? String ?? ""
+            let wordCount = result["word_count"] as? Int ?? 0
+            let transcriptFile = result["transcript_file"] as? String
+            var info = """
+            \(text)
 
-        --- Метаданные ---
-        ID: \(item.id)
-        Время: \(ts)
-        Слов: \(wordCount)
-        """
-        if let tf = transcriptFile {
-            info += "\nТранскрипт: \(tf)"
-        }
-        let alert = NSAlert()
-        alert.messageText = "Детали записи"
-        alert.informativeText = info
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Скопировать")
-        alert.addButton(withTitle: "Закрыть")
-        let resp = alert.runModal()
-        if resp == .alertFirstButtonReturn {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            --- Метаданные ---
+            ID: \(itemID)
+            Время: \(ts)
+            Слов: \(wordCount)
+            """
+            if let tf = transcriptFile {
+                info += "\nТранскрипт: \(tf)"
+            }
+            let textForCopy = text
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "Детали записи"
+                alert.informativeText = info
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Скопировать")
+                alert.addButton(withTitle: "Закрыть")
+                let resp = alert.runModal()
+                if resp == .alertFirstButtonReturn {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(textForCopy, forType: .string)
+                }
+            }
         }
     }
 

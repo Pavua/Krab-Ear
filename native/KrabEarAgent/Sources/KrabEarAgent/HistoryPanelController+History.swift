@@ -174,25 +174,35 @@ extension HistoryPanelController {
         panel.prompt = "Импортировать"
 
         guard panel.runModal() == .OK, let inputURL = panel.url else { return }
-        guard
-            let response = try? ipcClient.call(
-                method: "import_history_ndjson",
-                params: ["path": inputURL.path]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Импорт NDJSON", body: "Ошибка при импорте файла.")
-            return
-        }
+        let inputPath = inputURL.path
 
-        let imported = (result["imported"] as? Int) ?? 0
-        let skipped = (result["skipped"] as? Int) ?? 0
-        let errors = (result["errors"] as? Int) ?? 0
-        loadInitial()
-        showInfoAlert(
-            title: "Импорт NDJSON",
-            body: "Импортировано: \(imported)\nПропущено дублей: \(skipped)\nОшибок: \(errors)"
-        )
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipcClient.call(
+                    method: "import_history_ndjson",
+                    params: ["path": inputPath]
+                ),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Импорт NDJSON", body: "Ошибка при импорте файла.")
+                }
+                return
+            }
+
+            let imported = (result["imported"] as? Int) ?? 0
+            let skipped = (result["skipped"] as? Int) ?? 0
+            let errors = (result["errors"] as? Int) ?? 0
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.loadInitial()
+                self.showInfoAlert(
+                    title: "Импорт NDJSON",
+                    body: "Импортировано: \(imported)\nПропущено дублей: \(skipped)\nОшибок: \(errors)"
+                )
+            }
+        }
     }
 
     // MARK: - Retranslate / Summarize
@@ -232,52 +242,69 @@ extension HistoryPanelController {
             return
         }
 
-        guard
-            let translateResponse = try? ipcClient.call(
-                method: "translate_text",
-                params: [
-                    "text": cleanSource,
-                    "translation_mode": targetMode,
-                    "translation_style": settingsProvider().translationStyle,
-                    "network_mode": settingsProvider().networkMode,
-                ]
-            ),
-            let translateResult = translateResponse["result"] as? [String: Any]
-        else {
-            showInfoAlert(title: "Повторить перевод", body: "Не удалось выполнить перевод.")
-            return
-        }
-
-        let status = (translateResult["status"] as? String) ?? "unknown"
-        let translatedText = ((translateResult["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if status != "ok" || translatedText.isEmpty {
-            showInfoAlert(title: "Повторить перевод", body: "Перевод недоступен: \(status).")
-            return
-        }
-
+        let providerSettings = settingsProvider()
+        let translationStyle = providerSettings.translationStyle
+        let networkMode = providerSettings.networkMode
         let shouldPasteTranslated = translateAndPasteButton.state == .on
-        let newText = shouldPasteTranslated ? translatedText : cleanSource
 
-        let _ = try? ipcClient.call(
-            method: "add_history_item",
-            params: [
-                "text": newText,
-                "paste_status": "failed",
-                "source_text": cleanSource,
-                "translated_text": translatedText,
-                "translation_mode": targetMode,
-                "translation_status": status,
-                "translation_engine": (translateResult["engine"] as? String) ?? "",
-                "source_lang": (translateResult["source_lang"] as? String) ?? "",
-                "target_lang": (translateResult["target_lang"] as? String) ?? "",
-            ]
-        )
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let translateResponse = try? ipcClient.call(
+                    method: "translate_text",
+                    params: [
+                        "text": cleanSource,
+                        "translation_mode": targetMode,
+                        "translation_style": translationStyle,
+                        "network_mode": networkMode,
+                    ]
+                ),
+                let translateResult = translateResponse["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Повторить перевод", body: "Не удалось выполнить перевод.")
+                }
+                return
+            }
 
-        loadInitial()
-        showInfoAlert(
-            title: "Повторить перевод",
-            body: "Готово. Создана новая запись истории с обновлённым переводом."
-        )
+            let status = (translateResult["status"] as? String) ?? "unknown"
+            let translatedText = ((translateResult["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if status != "ok" || translatedText.isEmpty {
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Повторить перевод", body: "Перевод недоступен: \(status).")
+                }
+                return
+            }
+
+            let newText = shouldPasteTranslated ? translatedText : cleanSource
+            let engine = (translateResult["engine"] as? String) ?? ""
+            let sourceLang = (translateResult["source_lang"] as? String) ?? ""
+            let targetLang = (translateResult["target_lang"] as? String) ?? ""
+
+            let _ = try? ipcClient.call(
+                method: "add_history_item",
+                params: [
+                    "text": newText,
+                    "paste_status": "failed",
+                    "source_text": cleanSource,
+                    "translated_text": translatedText,
+                    "translation_mode": targetMode,
+                    "translation_status": status,
+                    "translation_engine": engine,
+                    "source_lang": sourceLang,
+                    "target_lang": targetLang,
+                ]
+            )
+
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.loadInitial()
+                self.showInfoAlert(
+                    title: "Повторить перевод",
+                    body: "Готово. Создана новая запись истории с обновлённым переводом."
+                )
+            }
+        }
     }
 
     @objc func onSummarizeSelected() {
@@ -332,29 +359,42 @@ extension HistoryPanelController {
         let selected = tableView.selectedRow
         guard selected >= 0, selected < items.count else { return }
         let item = items[selected]
-        _ = try? ipcClient.call(method: "delete_history_item", params: ["id": item.id])
+        let itemID = item.id
+
+        // UI update sync — пользователь видит мгновенный эффект.
         items.remove(at: selected)
         tableView.reloadData()
+
+        // IPC удаление — на background, не блокирует UI.
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "delete_history_item", params: ["id": itemID])
+        }
     }
 
     @objc func onCompact() {
-        let response = try? ipcClient.call(method: "compact_history", params: [:])
-        if let result = response?["result"] as? [String: Any] {
-            let reclaimed = (result["reclaimed_bytes"] as? Int) ?? 0
-            let beforeBytes = (result["before_total_bytes"] as? Int) ?? 0
-            let afterBytes = (result["after_total_bytes"] as? Int) ?? 0
-            let beforeActive = (result["before_active_count"] as? Int) ?? 0
-            let afterActive = (result["after_active_count"] as? Int) ?? 0
-            showInfoAlert(
-                title: "Оптимизация истории",
-                body: """
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipcClient.call(method: "compact_history", params: [:])
+            if let result = response?["result"] as? [String: Any] {
+                let reclaimed = (result["reclaimed_bytes"] as? Int) ?? 0
+                let beforeBytes = (result["before_total_bytes"] as? Int) ?? 0
+                let afterBytes = (result["after_total_bytes"] as? Int) ?? 0
+                let beforeActive = (result["before_active_count"] as? Int) ?? 0
+                let afterActive = (result["after_active_count"] as? Int) ?? 0
+                let body = """
                 Активных записей: \(beforeActive) -> \(afterActive)
-                Размер: \(formatBytes(beforeBytes)) -> \(formatBytes(afterBytes))
-                Освобождено: \(formatBytes(max(0, reclaimed)))
+                Размер: \(self?.formatBytes(beforeBytes) ?? "?") -> \(self?.formatBytes(afterBytes) ?? "?")
+                Освобождено: \(self?.formatBytes(max(0, reclaimed)) ?? "?")
                 """
-            )
+                DispatchQueue.main.async {
+                    self?.showInfoAlert(title: "Оптимизация истории", body: body)
+                }
+            }
+            DispatchQueue.main.async {
+                self?.loadInitial()
+            }
         }
-        loadInitial()
     }
 
     @objc func onOpenTranscripts() {
@@ -599,7 +639,10 @@ extension HistoryPanelController {
         return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
     }
 
-    func formatBytes(_ value: Int) -> String {
+    /// Pure helper — может вызываться из любого thread (nonisolated).
+    /// Используется в onCompact() из background closure для форматирования
+    /// строки до перехода на main thread (избегаем race на @MainActor).
+    nonisolated func formatBytes(_ value: Int) -> String {
         let safe = max(0, value)
         if safe < 1024 {
             return "\(safe) B"
