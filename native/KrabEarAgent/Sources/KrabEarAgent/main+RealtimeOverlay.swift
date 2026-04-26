@@ -55,7 +55,7 @@ extension AgentAppDelegate {
 
         let previewText = (result["preview_text"] as? String) ?? ""
         let durationSec = (result["duration_sec"] as? Double) ?? 0.0
-        let durationText = formatDuration(durationSec)
+        let durationText = HistoryPanelController.formatDuration(durationSec)
         let translatedPreview = translatePreviewTextIfNeeded(previewText)
         let modeHint = previewTranslationModeHint()
         realtimeOverlay.update(

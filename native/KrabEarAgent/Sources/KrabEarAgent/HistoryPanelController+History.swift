@@ -746,7 +746,7 @@ extension HistoryPanelController {
         case "status":
             text = item.pasteStatus
         default:
-            let translationBadge = buildTranslationBadge(item)
+            let translationBadge = HistoryPanelController.buildTranslationBadge(item)
             text = translationBadge + item.text
         }
 
@@ -976,7 +976,8 @@ extension HistoryPanelController {
         return max(historyMinRowHeight(), totalHeight)
     }
 
-    func buildTranslationBadge(_ item: HistoryItem) -> String {
+    /// Pure helper — не trogает self, тестируется без instance.
+    nonisolated static func buildTranslationBadge(_ item: HistoryItem) -> String {
         guard item.translationMode != "off" else { return "" }
         let statusMark: String
         switch item.translationStatus {
