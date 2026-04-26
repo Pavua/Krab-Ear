@@ -204,13 +204,20 @@ extension AgentAppDelegate {
     func markPasteStatus(historyId: String?, status: String) {
         guard let historyId else { return }
         logger.info("Обновление paste_status: history_id=\(historyId), status=\(status)")
-        _ = try? ipcClient.call(
-            method: "set_paste_status",
-            params: [
-                "id": historyId,
-                "paste_status": status,
-            ]
-        )
+        // Fire-and-forget: вызывается из handleTranscriptionResult на main thread.
+        // Без async wrap'а IPC socket read блокирует main → AppHang (>2s).
+        // Closes Sentry KRAB-EAR-AGENT-8.
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .utility).async {
+            _ = try? ipcClient.call(
+                method: "set_paste_status",
+                params: [
+                    "id": historyId,
+                    "paste_status": status,
+                ],
+                timeoutSec: IPCClient.quickTimeoutSec
+            )
+        }
     }
 
     func captureRecordingTargetApp() {
@@ -269,13 +276,19 @@ extension AgentAppDelegate {
         if let existingId, !existingId.isEmpty {
             return existingId
         }
+        // Sync IPC на main thread — но с quickTimeoutSec (5s) вместо default 60s,
+        // чтобы при заклине backend'а main thread не висел >2 сек (AppHang threshold).
+        // add_history_item — DB write, обычно <100 ms. Для полного fix потребуется
+        // refactor в async flow с completion handler, что меняет contract handler.
+        // Closes part of Sentry KRAB-EAR-AGENT-8.
         guard
             let response = try? ipcClient.call(
                 method: "add_history_item",
                 params: [
                     "text": text,
                     "paste_status": "failed",
-                ]
+                ],
+                timeoutSec: IPCClient.quickTimeoutSec
             ),
             let result = response["result"] as? [String: Any]
         else {
