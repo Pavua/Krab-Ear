@@ -144,4 +144,25 @@ extension HistoryPanelController {
         if key.hasPrefix("any_option")   { return "⌥ Any" }
         return "⌥"
     }
+
+    /// Build category header (small uppercased label) для visual grouping
+    /// между sections в Dictation tab. Phase 2 IA refactor step 2.
+    /// Pattern Apple System Settings 16: caption-size, semibold, textSecondary.
+    func makeCategoryHeader(text: String) -> NSView {
+        let label = NSTextField(labelWithString: text.uppercased())
+        label.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = KrabEarTheme.Colors.textSecondary
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -4),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: KrabEarTheme.Metrics.standard),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+        ])
+        return container
+    }
 }
