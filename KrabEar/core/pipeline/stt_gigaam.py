@@ -113,6 +113,8 @@ class GigaAMAdapter:
         self,
         audio: np.ndarray,
         sample_rate: int = 16000,
+        longform: bool = False,
+        hf_token: str = "",
     ) -> dict:
         """Транскрибирует аудиомассив в текст.
 
@@ -145,9 +147,13 @@ class GigaAMAdapter:
         try:
             self._write_wav(tmp_path, audio_16k)
             if transport == "in_process":
-                text, engine_name = self._transcribe_in_process(tmp_path)
+                text, engine_name = self._transcribe_in_process(
+                    tmp_path, longform=longform, hf_token=hf_token,
+                )
             else:  # subprocess
-                text, engine_name = self._transcribe_subprocess(tmp_path)
+                text, engine_name = self._transcribe_subprocess(
+                    tmp_path, longform=longform, hf_token=hf_token,
+                )
         finally:
             try:
                 os.unlink(tmp_path)
@@ -226,9 +232,22 @@ class GigaAMAdapter:
             )
         return self._active_transport
 
-    def _transcribe_in_process(self, audio_path: str) -> tuple[str, str]:
+    def _transcribe_in_process(
+        self, audio_path: str, longform: bool = False, hf_token: str = "",
+    ) -> tuple[str, str]:
         """In-process путь: загружает модель в текущий процесс, вызывает .transcribe."""
         model = self._get_model()
+        if longform and hasattr(model, "transcribe_longform"):
+            if hf_token:
+                os.environ.setdefault("HF_TOKEN", hf_token)
+                os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+            segments = model.transcribe_longform(audio_path)
+            text = "\n\n".join(
+                (seg.get("transcription") or "").strip()
+                for seg in (segments or [])
+                if isinstance(seg, dict) and seg.get("transcription")
+            )
+            return text, f"{self._engine_name()}-longform"
         transcription = model.transcribe(audio_path)
         if isinstance(transcription, str):
             text = transcription
@@ -238,10 +257,12 @@ class GigaAMAdapter:
             text = str(transcription)
         return text, self._engine_name()
 
-    def _transcribe_subprocess(self, audio_path: str) -> tuple[str, str]:
+    def _transcribe_subprocess(
+        self, audio_path: str, longform: bool = False, hf_token: str = "",
+    ) -> tuple[str, str]:
         """Subprocess путь: ленивый spawn worker'а, отправка transcribe-команды."""
         session = self._get_subprocess_session()
-        result = session.transcribe(audio_path)
+        result = session.transcribe(audio_path, longform=longform, hf_token=hf_token)
         text = str(result.get("text", ""))
         engine = str(result.get("engine") or self._engine_name())
         return text, engine
@@ -443,14 +464,31 @@ class _GigaAMSubprocessSession:
             self._device,
         )
 
-    def transcribe(self, audio_path: str) -> dict:
-        """Отправляет transcribe-команду, возвращает {"text": ..., "engine": ...}."""
+    def transcribe(
+        self,
+        audio_path: str,
+        longform: bool = False,
+        hf_token: str = "",
+    ) -> dict:
+        """Отправляет transcribe-команду, возвращает {"text": ..., "engine": ...}.
+
+        Параметры:
+            audio_path: путь к WAV/M4A/MP3 файлу.
+            longform:   bool — для аудио > 30 сек использовать
+                        `model.transcribe_longform()` (требует pyannote.audio + HF token).
+            hf_token:   HuggingFace API token для pyannote VAD. Если пустой —
+                        worker использует cached token (~/.cache/huggingface/token).
+        """
         if not self.is_loaded():
             raise RuntimeError("_GigaAMSubprocessSession: worker not started or crashed")
-        response = self._send(
-            {"op": "transcribe", "audio_path": audio_path},
-            timeout_sec=_SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC,
-        )
+        # Longform может занять 5-10× больше времени чем обычный transcribe — увеличиваем timeout.
+        timeout = _SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC * (8 if longform else 1)
+        request = {"op": "transcribe", "audio_path": audio_path}
+        if longform:
+            request["longform"] = True
+        if hf_token:
+            request["hf_token"] = hf_token
+        response = self._send(request, timeout_sec=timeout)
         if not response.get("ok"):
             err = response.get("error", "unknown")
             raise RuntimeError(f"_GigaAMSubprocessSession: transcribe failed: {err}")
