@@ -654,6 +654,10 @@ extension HistoryPanelController {
         settingsBarCD.alignment = .leading
         settingsBarCD.translatesAutoresizingMaskIntoConstraints = false
 
+        // Hero card — Phase 2 IA (consistency с Gemini variant). Видим summary
+        // сразу, без скролла на длинный список секций.
+        settingsBarCD.addArrangedSubview(buildDictationHeroCard())
+
         for s in [s1, s2, s3, s4, s5, s6] {
             settingsBarCD.addArrangedSubview(s)
         }
