@@ -272,6 +272,16 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        # Hot-reload pydantic Settings из обновлённого settings.json — без
+        # restart engine.py видит новые feature flags (STT_GIGAAM_ENABLED,
+        # STT_LANGUAGE_ROUTING_ENABLED, etc).
+        try:
+            from core.config import reload_settings_from_json
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("set_settings: hot-reloaded %d pydantic fields", updated)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("set_settings: hot-reload failed: %s", exc)
         return result
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
