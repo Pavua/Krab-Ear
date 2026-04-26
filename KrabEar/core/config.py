@@ -267,6 +267,20 @@ class Settings(BaseSettings):
     # Устройство для инференса: "mps" (Apple Silicon GPU) или "cpu".
     # На M4 Max рекомендуется "mps" — ~3× быстрее CPU при том же потреблении памяти.
     STT_GIGAAM_DEVICE: str = "mps"
+    # Транспорт для запуска инференса:
+    #   "in_process" — `import gigaam` в текущем Python. Работает только если gigaam
+    #                  установлен в активном venv. В main Krab Ear venv (Python 3.14
+    #                  + torch 2.11) gigaam несовместим (pin torch<=2.5.1 / onnxruntime<=1.23.x).
+    #   "subprocess" — запускает gigaam_worker.py из изолированного venv
+    #                  (по умолчанию ~/.venv_krab_ear_gigaam, см.
+    #                  scripts/install_gigaam_venv.command). Worker держит модель в
+    #                  памяти, общается через stdin/stdout JSON.
+    #   "auto" (default) — пробует in_process; при ImportError → subprocess.
+    STT_GIGAAM_TRANSPORT: str = "auto"
+    # Путь к Python интерпретатору изолированного venv с установленным gigaam.
+    # Используется только при transport in {"subprocess", "auto"}.
+    # Пустая строка = дефолт ~/.venv_krab_ear_gigaam/bin/python.
+    STT_GIGAAM_VENV_PYTHON: str = ""
 
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
