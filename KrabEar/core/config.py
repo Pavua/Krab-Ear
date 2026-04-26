@@ -264,9 +264,13 @@ class Settings(BaseSettings):
     # Режим модели: "rnnt" (выше качество, RNNT decoder) или "ctc" (быстрее, CTC decoder).
     # Полные имена тоже поддерживаются: "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc".
     STT_GIGAAM_MODE: str = "rnnt"
-    # Устройство для инференса: "mps" (Apple Silicon GPU) или "cpu".
-    # На M4 Max рекомендуется "mps" — ~3× быстрее CPU при том же потреблении памяти.
-    STT_GIGAAM_DEVICE: str = "mps"
+    # Устройство для инференса: "cpu" (default, рекомендуется) или "mps" (Apple Silicon GPU).
+    # Bench 2026-04-26 на M4 Max: CPU 0.62s vs MPS 4.36s на 15-сек fragment (RTF
+    # 0.041 vs 0.291). MPS медленнее из-за warmup + tensor transfer overhead на
+    # коротких inference; для длинных audio (>60s) может быть другая story —
+    # требуется отдельный bench когда longform доступен (HF_TOKEN setup).
+    # См. memory/reference_gigaam_bench_2026-04-26.md.
+    STT_GIGAAM_DEVICE: str = "cpu"
 
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
@@ -413,13 +417,6 @@ class Settings(BaseSettings):
     # Больше = точнее детекция (меньше шанс ошибки на коротких utterances).
     # Меньше = быстрее (~50ms @ 5s vs ~100ms @ 30s).
     STT_AUDIO_LANG_ID_PREVIEW_SEC: float = 5.0
-
-    # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
-    # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
-    # Лицензия: MIT. PyPI: pip install gigaam. HuggingFace: salute-developers/GigaAM
-    STT_GIGAAM_ENABLED: bool = False
-    STT_GIGAAM_MODE: str = "rnnt"
-    STT_GIGAAM_DEVICE: str = "mps"
 
     # --- Ежедневный дайджест на email (opt-in) ---
     # При RECAP_EMAIL_ENABLED=True: каждый день в RECAP_TIME_HOUR (локальное время)
