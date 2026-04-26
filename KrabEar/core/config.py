@@ -414,13 +414,6 @@ class Settings(BaseSettings):
     # Меньше = быстрее (~50ms @ 5s vs ~100ms @ 30s).
     STT_AUDIO_LANG_ID_PREVIEW_SEC: float = 5.0
 
-    # --- GigaAM-RNNT v2 adapter (RU-специализированная модель от Sber) ---
-    # GigaAM — Conformer-based модель (244M параметров), дообученная на 50 000 часах
-    # Лицензия: MIT. PyPI: pip install gigaam. HuggingFace: salute-developers/GigaAM
-    STT_GIGAAM_ENABLED: bool = False
-    STT_GIGAAM_MODE: str = "rnnt"
-    STT_GIGAAM_DEVICE: str = "mps"
-
     # --- Ежедневный дайджест на email (opt-in) ---
     # При RECAP_EMAIL_ENABLED=True: каждый день в RECAP_TIME_HOUR (локальное время)
     # автоматически генерируется DailyDigest и отправляется на RECAP_EMAIL_TO.
