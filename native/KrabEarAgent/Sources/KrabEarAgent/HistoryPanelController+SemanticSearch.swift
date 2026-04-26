@@ -70,6 +70,11 @@ extension HistoryPanelController {
         v.font = KrabEarTheme.Typography.body
         v.textContainerInset = NSSize(width: 8, height: 8)
         v.minSize = NSSize(width: 0, height: 120)
+        // Double-click handler: парсит ID из строки результата и прыгает к item
+        // в главной таблице истории. См. handleSemanticResultsDoubleClick.
+        let dblGesture = NSClickGestureRecognizer(target: self, action: #selector(handleSemanticResultsDoubleClick(_:)))
+        dblGesture.numberOfClicksRequired = 2
+        v.addGestureRecognizer(dblGesture)
         objc_setAssociatedObject(self, &SemanticSearchAssoc.resultsView, v, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return v
     }
@@ -259,6 +264,77 @@ extension HistoryPanelController {
             }
         }
         return Array(results.sorted { $0.1 > $1.1 }.prefix(topK))
+    }
+
+    // MARK: - Click-to-jump (double-click on result line)
+
+    /// Обрабатывает double-click внутри `semanticResultsView`. Определяет строку
+    /// под курсором, извлекает ID prefix (`abc12345`) через `extractItemIDPrefix`,
+    /// находит запись в `self.items` и скроллит к ней главную таблицу истории.
+    @objc func handleSemanticResultsDoubleClick(_ sender: NSClickGestureRecognizer) {
+        guard let textView = sender.view as? NSTextView else { return }
+        let location = sender.location(in: textView)
+
+        // Получаем character index по координатам клика.
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+        let charIndex = layoutManager.characterIndex(
+            for: location,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        let fullText = textView.string
+        guard charIndex < fullText.utf16.count else { return }
+
+        // Извлекаем строку (line) под курсором.
+        let nsText = fullText as NSString
+        let lineRange = nsText.lineRange(for: NSRange(location: min(charIndex, nsText.length - 1), length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let idPrefix = HistoryPanelController.extractItemIDPrefix(from: line) else {
+            semanticStatusLabel.stringValue = "Не удалось распарсить ID из строки. Кликни по строке вида '1. [82%] abc12345…'"
+            return
+        }
+
+        guard let row = items.firstIndex(where: { $0.id.hasPrefix(idPrefix) }) else {
+            semanticStatusLabel.stringValue = "Запись \(idPrefix)… не на текущей странице. Сбрось фильтры или загрузи больше истории."
+            return
+        }
+
+        // Переключаемся на History tab и скроллим к найденной строке.
+        if mainTabView.selectedTabViewItem?.identifier as? String != PanelTab.history.rawValue {
+            // Поиск индекса History tab; в default layout = 1 (Dictation=0, History=1).
+            for (idx, tab) in mainTabView.tabViewItems.enumerated() where (tab.identifier as? String) == PanelTab.history.rawValue {
+                mainTabView.selectTabViewItem(at: idx)
+                tabSelector?.setSelected(true, forSegment: idx)
+                break
+            }
+        }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        semanticStatusLabel.stringValue = "Перешёл к записи \(idPrefix)… (строка \(row + 1))"
+    }
+
+    /// Парсит prefix ID из строки результата формата `"N. [PCT%] abc12345…  …"`.
+    /// Возвращает `"abc12345"` (8 hex chars) или nil если строка не распарсилась.
+    /// Pure helper — `nonisolated`, тестируется без instance.
+    nonisolated static func extractItemIDPrefix(from line: String) -> String? {
+        // Pattern: "N. [PCT%] HEXPREFIX…  …"
+        // Регекс: \d+\.\s+\[\d+%\]\s+([a-fA-F0-9]+)…
+        let pattern = #"^\s*\d+\.\s+\[\d+%\]\s+([a-fA-F0-9]{4,})…"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+        let range = NSRange(line.startIndex..., in: line)
+        guard let match = regex.firstMatch(in: line, options: [], range: range),
+              match.numberOfRanges >= 2 else {
+            return nil
+        }
+        let groupRange = match.range(at: 1)
+        guard let swiftRange = Range(groupRange, in: line) else {
+            return nil
+        }
+        return String(line[swiftRange])
     }
 
     /// Форматирует список (id, score) в человекочитаемый текст для NSTextView.
