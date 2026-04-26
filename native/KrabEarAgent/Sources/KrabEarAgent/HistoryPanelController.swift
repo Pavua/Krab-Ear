@@ -2146,6 +2146,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(primaryActionsCard)
         historyStack.addArrangedSubview(advancedSection)
         historyStack.addArrangedSubview(importSection)
+        // Семантический поиск (PR #284 backend, отдельный extension UI)
+        historyStack.addArrangedSubview(setupSemanticSearchSection())
         // Gemini 3.1 Pro: управление + статистика
         let (managementSection, statsSection) = setupManagementSections()
         historyStack.addArrangedSubview(managementSection)
