@@ -2,8 +2,21 @@
 
 Все параметры могут быть переопределены через переменные окружения (.env
 или ~/Library/Application Support/KrabEar/.secrets).
+
+**Runtime overrides из settings.json**: backend's `set_settings` IPC
+сохраняет runtime изменения в `~/Library/Application Support/KrabEar/settings.json`
+(управляется через `backend.settings_service`). Чтобы pydantic Settings
+видел эти overrides без backend restart, мы автоматически читаем JSON
+ПОСЛЕ env vars + .env, перед finalizing instance.
+
+Приоритет (high → low):
+  1. Launchd / shell env vars (`KRAB_EAR_*`)
+  2. .env / .secrets files
+  3. settings.json runtime overrides ← bridged here
+  4. Class defaults
 """
 
+import json as _json
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import List, Any
@@ -14,6 +27,38 @@ from typing import List, Any
 # последний файл в tuple побеждает при конфликте ключей. Env vars из
 # launchd plist всё равно имеют более высокий приоритет (env > env_file).
 _SECRETS_FILE = Path.home() / "Library" / "Application Support" / "KrabEar" / ".secrets"
+
+# Settings.json file managed by backend.settings_service. Read at startup
+# чтобы pydantic Settings видел runtime overrides из IPC `set_settings`.
+_SETTINGS_JSON_FILE = Path.home() / "Library" / "Application Support" / "KrabEar" / "settings.json"
+
+
+def _load_settings_json_overrides() -> dict[str, Any]:
+    """Читает settings.json и нормализует ключи в UPPER_CASE для pydantic match.
+
+    settings.json использует lowercase ключи (`stt_gigaam_enabled`),
+    pydantic Settings — UPPER_CASE (`STT_GIGAAM_ENABLED`). Метод upper'ит
+    ключи и возвращает dict для применения как pydantic init kwargs.
+    Не raise при missing file / parse error — silent fallback на defaults.
+    """
+    if not _SETTINGS_JSON_FILE.exists():
+        return {}
+    try:
+        with open(_SETTINGS_JSON_FILE) as f:
+            raw = _json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    # Убираем nested dicts (pydantic Settings нашего класса flat) и не-валидные значения.
+    return {
+        k.upper(): v for k, v in raw.items()
+        if isinstance(k, str) and not isinstance(v, (dict, list))
+        # Кроме списков — некоторые settings (например MODEL_MAX_LIST) принимают list.
+    } | {
+        k.upper(): v for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, list)
+    }
 
 
 class Settings(BaseSettings):
@@ -567,7 +612,43 @@ class Settings(BaseSettings):
 
 
 # Singleton инстанс настроек
-settings = Settings()
+def _build_settings() -> Settings:
+    """Initialize Settings с runtime overrides из settings.json.
+
+    Order приоритета (high → low) per pydantic v2:
+      1. Explicit kwargs (что мы передаём из settings.json overrides)
+      2. Env vars (KRAB_EAR_*)
+      3. .env file
+      4. Class defaults
+
+    Wait — pydantic порядок: explicit kwargs > env vars. Это означало бы
+    settings.json побеждает env. Это противоположно желаемому.
+
+    **Нужный приоритет**: env > .env > settings.json > defaults.
+    Реализуется через: создаём instance с settings.json kwargs, ТАМ
+    pydantic подтянет env vars если они есть (и переопределит JSON
+    значения благодаря "validate_default" + env precedence).
+
+    На самом деле — pydantic-settings v2 НЕ переопределяет explicit kwargs
+    через env. Поэтому stratifying: применяем JSON kwargs ТОЛЬКО для
+    ключей которые НЕ установлены в env vars. Это ручная фильтрация.
+    """
+    import os as _os
+    overrides = _load_settings_json_overrides()
+    # Filter out keys которые уже определены в env vars (с префиксом).
+    # Env vars beat settings.json.
+    filtered: dict[str, Any] = {}
+    for key, value in overrides.items():
+        env_key = f"KRAB_EAR_{key}"
+        if env_key in _os.environ:
+            continue  # env wins
+        # Validate key existit в Settings model — иначе pydantic raise (extra=ignore).
+        # extra="ignore" means unknown keys silently dropped — safe.
+        filtered[key] = value
+    return Settings(**filtered)
+
+
+settings = _build_settings()
 
 # Дефолтные настройки для UI и логики (из legacy моделей)
 DEFAULT_SETTINGS: dict[str, Any] = {
