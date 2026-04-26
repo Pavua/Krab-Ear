@@ -648,10 +648,46 @@ extension HistoryPanelController {
             control: qualitySelector
         )
 
+        // 3. GigaAM-RNNT v2 toggle — RU специализированная модель (опционально).
+        //    Pre-flight check на venv (~/.venv_krab_ear_gigaam) делается в handler.
+        gigaamEnabledButton.title = ""
+        gigaamEnabledButton.setButtonType(.switch)
+        gigaamEnabledButton.setAccessibilityLabel(
+            "Включить GigaAM-RNNT v2 для русского STT — ~2.5× выше точность на разговорной речи. Требует установки venv через scripts/install_gigaam_venv.command."
+        )
+
+        let gigaamBetaBadge = makeBadge(
+            text: "RU only",
+            color: KrabEarTheme.Colors.accent,
+            tooltip: "Работает только для русского. Для en/es остаётся whisper."
+        )
+
+        let gigaamSubCaption = NSTextField(labelWithString:
+            "WER ~3.8% vs whisper ~9.8% на русском. Hard-limit ~25 сек на одну диктовку (long-form пока не поддерживается). Требует install_gigaam_venv.command (одноразово)."
+        )
+        gigaamSubCaption.font = KrabEarTheme.Typography.caption
+        gigaamSubCaption.textColor = KrabEarTheme.Colors.textDisabled
+        gigaamSubCaption.lineBreakMode = .byWordWrapping
+        gigaamSubCaption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let gigaamRowInner = makeSwitchRow(
+            label: "GigaAM-RNNT v2 для русского",
+            button: gigaamEnabledButton,
+            statusBadge: gigaamBetaBadge
+        )
+        let gigaamRow = NSStackView()
+        gigaamRow.orientation = .vertical
+        gigaamRow.alignment = .leading
+        gigaamRow.spacing = KrabEarTheme.Metrics.tight
+        gigaamRow.addArrangedSubview(gigaamRowInner)
+        gigaamRow.addArrangedSubview(gigaamSubCaption)
+
         // Assemble card (ThemeCardView content stack уже vertical + leading).
         card.contentStackView.addArrangedSubview(diarRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(qualRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(gigaamRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
