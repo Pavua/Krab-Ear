@@ -239,8 +239,9 @@ class GigaAMAdapter:
         model = self._get_model()
         if longform and hasattr(model, "transcribe_longform"):
             if hf_token:
-                os.environ.setdefault("HF_TOKEN", hf_token)
-                os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+                # Прямое присваивание (не setdefault) — explicit token имеет приоритет.
+                os.environ["HF_TOKEN"] = hf_token
+                os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
             segments = model.transcribe_longform(audio_path)
             text = "\n\n".join(
                 (seg.get("transcription") or "").strip()

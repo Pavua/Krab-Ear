@@ -108,11 +108,14 @@ def _handle_transcribe(params: dict) -> dict:
     longform = bool(params.get("longform", False))
     hf_token = params.get("hf_token", "")
 
-    # Если HF token передан явно — выставляем env vars (pyannote/HF Hub их читают).
+    # Если HF token передан явно — overwrite env vars (pyannote/HF Hub их читают).
+    # Используем прямое присваивание (не setdefault), чтобы explicit token из
+    # settings.STT_GIGAAM_HF_TOKEN имел приоритет над shell env (более частый
+    # case: env пустой, settings overrides cached ~/.cache/huggingface/token).
     if hf_token and isinstance(hf_token, str):
         import os
-        os.environ.setdefault("HF_TOKEN", hf_token)
-        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+        os.environ["HF_TOKEN"] = hf_token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
 
     try:
         if longform and hasattr(_MODEL, "transcribe_longform"):
