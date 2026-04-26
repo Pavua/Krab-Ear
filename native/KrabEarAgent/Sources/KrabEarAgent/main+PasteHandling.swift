@@ -105,8 +105,10 @@ extension AgentAppDelegate {
             handlePasteFailure(reason: pasteResult.reason, text: text)
         }
 
-        // Звук завершения транскрибации.
-        NSSound(named: "Purr")?.play()
+        // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
+        DispatchQueue.global(qos: .userInitiated).async {
+            NSSound(named: "Purr")?.play()
+        }
     }
 
     func isDuplicateAutopasteCandidate(historyId: String?, text: String) -> Bool {
@@ -299,7 +301,9 @@ extension AgentAppDelegate {
         default:
             if result.ok {
                 logger.info("Quick replay: успешно вставлен текст (reason=\(result.reason))")
-                NSSound(named: "Purr")?.play()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    NSSound(named: "Purr")?.play()
+                }
             } else {
                 handlePasteFailure(reason: result.reason)
             }

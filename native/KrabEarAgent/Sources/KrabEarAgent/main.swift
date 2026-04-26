@@ -896,11 +896,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         guard settings.playStartSound else {
             return
         }
-        // Уведомляющий звук о старте записи.
-        if let sound = NSSound(named: "Glass") {
-            sound.play()
-        } else {
-            NSSound.beep()
+        // Уведомляющий звук о старте записи (off main thread: AudioQueueXPC.Start синхронный).
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let sound = NSSound(named: "Glass") {
+                sound.play()
+            } else {
+                NSSound.beep()
+            }
         }
     }
 

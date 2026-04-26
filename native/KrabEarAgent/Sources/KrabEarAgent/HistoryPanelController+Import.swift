@@ -482,8 +482,10 @@ extension HistoryPanelController {
             errors: importErrorsTotal,
             duration: totalSec
         )
-        // Звук завершения импорта.
-        NSSound(named: "Purr")?.play()
+        // Звук завершения импорта (off main thread: AudioQueueXPC.Start синхронный).
+        DispatchQueue.global(qos: .userInitiated).async {
+            NSSound(named: "Purr")?.play()
+        }
 
         // Сбрасываем агрегаторы для следующей очереди.
         importJobsPlanned = 0
