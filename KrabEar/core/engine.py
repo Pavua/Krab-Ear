@@ -370,6 +370,18 @@ class AudioEngine:
             "enabled" if llm_rewriter is not None else "disabled",
         )
 
+        # Warmup GigaAM в background если enabled — избегаем cold-start latency
+        # на первой диктовке (subprocess spawn + model load = ~30 сек).
+        if getattr(settings, "STT_GIGAAM_ENABLED", False):
+            import threading
+            def _warmup_bg() -> None:
+                try:
+                    self._router.warmup_gigaam()
+                except Exception as exc:
+                    logger.warning("GigaAM warmup в background failed: %s", exc)
+            threading.Thread(target=_warmup_bg, name="GigaAM-warmup", daemon=True).start()
+            logger.info("GigaAM warmup запущен в background thread")
+
     def _llm_rewrite_allowed(self) -> bool:
         """Runtime check: включён ли LLM rewriter И user runtime toggle."""
         if self._llm_rewriter is None:

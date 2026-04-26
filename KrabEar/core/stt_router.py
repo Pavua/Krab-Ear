@@ -78,6 +78,11 @@ class STTRouter:
         self._adapter_factory = adapter_factory
         # Lazy-init AudioLanguageID (создаётся при первом использовании)
         self._lang_id: Optional[Any] = None
+        # GigaAM adapter cache — single instance reused между transcribe calls.
+        # Раньше get_gigaam_adapter() создавал new instance каждый раз —
+        # subprocess spawn + model load на каждый chunk. Now cache + warm-up
+        # support через `warmup_gigaam()`.
+        self._gigaam_adapter: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -147,20 +152,24 @@ class STTRouter:
     def get_gigaam_adapter(self) -> Optional[Any]:
         """Возвращает инициализированный GigaAMAdapter если STT_GIGAAM_ENABLED=True.
 
-        Условия возврата не-None:
-        1. settings.STT_GIGAAM_ENABLED == True
-        2. `gigaam` пакет доступен для импорта (pip install gigaam)
-
-        Возвращает GigaAMAdapter или None (если отключён или gigaam не установлен).
-
-        Интеграция в AudioEngine:
-            Когда detected_lang == "ru" AND get_gigaam_adapter() is not None →
-            пробуем GigaAM первым, при ошибке fallback на whisper-large-v3.
-            TODO(follow-up): интегрировать в AudioEngine.transcribe() chain.
+        Cached singleton — same instance reused между transcribe calls (раньше
+        new instance каждый раз → subprocess spawn × N). На toggle off/on
+        adapter recreated automatically.
         """
         if not getattr(self._settings, "STT_GIGAAM_ENABLED", False):
+            # Toggle off — close cached adapter (если был) для cleanup.
+            if self._gigaam_adapter is not None:
+                try:
+                    self._gigaam_adapter.close()
+                except Exception:
+                    pass
+                self._gigaam_adapter = None
             logger.debug("STTRouter.get_gigaam_adapter: STT_GIGAAM_ENABLED=False → None")
             return None
+
+        # Return cached instance (если есть) — same subprocess reused.
+        if self._gigaam_adapter is not None:
+            return self._gigaam_adapter
 
         try:
             from core.pipeline.stt_gigaam import GigaAMAdapter  # type: ignore[import]
@@ -172,8 +181,6 @@ class STTRouter:
 
         mode = getattr(self._settings, "STT_GIGAAM_MODE", "rnnt")
         device = getattr(self._settings, "STT_GIGAAM_DEVICE", "mps")
-        # transport / venv_python: настройки могут отсутствовать в legacy / mock объектах,
-        # поэтому ограничиваем тип явно (MagicMock вернёт MagicMock на любой getattr).
         transport_raw = getattr(self._settings, "STT_GIGAAM_TRANSPORT", "auto")
         transport = transport_raw if isinstance(transport_raw, str) else "auto"
         venv_python_raw = getattr(self._settings, "STT_GIGAAM_VENV_PYTHON", "")
@@ -189,7 +196,8 @@ class STTRouter:
                 transport=transport,
                 venv_python_path=venv_python,
             )
-            logger.debug(
+            self._gigaam_adapter = adapter  # cache
+            logger.info(
                 "STTRouter.get_gigaam_adapter: адаптер создан (mode=%s, device=%s, transport=%s)",
                 mode,
                 device,
@@ -199,6 +207,31 @@ class STTRouter:
         except Exception as exc:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
+
+    def warmup_gigaam(self) -> bool:
+        """Force-load GigaAM model в background чтобы избежать cold-start latency.
+
+        Called at backend startup (если settings.STT_GIGAAM_ENABLED=True) —
+        spawns subprocess + loads model в фоне, к моменту первой диктовки всё
+        готово.
+
+        Returns: True если warmup triggered (или already done), False если
+        GigaAM disabled / unavailable.
+        """
+        adapter = self.get_gigaam_adapter()
+        if adapter is None:
+            return False
+        # Pre-load: small dummy audio (1s silence) → forces subprocess spawn +
+        # model load. Это same path как transcribe но на dev silence.
+        import numpy as np
+        try:
+            dummy = np.zeros(16000, dtype=np.float32)  # 1s silence at 16kHz
+            adapter.transcribe(dummy, sample_rate=16000)
+            logger.info("STTRouter.warmup_gigaam: модель готова (subprocess loaded)")
+            return True
+        except Exception as exc:
+            logger.warning("STTRouter.warmup_gigaam: ошибка warmup: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # Внутренние методы
