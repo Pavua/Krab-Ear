@@ -20,7 +20,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Диагностика"))
+                self.showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Диагностика"))
             }
         }
     }
@@ -37,7 +37,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Метрики"))
+                self.showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Метрики"))
             }
         }
     }
@@ -54,7 +54,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Статистика записей"))
+                self.showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Статистика записей"))
             }
         }
     }
@@ -71,7 +71,7 @@ extension HistoryPanelController {
             }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.showDiagnosticsOutput(self.formatNestedResult(result, title: "Хранилище"))
+                self.showDiagnosticsOutput(HistoryPanelController.formatNestedResult(result, title: "Хранилище"))
             }
         }
     }
@@ -86,7 +86,7 @@ extension HistoryPanelController {
         }
     }
 
-    func formatNestedResult(_ result: [String: Any], title: String) -> String {
+    nonisolated static func formatNestedResult(_ result: [String: Any], title: String) -> String {
         var lines: [String] = ["=== \(title) ==="]
         for (key, value) in result.sorted(by: { $0.key < $1.key }) {
             if let dict = value as? [String: Any] {

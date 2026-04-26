@@ -89,7 +89,7 @@ extension HistoryPanelController {
         let isRecording = (result["is_recording"] as? Bool) ?? false
         let durationSec = (result["duration_sec"] as? Double) ?? 0.0
         let previewText = ((result["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let durationText = formatDuration(durationSec)
+        let durationText = HistoryPanelController.formatDuration(durationSec)
 
         if isRecording {
             realtimeStatusLabel.stringValue = "Realtime: запись \(durationText)"
@@ -106,7 +106,7 @@ extension HistoryPanelController {
         }
     }
 
-    func formatDuration(_ seconds: Double) -> String {
+    nonisolated static func formatDuration(_ seconds: Double) -> String {
         let total = max(0, Int(seconds.rounded()))
         let minutes = total / 60
         let secs = total % 60
