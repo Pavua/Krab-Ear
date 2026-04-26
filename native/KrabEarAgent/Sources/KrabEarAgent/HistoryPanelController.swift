@@ -1749,20 +1749,25 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // Hero card — Phase 2 IA refactor (Gemini 3.1 Pro design 2026-04-26):
         // visual hierarchy для частых параметров вверху таба, всегда видим.
         settingsBar.addArrangedSubview(buildDictationHeroCard())
+
+        // Group: Базовые (recording, hotkey, system).
+        settingsBar.addArrangedSubview(makeCategoryHeader(text: "Базовые"))
         settingsBar.addArrangedSubview(recordingSection)
         settingsBar.addArrangedSubview(hotkeySection)
         settingsBar.addArrangedSubview(builtSystemSection)
-        settingsBar.addArrangedSubview(llmSection)
 
-        // --- AUDIO PIPELINE SECTION (PR #20 — Gemini 3.1 Pro, UI only) ---
-        // Reparents `diarizationButton` (из aiSettingsRow1) + `qualitySelector`
-        // (из settingsRow1) в отдельную секцию "Аудио-пайплайн".
+        // Group: Аудио (audio pipeline + profile/devices).
+        settingsBar.addArrangedSubview(makeCategoryHeader(text: "Аудио"))
         let audioPipelineSection = buildAudioPipelineSection()
         settingsBar.addArrangedSubview(audioPipelineSection)
+        let profAudioSection = setupDictationProfileAudioSection()
+        settingsBar.addArrangedSubview(profAudioSection)
 
-        // --- VOICE ASSISTANT SECTION (Phase 1.5, Path A refactor) ---
-        // buildVoiceAssistantSection() now uses makeSwitchRow/makeSettingRow helpers
-        // and populates vaEngineSelector/vaBrainSelector items internally.
+        // Group: Нейросетевые функции (LLM + VA + Selection Translator + Quick Preset).
+        settingsBar.addArrangedSubview(makeCategoryHeader(text: "Нейросетевые функции"))
+        settingsBar.addArrangedSubview(llmSection)
+
+        // Voice Assistant — wire targets/actions.
         let vaSection = buildVoiceAssistantSection()
         vaHotkeyToggle.target = self
         vaHotkeyToggle.action = #selector(onVAHotkeyToggleChanged)
@@ -1774,18 +1779,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaBrainSelector.action = #selector(onVABrainSelectorChanged)
         settingsBar.addArrangedSubview(vaSection)
 
-        // --- QUICK RECORDING PRESET SECTION ---
-        let quickPresetSection = buildQuickPresetSection()
-        settingsBar.addArrangedSubview(quickPresetSection)
-
-        // --- SELECTION TRANSLATOR SECTION (Phase 2A) ---
         let selTransSection = buildSelectionTranslatorSection()
         settingsBar.addArrangedSubview(selTransSection)
 
-        // --- DIAGNOSTICS & METRICS SECTION ---
-        // Extracted → setupDictationDiagnosticsSection (PR refactor/extract-dictation-tab-sections).
-        // Возвращает tuple (section, diagCard) — diagCard нужен для late width constraint
-        // (NSGenericException 'no common ancestor' guard, см. PR #228 lineage).
+        let quickPresetSection = buildQuickPresetSection()
+        settingsBar.addArrangedSubview(quickPresetSection)
+
+        // Group: Разработчик / Отладка (diagnostics, clipboard).
+        settingsBar.addArrangedSubview(makeCategoryHeader(text: "Разработчик / Отладка"))
+
         let (diagSection, diagCard) = setupDictationDiagnosticsSection()
         settingsBar.addArrangedSubview(diagSection)
         let diagWidthC = diagnosticsOutputScroll.widthAnchor.constraint(
@@ -1794,13 +1796,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         diagWidthC.isActive = true
         themeWidthConstraints.append(diagWidthC)
 
-        // --- PROFILE PRESETS & AUDIO DEVICES SECTION ---
-        // Extracted → setupDictationProfileAudioSection.
-        let profAudioSection = setupDictationProfileAudioSection()
-        settingsBar.addArrangedSubview(profAudioSection)
-
-        // --- CLIPBOARD HISTORY SECTION ---
-        // Extracted → setupDictationClipboardSection.
         let clipSection = setupDictationClipboardSection()
         settingsBar.addArrangedSubview(clipSection)
 
