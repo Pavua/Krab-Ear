@@ -77,7 +77,14 @@ extension HistoryPanelController {
     // MARK: - PR 1.5 hook points
 
     /// Вызывается из HotkeyManager (PR 1.5) для старта разговора по hotkey.
+    /// При menu-bar mode panel может быть закрытым — открываем + tab switch.
     func triggerConversationStart() {
+        // Ensure panel visible (no-op если уже видим). При menu-bar mode без
+        // showPanel() нет mainTabView в hierarchy → tab switch silent.
+        showPanel()
+        // Activate window чтобы user видел переключение (panel может быть behind).
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         // Переключить на вкладку «Разговор с AI» (индекс 3).
         mainTabView.selectTabViewItem(at: 3)
         tabSelector.selectedSegment = 3
