@@ -437,9 +437,41 @@ GigaAM нельзя поставить в основной Krab Ear venv: пак
 |---|---|---|
 | `STT_GIGAAM_ENABLED` | `False` | Включить GigaAM в STT chain |
 | `STT_GIGAAM_MODE` | `"rnnt"` | `"rnnt"` (выше качество) или `"ctc"` (быстрее) |
-| `STT_GIGAAM_DEVICE` | `"mps"` | `"mps"` (Apple Silicon GPU, ~3× быстрее) или `"cpu"` |
+| `STT_GIGAAM_DEVICE` | `"cpu"` | `"cpu"` (default, рекомендуется по bench 2026-04-26) или `"mps"` |
 | `STT_GIGAAM_TRANSPORT` | `"auto"` | `"auto"` / `"in_process"` / `"subprocess"` |
 | `STT_GIGAAM_VENV_PYTHON` | `""` | Путь к venv-Python (пусто = `~/.venv_krab_ear_gigaam/bin/python`) |
+| `STT_GIGAAM_HF_TOKEN` | `""` | HuggingFace API token для longform (см. ниже) |
+
+#### Длинные аудио (> 30 сек) — `transcribe_longform`
+
+GigaAM `transcribe()` имеет hard limit ~25–30 сек на одну операцию. Для длинных файлов (импорт звонков, диктовка > 30 сек) используется `transcribe_longform()`, который через `pyannote.audio` нарезает аудио по VAD-сегментам и склеивает результат.
+
+**Setup (one-time):**
+
+1. **Доустановить зависимости в venv_gigaam:**
+   ```bash
+   ~/.venv_krab_ear_gigaam/bin/pip install "gigaam[longform]"
+   # huggingface_hub 1.x несовместим с pyannote 3.4 (deprecated `use_auth_token` API):
+   ~/.venv_krab_ear_gigaam/bin/pip install "huggingface_hub<0.26"
+   ```
+
+2. **Принять TOS на HuggingFace** (`pyannote/voice-activity-detection` — gated repo):
+   - Открой https://hf.co/pyannote/voice-activity-detection (потребуется HF аккаунт)
+   - Нажми **"Agree and access repository"**
+   - Опционально: то же для `pyannote/segmentation-3.0` если попросит
+
+3. **HF token** уже должен быть в `~/.cache/huggingface/token` (от предыдущей `huggingface-cli login`). Проверь:
+   ```bash
+   ~/.venv_krab_ear_gigaam/bin/python -c "from huggingface_hub import HfApi; print(HfApi().whoami()['name'])"
+   ```
+   Если token нет — `huggingface-cli login` с тем же интерпретатором.
+
+4. **Активировать longform в backend** (опционально — установи свой token):
+   ```python
+   set_settings({"stt_gigaam_hf_token": "hf_..."})  # пусто = используется cached
+   ```
+
+После этого `GigaAMAdapter.transcribe(audio, longform=True, hf_token=settings.STT_GIGAAM_HF_TOKEN)` будет работать. В транскрибированной записи поле `engine` станет `gigaam-rnnt-longform`.
 
 #### Проверка после включения
 
