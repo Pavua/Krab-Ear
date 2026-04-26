@@ -30,7 +30,7 @@ enum IPCError: Error, LocalizedError {
         case .readFailed:
             return "Ошибка чтения ответа backend"
         case .timeout:
-            return "Backend не ответил за 5 секунд (timeout)"
+            return "Backend не ответил за установленный таймаут (timeout)"
         case .invalidResponse:
             return "Backend вернул некорректный ответ"
         case .backendError(let message):
@@ -48,7 +48,24 @@ final class IPCClient: @unchecked Sendable {
         self.socketPath = socketPath
     }
 
+    /// Default socket timeout (seconds) для long-running operations
+    /// (transcribe на max profile + LLM rewrite = 5-10 сек typically; up to 60s
+    /// для длинных audio file imports). См. PR #316 для history rationale.
+    public static let defaultTimeoutSec: Int = 60
+
+    /// Quick timeout (seconds) для status / diagnostics calls которые должны
+    /// ответить быстро. Используй через `call(method:params:timeoutSec:)`
+    /// overload (например `getDiagnostics`, `getRecordingState`, `ping`).
+    public static let quickTimeoutSec: Int = 5
+
     func call(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+        return try call(method: method, params: params, timeoutSec: Self.defaultTimeoutSec)
+    }
+
+    /// Variant с explicit timeout. Используй `IPCClient.quickTimeoutSec` (5s) для
+    /// status / diagnostics и `IPCClient.defaultTimeoutSec` (60s) для transcribe /
+    /// summarize / extract. Custom Int OK для special cases.
+    func call(method: String, params: [String: Any] = [:], timeoutSec: Int) throws -> [String: Any] {
         let request: [String: Any] = [
             "id": UUID().uuidString,
             "method": method,
@@ -66,15 +83,10 @@ final class IPCClient: @unchecked Sendable {
         }
         defer { close(fd) }
 
-        // Socket timeout: 60s upper bound для long-running операций (transcribe на
-        // max profile = 4-10s + LLM rewrite 0.6-1s; для длинных аудио до 30+s).
-        // PR #288 поставил 5s timeout как mitigation для AGENT-3 hangs, но это
-        // обрезало валидные транскрипты > 5s (см. backend.log: "STT готово: 4.47s").
-        // AGENT-3 root cause (sync IPC на main thread) уже покрыт PRs #299/#300/#315
-        // — 30+ функций async-wrapped через DispatchQueue.global. С async wrap'ом
-        // 60s timeout не блокирует UI: long ops ждут на background, UI остаётся
-        // responsive. Per-method timeout — отдельный future PR.
-        var tv = timeval(tv_sec: 60, tv_usec: 0)
+        // Per-method timeout: status calls могут использовать quickTimeoutSec (5s);
+        // transcribe / LLM ops — defaultTimeoutSec (60s, см. PR #316 rationale).
+        // AGENT-3 root cause (sync IPC на main thread) покрыт PRs #299/#300/#315.
+        var tv = timeval(tv_sec: timeoutSec, tv_usec: 0)
         let tvSize = socklen_t(MemoryLayout<timeval>.size)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvSize)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
