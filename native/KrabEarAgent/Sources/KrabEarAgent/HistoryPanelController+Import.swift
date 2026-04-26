@@ -130,8 +130,8 @@ extension HistoryPanelController {
             ? "Папок: \(preview.folderCount)\n"
             : ""
         importStatusLabel.toolTip = preview.sample.isEmpty
-            ? "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)"
-            : "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(formatBytes(preview.totalBytes))\nФорматы: \(extSummary)\nПримеры:\n\(preview.sample.joined(separator: "\n"))"
+            ? "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(HistoryPanelController.formatBytes(preview.totalBytes))\nФорматы: \(extSummary)"
+            : "\(folderLine)Подготовлено файлов: \(preview.audioCount)\nОбъём: \(HistoryPanelController.formatBytes(preview.totalBytes))\nФорматы: \(extSummary)\nПримеры:\n\(preview.sample.joined(separator: "\n"))"
         updateImportStatusLabel()
         processNextImportIfNeeded()
     }
@@ -537,7 +537,7 @@ extension HistoryPanelController {
         if !importQueue.isEmpty {
             let totalFolders = importQueue.reduce(0) { $0 + $1.folderCount }
             let folderSuffix = totalFolders > 1 ? " в \(totalFolders) папках" : ""
-            importStatusLabel.stringValue = "Импорт: в очереди \(importQueue.count), файлов \(importFilesPlanned)\(folderSuffix), объём \(formatBytes(importBytesPlanned))"
+            importStatusLabel.stringValue = "Импорт: в очереди \(importQueue.count), файлов \(importFilesPlanned)\(folderSuffix), объём \(HistoryPanelController.formatBytes(importBytesPlanned))"
             return
         }
         if importJobsPlanned > 0 && importJobsCompleted >= importJobsPlanned {

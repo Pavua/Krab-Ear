@@ -349,8 +349,8 @@ extension HistoryPanelController {
                 title: "Оптимизация истории",
                 body: """
                 Активных записей: \(beforeActive) -> \(afterActive)
-                Размер: \(formatBytes(beforeBytes)) -> \(formatBytes(afterBytes))
-                Освобождено: \(formatBytes(max(0, reclaimed)))
+                Размер: \(HistoryPanelController.formatBytes(beforeBytes)) -> \(HistoryPanelController.formatBytes(afterBytes))
+                Освобождено: \(HistoryPanelController.formatBytes(max(0, reclaimed)))
                 """
             )
         }
@@ -513,7 +513,7 @@ extension HistoryPanelController {
 
     func updateHistoryStatusLabel() {
         let stats = fetchHistoryStats()
-        let statsSuffix = stats.map { " • Активных: \($0.activeCount), \(formatBytes($0.totalBytes))" } ?? ""
+        let statsSuffix = stats.map { " • Активных: \($0.activeCount), \(HistoryPanelController.formatBytes($0.totalBytes))" } ?? ""
         if items.isEmpty {
             historyStatusLabel.stringValue = "История пуста\(statsSuffix)"
         } else if nextCursor == nil {
@@ -599,7 +599,9 @@ extension HistoryPanelController {
         return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
     }
 
-    func formatBytes(_ value: Int) -> String {
+    /// Pure helper — не trogает self, тестируется без instance.
+    /// Использует SI-style binary суффиксы (1024-base): B / KB / MB / GB.
+    nonisolated static func formatBytes(_ value: Int) -> String {
         let safe = max(0, value)
         if safe < 1024 {
             return "\(safe) B"
