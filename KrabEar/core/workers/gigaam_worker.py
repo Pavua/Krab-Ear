@@ -85,7 +85,17 @@ def _handle_load(params: dict) -> dict:
 
 
 def _handle_transcribe(params: dict) -> dict:
-    """Транскрибирует аудиофайл. Модель должна быть предварительно загружена."""
+    """Транскрибирует аудиофайл. Модель должна быть предварительно загружена.
+
+    Параметры:
+        audio_path: str (required) — путь к WAV/M4A/MP3 файлу.
+        longform:   bool (optional, default=False) — использовать
+                    `model.transcribe_longform()` для аудио > 30 сек. Требует
+                    pyannote.audio + HF token (берётся из ~/.cache/huggingface/token
+                    или передаётся в `hf_token` параметре).
+        hf_token:   str (optional) — HuggingFace API token для pyannote VAD.
+                    Если пустой — fallback на cached token.
+    """
     global _MODEL, _MODE
 
     if _MODEL is None:
@@ -95,25 +105,50 @@ def _handle_transcribe(params: dict) -> dict:
     if not audio_path or not isinstance(audio_path, str):
         return _err("invalid_params: audio_path must be a non-empty string")
 
+    longform = bool(params.get("longform", False))
+    hf_token = params.get("hf_token", "")
+
+    # Если HF token передан явно — выставляем env vars (pyannote/HF Hub их читают).
+    if hf_token and isinstance(hf_token, str):
+        import os
+        os.environ.setdefault("HF_TOKEN", hf_token)
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+
     try:
-        result = _MODEL.transcribe(audio_path)
+        if longform and hasattr(_MODEL, "transcribe_longform"):
+            # Возвращает list[dict] с `transcription`, `boundaries` (start, end).
+            segments = _MODEL.transcribe_longform(audio_path)
+            # Склеиваем в единый текст (с двойным переводом строк между сегментами).
+            text = "\n\n".join(
+                (seg.get("transcription") or "").strip()
+                for seg in (segments or [])
+                if isinstance(seg, dict) and seg.get("transcription")
+            )
+            result_meta = {
+                "longform": True,
+                "segments_count": len(segments) if segments else 0,
+            }
+        else:
+            result = _MODEL.transcribe(audio_path)
+            # gigaam.transcribe() может вернуть строку или объект с .text — адаптируем.
+            if isinstance(result, str):
+                text = result
+            elif hasattr(result, "text"):
+                text = result.text
+            else:
+                text = str(result)
+            result_meta = {"longform": False}
     except Exception as exc:
         return _err(f"transcribe_failed: {type(exc).__name__}: {exc}")
-
-    # gigaam.transcribe() может вернуть строку или объект с .text — адаптируем.
-    if isinstance(result, str):
-        text = result
-    elif hasattr(result, "text"):
-        text = result.text
-    else:
-        text = str(result)
 
     # Имя движка соответствует тому что использует in-process адаптер
     # (core/pipeline/stt_gigaam.py — _engine_name).
     mode_base = (_MODE or "rnnt").replace("v2_", "").replace("v1_", "")
     engine = f"gigaam-{mode_base}"
+    if longform:
+        engine = f"{engine}-longform"
 
-    return {"ok": True, "text": text.strip(), "engine": engine}
+    return {"ok": True, "text": text.strip(), "engine": engine, **result_meta}
 
 
 def _process_request(line: str) -> Optional[dict]:
