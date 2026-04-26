@@ -327,29 +327,4 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 }
 
-// MARK: - SSESessionDelegate
-
-/// URLSessionDataDelegate для SSE long-poll стриминга.
-private final class SSESessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let onLine: (String) -> Void
-    private var buffer = ""
-
-    init(onLine: @escaping (String) -> Void) {
-        self.onLine = onLine
-        super.init()
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        buffer += String(decoding: data, as: UTF8.self)
-        // Разбиваем по \n, отправляем полные строки
-        let lines = buffer.components(separatedBy: "\n")
-        buffer = lines.last ?? ""
-        for line in lines.dropLast() {
-            onLine(line)
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // SSE соединение закрылось — не перезапускаем (stop() уже вызван)
-    }
-}
+// MARK: - SSESessionDelegate (extracted в SSESessionDelegate.swift, shared с TranslationStreamView)
