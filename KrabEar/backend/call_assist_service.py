@@ -596,7 +596,20 @@ class CallAssistService:
             path=query,
         )
         if not result.get("ok"):
-            raise RuntimeError(f"Gateway quick-phrases error: {result.get('error', 'unknown')}")
+            # Voice Gateway часто offline (port 8090 не запущен) — это нормально,
+            # quick-phrases это optional feature. Возвращаем пустой набор + status,
+            # чтобы клиент мог показать "VG недоступен" вместо crash'а.
+            # Schema совместима с success path (payload содержит "items").
+            err = str(result.get("error", "unknown"))
+            logger.info(
+                "list_quick_phrases: gateway недоступен (%s) — возвращаю пустой набор",
+                err[:80],
+            )
+            return {
+                "items": [],
+                "status": "gateway_unavailable",
+                "error": err,
+            }
         return result.get("payload", {})
 
     def handle_list_templates(self, params: dict[str, Any]) -> dict[str, Any]:

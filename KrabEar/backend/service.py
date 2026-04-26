@@ -1488,6 +1488,32 @@ class BackendService:
         )
         text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
         transcription_error = self._extract_transcribed_error(transcribe_payload)
+
+        # Retry с soft cleanup если текст обнулился post-processing'ом, но raw STT
+        # был не пустой и confidence высокий. На длинных записях (>20s, >100 chars
+        # raw) postprocess может ошибочно срабатывать как looping/echo фильтр.
+        # См. backend.log 2026-04-26 18:04:12: STT confidence 0.87, но empty_text
+        # → fallback в preview взял только последние 12s (начало срезалось).
+        if not text and not transcription_error:
+            raw_text = str(self._extract_transcribed_text(transcribe_payload) or "").strip()
+            if len(raw_text) >= 30 and duration_sec >= 8.0:
+                logger.warning(
+                    "Retry transcribe с soft cleanup: raw_text len=%d, duration=%.1fs (post-process drop'нул весь текст)",
+                    len(raw_text), duration_sec,
+                )
+                # Возврат raw text без postprocess фильтров, минимальный cleanup.
+                text = TextUtils.normalize_phrase(raw_text).strip()
+                # Лёгкая нормализация пунктуации/пробелов без drop-условий.
+                text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+                text = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", text)
+                text = re.sub(r"\s+", " ", text).strip()
+                if text:
+                    first_alpha = next((i for i, c in enumerate(text) if c.isalpha()), -1)
+                    if first_alpha >= 0:
+                        text = text[:first_alpha] + text[first_alpha].upper() + text[first_alpha + 1:]
+                    if not re.search(r"[.!?…]$", text):
+                        text = f"{text}."
+
         if not text:
             if transcription_error:
                 event_bus.emit_typed(EventType.STT_FAILED, SttFailed(reason=transcription_error, duration_sec=duration_sec))
@@ -3445,7 +3471,12 @@ class BackendService:
         Дополнительная фильтрация и базовая нормализация пунктуации.
 
         Цель: уменьшить артефакты на пустом/шумовом вводе и чуть улучшить читаемость.
+
+        ВАЖНО: каждый из 3-х путей возврата `""` логируется на WARNING уровне
+        с сэмплом первых 80 символов raw text — иначе debugging "почему текст
+        обнулился при confidence=0.87" невозможен.
         """
+        logger = logging.getLogger("KrabEar.Backend.Service")
         clean = str(text or "").strip()
         if not clean:
             return ""
@@ -3453,10 +3484,18 @@ class BackendService:
         lowered = clean.lower()
         # Явные тех-артефакты инструментального вывода.
         if "<begin_of_box>" in lowered or "<end_of_box>" in lowered or "\"action\":" in lowered:
+            logger.warning(
+                "postprocess: drop reason=tech_artifact, len=%d, sample=%r",
+                len(clean), clean[:80],
+            )
             return ""
 
         normalized = TextUtils.normalize_phrase(clean)
         if BackendService._is_known_prompt_echo(normalized):
+            logger.warning(
+                "postprocess: drop reason=known_prompt_echo, len=%d, sample=%r",
+                len(clean), clean[:80],
+            )
             return ""
 
         collapsed_duplicate = BackendService._collapse_immediate_duplicate_phrase(normalized)
@@ -3466,6 +3505,10 @@ class BackendService:
 
         words = re.findall(r"[A-Za-zА-Яа-я0-9'-]+", clean.lower())
         if BackendService._looks_like_looping_artifact(words, min_words=8, min_bigram_hits=4):
+            logger.warning(
+                "postprocess: drop reason=looping_artifact, len=%d, sample=%r",
+                len(clean), clean[:80],
+            )
             return ""
 
         clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
