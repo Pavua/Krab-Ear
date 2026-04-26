@@ -66,9 +66,15 @@ final class IPCClient: @unchecked Sendable {
         }
         defer { close(fd) }
 
-        // 5s timeout — иначе main thread зависает в Darwin.read когда backend медленный
-        // (mitigation для KRAB-EAR-AGENT-3/8 — proper async fix отдельно).
-        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        // Socket timeout: 60s upper bound для long-running операций (transcribe на
+        // max profile = 4-10s + LLM rewrite 0.6-1s; для длинных аудио до 30+s).
+        // PR #288 поставил 5s timeout как mitigation для AGENT-3 hangs, но это
+        // обрезало валидные транскрипты > 5s (см. backend.log: "STT готово: 4.47s").
+        // AGENT-3 root cause (sync IPC на main thread) уже покрыт PRs #299/#300/#315
+        // — 30+ функций async-wrapped через DispatchQueue.global. С async wrap'ом
+        // 60s timeout не блокирует UI: long ops ждут на background, UI остаётся
+        // responsive. Per-method timeout — отдельный future PR.
+        var tv = timeval(tv_sec: 60, tv_usec: 0)
         let tvSize = socklen_t(MemoryLayout<timeval>.size)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvSize)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
