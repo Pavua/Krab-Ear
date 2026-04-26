@@ -457,7 +457,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onCompactHistory() {
-        _ = try? ipcClient.call(method: "compact_history", params: [:])
+        // IPC compact может занять до нескольких секунд → на background.
+        // showPanel() — UI, оставляем на main, открываем сразу (не ждём compact).
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? ipcClient.call(method: "compact_history", params: [:])
+        }
         historyPanel?.showPanel()
     }
 
