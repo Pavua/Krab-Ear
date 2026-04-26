@@ -172,13 +172,28 @@ class STTRouter:
 
         mode = getattr(self._settings, "STT_GIGAAM_MODE", "rnnt")
         device = getattr(self._settings, "STT_GIGAAM_DEVICE", "mps")
+        # transport / venv_python: настройки могут отсутствовать в legacy / mock объектах,
+        # поэтому ограничиваем тип явно (MagicMock вернёт MagicMock на любой getattr).
+        transport_raw = getattr(self._settings, "STT_GIGAAM_TRANSPORT", "auto")
+        transport = transport_raw if isinstance(transport_raw, str) else "auto"
+        venv_python_raw = getattr(self._settings, "STT_GIGAAM_VENV_PYTHON", "")
+        if isinstance(venv_python_raw, str) and venv_python_raw.strip():
+            venv_python: Optional[str] = venv_python_raw.strip()
+        else:
+            venv_python = None
 
         try:
-            adapter = GigaAMAdapter(device=device, mode=mode)
+            adapter = GigaAMAdapter(
+                device=device,
+                mode=mode,
+                transport=transport,
+                venv_python_path=venv_python,
+            )
             logger.debug(
-                "STTRouter.get_gigaam_adapter: адаптер создан (mode=%s, device=%s)",
+                "STTRouter.get_gigaam_adapter: адаптер создан (mode=%s, device=%s, transport=%s)",
                 mode,
                 device,
+                transport,
             )
             return adapter
         except Exception as exc:

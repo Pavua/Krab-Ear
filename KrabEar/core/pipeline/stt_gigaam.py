@@ -12,13 +12,28 @@ PyPI: pip install gigaam
 - Lazy-load модели (не в __init__)
 - PyTorch + MPS, не MLX → mlx_lock НЕ нужен
 - Возврат стандартного dict {"text", "language", "confidence", "engine"}
+
+Транспорты (PR B-3, 2026-04-26):
+- "in_process" — `import gigaam` в текущем процессе. Работает только если
+  gigaam установлен в активном Python-окружении. В main Krab Ear venv
+  (Python 3.14, torch 2.11) gigaam не ставится — в этом случае выбирай
+  "subprocess".
+- "subprocess" — запускает gigaam_worker.py из изолированного venv
+  (по умолчанию ~/.venv_krab_ear_gigaam с Python 3.12 + torch 2.5.1).
+  Worker держит модель в памяти и принимает JSON-команды через stdin/stdout.
+  См. KrabEar/core/workers/gigaam_worker.py.
+- "auto" (default) — пробует in_process; при ImportError → subprocess.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
+import threading
 import wave
 from typing import Optional
 
@@ -31,6 +46,17 @@ _REQUIRED_SAMPLE_RATE = 16000
 
 # Модели, поддерживаемые адаптером
 _VALID_MODES = frozenset({"rnnt", "ctc", "v2_rnnt", "v2_ctc", "v1_rnnt", "v1_ctc"})
+
+# Допустимые значения transport-параметра.
+_VALID_TRANSPORTS = frozenset({"auto", "in_process", "subprocess"})
+
+# Default путь к Python в изолированном venv с GigaAM (см. scripts/install_gigaam_venv.command).
+_DEFAULT_VENV_PYTHON = os.path.expanduser("~/.venv_krab_ear_gigaam/bin/python")
+
+# Таймаут (секунды) на одну операцию transcribe в subprocess. Нужен запас
+# на длинное аудио + первичную загрузку модели.
+_SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC = 120.0
+_SUBPROCESS_LOAD_TIMEOUT_SEC = 180.0
 
 
 class GigaAMAdapter:
@@ -53,15 +79,31 @@ class GigaAMAdapter:
     Модель загружается лениво при первом вызове transcribe() — не в __init__.
     """
 
-    def __init__(self, device: str = "mps", mode: str = "rnnt") -> None:
+    def __init__(
+        self,
+        device: str = "mps",
+        mode: str = "rnnt",
+        transport: str = "auto",
+        venv_python_path: Optional[str] = None,
+    ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(
                 f"GigaAMAdapter: неподдерживаемый mode={mode!r}. "
                 f"Допустимые значения: {sorted(_VALID_MODES)}"
             )
+        if transport not in _VALID_TRANSPORTS:
+            raise ValueError(
+                f"GigaAMAdapter: неподдерживаемый transport={transport!r}. "
+                f"Допустимые значения: {sorted(_VALID_TRANSPORTS)}"
+            )
         self._device = device
         self._mode = mode
-        self._model: Optional[object] = None  # lazy load
+        self._transport_pref = transport
+        self._venv_python_path = venv_python_path or _DEFAULT_VENV_PYTHON
+        self._model: Optional[object] = None  # lazy in-process load
+        self._subprocess: Optional["_GigaAMSubprocessSession"] = None  # lazy subprocess
+        # Активный transport определится на первом вызове transcribe (или _resolve_transport).
+        self._active_transport: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -90,34 +132,34 @@ class GigaAMAdapter:
 
         При ошибке кидает исключение (ImportError / RuntimeError).
         """
-        model = self._get_model()
+        # Resolve transport единожды (auto → in_process | subprocess).
+        transport = self._resolve_transport()
 
-        # --- Resample если нужно ---
+        # Resample выполняем одинаково для обоих транспортов.
         audio_16k = self._ensure_16k(audio, sample_rate)
 
-        # --- GigaAM принимает путь к файлу → пишем во временный WAV ---
+        # Пишем temp WAV (gigaam в обоих транспортах принимает путь к файлу).
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
             self._write_wav(tmp_path, audio_16k)
-            transcription = model.transcribe(tmp_path)
+            if transport == "in_process":
+                text, engine_name = self._transcribe_in_process(tmp_path)
+            else:  # subprocess
+                text, engine_name = self._transcribe_subprocess(tmp_path)
         finally:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
 
-        # gigaam.transcribe() возвращает объект с .text или строку в зависимости от версии
-        if isinstance(transcription, str):
-            text = transcription
-        elif hasattr(transcription, "text"):
-            text = transcription.text
-        else:
-            text = str(transcription)
-
-        engine_name = self._engine_name()
-        logger.debug("GigaAMAdapter: транскрибировано %d символов (engine=%s)", len(text), engine_name)
+        logger.debug(
+            "GigaAMAdapter: транскрибировано %d символов (engine=%s, transport=%s)",
+            len(text),
+            engine_name,
+            transport,
+        )
 
         return {
             "text": text.strip(),
@@ -129,8 +171,110 @@ class GigaAMAdapter:
         }
 
     def is_loaded(self) -> bool:
-        """Возвращает True если модель уже загружена в память."""
-        return self._model is not None
+        """Возвращает True если модель уже загружена (in-process ИЛИ subprocess)."""
+        if self._model is not None:
+            return True
+        if self._subprocess is not None and self._subprocess.is_loaded():
+            return True
+        return False
+
+    def close(self) -> None:
+        """Освобождает ресурсы: subprocess worker (если запущен)."""
+        if self._subprocess is not None:
+            try:
+                self._subprocess.close()
+            except Exception as exc:
+                logger.debug("GigaAMAdapter.close: %s", exc)
+            self._subprocess = None
+
+    def __del__(self) -> None:
+        # Best-effort cleanup; не raise — иначе garbage collector ругается.
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Transport resolution + дispatch
+    # ------------------------------------------------------------------
+
+    def _resolve_transport(self) -> str:
+        """Определяет активный транспорт (in_process | subprocess) и кэширует решение.
+
+        - "in_process" / "subprocess" → используем напрямую.
+        - "auto" → пробуем `import gigaam`. ImportError → subprocess.
+        """
+        if self._active_transport is not None:
+            return self._active_transport
+
+        pref = self._transport_pref
+        if pref == "in_process" or pref == "subprocess":
+            self._active_transport = pref
+            return pref
+
+        # auto: проверяем доступность gigaam в текущем процессе.
+        try:
+            import gigaam  # noqa: F401
+            self._active_transport = "in_process"
+            logger.info("GigaAMAdapter: transport=auto resolved to in_process")
+        except ImportError:
+            self._active_transport = "subprocess"
+            logger.info(
+                "GigaAMAdapter: transport=auto resolved to subprocess "
+                "(gigaam недоступен в main venv → используем %s)",
+                self._venv_python_path,
+            )
+        return self._active_transport
+
+    def _transcribe_in_process(self, audio_path: str) -> tuple[str, str]:
+        """In-process путь: загружает модель в текущий процесс, вызывает .transcribe."""
+        model = self._get_model()
+        transcription = model.transcribe(audio_path)
+        if isinstance(transcription, str):
+            text = transcription
+        elif hasattr(transcription, "text"):
+            text = transcription.text
+        else:
+            text = str(transcription)
+        return text, self._engine_name()
+
+    def _transcribe_subprocess(self, audio_path: str) -> tuple[str, str]:
+        """Subprocess путь: ленивый spawn worker'а, отправка transcribe-команды."""
+        session = self._get_subprocess_session()
+        result = session.transcribe(audio_path)
+        text = str(result.get("text", ""))
+        engine = str(result.get("engine") or self._engine_name())
+        return text, engine
+
+    def _get_subprocess_session(self) -> "_GigaAMSubprocessSession":
+        """Lazy spawn subprocess worker. Idempotent."""
+        if self._subprocess is not None:
+            return self._subprocess
+
+        if not os.path.exists(self._venv_python_path):
+            raise RuntimeError(
+                f"GigaAMAdapter[subprocess]: venv Python не найден: {self._venv_python_path}\n"
+                "Запусти scripts/install_gigaam_venv.command чтобы создать venv_gigaam, "
+                "либо передай явный venv_python_path в GigaAMAdapter(...)."
+            )
+
+        worker_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "workers", "gigaam_worker.py")
+        )
+        if not os.path.exists(worker_path):
+            raise RuntimeError(
+                f"GigaAMAdapter[subprocess]: worker script не найден: {worker_path}"
+            )
+
+        session = _GigaAMSubprocessSession(
+            venv_python=self._venv_python_path,
+            worker_path=worker_path,
+            mode=self._mode,
+            device=self._device,
+        )
+        session.start()  # spawn + load model
+        self._subprocess = session
+        return session
 
     # ------------------------------------------------------------------
     # Внутренние методы
@@ -223,3 +367,179 @@ class GigaAMAdapter:
         """Возвращает строку-идентификатор движка для result dict."""
         mode_base = self._mode.replace("v2_", "").replace("v1_", "")
         return f"gigaam-{mode_base}"
+
+
+# ---------------------------------------------------------------------------
+# Subprocess transport (B-3, 2026-04-26)
+# ---------------------------------------------------------------------------
+
+
+class _GigaAMSubprocessSession:
+    """Управляет долгоживущим subprocess-воркером (gigaam_worker.py).
+
+    Worker запускается из изолированного venv (~/.venv_krab_ear_gigaam) с
+    Python 3.12 + torch 2.5.1 + gigaam, потому что main Krab Ear venv
+    несовместим с pin'ами gigaam. Общение через stdin/stdout JSON-строками.
+
+    Lifecycle:
+        session = _GigaAMSubprocessSession(venv_python, worker_path, mode, device)
+        session.start()           # spawn + load model
+        result = session.transcribe(audio_path)  # повторяемо
+        session.close()           # graceful shutdown
+
+    Threading: внутренний lock сериализует transcribe-вызовы (worker single-threaded).
+    """
+
+    def __init__(
+        self,
+        venv_python: str,
+        worker_path: str,
+        mode: str,
+        device: str,
+    ) -> None:
+        self._venv_python = venv_python
+        self._worker_path = worker_path
+        self._mode = mode
+        self._device = device
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        self._loaded = False
+
+    def is_loaded(self) -> bool:
+        """True если worker запущен и модель загружена."""
+        return self._loaded and self._proc is not None and self._proc.poll() is None
+
+    def start(self) -> None:
+        """Spawn subprocess + отправить load-команду. Idempotent."""
+        if self._proc is not None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                [self._venv_python, "-u", self._worker_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # line-buffered для синхронной работы с readline()
+            )
+        except (OSError, FileNotFoundError) as exc:
+            raise RuntimeError(
+                f"_GigaAMSubprocessSession: не удалось запустить worker: {exc}"
+            ) from exc
+
+        # Сразу шлём load-команду — модель в памяти к моменту первого transcribe.
+        load_response = self._send(
+            {"op": "load", "mode": self._mode, "device": self._device},
+            timeout_sec=_SUBPROCESS_LOAD_TIMEOUT_SEC,
+        )
+        if not load_response.get("ok"):
+            err = load_response.get("error", "unknown")
+            self.close()
+            raise RuntimeError(f"_GigaAMSubprocessSession: load failed: {err}")
+        self._loaded = True
+        logger.info(
+            "_GigaAMSubprocessSession: worker готов (mode=%s, device=%s)",
+            self._mode,
+            self._device,
+        )
+
+    def transcribe(self, audio_path: str) -> dict:
+        """Отправляет transcribe-команду, возвращает {"text": ..., "engine": ...}."""
+        if not self.is_loaded():
+            raise RuntimeError("_GigaAMSubprocessSession: worker not started or crashed")
+        response = self._send(
+            {"op": "transcribe", "audio_path": audio_path},
+            timeout_sec=_SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC,
+        )
+        if not response.get("ok"):
+            err = response.get("error", "unknown")
+            raise RuntimeError(f"_GigaAMSubprocessSession: transcribe failed: {err}")
+        return response
+
+    def close(self) -> None:
+        """Graceful shutdown: shutdown-команда + wait + force kill при таймауте."""
+        if self._proc is None:
+            return
+        try:
+            # Shutdown — worker отвечает молча (просто exit).
+            try:
+                if self._proc.stdin and not self._proc.stdin.closed:
+                    self._proc.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+                    self._proc.stdin.flush()
+                    self._proc.stdin.close()
+            except (OSError, BrokenPipeError):
+                pass
+            try:
+                self._proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+        finally:
+            self._proc = None
+            self._loaded = False
+
+    # ------------------------------------------------------------------
+    # Internal protocol helpers
+    # ------------------------------------------------------------------
+
+    def _send(self, request: dict, timeout_sec: float) -> dict:
+        """Отправляет JSON-запрос, читает одну JSON-строку ответа.
+
+        Сериализует доступ через `_lock` — несколько потоков не могут одновременно
+        писать в stdin одного worker'а.
+        """
+        if self._proc is None:
+            raise RuntimeError("_GigaAMSubprocessSession: process not started")
+        if self._proc.stdin is None or self._proc.stdout is None:
+            raise RuntimeError("_GigaAMSubprocessSession: process pipes missing")
+
+        with self._lock:
+            try:
+                self._proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise RuntimeError(f"_GigaAMSubprocessSession: stdin write failed: {exc}") from exc
+
+            # Простой read с timeout: используем threading.Timer для kill при зависании.
+            # subprocess.Popen API не поддерживает per-readline timeout на текстовых pipes,
+            # поэтому простейшая защита — Timer, который терминирует процесс если не успели.
+            timer = threading.Timer(timeout_sec, self._timeout_kill)
+            timer.start()
+            try:
+                line = self._proc.stdout.readline()
+            finally:
+                timer.cancel()
+
+        if not line:
+            raise RuntimeError(
+                "_GigaAMSubprocessSession: empty response (worker exited or timed out)"
+            )
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"_GigaAMSubprocessSession: invalid JSON from worker: {exc}; line={line!r}"
+            ) from exc
+
+    def _timeout_kill(self) -> None:
+        """Вызывается Timer'ом если worker не ответил вовремя."""
+        if self._proc is None or self._proc.poll() is not None:
+            return
+        logger.warning("_GigaAMSubprocessSession: worker timeout → terminating")
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+
+
+def is_subprocess_venv_available(venv_python_path: Optional[str] = None) -> bool:
+    """Проверяет существует ли venv с gigaam (worker сможет запуститься).
+
+    Полезно для проактивной проверки перед STT_GIGAAM_ENABLED=True.
+    Не запускает реальный subprocess — только проверка filesystem.
+    """
+    path = venv_python_path or _DEFAULT_VENV_PYTHON
+    return os.path.exists(path) and shutil.which(path) is not None or os.path.isfile(path)
