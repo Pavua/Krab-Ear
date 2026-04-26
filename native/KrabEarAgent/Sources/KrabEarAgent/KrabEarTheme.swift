@@ -636,6 +636,13 @@ public class CollapsibleSectionView: NSView {
     private let containerStack = NSStackView()
     private let headerSeparator = NSBox()
 
+    // MARK: - Hover state (Gemini design 2026-04-26 microinteraction)
+
+    /// Hover tint backdrop — visible только при mouse enter в headerStack.
+    /// Делает collapsible header feel interactive — отвечает на pointer.
+    private let hoverBackdrop = NSView()
+    private var headerTrackingArea: NSTrackingArea?
+
     public private(set) var isExpanded: Bool
 
     public init(sectionId: String, title: String, isExpanded: Bool = true) {
@@ -690,6 +697,23 @@ public class CollapsibleSectionView: NSView {
         // Если .distribution defaults ever change in AppKit — spacer layout сломается без этой строки.
         headerStack.distribution = .fill
         headerStack.edgeInsets = NSEdgeInsets(top: 0, left: KrabEarTheme.Metrics.tight, bottom: 0, right: 0)
+        headerStack.wantsLayer = true
+
+        // Hover backdrop — sits behind header content, fades in on mouseEnter.
+        // Subtle 4% white tint => feels interactive at AA contrast level.
+        hoverBackdrop.wantsLayer = true
+        hoverBackdrop.layer?.cornerRadius = 6
+        hoverBackdrop.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.04).cgColor
+        hoverBackdrop.alphaValue = 0
+        hoverBackdrop.translatesAutoresizingMaskIntoConstraints = false
+        headerStack.addSubview(hoverBackdrop)
+        NSLayoutConstraint.activate([
+            hoverBackdrop.topAnchor.constraint(equalTo: headerStack.topAnchor, constant: -2),
+            hoverBackdrop.leadingAnchor.constraint(equalTo: headerStack.leadingAnchor, constant: -2),
+            hoverBackdrop.trailingAnchor.constraint(equalTo: headerStack.trailingAnchor, constant: 2),
+            hoverBackdrop.bottomAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 2),
+        ])
+
         headerStack.addArrangedSubview(disclosureButton)
         headerStack.addArrangedSubview(titleLabel)
         headerStack.addArrangedSubview(NSView()) // spacer — makes full width clickable
@@ -762,9 +786,13 @@ public class CollapsibleSectionView: NSView {
         }
 
         if animated {
+            // Spring-like timing function: easeOut с лёгким overshoot — collapse/expand
+            // выглядит "natural", как Apple System Settings 16. Honors Reduce Motion.
+            let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.2
+                ctx.duration = reducedMotion ? 0.001 : 0.28
                 ctx.allowsImplicitAnimation = true
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0.0, 1.0) // ease-out cubic
                 applyChanges()
             }
         } else {
@@ -772,6 +800,41 @@ public class CollapsibleSectionView: NSView {
         }
 
         UserDefaults.standard.set(expanded, forKey: "CollapsibleSection_\(sectionId)")
+    }
+
+    // MARK: - Hover tracking (Gemini design 2026-04-26)
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = headerTrackingArea {
+            headerStack.removeTrackingArea(existing)
+        }
+        let opts: NSTrackingArea.Options = [.activeAlways, .mouseEnteredAndExited, .inVisibleRect]
+        let area = NSTrackingArea(rect: headerStack.bounds, options: opts, owner: self, userInfo: nil)
+        headerTrackingArea = area
+        headerStack.addTrackingArea(area)
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea == headerTrackingArea else { return super.mouseEntered(with: event) }
+        animateHover(visible: true)
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea == headerTrackingArea else { return super.mouseExited(with: event) }
+        animateHover(visible: false)
+    }
+
+    private func animateHover(visible: Bool) {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            hoverBackdrop.alphaValue = visible ? 1.0 : 0.0
+            return
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            ctx.allowsImplicitAnimation = true
+            hoverBackdrop.animator().alphaValue = visible ? 1.0 : 0.0
+        }
     }
 }
 
