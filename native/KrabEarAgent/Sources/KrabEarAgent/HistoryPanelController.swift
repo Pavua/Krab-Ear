@@ -1092,11 +1092,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(NSView())
 
         // D.10a: AI Settings Row Setup
+        // Список выверенных моделей по результатам бенчмарка Round 1-8 (2026-04-28).
+        // Все verified outputs на тестовом наборе (RU/ES/EN + мат + brand recognition).
         llmModelSelector.addItems(withTitles: [
+            // 🥇 Production rewriter (fast, abliterated, Qwen 3 family — supported)
             "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-            "qwen3.5-4b-mlx",
-            "qwen3.5-9b@6bit",
-            "qwen2.5-coder-7b-instruct-mlx",
+            // 🥈 Quality challenger (13B uncensored, sustains мат + brands)
+            "mythomax-l2-lora-assemble-13b",
+            // 🏆 Best quality для VA brain (slow ~7s, GGUF через llama.cpp)
+            "qwen/qwen3.6-27b",
+            // Mistral Devstral 2 24B (Dec 2025 fresh, Mistral arch)
+            "mistralai/devstral-small-2-2512",
+            // RU-native specialty (Yandex 8B, brand recognition авто)
+            "yandexgpt-5-lite-8b-pretrain",
+            // OpenHermes Mistral 7B (быстрый но удаляет filler слова)
+            "openhermes-2.5-mistral-7b-mlx-393a7",
+            // Microsoft Fara 7B
+            "microsoft_fara-7b",
         ])
 
         diarizationButton.target = self
