@@ -80,6 +80,54 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bВиспер\b", "Whisper"),
     (r"\bКлод\b", "Claude"),
     (r"\bЭм\s*Эл\s*Икс\b", "MLX"),
+    # Qwen brand mishears (live transcripts: "QN14B", "квен", "к Вен", "Квент", "QN1")
+    # Whisper транскрибирует "Qwen" фонетически в РУ как "квен/Квен", в EN sometimes "QN".
+    (r"\bQN\s*\d+B?\b", lambda m: "Qwen " + m.group(0).split("QN")[1].lstrip()),
+    (r"\bкВен\b", "Qwen"),
+    (r"\bк\s+Вен\b", "Qwen"),
+    (r"\bКвент\b", "Qwen"),
+    (r"\bквен\b", "Qwen"),
+    (r"\bКвен\b", "Qwen"),
+    # GigaAM mishear
+    (r"\bГига\s*АМ\b", "GigaAM"),
+    (r"\bГига\s*Эй\s*Эм\b", "GigaAM"),
+    # MythoMax mishear
+    (r"\bМито\s*Макс\b", "MythoMax"),
+    (r"\bМитомакс\b", "MythoMax"),
+    # LM Studio mishear
+    (r"\bЛМ\s*Студио\b", "LM Studio"),
+    (r"\bЭл\s*Эм\s*Студио\b", "LM Studio"),
+    (r"\bLOM\s*Studio\b", "LM Studio"),       # live: "LOM Studio"
+    (r"\bЛОМ\s*Студио\b", "LM Studio"),
+    # GGUF mishears (Whisper фантастически транскрибирует — live: "ахолув")
+    (r"\bахолув\b", "GGUF"),
+    (r"\bАхолув\b", "GGUF"),
+    (r"\bгу[ -]?гу[ -]?эф\b", "GGUF"),
+    (r"\bджи[ -]?джи[ -]?ю[ -]?эф\b", "GGUF"),
+    (r"\bджи\s*ю\s*эф\b", "GGUF"),
+    # Crypto / blockchain brand mishears
+    (r"\bБиткоин\b", "Bitcoin"),
+    (r"\bБиткойн\b", "Bitcoin"),
+    (r"\bСолана\b", "Solana"),
+    (r"\bЭфириум\b", "Ethereum"),
+    (r"\bКрипто\b", "Crypto"),
+    # Browser brands
+    (r"\bСафари\b", "Safari"),
+    (r"\bХром\b", "Chrome"),
+    (r"\bХроме\b", "Chrome"),
+    # Obsidian (note app)
+    (r"\bОбсидиан\b", "Obsidian"),
+    (r"\bОбсидиан\b", "Obsidian"),
+    # Inference
+    (r"\bинференс\b", "inference"),
+    (r"\bинференца\b", "inference"),
+    # Whisper STT artefact: "ОК" sometimes transcribed as digit "0".
+    # Conservative pattern: only после filler words ("Ну/ну/Да/да") и followed by RU word.
+    # Avoids breaking legitimate числовое "0" (e.g. "температура 0 градусов").
+    # Cases live: "Ну 0 продолжаем", "Ну 0 вот это", "Ну 0 наименование".
+    (r"\b([Нн]у|[Дд]а)\s+0\s+(?=[А-Яа-яЁё])", r"\1, ОК, "),
+    # Standalone "0" between RU words after period/comma — same artefact.
+    (r"(?<=[.,!?])\s+0\s+(?=[А-Яа-яЁё])", " ОК, "),
     (r"\bФаст\s*АПИ\b", "FastAPI"),
     (r"\bГит[-\s]?Хаб\b", "GitHub"),
     (r"\bМак[-\s]?Бук\b", "MacBook"),
