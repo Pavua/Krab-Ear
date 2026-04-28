@@ -1174,6 +1174,18 @@ class BackendService:
             }
         self._reset_preview_state()
         settings = self._cached_settings()
+        # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
+        # Fire-and-forget, не блокирует start_recording flow (timeout 1.5 сек).
+        # См. backend/lm_studio_lifecycle.py.
+        try:
+            brain_model = str(settings.get("llm_brain_model", "")).strip()
+            unload_enabled = bool(settings.get("llm_brain_unload_on_recording", True))
+            if brain_model and unload_enabled:
+                from backend.lm_studio_lifecycle import unload_model_async
+                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
+                unload_model_async(base_url, brain_model)
+        except Exception as exc:
+            logger.debug("LM Studio brain unload hook failed: %s", exc)
         add_breadcrumb(
             category="recording",
             message="started",
@@ -1337,6 +1349,17 @@ class BackendService:
             level="info",
             data={"duration_sec": round(float(duration_sec), 2)},
         )
+        # LM Studio brain pre-load: pre-warm к моменту когда user может открыть VA.
+        # Fire-and-forget, не блокирует stop flow.
+        try:
+            brain_model = str(settings.get("llm_brain_model", "")).strip()
+            preload_enabled = bool(settings.get("llm_brain_preload_on_stop", True))
+            if brain_model and preload_enabled:
+                from backend.lm_studio_lifecycle import load_model_async
+                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
+                load_model_async(base_url, brain_model)
+        except Exception as exc:
+            logger.debug("LM Studio brain preload hook failed: %s", exc)
         sr = self._load_stop_recording_settings(params, settings)
         quality_profile = sr["quality_profile"]
         cleanup_profile = sr["cleanup_profile"]
