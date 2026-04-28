@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
 
+    # Voice Assistant brain — большая модель для интерактивного разговора
+    # (Phase 1 VA через OpenClaw). Когда STT recording активен, brain выгружается
+    # из LM Studio чтобы освободить ~19-20 GB unified memory под Whisper+pyannote.
+    # После stop_recording brain pre-loadится обратно.
+    # Пустая строка = lifecycle hook отключён (single-tier setup).
+    LLM_BRAIN_MODEL: str = ""
+    # Автоматически unload brain при start_recording (освобождает память для STT).
+    LLM_BRAIN_UNLOAD_ON_RECORDING: bool = True
+    # Автоматически pre-load brain при stop_recording (warm для VA conversation).
+    LLM_BRAIN_PRELOAD_ON_STOP: bool = True
+
     # Авто-резервное копирование
     AUTO_BACKUP_ENABLED: bool = True
 

@@ -53,6 +53,78 @@ def _is_capitalized_or_multiword(term: str) -> bool:
     return False
 
 
+# Известные Whisper hallucinations (паттерны субтитров и filler-токены).
+# Если term контейнирует эти подстроки целиком — считаем галлюцинацией.
+# См. https://github.com/openai/whisper/discussions/928 — типичные RU паттерны.
+_HALLUCINATION_PATTERNS = frozenset({
+    "продолжение следует",
+    "следует продолжение",
+    "субтитры от",
+    "субтитры подготовил",
+    "редактор субтитров",
+    "корректор",
+    "thanks for watching",
+    "subscribe",
+    "like and subscribe",
+    "конец конец",
+    "порядке порядке",
+    "голосом голосом",
+    "совсем совсем",
+})
+
+# Императивные глаголы инструкций (часто "вытекают" из system prompt'а
+# rewriter'а или из ChatGPT-style диктовки в audio). Не реальная лексика
+# пользователя — фильтруем.
+_INSTRUCTION_VERBS = frozenset({
+    "пиши", "напиши", "запиши",
+    "повторяй", "повтори",
+    "сохрани", "сохраняй",
+    "укажи", "укажите",
+    "верни", "вернёт",
+    "исправь", "исправь",
+    "проверь", "проверьте",
+    "переведи", "переведите",
+})
+
+
+def _looks_like_hallucination(term: str) -> bool:
+    """True если term — типичная Whisper hallucination или artefact промпта.
+
+    Защищает auto-glossary feedback loop от self-poisoning: если
+    Whisper однажды нагенерил "продолжение следует" на тихом clip'е,
+    AutoGlossary не должен его повторно инжектить в prompt → reinforcing.
+    """
+    if not term:
+        return True
+    t = term.strip().lower()
+
+    # 1. Точное совпадение с known hallucinations
+    if t in _HALLUCINATION_PATTERNS:
+        return True
+
+    # 2. Repeated word: "X X" где X — то же слово
+    parts = t.split()
+    if len(parts) == 2 and parts[0] == parts[1]:
+        return True
+    # Также 3-grams "X X X"
+    if len(parts) == 3 and parts[0] == parts[1] == parts[2]:
+        return True
+
+    # 3. Начинается с императивного глагола инструкции
+    if parts and parts[0] in _INSTRUCTION_VERBS:
+        return True
+    # Любой токен в multiword — instruction verb
+    if len(parts) >= 2 and any(p in _INSTRUCTION_VERBS for p in parts):
+        return True
+
+    # 4. Подстрока совпадает с known hallucination (для embedded artefacts)
+    for pattern in _HALLUCINATION_PATTERNS:
+        if pattern in t:
+            return True
+
+    return False
+
+
 def _ts_to_epoch(ts: str) -> float:
     """Конвертирует ISO-8601 строку в Unix epoch float.
 
@@ -243,6 +315,10 @@ class AutoGlossaryBuilder:
                 if len(et.term) < 3:
                     continue
                 if not _is_capitalized_or_multiword(et.term):
+                    continue
+                if _looks_like_hallucination(et.term):
+                    # Защита от self-poisoning loop: не подбираем Whisper
+                    # hallucinations и instruction-style фрагменты.
                     continue
                 key = et.term  # сохраняем оригинальный регистр
                 freq[key] += et.frequency
