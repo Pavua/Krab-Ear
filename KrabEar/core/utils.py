@@ -18,6 +18,43 @@ _WORD_REPEAT_RE = re.compile(
     r"(.+?)\s+([А-Яа-яA-Za-z0-9'-]+(?:\s+[А-Яа-яA-Za-z0-9'-]+){0,2})\s+\2[.!?…]*$"
 )
 
+# Speech disfluency dedup — re-articulation patterns.
+# Кейсы из live диктовки:
+#   "записываю уже, уже"         → "записываю уже"
+#   "вот сейчас, вот сейчас"     → "вот сейчас"
+#   "с выбранной, с выбранной"   → "с выбранной"
+#   "протестирую, протестирую"   → "протестирую"
+#   "слово слово"                → "слово"
+#
+# Не путаем с риторическим повтором/emphasis ("очень очень важно",
+# "далеко далеко"). Признак re-articulation: разделитель "X, X" либо
+# повтор без интонационного значения. Применяем только для запятой как
+# разделителя — двойной пробел "очень очень" может быть emphasis.
+#
+# Паттерн: word boundary + token + ", " + same token + word boundary.
+# Capture group 1 — token, обратная ссылка \1 — same token.
+_DEDUP_COMMA_RE = re.compile(
+    # token = letter + 0-30 more letters/dashes/apostrophes (1-char tokens like "с","я" OK)
+    r"\b([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z'-]{0,30}(?:\s+[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z'-]{0,30}){0,3})"
+    r",\s+\1\b",
+    re.IGNORECASE,
+)
+
+# Multi-word re-articulation без запятой ("вот сейчас вот сейчас"):
+# опционально, более рискованно (false positive на emphasis), включаем
+# только для 2-4 слов где первое — не emphasis-маркер ("очень", "далеко",
+# "много", "сильно", "глубоко", "быстро", "медленно").
+_EMPHASIS_MARKERS = frozenset({
+    "очень", "далеко", "много", "сильно", "глубоко",
+    "быстро", "медленно", "тихо", "громко", "близко",
+    "very", "many", "much", "deep", "fast", "slow",
+})
+
+_MULTIWORD_REPEAT_RE = re.compile(
+    r"\b([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z'-]*(?:\s+[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z'-]*){1,3})\s+\1\b",
+    re.IGNORECASE,
+)
+
 # Кириллические искажения имён собственных → каноническая латиница.
 # Whisper на русской речи транскрибирует бренды в кириллицу; возвращаем их в латиницу
 # детерминированно, независимо от того, сработал ли initial_prompt.
@@ -173,6 +210,9 @@ class TextUtils:
         clean = TextUtils._cleanup_soft(clean)
         # Базовая фильтрация известных артефактов нужна и в soft-профиле.
         clean = TextUtils._strip_hallucinations(clean)
+        # Speech disfluency dedup — re-articulation patterns ("слово, слово").
+        # Делается до brand normalization чтобы не путать с emphasis.
+        clean = TextUtils._dedup_re_articulation(clean)
         # Нормализация брендов/имён и времени — всегда, чтобы диктовка не требовала ручной правки.
         clean = TextUtils.normalize_entities(clean)
 
@@ -181,6 +221,48 @@ class TextUtils:
             clean = TextUtils._cleanup_strict(clean)
 
         return clean.strip()
+
+    @staticmethod
+    def _dedup_re_articulation(text: str) -> str:
+        """Удаляет немедленные повторы re-articulation от STT.
+
+        Whisper при overlapping context window иногда дублирует токены:
+            "записываю уже, уже"  → "записываю уже"
+            "с выбранной, с выбранной" → "с выбранной"
+            "протестирую, протестирую" → "протестирую"
+
+        Также handles "X X" (без запятой) для multi-word phrases где
+        first token не emphasis-marker ("очень очень" → keep как emphasis).
+
+        Iterative — сразу несколько повторов в строке: применяем regex до
+        стабилизации (no more changes), max 5 проходов чтобы avoid loops.
+        """
+        if not text:
+            return text
+
+        # Pass 1: comma-separated re-articulation ("X, X")
+        for _ in range(5):
+            replaced = _DEDUP_COMMA_RE.sub(r"\1", text)
+            if replaced == text:
+                break
+            text = replaced
+
+        # Pass 2: multi-word без запятой ("вот сейчас вот сейчас")
+        # Скипаем когда первое слово — emphasis marker.
+        def _multiword_dedup(match: "re.Match[str]") -> str:
+            phrase = match.group(1)
+            first_word = phrase.split()[0].lower()
+            if first_word in _EMPHASIS_MARKERS:
+                return match.group(0)  # keep as-is (emphasis preserved)
+            return phrase
+
+        for _ in range(5):
+            replaced = _MULTIWORD_REPEAT_RE.sub(_multiword_dedup, text)
+            if replaced == text:
+                break
+            text = replaced
+
+        return text
 
     @staticmethod
     def _cleanup_soft(clean: str) -> str:
