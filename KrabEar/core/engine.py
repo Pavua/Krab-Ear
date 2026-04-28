@@ -716,6 +716,11 @@ class AudioEngine:
                 _report("diarize")
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview)
 
+            # После STT + diarization — освобождаем MLX промежуточные массивы.
+            # MLX держит Metal-буферы пока Python GC не удалит ссылки на mx.array.
+            import gc as _gc
+            _gc.collect()
+
             # 4. Очистка результата через утилиты (D.7 normalization)
             _report("cleanup")
             cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
@@ -2404,6 +2409,7 @@ class AudioEngine:
             if audio_path is None:
                 return None
 
+            import gc
             pipeline = self._load_diarization_pipeline()
             prepared_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
             try:
@@ -2417,6 +2423,12 @@ class AudioEngine:
             finally:
                 if should_cleanup:
                     Path(prepared_path).unlink(missing_ok=True)
+                gc.collect()
+                if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
 
         except Exception as exc:
             logger.debug("_estimate_num_speakers: не удалось оценить спикеров: %s", exc)
@@ -2528,6 +2540,7 @@ class AudioEngine:
     def _run_diarization_impl(self, audio_path: str) -> list[dict[str, Any]]:
         """Внутренняя реализация diarization. Вынесена чтобы обернуть весь chain
         одним span'ом без изменения обработки ошибок."""
+        import gc
         pipeline = self._load_diarization_pipeline()
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:
@@ -2543,11 +2556,19 @@ class AudioEngine:
                 f.write(f"Exception Args: {e}\\n\\n")
                 f.write("--- Traceback ---\\n")
                 traceback.print_exc(file=f)
-            # Re-raise to let the outer handler log and continue
             raise e
         finally:
             if should_cleanup:
                 Path(prepared_audio_path).unlink(missing_ok=True)
+            # Освобождаем MPS-кэш PyTorch после каждого запуска pyannote.
+            # Без этого torch.mps аллокатор держит speaker embedding тензоры
+            # бесконечно — память растёт с каждой записью (утечка 30 GB за ночь).
+            gc.collect()
+            if torch is not None and hasattr(torch, "mps") and torch.backends.mps.is_available():
+                try:
+                    torch.mps.empty_cache()
+                except Exception:
+                    pass
         if hasattr(diarization, "speaker_diarization"):
             diarization = diarization.speaker_diarization
         speaker_segments: list[dict[str, Any]] = []
