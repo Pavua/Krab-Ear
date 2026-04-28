@@ -1092,13 +1092,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(NSView())
 
         // D.10a: AI Settings Row Setup
-        // Список выверенных моделей по результатам бенчмарка Round 1-8 (2026-04-28).
-        // Все verified outputs на тестовом наборе (RU/ES/EN + мат + brand recognition).
+        // Список выверенных моделей по результатам бенчмарков Round 1-13 (2026-04-28).
+        // Все verified outputs на тестовом наборе (RU/ES/EN + мат + brand recognition + dedup).
         llmModelSelector.addItems(withTitles: [
-            // 🥇 Production rewriter (fast, abliterated, Qwen 3 family — supported)
+            // 🥇 Production rewriter (fastest, abliterated, Qwen 3 family — MLX native)
             "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-            // 🥈 Quality challenger (13B uncensored, sustains мат + brands)
+            // 🥈 Mid-tier challenger (13B uncensored GGUF, sustains мат)
             "mythomax-l2-lora-assemble-13b",
+            // 🆕 Round 13 NEW WINNER: Qwen 2.5 14B Uncensored MLX (Apr 2026)
+            // 7/7 clean, brand recognition (commit Latin sохранил), dedup Whisper повторов, ~7.7s
+            "qwen2.5-14b-uncensored-mlx",
             // 🏆 Best quality для VA brain (slow ~7s, GGUF через llama.cpp)
             "qwen/qwen3.6-27b",
             // Mistral Devstral 2 24B (Dec 2025 fresh, Mistral arch)
