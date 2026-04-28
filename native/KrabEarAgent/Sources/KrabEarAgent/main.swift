@@ -183,18 +183,35 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        do {
-            try backendSupervisor.ensureBackendRunning()
-            logger.info("Backend доступен и готов к IPC")
-        } catch {
-            logger.error("Backend недоступен: \(error.localizedDescription)")
-            showFatalAndTerminate(
-                title: "Krab Ear: backend недоступен",
-                body: error.localizedDescription
-            )
-            return
+        // Backend wait перенесён в Task.detached — иначе main thread висит до 20 сек
+        // на холодном старте Whisper/pyannote (Sentry KRAB-EAR-AGENT-4 AppHang).
+        // applicationDidFinishLaunching возвращается сразу, NSApp.run цикл не блокируется,
+        // оставшийся setup (UI, hotkey, history panel) выполняется по готовности backend.
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.backendSupervisor.ensureBackendRunningAsync()
+                await MainActor.run {
+                    self.logger.info("Backend доступен и готов к IPC")
+                    self.completeStartupAfterBackendReady()
+                }
+            } catch {
+                await MainActor.run {
+                    self.logger.error("Backend недоступен: \(error.localizedDescription)")
+                    self.showFatalAndTerminate(
+                        title: "Krab Ear: backend недоступен",
+                        body: error.localizedDescription
+                    )
+                }
+            }
         }
+    }
 
+    /// Завершает startup после того как backend ответил на ping.
+    /// Вызывается из Task.detached → MainActor.run по готовности.
+    /// Содержит весь UI/hotkey/history setup, который требует working IPC.
+    @MainActor
+    func completeStartupAfterBackendReady() {
         ipcClient = IPCClient(socketPath: backendSupervisor.socketPath)
         settings = loadSettings()
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
@@ -202,7 +219,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
         )
 
-    // PermissionWizard удален, используем QuickStartWindowController
+        // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
             settingsProvider: { [weak self] in
@@ -233,7 +250,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         )
 
         hotkeyManager = makeHotkeyManager(settings: settings)
-        // Quick replay: Cmd+Option+V → повторить последнюю вставку
         hotkeyManager?.onQuickReplay = { [weak self] in
             DispatchQueue.main.async {
                 self?.handleQuickReplayPaste()
@@ -242,7 +258,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован (mode=\(settings.hotkeyMode))")
 
-        // Phase 2A: Selection translator — Cmd+Shift+T
         selectionTranslator = SelectionTranslator(
             ipcClient: ipcClient,
             notificationService: notificationService
@@ -250,22 +265,17 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.start()
         logger.info("SelectionTranslator запущен (Cmd+Shift+T)")
 
-        // UserDefaults preset seed
         if UserDefaults.standard.string(forKey: "KrabEar_ActivePreset") == nil {
             UserDefaults.standard.set("default", forKey: "KrabEar_ActivePreset")
         }
         startPresetHotkeyMonitor()
         logger.info("Quick preset hotkey monitor запущен (Cmd+Shift+P)")
 
-        // Phase 2B: Live субтитры — Cmd+Shift+L через menu item (main+StatusMenu + main+LiveSubs).
-
-        // Recording bookmarks: Cmd+Shift+B (feat/recording-bookmarks)
         if settings.bookmarksHotkeyEnabled {
             startBookmarkHotkeyMonitor()
             logger.info("Bookmark hotkey активирован (Cmd+Shift+B)")
         }
 
-        // PR 1.5: Wake word listener (default OFF — toggle в Settings)
         setupWakeWordListenerIfEnabled()
 
         applyMode(settings.mode, persist: false)

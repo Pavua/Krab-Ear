@@ -23,7 +23,7 @@ enum SupervisionMode {
 ///
 /// Поддерживает автоматический перезапуск при обнаружении мёртвого backend
 /// (например, после macOS Jetsam SIGKILL из-за нехватки памяти).
-final class BackendSupervisor {
+final class BackendSupervisor: @unchecked Sendable {
     private(set) var backendProcess: Process?
     let projectRoot: String
     let dataDir: String
@@ -144,6 +144,59 @@ final class BackendSupervisor {
             for _ in 0..<30 {  // 30 * 200ms = 6s — whisper cold start на fresh spawn
                 usleep(200_000)
                 if (try? client.call(method: "ping")) != nil {
+                    consecutiveRestarts = 0
+                    return
+                }
+            }
+            throw IPCError.socketConnectFailed("backend не ответил после запуска")
+        }
+    }
+
+    /// Async версия `ensureBackendRunning()` — НЕ блокирует calling thread.
+    /// Polling переписан через `Task.sleep` вместо `usleep` чтобы main thread
+    /// не висел в `applicationDidFinishLaunching` (Sentry KRAB-EAR-AGENT-4).
+    ///
+    /// Caller должен запускать через `Task.detached { try await ... }`,
+    /// после успешного завершения переключиться на @MainActor для UI.
+    func ensureBackendRunningAsync() async throws {
+#if DEBUG
+        if let testEnsure = _testEnsureOverride {
+            try testEnsure()
+            return
+        }
+#endif
+        let client = IPCClient(socketPath: socketPath)
+
+        let pingOK: () async -> Bool = {
+#if DEBUG
+            if let ping = self._testPingOverride { return ping() }
+#endif
+            return ((try? await client.callAsync(method: "ping", timeoutSec: IPCClient.quickTimeoutSec)) != nil)
+        }
+
+        if await pingOK() {
+            consecutiveRestarts = 0
+            return
+        }
+
+        switch supervisionMode {
+        case .passive:
+            for _ in 0..<100 {  // 100 * 200ms = 20s
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if await pingOK() {
+                    consecutiveRestarts = 0
+                    return
+                }
+            }
+            throw IPCError.socketConnectFailed(
+                "backend (launchd Variant B) не отвечает за 20 сек — проверь `launchctl print gui/\(getuid())/ai.krab.ear.backend`"
+            )
+        case .active:
+            cleanupStaleSocket()
+            try startBackendProcess()
+            for _ in 0..<30 {  // 30 * 200ms = 6s
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if await pingOK() {
                     consecutiveRestarts = 0
                     return
                 }

@@ -17,7 +17,17 @@ extension AgentAppDelegate {
             notify(title: "Krab Ear", body: "Пустой текст после транскрибации")
             return
         }
-        let effectiveHistoryId = ensureHistoryItem(text: cleanText, existingId: historyId)
+        // Resolve history_id асинхронно — раньше тут sync IPC на main thread с 5s timeout
+        // вешал AppHang (Sentry KRAB-EAR-AGENT-8). Continuation запускает полный paste flow
+        // только после того, как IPC ответил (или не ответил → id == nil, fallback path).
+        ensureHistoryItem(text: cleanText, existingId: historyId) { [weak self] effectiveHistoryId in
+            self?.continueTranscriptionResult(cleanText: cleanText, historyId: effectiveHistoryId)
+        }
+    }
+
+    /// Continuation для `handleTranscriptionResult` после async-resolve history_id.
+    /// Вызывается на main thread (см. `ensureHistoryItem` completion dispatch).
+    func continueTranscriptionResult(cleanText: String, historyId effectiveHistoryId: String?) {
         if lastResult == nil || lastResult?.finalText != cleanText {
             lastResult = LastTranscriptionSnapshot(
                 finalText: cleanText,
@@ -272,31 +282,41 @@ extension AgentAppDelegate {
         return target.processIdentifier
     }
 
-    func ensureHistoryItem(text: String, existingId: String?) -> String? {
+    /// Async resolve history_id: fast-path возвращает existingId сразу,
+    /// иначе IPC `add_history_item` выполняется на background queue, completion
+    /// дёргается на main thread. Раньше эта функция была sync с 5s timeout
+    /// и вешала main thread → AppHang ≥ 2s (Sentry KRAB-EAR-AGENT-8).
+    /// Closes Sentry KRAB-EAR-AGENT-8.
+    func ensureHistoryItem(
+        text: String,
+        existingId: String?,
+        completion: @escaping @MainActor @Sendable (String?) -> Void
+    ) {
         if let existingId, !existingId.isEmpty {
-            return existingId
+            completion(existingId)
+            return
         }
-        // Sync IPC на main thread — но с quickTimeoutSec (5s) вместо default 60s,
-        // чтобы при заклине backend'а main thread не висел >2 сек (AppHang threshold).
-        // add_history_item — DB write, обычно <100 ms. Для полного fix потребуется
-        // refactor в async flow с completion handler, что меняет contract handler.
-        // Closes part of Sentry KRAB-EAR-AGENT-8.
-        guard
-            let response = try? ipcClient.call(
+        let ipc = self.ipcClient
+        let textCopy = text
+        Task.detached { [weak self] in
+            let response = try? await ipc.callAsync(
                 method: "add_history_item",
                 params: [
-                    "text": text,
+                    "text": textCopy,
                     "paste_status": "failed",
                 ],
                 timeoutSec: IPCClient.quickTimeoutSec
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            logger.warn("Не удалось создать fallback запись в истории")
-            return nil
+            )
+            let id = (response?["result"] as? [String: Any])?["id"] as? String
+            await MainActor.run {
+                if let id {
+                    self?.logger.info("Создана fallback запись истории: id=\(id)")
+                } else {
+                    self?.logger.warn("Не удалось создать fallback запись в истории")
+                }
+                completion(id)
+            }
         }
-        logger.info("Создана fallback запись истории: id=\(result["id"] as? String ?? "nil")")
-        return result["id"] as? String
     }
 
 

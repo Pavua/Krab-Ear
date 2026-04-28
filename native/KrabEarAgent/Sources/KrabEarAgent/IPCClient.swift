@@ -62,6 +62,40 @@ final class IPCClient: @unchecked Sendable {
         return try call(method: method, params: params, timeoutSec: Self.defaultTimeoutSec)
     }
 
+    /// Async-friendly wrapper: выполняет sync `call(...)` на background queue,
+    /// возвращая результат через Swift Concurrency. Использовать для всех
+    /// IPC вызовов из @MainActor контекста — main thread не блокируется,
+    /// AppHang детектор не срабатывает (Sentry KRAB-EAR-AGENT-4/8/A/B/C/D).
+    func callAsync(
+        method: String,
+        params: [String: Any] = [:],
+        timeoutSec: Int = IPCClient.defaultTimeoutSec
+    ) async throws -> [String: Any] {
+        let captured: (String, [String: Any], Int) = (method, params, timeoutSec)
+        // [String: Any] не Sendable — оборачиваем в @unchecked Sendable box
+        // чтобы передать через Task continuation без data race warning.
+        // IPC response это immutable JSON dict, гонок нет.
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: IPCError.invalidResponse)
+                    return
+                }
+                do {
+                    let result = try self.call(
+                        method: captured.0,
+                        params: captured.1,
+                        timeoutSec: captured.2
+                    )
+                    nonisolated(unsafe) let resultBox = result
+                    continuation.resume(returning: resultBox)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// Variant с explicit timeout. Используй `IPCClient.quickTimeoutSec` (5s) для
     /// status / diagnostics и `IPCClient.defaultTimeoutSec` (60s) для transcribe /
     /// summarize / extract. Custom Int OK для special cases.
