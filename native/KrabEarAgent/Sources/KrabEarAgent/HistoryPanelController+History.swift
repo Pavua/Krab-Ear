@@ -148,13 +148,21 @@ extension HistoryPanelController {
                 body: "Не удалось сохранить файл: \(error.localizedDescription)"
             )
         }
-        // Также сохраняем копию через IPC (export_history) в transcripts/
-        if let ipcResponse = try? ipcClient.call(
-            method: "export_history",
-            params: ["format": "md", "save_to_file": true]
-        ), let ipcResult = ipcResponse["result"] as? [String: Any],
-           let serverPath = ipcResult["path"] as? String {
-            notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+        // Также сохраняем копию через IPC (export_history) в transcripts/.
+        // Off-main-thread чтобы не блокировать UI пока backend пишет файл (AppHang risk).
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard
+                let ipcResponse = try? ipc.call(
+                    method: "export_history",
+                    params: ["format": "md", "save_to_file": true]
+                ),
+                let ipcResult = ipcResponse["result"] as? [String: Any],
+                let serverPath = ipcResult["path"] as? String
+            else { return }
+            DispatchQueue.main.async {
+                self?.notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+            }
         }
     }
 

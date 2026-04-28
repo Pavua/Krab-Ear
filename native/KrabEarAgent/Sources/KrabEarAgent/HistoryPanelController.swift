@@ -2092,23 +2092,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             return
         }
 
-        guard
-            let response = try? ipcClient.call(
+        // Async IPC чтобы NSAlert dismiss не блокировал main thread (AppHang risk).
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = (try? ipc.call(
                 method: "set_translation_glossary_item",
                 params: ["source": source, "target": target]
-            ),
-            response["ok"] as? Bool == true
-        else {
-            showInfoAlert(title: "Глоссарий", body: "Не удалось сохранить термин.")
-            return
+            ))?["ok"] as? Bool == true
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !ok {
+                    self.showInfoAlert(title: "Глоссарий", body: "Не удалось сохранить термин.")
+                    return
+                }
+                var nextPayload = self.settingsProvider().toPayload()
+                var glossary = self.settingsProvider().translationGlossary
+                glossary[source] = target
+                nextPayload["translation_glossary"] = glossary
+                _ = self.settingsUpdater(nextPayload)
+                self.syncSettingsControls()
+            }
         }
-
-        var nextPayload = settingsProvider().toPayload()
-        var glossary = settingsProvider().translationGlossary
-        glossary[source] = target
-        nextPayload["translation_glossary"] = glossary
-        _ = settingsUpdater(nextPayload)
-        syncSettingsControls()
     }
 
     @objc private func onRemoveGlossaryTerm() {
@@ -2128,23 +2132,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             return
         }
 
-        guard
-            let response = try? ipcClient.call(
+        // Async IPC чтобы NSAlert dismiss не блокировал main thread (AppHang risk).
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = (try? ipc.call(
                 method: "remove_translation_glossary_item",
                 params: ["source": source]
-            ),
-            response["ok"] as? Bool == true
-        else {
-            showInfoAlert(title: "Глоссарий", body: "Не удалось удалить термин.")
-            return
+            ))?["ok"] as? Bool == true
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !ok {
+                    self.showInfoAlert(title: "Глоссарий", body: "Не удалось удалить термин.")
+                    return
+                }
+                var nextPayload = self.settingsProvider().toPayload()
+                var glossary = self.settingsProvider().translationGlossary
+                glossary.removeValue(forKey: source)
+                nextPayload["translation_glossary"] = glossary
+                _ = self.settingsUpdater(nextPayload)
+                self.syncSettingsControls()
+            }
         }
-
-        var nextPayload = settingsProvider().toPayload()
-        var glossary = settingsProvider().translationGlossary
-        glossary.removeValue(forKey: source)
-        nextPayload["translation_glossary"] = glossary
-        _ = settingsUpdater(nextPayload)
-        syncSettingsControls()
     }
 
     func showInfoAlert(title: String, body: String) {
