@@ -46,28 +46,37 @@ extension AgentAppDelegate {
         guard isRecording, settings.realtimePreviewEnabled else {
             return
         }
-        guard
-            let response = try? ipcClient.call(method: "get_recording_state", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            return
-        }
-
-        let previewText = (result["preview_text"] as? String) ?? ""
-        let durationSec = (result["duration_sec"] as? Double) ?? 0.0
-        let durationText = formatDuration(durationSec)
-        let translatedPreview = translatePreviewTextIfNeeded(previewText)
-        let modeHint = previewTranslationModeHint()
-        realtimeOverlay.update(
-            previewText: previewText,
-            translatedText: translatedPreview,
-            durationText: durationText,
-            modeHint: modeHint
-        )
-
-        // VU meter: обновляем уровень RMS (~0.85 Hz из polling)
-        if let audioRms = result["audio_rms"] as? Double {
-            realtimeOverlay.setAudioLevel(Float(audioRms))
+        // Sync IPC на main thread каждые 0.85s через NSTimer вызывал AppHang
+        // когда backend под нагрузкой (диктовка + STT) — Sentry KRAB-EAR-AGENT-8 регрессия.
+        // Перенесли на background queue с UI update обратно на main.
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard
+                let response = try? ipc.call(method: "get_recording_state", params: [:]),
+                let result = response["result"] as? [String: Any]
+            else {
+                return
+            }
+            let previewText = (result["preview_text"] as? String) ?? ""
+            let durationSec = (result["duration_sec"] as? Double) ?? 0.0
+            let audioRms = result["audio_rms"] as? Double
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let durationText = self.formatDuration(durationSec)
+                // translatePreviewTextIfNeeded вызывает second IPC sync — он async-aware ниже,
+                // возвращает cached value сразу.
+                let translatedPreview = self.translatePreviewTextIfNeeded(previewText)
+                let modeHint = self.previewTranslationModeHint()
+                self.realtimeOverlay.update(
+                    previewText: previewText,
+                    translatedText: translatedPreview,
+                    durationText: durationText,
+                    modeHint: modeHint
+                )
+                if let audioRms {
+                    self.realtimeOverlay.setAudioLevel(Float(audioRms))
+                }
+            }
         }
     }
 
@@ -130,39 +139,57 @@ extension AgentAppDelegate {
             return lastPreviewTranslationText.isEmpty ? nil : lastPreviewTranslationText
         }
 
-        guard
-            let response = try? ipcClient.call(
+        // IPC на main thread блокирует ~100-500ms (translation pass + LLM). При
+        // частоте refresh 0.85s + случайной задержке backend это ловит AppHang.
+        // Запускаем в background queue, UI получит результат на следующем tick'е (≤1s lag).
+        let ipc = self.ipcClient
+        let translationMode = settings.translationMode
+        let translationStyle = settings.translationStyle
+        let networkMode = settings.networkMode
+        let cleanPreviewCopy = cleanPreview
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipc.call(
                 method: "translate_text",
                 params: [
-                    "text": cleanPreview,
-                    "translation_mode": settings.translationMode,
-                    "translation_style": settings.translationStyle,
-                    "network_mode": settings.networkMode,
+                    "text": cleanPreviewCopy,
+                    "translation_mode": translationMode,
+                    "translation_style": translationStyle,
+                    "network_mode": networkMode,
                 ]
-            ),
-            let result = response["result"] as? [String: Any]
-        else {
-            return lastPreviewTranslationText.isEmpty ? nil : lastPreviewTranslationText
-        }
-
-        let status = (result["status"] as? String) ?? "unknown"
-        let translated = ((result["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        lastPreviewTranslationSource = cleanPreview
-        lastPreviewTranslationAt = now
-        lastPreviewTranslationMode = settings.translationMode
-        if status == "ok", !translated.isEmpty {
-            lastPreviewTranslationText = translated
-            lastPreviewTranslationFailures = 0
-            lastPreviewTranslationFailureAt = 0
-            lastPreviewTranslationSuccessAt = now
-        } else {
-            lastPreviewTranslationFailures += 1
-            lastPreviewTranslationFailureAt = now
-            // Если перевод временно недоступен, удерживаем последний валидный перевод короткое время.
-            if now - lastPreviewTranslationSuccessAt > 8.0 {
-                lastPreviewTranslationText = ""
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let now2 = Date().timeIntervalSince1970
+                guard
+                    let result = response?["result"] as? [String: Any]
+                else {
+                    self.lastPreviewTranslationFailures += 1
+                    self.lastPreviewTranslationFailureAt = now2
+                    if now2 - self.lastPreviewTranslationSuccessAt > 8.0 {
+                        self.lastPreviewTranslationText = ""
+                    }
+                    return
+                }
+                let status = (result["status"] as? String) ?? "unknown"
+                let translated = ((result["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                self.lastPreviewTranslationSource = cleanPreviewCopy
+                self.lastPreviewTranslationAt = now2
+                self.lastPreviewTranslationMode = translationMode
+                if status == "ok", !translated.isEmpty {
+                    self.lastPreviewTranslationText = translated
+                    self.lastPreviewTranslationFailures = 0
+                    self.lastPreviewTranslationFailureAt = 0
+                    self.lastPreviewTranslationSuccessAt = now2
+                } else {
+                    self.lastPreviewTranslationFailures += 1
+                    self.lastPreviewTranslationFailureAt = now2
+                    if now2 - self.lastPreviewTranslationSuccessAt > 8.0 {
+                        self.lastPreviewTranslationText = ""
+                    }
+                }
             }
         }
+        // Возвращаем cached value немедленно — UI не ждёт IPC.
         return lastPreviewTranslationText.isEmpty ? nil : lastPreviewTranslationText
     }
 
