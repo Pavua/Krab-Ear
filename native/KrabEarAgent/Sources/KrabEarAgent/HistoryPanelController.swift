@@ -1092,16 +1092,41 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(NSView())
 
         // D.10a: AI Settings Row Setup
-        // Список выверенных моделей по результатам бенчмарков Round 1-13 (2026-04-28).
+        // Список выверенных моделей по результатам бенчмарков Round 1-19 (2026-04-29).
         // Все verified outputs на тестовом наборе (RU/ES/EN + мат + brand recognition + dedup).
+        // Hot-swap через GUI работает без restart backend (см. _handle_set_settings_with_hot_reload).
         llmModelSelector.addItems(withTitles: [
-            // 🥇 Production rewriter (fastest, abliterated, Qwen 3 family — MLX native)
-            "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-            // 🥈 Mid-tier challenger (13B uncensored GGUF, sustains мат)
-            "mythomax-l2-lora-assemble-13b",
-            // 🆕 Round 13 NEW WINNER: Qwen 2.5 14B Uncensored MLX (Apr 2026)
-            // 7/7 clean, brand recognition (commit Latin sохранил), dedup Whisper повторов, ~7.7s
+            // 🥇 Round 19 WINNER (2026-04-29 18:10): 7.7 GB, official Qwen3.5-9B 6-bit.
+            // avg 1.4s (fastest clean rewriter), brands ✅, mat ✅, no <think>. NEW DEFAULT.
+            "qwen3.5-9b@6bit",
+            // 🥈 Round 18 winner: 7.8 GB, Qwen3-14B abliterated v2.
+            // avg 1.9s, brands ✅, mat ✅, RU_OK best-of-bench, no hallucination.
+            "huihui-qwen3-14b-abl-v2",
+            // 🥈 Round 17 winner: 17.8 GB, Qwen3-30B-A3B Instruct (MoE, 3B active).
+            // avg 4.5s. Premium choice when 36 GB headroom available.
+            "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+            // 🥇 R20 NEW SPEED CHAMP: 4.3 GB official Qwen3-8B 4-bit.
+            // avg 0.9s, brands ✅, mat ✅, ES preserved, no <think>, минималистичный rewrite (no paraphrase).
+            "Qwen3-8B-MLX-4bit",
+            // 🥈 Speed alt: 4.2 GB Aya-Expanse-8B, avg 0.8s.
+            // Brands ✅, mat ✅, BUT любит paraphrase ("тесты"→"тестирование"). Use if Qwen3-8B недоступен.
+            "aya-expanse-8b",
+            // 🥈 R19 alt: 15 GB, official Qwen3.5-27B 4-bit. Clean throughout, avg 3.7s.
+            "Qwen3.5-27B-4bit",
+            // 🥈 R17 STRONG #2: 16.9 GB, Cohere Aya Expanse 32B abliterated.
+            // avg 7.8s, чистый minimal rewrite, отлично на длинных диктовках.
+            "Aya-Expanse-32B-abliterated",
+            // 🥈 R18 alt: 13.3 GB, Qwen3.5-27B Text-heretic. avg 4.2s. No <think>.
+            "Qwen3.5-27B-Text-heretic-mxfp4-mlx",
+            // 🥉 R13 winner (Apr 28): Qwen 2.5 14B Uncensored MLX (7.7 GB, baseline, 3-4s).
             "qwen2.5-14b-uncensored-mlx",
+            // 🥉 Hermes-3 Llama 8B (4.2 GB, avg 1.0s — fastest, but brand-blind).
+            // Use ONLY when deterministic regex pre-pass is enough to fix brands.
+            "Hermes-3-Llama-8B",
+            // 🥉 Old default: 2.6 GB Qwen3-4B Instruct abliterated (для слабых машин).
+            "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+            // Mid-tier challenger (13B uncensored GGUF, sustains мат)
+            "mythomax-l2-lora-assemble-13b",
             // 🏆 Best quality для VA brain (slow ~7s, GGUF через llama.cpp)
             "qwen/qwen3.6-27b",
             // Mistral Devstral 2 24B (Dec 2025 fresh, Mistral arch)

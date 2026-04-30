@@ -262,6 +262,25 @@ class LLMRewriter:
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
 
+    def set_model(self, new_model: str) -> bool:
+        """Hot-swap rewriter model name without backend restart.
+
+        Returns True if model name changed. Resets circuit breaker so the new
+        model gets a fresh chance even if previous one was tripped.
+        Caller is responsible for ensuring `new_model` is loadable in LM Studio
+        (LM Studio JIT will auto-load on first request if it's downloaded).
+        """
+        new_model = (new_model or "").strip()
+        if not new_model or new_model == self._model:
+            return False
+        logger.info("LLMRewriter: hot-swap model %r → %r", self._model, new_model)
+        self._model = new_model
+        # Reset circuit so the new model gets a fresh start
+        self._circuit.record_success()  # closes circuit if it was open
+        self._last_error = None
+        self._last_latency_ms = None
+        return True
+
     def _postprocess(self, content: str) -> str:
         """Убирает типичный мусор в ответе LLM (кавычки, префиксы, multi-paragraph)."""
         s = (content or "").strip()
@@ -299,6 +318,49 @@ class LLMRewriter:
             {"role": "user", "content": text},
         ]
 
+    # ------------------------------------------------------------------
+    # Endpoint mode selection
+    # ------------------------------------------------------------------
+    # ROOT CAUSE: LM Studio's /v1/chat/completions endpoint applies a
+    # tool-extraction layer that parses any <tool_call>...</tool_call>
+    # markers in raw model output and moves them into the structured
+    # `tool_calls` field — clearing `content` in the process. This happens
+    # even when client sends `tool_choice: "none"` and `tools: []`.
+    #
+    # Qwen3-family fine-tunes (Huihui, Josiefied, Qwen3.5) emit `<tool_call>`
+    # JSON when given structured editor tasks (numbered rules trigger their
+    # function-calling fine-tune). Direct comparison: same model loaded via
+    # mlx_lm.server (no LM Studio tool extractor) returns clean text;
+    # via LM Studio chat completions returns tool_calls.
+    #
+    # FIX: route requests through /v1/completions (raw text completion).
+    # We build the chat template manually as a plain prompt string. LM Studio
+    # treats it as completion (no tool extractor), returns plain `text`.
+    # This is OpenAI-spec compliant and works with any LM Studio backend.
+    # ------------------------------------------------------------------
+    _QWEN_FAMILY_MARKERS = ("qwen", "Qwen", "QWEN")
+
+    def _is_qwen_family(self) -> bool:
+        return any(m in (self._model or "") for m in self._QWEN_FAMILY_MARKERS)
+
+    def _build_qwen_chatml_prompt(self, text: str) -> str:
+        """Manually build Qwen ChatML prompt for /v1/completions.
+
+        Qwen3-Instruct chat template format (без tools preamble который
+        провоцирует tool_calls в chat-mode):
+
+            <|im_start|>system\n{SYSTEM}<|im_end|>
+            <|im_start|>user\n{TEXT}<|im_end|>
+            <|im_start|>assistant\n
+        """
+        return (
+            "<|im_start|>system\n"
+            f"{SYSTEM_PROMPT}<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"{text}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+
     def rewrite(self, text: str) -> LLMRewriteResult:
         """Отправляет текст в LLM и возвращает исправленную версию.
 
@@ -322,17 +384,34 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
 
-        # 3. Подготовка запроса
-        payload = {
-            "model": self._model,
-            "messages": self._build_messages(cleaned_input),
-            "temperature": 0.0,
-            "max_tokens": self._estimate_max_tokens(cleaned_input),
-            "stream": False,
-            # Убран "\n\n" из stop — qwen3.5 с reasoning mode ставит \n\n
-            # между thinking и ответом, что обрезало content до пустоты.
-            "stop": ["Исправленный текст:", "Исходный текст:"],
-        }
+        # 3. Endpoint selection: Qwen family → /v1/completions (root-cause fix
+        # для tool_calls leak'а в LM Studio), остальные → /v1/chat/completions.
+        if self._is_qwen_family():
+            payload = {
+                "model": self._model,
+                "prompt": self._build_qwen_chatml_prompt(cleaned_input),
+                "temperature": 0.0,
+                "max_tokens": self._estimate_max_tokens(cleaned_input),
+                "stream": False,
+                "stop": ["<|im_end|>", "<|im_start|>", "Исправленный текст:", "Исходный текст:"],
+            }
+            endpoint_path = "/completions"
+        else:
+            payload = {
+                "model": self._model,
+                "messages": self._build_messages(cleaned_input),
+                "temperature": 0.0,
+                "max_tokens": self._estimate_max_tokens(cleaned_input),
+                "stream": False,
+                "stop": ["Исправленный текст:", "Исходный текст:"],
+                # Last-resort guard для не-Qwen моделей, эмитящих tool_calls
+                # (видно в LM Studio логах). На /v1/chat/completions LM Studio
+                # активирует tool extractor, который ловит <tool_call>...</tool_call>
+                # markers и переносит в структурированное поле, теряя content.
+                "tool_choice": "none",
+                "tools": [],
+            }
+            endpoint_path = "/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
@@ -342,7 +421,7 @@ class LLMRewriter:
         start = time.monotonic()
         try:
             response = self._session.post(
-                f"{self._base_url}/chat/completions",
+                f"{self._base_url}{endpoint_path}",
                 json=payload,
                 headers=headers,
                 timeout=self._timeout,
@@ -374,16 +453,42 @@ class LLMRewriter:
                 latency_ms=latency_ms,
             )
 
-        # 6. Parse JSON response
+        # 6. Parse JSON response — schema differs between endpoints:
+        #   /v1/completions:        choices[0].text                  (plain string)
+        #   /v1/chat/completions:   choices[0].message.content       (+ optional .tool_calls)
         try:
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            if "text" in choice:
+                # /v1/completions response — Qwen family path
+                content = choice.get("text") or ""
+                tool_calls = None  # raw completion endpoint never returns tool_calls
+            else:
+                message = choice["message"]
+                content = message.get("content")
+                tool_calls = message.get("tool_calls")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             self._last_error = f"parse_error: {exc}"
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="parse_error", latency_ms=latency_ms
             )
+
+        # 6b. Guard: некоторые модели (Qwen 2.5 14B Uncensored)
+        # игнорят tool_choice=none и эмитят tool_calls вместо content.
+        # Это ломает rewrite — fallback на оригинал.
+        if tool_calls and not content:
+            self._circuit.record_failure()
+            self._last_error = "tool_calls_emitted"
+            logger.warning(
+                "LLM emitted tool_calls instead of content (model=%s), falling back",
+                self._model,
+            )
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="tool_calls_emitted", latency_ms=latency_ms
+            )
+        if not content:
+            content = ""
 
         # 7. Postprocess
         cleaned = self._postprocess(content)
@@ -408,14 +513,25 @@ class LLMRewriter:
                 )
 
         # 9. Length ratio guard — dramatic shrink/expansion = hallucination
+        # Adaptive thresholds:
+        # - Очень короткие inputs (<60 chars) часто содержат много повторов re-articulation,
+        #   которые легитимно сжимаются до 15-25% (например "так так так так так так" → "так").
+        # - Длинные inputs (>200 chars) редко сжимаются ниже 30% без потери смысла.
+        # - Short range (60-200): in-between threshold 0.22.
         input_len = len(cleaned_input)
         output_len = len(cleaned)
         if input_len > 20:
             ratio = output_len / input_len
-            if ratio < 0.35:
+            if input_len < 60:
+                short_thr = 0.15  # очень короткие — допускаем агрессивное сжатие
+            elif input_len < 200:
+                short_thr = 0.22
+            else:
+                short_thr = 0.30  # длинные — guard построже
+            if ratio < short_thr:
                 logger.warning(
-                    "LLM output too short (%.0f%% of input), falling back to original",
-                    ratio * 100,
+                    "LLM output too short (%.0f%% of input, threshold %.0f%%), falling back to original",
+                    ratio * 100, short_thr * 100,
                 )
                 self._last_error = "output_too_short"
                 return LLMRewriteResult(
@@ -472,6 +588,8 @@ class LLMRewriter:
             "temperature": 0.0,
             "max_tokens": self._estimate_max_tokens(cleaned_input),
             "stream": False,
+            "tool_choice": "none",
+            "tools": [],
         }
         headers = {
             "Content-Type": "application/json",

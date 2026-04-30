@@ -261,6 +261,103 @@ class LLMRewriterMaxTokensTestCase(unittest.TestCase):
         self.assertEqual(result, 256)
 
 
+class LLMRewriterEndpointSelectionTestCase(unittest.TestCase):
+    """Tests для архитектурного fix: Qwen family → /v1/completions, иначе → /v1/chat/completions.
+
+    Root cause: LM Studio's chat completions endpoint автоматически extract'ит
+    <tool_call> markers из output модели и переносит их в structured field,
+    очищая content. Это даёт fallback_reason=tool_calls_emitted на каждый
+    rewrite через Qwen3-Instruct fine-tunes (Huihui, Josiefied и т.д.).
+    Bypass: использовать /v1/completions endpoint без tool extractor layer.
+    """
+
+    def _mock_completions_response(self, text: str, status_code: int = 200):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.json.return_value = {"choices": [{"text": text}]}
+        return mock
+
+    def _mock_chat_response(self, content: str):
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.return_value = {"choices": [{"message": {"content": content}}]}
+        return mock
+
+    def test_qwen_family_routes_to_completions_endpoint(self):
+        from backend.llm_rewriter import LLMRewriter
+        rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="x",
+            model="huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+            timeout_sec=4.0,
+        )
+        rewriter._session.post = MagicMock(
+            return_value=self._mock_completions_response("краткий вход исправлен литературно сегодня")
+        )
+        result = rewriter.rewrite("краткий вход с повторами повторами для тестирования")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text, "краткий вход исправлен литературно сегодня")
+        url = rewriter._session.post.call_args.args[0]
+        self.assertEqual(url, "http://localhost:1234/v1/completions")
+
+    def test_qwen_family_uses_chatml_prompt(self):
+        from backend.llm_rewriter import LLMRewriter
+        rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1", api_key="x",
+            model="qwen2.5-14b-uncensored-mlx", timeout_sec=4.0,
+        )
+        rewriter._session.post = MagicMock(
+            return_value=self._mock_completions_response("ок")
+        )
+        rewriter.rewrite("test")
+        payload = rewriter._session.post.call_args.kwargs["json"]
+        self.assertIn("prompt", payload)
+        self.assertNotIn("messages", payload)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+        # ChatML markers
+        self.assertIn("<|im_start|>system", payload["prompt"])
+        self.assertIn("<|im_start|>user", payload["prompt"])
+        self.assertIn("<|im_start|>assistant", payload["prompt"])
+        self.assertIn("test", payload["prompt"])
+        # Stop tokens to prevent runaway generation
+        self.assertIn("<|im_end|>", payload["stop"])
+
+    def test_non_qwen_routes_to_chat_completions(self):
+        from backend.llm_rewriter import LLMRewriter
+        rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1", api_key="x",
+            model="mistralai/devstral-small-2-2512", timeout_sec=4.0,
+        )
+        rewriter._session.post = MagicMock(
+            return_value=self._mock_chat_response("ок")
+        )
+        rewriter.rewrite("test")
+        url = rewriter._session.post.call_args.args[0]
+        self.assertEqual(url, "http://localhost:1234/v1/chat/completions")
+        payload = rewriter._session.post.call_args.kwargs["json"]
+        self.assertIn("messages", payload)
+        # Tool guard preserved для не-Qwen моделей
+        self.assertEqual(payload.get("tool_choice"), "none")
+        self.assertEqual(payload.get("tools"), [])
+
+    def test_qwen_completions_response_parses_text_field(self):
+        """Schema check: /v1/completions returns choices[0].text, not message.content."""
+        from backend.llm_rewriter import LLMRewriter
+        rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1", api_key="x",
+            model="qwen3-something", timeout_sec=4.0,
+        )
+        rewriter._session.post = MagicMock(
+            return_value=self._mock_completions_response("чистый ответ")
+        )
+        # Short input (≤20 chars) skips length-ratio guard
+        result = rewriter.rewrite("вход")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text, "чистый ответ")
+        self.assertIsNone(result.fallback_reason)
+
+
 class LLMRewriterRewriteSuccessTestCase(unittest.TestCase):
     """Happy path tests для rewrite()."""
 

@@ -201,6 +201,17 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 **ЗАПРЕЩЕНО:** `kill -9`, `SIGHUP`, `Restart Krab.command`, прямой `python -m src.main`.
 OpenClaw Gateway: `openclaw gateway stop && sleep 2 && openclaw gateway start` (НЕ SIGHUP).
 
+## API Tokens (persistent — не теряй между сессиями!)
+
+**LM Studio HTTP API Bearer token** для bench-скриптов (текст + image attach):
+- **Где хранится:** `/Users/pablito/Antigravity_AGENTS/Krab Ear/.env` (gitignored) → `LM_STUDIO_API_TOKEN`
+- **Также в:** Krab Ear settings.json → `llm_api_key` (читается backend rewriter'ом)
+- **Получить новый при revoke:** LM Studio app → Server Settings → API Keys
+- **Использование в bench:** `scripts/llm-bench/full-bench.py` загружает автоматически (env var → .env → settings.json fallback chain)
+- **HTTP API без token:** возвращает 401 на `/v1/*` endpoints. `lms chat` CLI работает без token (internal IPC).
+
+**Sentry Auth Token** — в main Krab `.env` (`/Users/pablito/Antigravity_AGENTS/Krab_ascii/.env` → `SENTRY_AUTH_TOKEN`). Org `po-zm`, region US.
+
 ## Common Commands
 
 ### Python backend

@@ -719,7 +719,7 @@ class BackendService:
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
             "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
             "get_settings": self._settings_svc.handle_get_settings,  # VERIFIED: called from Swift (main)
-            "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
+            "set_settings": self._handle_set_settings_with_hot_reload,  # wraps SettingsService to hot-swap llm_rewriter model
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
@@ -2509,6 +2509,34 @@ class BackendService:
             })
 
         return {"pending": pending, "count": len(pending)}
+
+    def _handle_set_settings_with_hot_reload(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Wraps SettingsService.handle_set_settings to hot-swap llm_rewriter
+        model when `llm_model` setting changes. Без этого click в GUI dropdown
+        изменял только settings.json, но runtime LLMRewriter._model оставался
+        старым до перезапуска backend.
+        """
+        old_model = None
+        if self._llm_rewriter is not None:
+            old_model = getattr(self._llm_rewriter, "_model", None)
+        result = self._settings_svc.handle_set_settings(params)
+        new_model = (params or {}).get("llm_model")
+        if (
+            new_model
+            and isinstance(new_model, str)
+            and self._llm_rewriter is not None
+            and new_model != old_model
+        ):
+            try:
+                changed = self._llm_rewriter.set_model(new_model)
+                if changed:
+                    logger.info(
+                        "LLM rewriter hot-swap: %s → %s (no restart needed)",
+                        old_model, new_model,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM rewriter hot-swap failed: %s", exc)
+        return result
 
     def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает последний word-level diff от LLM rewriter'а."""
