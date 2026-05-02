@@ -1061,7 +1061,8 @@ class BackendService:
             )
 
         try:
-            result = handler(params)
+            with self.health_metrics.track_request():
+                result = handler(params)
             return {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
