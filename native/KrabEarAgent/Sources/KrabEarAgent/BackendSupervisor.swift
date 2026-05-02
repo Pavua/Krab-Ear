@@ -31,7 +31,11 @@ final class BackendSupervisor: @unchecked Sendable {
 
     /// Счётчик последовательных перезапусков (сбрасывается при успешном ping).
     private var consecutiveRestarts = 0
-    private static let maxConsecutiveRestarts = 3
+
+    // Circuit breaker state
+    private var circuitOpenedAt: Date?
+    private static let circuitOpenAfter = 5
+    private static let circuitCooldownDefault: TimeInterval = 300  // 5 min
 
     /// Режим супервизии, определяется один раз при первом обращении (lazy).
     /// Lazy init означает что реальный `launchctl print` вызов происходит
@@ -52,12 +56,50 @@ final class BackendSupervisor: @unchecked Sendable {
     /// Тест-хук: если задан, ensureBackendRunning() вызывает этот блок вместо
     /// реального spawn/wait (исключает 20-секундный sleep в тестах).
     var _testEnsureOverride: (() throws -> Void)? = nil
+
+    /// Тест-хук: переопределяет cooldown circuit breaker'а (вместо 5 мин).
+    var _testCooldownSec: TimeInterval? = nil
+
+    /// Тест-хук: переопределяет задержку backoff (0 = без sleep в тестах).
+    var _testBackoffOverride: TimeInterval? = nil
 #endif
 
     init(projectRoot: String) {
         self.projectRoot = projectRoot
         self.dataDir = NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath
         self.socketPath = (self.dataDir as NSString).appendingPathComponent("krabear.sock")
+    }
+
+    // MARK: — Circuit breaker helpers
+
+    private var circuitCooldown: TimeInterval {
+        #if DEBUG
+        return _testCooldownSec ?? Self.circuitCooldownDefault
+        #else
+        return Self.circuitCooldownDefault
+        #endif
+    }
+
+    /// Backoff schedule: 1st=0s, 2nd=2s, 3rd=5s, 4th+=15s.
+    func backoffDelay(attempt: Int) -> TimeInterval {
+        switch attempt {
+        case ...1: return 0
+        case 2: return 2
+        case 3: return 5
+        default: return 15
+        }
+    }
+
+    /// True если circuit открыт (5 fails недавно). Восстанавливается через cooldown.
+    func isCircuitOpen() -> Bool {
+        guard let openedAt = circuitOpenedAt else { return false }
+        if Date().timeIntervalSince(openedAt) >= circuitCooldown {
+            // cooldown прошёл → закрываем circuit
+            circuitOpenedAt = nil
+            consecutiveRestarts = 0
+            return false
+        }
+        return true
     }
 
     /// Определяет, загружен ли Variant B backend plist в launchd.
@@ -207,13 +249,20 @@ final class BackendSupervisor: @unchecked Sendable {
 
     /// Перезапускает backend, если он мёртв. Возвращает true при успешном восстановлении.
     ///
-    /// В active режиме ограничен `maxConsecutiveRestarts` попытками подряд,
-    /// чтобы не зациклить перезапуски при системном OOM. В passive режиме
-    /// полагается на launchd KeepAlive и только ждёт восстановления.
+    /// В active режиме: exponential backoff (0/2/5/15s) + circuit breaker после
+    /// circuitOpenAfter (5) последовательных неудач. Circuit закрывается через
+    /// circuitCooldown (5 мин) автоматически.
+    /// В passive режиме полагается на launchd KeepAlive и только ждёт восстановления.
     func restartIfDead() -> Bool {
         if isBackendAlive() {
             consecutiveRestarts = 0
+            circuitOpenedAt = nil
             return true
+        }
+
+        // Circuit breaker check (только для active mode — passive режим не throttle'им)
+        if isCircuitOpen() {
+            return false
         }
 
         switch supervisionMode {
@@ -228,10 +277,22 @@ final class BackendSupervisor: @unchecked Sendable {
             }
 
         case .active:
-            guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
+            consecutiveRestarts += 1
+            if consecutiveRestarts >= Self.circuitOpenAfter {
+                circuitOpenedAt = Date()
                 return false
             }
-            consecutiveRestarts += 1
+
+            let delay: TimeInterval
+            #if DEBUG
+            delay = _testBackoffOverride ?? backoffDelay(attempt: consecutiveRestarts)
+            #else
+            delay = backoffDelay(attempt: consecutiveRestarts)
+            #endif
+            if delay > 0 {
+                Thread.sleep(forTimeInterval: delay)
+            }
+
             stopBackend()
             do {
                 try ensureBackendRunning()

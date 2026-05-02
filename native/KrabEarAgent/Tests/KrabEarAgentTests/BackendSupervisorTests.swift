@@ -25,6 +25,7 @@ private func makeSupervisor(
     supervisor._testEnsureOverride = {
         if let err = ensureError { throw err }
     }
+    supervisor._testBackoffOverride = 0  // без реальных sleep'ов в тестах
     return supervisor
 }
 
@@ -106,20 +107,28 @@ final class BackendSupervisorTests: XCTestCase {
         XCTAssertTrue(result)
     }
 
-    func test_restartIfDead_active_respectsMaxConsecutiveRestarts() {
-        // Ping всегда false → каждый вызов restartIfDead пытается перезапуск.
-        // maxConsecutiveRestarts == 3, 4-й вызов должен вернуть false без ensureBackendRunning.
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+    func test_restartIfDead_active_respectsCircuitBreaker() {
+        // Ping всегда false + ensure всегда кидает → каждый вызов restartIfDead
+        // накапливает consecutiveRestarts. Circuit открывается после 5-го fails.
+        // 6-й вызов возвращает false без вызова ensureBackendRunning.
+        let err = IPCError.socketConnectFailed("test")
+        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: err)
+        supervisor._testBackoffOverride = 0  // без реальных sleep'ов
 
         let r0 = supervisor.restartIfDead()   // consecutiveRestarts → 1
         let r1 = supervisor.restartIfDead()   // consecutiveRestarts → 2
         let r2 = supervisor.restartIfDead()   // consecutiveRestarts → 3
-        let r3 = supervisor.restartIfDead()   // превышает лимит
+        let r3 = supervisor.restartIfDead()   // consecutiveRestarts → 4
+        let r4 = supervisor.restartIfDead()   // consecutiveRestarts → 5 → circuit opens
+        let r5 = supervisor.restartIfDead()   // circuit open → false без ensureBackendRunning
 
-        XCTAssertTrue(r0, "1-й restart должен быть успешным")
-        XCTAssertTrue(r1, "2-й restart должен быть успешным")
-        XCTAssertTrue(r2, "3-й restart должен быть успешным")
-        XCTAssertFalse(r3, "4-й restart превышает лимит — должен вернуть false")
+        XCTAssertFalse(r0, "1-й restart: ensure кидает → false")
+        XCTAssertFalse(r1, "2-й restart: ensure кидает → false")
+        XCTAssertFalse(r2, "3-й restart: ensure кидает → false")
+        XCTAssertFalse(r3, "4-й restart: ensure кидает → false")
+        XCTAssertFalse(r4, "5-й restart: circuit открывается → false")
+        XCTAssertFalse(r5, "6-й restart: circuit open → false (без вызова ensure)")
+        XCTAssertTrue(supervisor.isCircuitOpen(), "После 5 fails circuit должен быть open")
     }
 
     // MARK: stopBackend — passive mode
@@ -129,5 +138,58 @@ final class BackendSupervisorTests: XCTestCase {
         // passive mode: stopBackend() — no-op, не трогает backendProcess
         supervisor.stopBackend()
         XCTAssertNil(supervisor.backendProcess, "passive mode: backendProcess остаётся nil после stopBackend")
+    }
+}
+
+// MARK: - BackendSupervisorBackoffTests
+
+final class BackendSupervisorBackoffTests: XCTestCase {
+
+    /// 5-я попытка restart открывает circuit breaker (без вызова ensure на 5-й и 6-й итерации).
+    func testCircuitBreakerOpensAfterFiveFails() {
+        let supervisor = BackendSupervisor(projectRoot: "/tmp/test")
+        var ensureCalls = 0
+        supervisor._testEnsureOverride = {
+            ensureCalls += 1
+            throw NSError(domain: "test", code: 1, userInfo: nil)
+        }
+        supervisor._testPingOverride = { false }
+        supervisor._testBackoffOverride = 0  // без реальных sleep'ов
+        supervisor.overrideSupervisionMode(.active)
+
+        for _ in 0..<6 {
+            _ = supervisor.restartIfDead()
+        }
+        XCTAssertTrue(supervisor.isCircuitOpen())
+        // Итерации 1-4: ensure вызывается (restarts 1..4 < circuitOpenAfter=5).
+        // Итерация 5: restarts=5 >= 5 → circuit opens, ensure НЕ вызывается.
+        // Итерация 6: circuit open → ensure НЕ вызывается.
+        XCTAssertEqual(ensureCalls, 4, "5-я и 6-я попытки не должны вызвать ensureBackend (circuit opens at restarts=5)")
+    }
+
+    /// После cooldown circuit закрывается, restartIfDead снова работает.
+    func testCircuitClosesAfterCooldown() {
+        let supervisor = BackendSupervisor(projectRoot: "/tmp/test")
+        supervisor._testEnsureOverride = { throw NSError(domain: "test", code: 1) }
+        supervisor._testPingOverride = { false }
+        supervisor._testBackoffOverride = 0
+        supervisor._testCooldownSec = 0.1  // override 5min default to 0.1s
+        supervisor.overrideSupervisionMode(.active)
+
+        for _ in 0..<5 { _ = supervisor.restartIfDead() }
+        XCTAssertTrue(supervisor.isCircuitOpen())
+
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertFalse(supervisor.isCircuitOpen())
+    }
+
+    /// Backoff delays формируются: 1=0s, 2=2s, 3=5s, 4+=15s.
+    func testBackoffSchedule() {
+        let supervisor = BackendSupervisor(projectRoot: "/tmp/test")
+        XCTAssertEqual(supervisor.backoffDelay(attempt: 1), 0)
+        XCTAssertEqual(supervisor.backoffDelay(attempt: 2), 2)
+        XCTAssertEqual(supervisor.backoffDelay(attempt: 3), 5)
+        XCTAssertEqual(supervisor.backoffDelay(attempt: 4), 15)
+        XCTAssertEqual(supervisor.backoffDelay(attempt: 5), 15)
     }
 }
