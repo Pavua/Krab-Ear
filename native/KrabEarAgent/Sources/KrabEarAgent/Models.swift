@@ -134,7 +134,7 @@ struct AgentSettings {
         diarizationEnabled: true,
         llmRewriteEnabled: false,
         gigaamEnabled: false,
-        llmModel: "qwen3.5-9b@6bit",
+        llmModel: "gemma-4-e4b-it-mlx",
         bookmarksHotkeyEnabled: true,
         telnyxAPIKey: "",
         telnyxFromNumber: "",

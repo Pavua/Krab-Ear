@@ -1092,12 +1092,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         settingsRow6.addArrangedSubview(NSView())
 
         // D.10a: AI Settings Row Setup
-        // Список выверенных моделей по результатам бенчмарков Round 1-19 (2026-04-29).
+        // Список выверенных моделей по результатам бенчмарков Round 1-28 (2026-04-29 .. 05-02).
         // Все verified outputs на тестовом наборе (RU/ES/EN + мат + brand recognition + dedup).
         // Hot-swap через GUI работает без restart backend (см. _handle_set_settings_with_hot_reload).
         llmModelSelector.addItems(withTitles: [
-            // 🥇 Round 19 WINNER (2026-04-29 18:10): 7.7 GB, official Qwen3.5-9B 6-bit.
-            // avg 1.4s (fastest clean rewriter), brands ✅, mat ✅, no <think>. NEW DEFAULT.
+            // 🥇 PRODUCTION DEFAULT (2026-05-02): 6.86 GB, Gemma 4 E4B Instruct MLX.
+            // Unified rewriter+VL, no reasoning_content split (в отличие от Qwen3.5/3.6).
+            // avg ~0.8s (fastest clean rewriter), brands ✅, mat ✅, no <think>. Vision-capable.
+            "gemma-4-e4b-it-mlx",
+            // 🥈 Round 19 alt: 7.7 GB, official Qwen3.5-9B 6-bit.
+            // avg 1.4s, brands ✅, mat ✅. ⚠ reasoning_content split в LM Studio API → пустой content.
             "qwen3.5-9b@6bit",
             // 🥈 Round 18 winner: 7.8 GB, Qwen3-14B abliterated v2.
             // avg 1.9s, brands ✅, mat ✅, RU_OK best-of-bench, no hallucination.
