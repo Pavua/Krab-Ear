@@ -280,6 +280,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
         applyMode(settings.mode, persist: false)
 
+        // Phase A: continuous health monitor + status indicator
+        setupHealthMonitor()
+
         if !settings.onboardingCompleted && !options.launchedByLaunchd {
             openQuickStart()
         } else if options.showHistoryOnLaunch {
@@ -297,6 +300,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         selectionTranslator?.stop()
         stopLiveSubsCapture()
         stopRealtimeOverlayPolling()
+        tearDownHealthMonitor()
         backendSupervisor.stopBackend()
     }
 
