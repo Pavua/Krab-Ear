@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 from __version__ import __version__ as APP_VERSION  # noqa: E402
+from backend.health_metrics import HealthMetrics
 from backend.model_cache_manager import ModelCacheManager
 from backend.hotword_detector import HotwordDetector
 from backend.openwakeword_adapter import OpenWakeWordAdapter
@@ -197,6 +198,7 @@ class BackendService:
 
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
+        self.health_metrics = HealthMetrics()
         self._settings_svc = SettingsService(store=self.store)
         self._system_monitor = SystemMonitor()
         self._preview_lock = threading.Lock()
@@ -1154,7 +1156,9 @@ class BackendService:
             "status": "ok",
             "service": "krabear-backend",
             "version": APP_VERSION,
-            "uptime_sec": round(time.monotonic() - self._start_time, 1),
+            "uptime_sec": self.health_metrics.uptime_sec(),
+            "rss_mb": self.health_metrics.rss_mb(),
+            "active_requests": self.health_metrics.active_requests(),
             "is_recording": bool(getattr(self.recorder, "is_recording", False)),
             "history_count": history_count,
         }
