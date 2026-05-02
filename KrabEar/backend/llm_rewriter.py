@@ -14,6 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+import re
 import requests
 from enum import Enum
 from typing import Optional
@@ -243,7 +244,7 @@ class LLMRewriter:
         base_url: str,
         api_key: str,
         model: str,
-        timeout_sec: float = 4.0,
+        timeout_sec: float = 15.0,  # was 4.0 — too short for LM Studio JIT cold load (~6-9s from SSD)
         circuit_fail_threshold: int = 3,
         circuit_initial_reset_sec: int = 60,
         circuit_max_reset_sec: int = 600,
@@ -281,9 +282,21 @@ class LLMRewriter:
         self._last_latency_ms = None
         return True
 
+    _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
     def _postprocess(self, content: str) -> str:
-        """Убирает типичный мусор в ответе LLM (кавычки, префиксы, multi-paragraph)."""
+        """Убирает типичный мусор в ответе LLM (кавычки, префиксы, <think>, multi-paragraph)."""
         s = (content or "").strip()
+        if not s:
+            return ""
+
+        # Strip <think>...</think> reasoning blocks (Qwen3.5/Qwen3 emit these by default)
+        s = self._THINK_RE.sub("", s).strip()
+        # If <think> opened but never closed (hit max_tokens), drop everything from <think>
+        if "<think>" in s.lower() and "</think>" not in s.lower():
+            idx = s.lower().index("<think>")
+            s = s[:idx].strip()
+
         if not s:
             return ""
 
@@ -384,34 +397,22 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
 
-        # 3. Endpoint selection: Qwen family → /v1/completions (root-cause fix
-        # для tool_calls leak'а в LM Studio), остальные → /v1/chat/completions.
-        if self._is_qwen_family():
-            payload = {
-                "model": self._model,
-                "prompt": self._build_qwen_chatml_prompt(cleaned_input),
-                "temperature": 0.0,
-                "max_tokens": self._estimate_max_tokens(cleaned_input),
-                "stream": False,
-                "stop": ["<|im_end|>", "<|im_start|>", "Исправленный текст:", "Исходный текст:"],
-            }
-            endpoint_path = "/completions"
-        else:
-            payload = {
-                "model": self._model,
-                "messages": self._build_messages(cleaned_input),
-                "temperature": 0.0,
-                "max_tokens": self._estimate_max_tokens(cleaned_input),
-                "stream": False,
-                "stop": ["Исправленный текст:", "Исходный текст:"],
-                # Last-resort guard для не-Qwen моделей, эмитящих tool_calls
-                # (видно в LM Studio логах). На /v1/chat/completions LM Studio
-                # активирует tool extractor, который ловит <tool_call>...</tool_call>
-                # markers и переносит в структурированное поле, теряя content.
-                "tool_choice": "none",
-                "tools": [],
-            }
-            endpoint_path = "/chat/completions"
+        # 3. ALL models now use /v1/chat/completions (proper chat template).
+        # Previous /v1/completions routing for Qwen (to avoid tool_calls leak)
+        # CAUSED: no chat template → model ignores system prompt → <think> mode
+        # → all max_tokens spent on reasoning → empty content → fallback.
+        # tool_calls leak is now handled by tool_calls guard in parse step (6b).
+        payload = {
+            "model": self._model,
+            "messages": self._build_messages(cleaned_input),
+            "temperature": 0.0,
+            "max_tokens": self._estimate_max_tokens(cleaned_input),
+            "stream": False,
+            "stop": ["Исправленный текст:", "Исходный текст:"],
+            "tool_choice": "none",
+            "tools": [],
+        }
+        endpoint_path = "/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
@@ -442,16 +443,45 @@ class LLMRewriter:
         latency_ms = int((time.monotonic() - start) * 1000)
         self._last_latency_ms = latency_ms
 
-        # 5. HTTP status check
+        # 5. HTTP status check — with JIT retry for LM Studio Channel Error.
+        # LM Studio returns 400 "Channel Error" when model is cold-loading via JIT.
+        # The model loads in 1-6s, so a single retry after 5s usually succeeds.
         if response.status_code != 200:
-            self._circuit.record_failure()
-            self._last_error = f"http_{response.status_code}"
-            return LLMRewriteResult(
-                ok=False,
-                text=None,
-                fallback_reason=f"http_{response.status_code}",
-                latency_ms=latency_ms,
-            )
+            is_channel_error = response.status_code == 400 and "Channel Error" in response.text[:200]
+            if is_channel_error and not getattr(self, "_jit_retrying", False):
+                logger.info("LM Studio Channel Error (JIT cold load) — waiting 5s and retrying once")
+                self._jit_retrying = True
+                time.sleep(5)
+                try:
+                    response = self._session.post(
+                        f"{self._base_url}{endpoint_path}",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                    latency_ms = int((time.monotonic() - start) * 1000)
+                    self._last_latency_ms = latency_ms
+                finally:
+                    self._jit_retrying = False
+                if response.status_code == 200:
+                    logger.info("JIT retry succeeded after %d ms", latency_ms)
+                    # fall through to parse step below
+                else:
+                    self._circuit.record_failure()
+                    self._last_error = f"http_{response.status_code}_after_retry"
+                    return LLMRewriteResult(
+                        ok=False, text=None,
+                        fallback_reason=f"http_{response.status_code}_after_retry",
+                        latency_ms=latency_ms,
+                    )
+            else:
+                self._circuit.record_failure()
+                self._last_error = f"http_{response.status_code}"
+                return LLMRewriteResult(
+                    ok=False, text=None,
+                    fallback_reason=f"http_{response.status_code}",
+                    latency_ms=latency_ms,
+                )
 
         # 6. Parse JSON response — schema differs between endpoints:
         #   /v1/completions:        choices[0].text                  (plain string)
@@ -513,21 +543,20 @@ class LLMRewriter:
                 )
 
         # 9. Length ratio guard — dramatic shrink/expansion = hallucination
-        # Adaptive thresholds:
-        # - Очень короткие inputs (<60 chars) часто содержат много повторов re-articulation,
-        #   которые легитимно сжимаются до 15-25% (например "так так так так так так" → "так").
-        # - Длинные inputs (>200 chars) редко сжимаются ниже 30% без потери смысла.
-        # - Short range (60-200): in-between threshold 0.22.
+        # Adaptive thresholds — VERY permissive for short segments:
+        # Krab Ear breaks dictation into 8-22 char segments for realtime preview.
+        # LLM legitimately compresses "Ну вот я хочу сказать" → "Хочу сказать" (50%).
+        # Even "так так так" → "так" (33%). Guard only catches catastrophic failures.
         input_len = len(cleaned_input)
         output_len = len(cleaned)
-        if input_len > 20:
+        if input_len > 30:  # re-enabled after adding <think> stripping to _postprocess
             ratio = output_len / input_len
-            if input_len < 60:
-                short_thr = 0.15  # очень короткие — допускаем агрессивное сжатие
+            if input_len < 80:
+                short_thr = 0.05  # 5% — almost always pass (only catch empty/1-word outputs)
             elif input_len < 200:
-                short_thr = 0.22
+                short_thr = 0.10  # 10% — permissive
             else:
-                short_thr = 0.30  # длинные — guard построже
+                short_thr = 0.20  # 20% — длинные тексты, построже
             if ratio < short_thr:
                 logger.warning(
                     "LLM output too short (%.0f%% of input, threshold %.0f%%), falling back to original",

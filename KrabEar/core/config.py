@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx"
-    LLM_TIMEOUT_SEC: float = 5.0
+    LLM_TIMEOUT_SEC: float = 20.0  # was 5.0 — too short for LM Studio JIT cold load (~6-9s from SSD mmap)
     LLM_CIRCUIT_FAIL_THRESHOLD: int = 3
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
