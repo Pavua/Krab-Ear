@@ -283,6 +283,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "paste.ax_denied", "paste.app_unsupported",
             "rewriter.timeout", "rewriter.connection_error",
             "rewriter.circuit_open", "rewriter.unavailable",
+            # Added 2026-05-04 — gemma-4 production failure modes (HTTP 200
+            # but content empty / tool_calls leak / parse error)
+            "rewriter.tool_calls_emitted",
+            "rewriter.empty_response",
+            "rewriter.parse_error",
             "stt.load_fail", "stt.empty_text",
             "diarization.no_token", "diarization.pipeline_fail",
             "translation.timeout",
@@ -1444,7 +1449,18 @@ self._push_error("rewriter.connection_error", f"connection_error: {exc}")
 
 # In HTTP non-200 branch (final, after retry exhaustion):
 self._push_error("rewriter.timeout", f"http_{response.status_code}")
+
+# In tool_calls_emitted guard (line ~510-519, "if tool_calls and not content"):
+self._push_error("rewriter.tool_calls_emitted", f"model={self._model} emitted tool_calls instead of text content")
+
+# In empty_response guard (line ~526-530, "if not cleaned"):
+self._push_error("rewriter.empty_response", f"model={self._model} returned empty content")
+
+# In parse_error branch (line ~500-505, JSON decode/key error):
+self._push_error("rewriter.parse_error", f"parse_error: {exc}", severity="warn")
 ```
+
+**Production context:** gemma-4-e4b-it-mlx (Vision+Tool capable) frequently emits `<tool_call>` JSON instead of plain text when given the numbered-rule SYSTEM_PROMPT. mlx_lm's stream_generate also raises UnboundLocalError mid-stream. HTTP layer returns 200 with empty `content` + populated `tool_calls`. The first three pushes (timeout/connection/http_5xx) are dormant for this model — they fire for connection-level failures. The latter three (tool_calls_emitted/empty_response/parse_error) fire on every gemma-4 failure. Without B.1, these were 100% silent in user-facing UI.
 
 Add in `_rewrite_impl` near the top, after circuit-breaker check:
 
@@ -2133,7 +2149,7 @@ Test plan: see plan file Task 15 manual acceptance criteria.
 | Layer 4 — StatusIndicator severity badge | 12 |
 | Layer 5 — action handlers (real 3 + stubs) | 5 |
 | Sentry tier mapping (info skip, warn batch, error/critical immediate) | 4 |
-| Wired errors: rewriter.timeout, rewriter.connection_error | 8 |
+| Wired errors: rewriter.timeout, rewriter.connection_error, rewriter.tool_calls_emitted, rewriter.empty_response, rewriter.parse_error | 8 |
 | Wired errors: paste.ax_denied | 9, 14 |
 | Wired errors: diarization.no_token | 9 |
 | KRAB_EAR_LLM_FORCE_TIMEOUT env | 8 |

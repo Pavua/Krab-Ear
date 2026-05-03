@@ -337,6 +337,37 @@ ERROR_REGISTRY: dict[str, dict] = {
         "severity": "info",
         "dedupe_seconds": 300,
     },
+    # Added 2026-05-04 after observing real production failure modes for
+    # gemma-4-e4b-it-mlx (Vision+Tool capable) — model emits <tool_call>
+    # JSON instead of plain text editor output due to its tool-calling
+    # fine-tune triggered by numbered-rule SYSTEM_PROMPT. mlx_lm's
+    # stream_generate also raises UnboundLocalError mid-stream. HTTP
+    # returns 200 with empty content + tool_calls field; existing guards
+    # catch it but were silent before B.1.
+    "rewriter.tool_calls_emitted": {
+        "user_msg_ru": "Rewriter вернул tool_calls вместо текста — raw text вставлен",
+        "actionable": True,
+        "action_id": "disable_rewriter",
+        "action_label": "Выключить rewriter",
+        "severity": "warn",
+        "dedupe_seconds": 60,
+    },
+    "rewriter.empty_response": {
+        "user_msg_ru": "Rewriter вернул пустой ответ — raw text вставлен",
+        "actionable": True,
+        "action_id": "disable_rewriter",
+        "action_label": "Выключить rewriter",
+        "severity": "warn",
+        "dedupe_seconds": 60,
+    },
+    "rewriter.parse_error": {
+        "user_msg_ru": "Rewriter вернул некорректный JSON — raw text вставлен",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 120,
+    },
 
     # ── Layer: stt ───────────────────────────────────────────────
     "stt.load_fail": {
@@ -422,7 +453,7 @@ ERROR_REGISTRY: dict[str, dict] = {
 }
 ```
 
-**Total: 15 codes** (paste 2, rewriter 4, stt 2, diarization 2, translation 1, mlx 1, history 1, vocabulary 1, hotkey 1 = 9 user-facing классов из catalog'а + 6 sub-variants для finer-grained UX). Каждый дополнительный sub-variant требует отдельный регрессионный тест.
+**Total: 18 codes** (paste 2, rewriter 7, stt 2, diarization 2, translation 1, mlx 1, history 1, vocabulary 1, hotkey 1 = 9 user-facing классов из catalog'а + 9 sub-variants для finer-grained UX, включая 3 кода добавленных 2026-05-04 для actual production failure modes гемма-4: tool_calls_emitted, empty_response, parse_error). Каждый дополнительный sub-variant требует отдельный регрессионный тест.
 
 ---
 
