@@ -180,6 +180,9 @@ class BackendService:
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
+        # Fire background warmup if rewriter is enabled — reduces first-call latency
+        if self._llm_rewriter is not None:
+            threading.Thread(target=self._llm_rewriter.warmup, daemon=True).start()
         self._action_items_extractor = self._init_action_items_extractor()
 
         if transcriber is None:
