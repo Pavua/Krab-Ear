@@ -782,5 +782,57 @@ class LLMRewriterLoudFailuresTestCase(unittest.TestCase):
         self.assertTrue(any("status=500" in line for line in cm.output))
 
 
+class LLMRewriter503JitRetryTestCase(unittest.TestCase):
+    """Tests for the 503 JIT retry path (section 5 of _rewrite_impl)."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=5.0,
+        )
+
+    def _resp(self, status_code, content=None):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.text = ""
+        if content is not None:
+            mock.json.return_value = {"choices": [{"message": {"content": content}}]}
+        return mock
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_succeeds(self, mock_sleep):
+        rewritten = "Исправленный текст готов."
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(200, rewritten)]
+        )
+        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text_or_fallback("raw"), rewritten)
+        self.assertIsNotNone(result.latency_ms)
+        mock_sleep.assert_called_once_with(10)
+        self.assertEqual(self.rewriter._circuit.state, "closed")
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_then_503_fails(self, mock_sleep):
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(503)]
+        )
+        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.fallback_reason.startswith("http_503"))
+        self.assertEqual(self.rewriter._circuit._consecutive_failures, 1)
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_no_recursion(self, mock_sleep):
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(503)]
+        )
+        self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertEqual(self.rewriter._session.post.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
