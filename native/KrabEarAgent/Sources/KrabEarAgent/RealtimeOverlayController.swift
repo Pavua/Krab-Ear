@@ -96,7 +96,7 @@ private final class StageBadgeView: NSView {
 /// Near-cursor positioning, анимированное появление/исчезновение,
 /// поддержка 3-стадийного reveal после окончания записи.
 @MainActor
-public final class RealtimeOverlayController {
+public final class RealtimeOverlayController: NSObject {
 
     // MARK: Panel + Views
 
@@ -158,12 +158,13 @@ public final class RealtimeOverlayController {
     private let cornerRadius: CGFloat = KrabEarTheme.Metrics.cardCornerRadius
 
     // CABasicAnimation keys
-    private let dotPulseKey   = "krabEarDotPulse"
-    private let labelPulseKey = "krabEarLabelPulse"
+    private let dotPulseKey       = "krabEarDotPulse"
+    private let labelPulseKey     = "krabEarLabelPulse"
+    private let breathingKey      = "krabEarBreathing"
 
     // MARK: Init
 
-    public init() {
+    public override init() {
         let initialRect = NSRect(x: 0, y: 0, width: 520, height: 80)
         self.panel = NSPanel(
             contentRect: initialRect,
@@ -175,9 +176,11 @@ public final class RealtimeOverlayController {
         self.effectView = NSVisualEffectView(frame: initialRect)
         self.tintView   = DynamicTintView(frame: initialRect)
 
+        super.init()
         setupPanel()
         setupEffectView()
         setupUI()
+        setupHoverTracking()  // F7-5: hover dimming affordance
     }
 
     // MARK: - Public API
@@ -187,19 +190,21 @@ public final class RealtimeOverlayController {
         guard overlayState == .hidden else { return }
         overlayState = .live
         stageBadge.isHidden = true
-        tintView.tintColor = NSColor.systemRed.withAlphaComponent(0.04)
+        tintView.tintColor = NSColor.systemRed.withAlphaComponent(0.06)
         positionNearCursor()
         panel.alphaValue = 0
         panel.orderFront(nil)
         animateShow()
         startDotPulse()    // 4a
         startLabelPulse()  // 4d
+        startBreathing()   // F7-1: breathing tint alpha
         recordingDot.isHidden = false
     }
 
     public func hide() {
         revealTask?.cancel()
         stopAllPulse()
+        stopBreathing()    // F7-1: remove breathing on hide
         if overlayState == .hidden { return }
         overlayState = .hidden
         recordingDot.isHidden = true
@@ -220,13 +225,13 @@ public final class RealtimeOverlayController {
 
         let clean = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty {
-            primaryLabel.stringValue = "Слушаю…"
+            setPrimaryText("Слушаю…")    // F7-4: kern-attributed
         } else {
             let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if cleanTrans.isEmpty {
-                primaryLabel.stringValue = clean
+                setPrimaryText(clean)    // F7-4
             } else {
-                primaryLabel.stringValue = "\(clean)\n\n↔ Перевод\n\(cleanTrans)"
+                setPrimaryText("\(clean)\n\n↔ Перевод\n\(cleanTrans)")  // F7-4
             }
         }
         if panel.isVisible {
@@ -262,10 +267,11 @@ public final class RealtimeOverlayController {
     ) {
         revealTask?.cancel()
         stopAllPulse()
+        stopBreathing()    // F7-1: remove breathing when entering reveal
         recordingDot.isHidden = true
 
         if overlayState == .hidden {
-            primaryLabel.stringValue = rawText.isEmpty ? "…" : rawText
+            setPrimaryText(rawText.isEmpty ? "…" : rawText)  // F7-4: kern-attributed
             positionNearCursor()
             panel.alphaValue = 0
             panel.orderFront(nil)
@@ -273,8 +279,8 @@ public final class RealtimeOverlayController {
         }
 
         overlayState = .reveal
-        // 4b: accent tint during transcribing
-        tintView.tintColor = NSColor.controlAccentColor.withAlphaComponent(0.04)
+        // 4b: accent tint during transcribing (F7 token: 0.08)
+        tintView.tintColor = NSColor.controlAccentColor.withAlphaComponent(0.08)
 
         let stageInterval = duration / 3.0
 
@@ -316,7 +322,7 @@ public final class RealtimeOverlayController {
         panel.isOpaque            = false
         panel.backgroundColor     = .clear
         panel.hasShadow           = false
-        panel.ignoresMouseEvents  = true
+        panel.ignoresMouseEvents  = false  // F7-5: allow hover tracking (nonactivatingPanel prevents focus steal)
     }
 
     private func setupEffectView() {
@@ -397,9 +403,9 @@ public final class RealtimeOverlayController {
         primaryLabel.alignment       = .left
         primaryLabel.maximumNumberOfLines = 0
         primaryLabel.lineBreakMode   = .byWordWrapping
-        primaryLabel.stringValue     = "Слушаю…"
         primaryLabel.wantsLayer      = true
         primaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        setPrimaryText("Слушаю…")  // F7-4: use kern-attributed setter
 
         audioLevelMeter.translatesAutoresizingMaskIntoConstraints = false
         effectView.addSubview(modeLabel)
@@ -544,7 +550,7 @@ public final class RealtimeOverlayController {
     private func showStage(text: String, label: String) {
         stageBadge.stageText   = label
         stageBadge.isHidden    = false
-        primaryLabel.stringValue = text
+        setPrimaryText(text)   // F7-4: kern-attributed
         adjustHeight()
     }
 
@@ -555,9 +561,11 @@ public final class RealtimeOverlayController {
             adjustHeight()
             return
         }
+        // F7-3: ease-out spring curve for liquid reveal (cubic-bezier 0.25/1/0.25/1)
+        let revealEasing = CAMediaTimingFunction(controlPoints: 0.25, 1.0, 0.25, 1.0)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = KrabEarTheme.Motion.Duration.short
-            ctx.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+            ctx.timingFunction = revealEasing
             ctx.allowsImplicitAnimation = true
             primaryLabel.animator().alphaValue = 0
             stageBadge.animator().alphaValue   = 0
@@ -566,11 +574,11 @@ public final class RealtimeOverlayController {
                 guard let self else { return }
                 self.stageBadge.stageText      = label
                 self.stageBadge.isHidden       = false
-                self.primaryLabel.stringValue  = text
+                self.setPrimaryText(text)      // F7-4: kern-attributed
                 self.adjustHeight()
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = KrabEarTheme.Motion.Duration.short
-                    ctx.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+                    ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 1.0, 0.25, 1.0)
                     ctx.allowsImplicitAnimation = true
                     self.primaryLabel.animator().alphaValue = 1.0
                     self.stageBadge.animator().alphaValue   = 1.0
@@ -594,8 +602,9 @@ public final class RealtimeOverlayController {
         let width = clamp(value: 520, min: minWidth, max: maxWidth)
         let height = currentPanelHeight()
 
-        var x = cursor.x + 50
-        var y = cursor.y - height - 30
+        // F7-2: cursor offset 16pt right, 24pt below (bottom-right of cursor tip)
+        var x = cursor.x + 16
+        var y = cursor.y - 24 - height
 
         if x + width > visible.maxX {
             x = cursor.x - width - 10
@@ -646,6 +655,67 @@ public final class RealtimeOverlayController {
         let textH = heightForString(primaryLabel.stringValue, font: primaryLabel.font ?? KrabEarTheme.Typography.display, width: textWidth)
         let total = topRowH + vuMeterH + stageLabelH + padding + textH
         return clamp(value: total, min: minHeight, max: maxHeight)
+    }
+
+    // MARK: - F7-1: Breathing Tint Animation
+
+    private func startBreathing() {
+        guard !reduceMotion else { return }
+        tintView.layer?.removeAnimation(forKey: breathingKey)
+        let breathing = CABasicAnimation(keyPath: "opacity")
+        breathing.fromValue  = 0.03
+        breathing.toValue    = 0.08
+        breathing.duration   = 1.5
+        breathing.autoreverses = true
+        breathing.repeatCount  = .infinity
+        tintView.layer?.add(breathing, forKey: breathingKey)
+    }
+
+    private func stopBreathing() {
+        tintView.layer?.removeAnimation(forKey: breathingKey)
+    }
+
+    // MARK: - F7-4: Typographic Tracking Helper
+
+    /// Sets primaryLabel text with 0.3pt letter-spacing kern applied.
+    func setPrimaryText(_ text: String) {
+        let font = primaryLabel.font ?? KrabEarTheme.Typography.display
+        let attrs: [NSAttributedString.Key: Any] = [
+            .kern: 0.3 as NSNumber,
+            .font: font,
+            .foregroundColor: NSColor.labelColor
+        ]
+        primaryLabel.attributedStringValue = NSAttributedString(string: text, attributes: attrs)
+    }
+
+    // MARK: - F7-5: Hover Dimming
+
+    private func setupHoverTracking() {
+        guard let contentView = panel.contentView else { return }
+        let tracking = NSTrackingArea(
+            rect: contentView.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        contentView.addTrackingArea(tracking)
+    }
+
+    // NSResponder-compatible (NSObject inherits from NSResponder via Objective-C runtime)
+    @objc public func mouseEntered(with event: NSEvent) {
+        guard overlayState != .hidden else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            panel.animator().alphaValue = 0.8 * targetAlpha
+        }
+    }
+
+    @objc public func mouseExited(with event: NSEvent) {
+        guard overlayState != .hidden else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            panel.animator().alphaValue = targetAlpha
+        }
     }
 
     // MARK: - Helpers
