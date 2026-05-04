@@ -158,6 +158,18 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bКарр[еэ]фур\b", "Carrefour"),
     (r"\bЛидл\b", "Lidl"),
     (r"\bАльди\b", "Aldi"),
+    # AI/ML — Phase C.4 brand expansion (2026-05-04)
+    # Gemma — Google's open model family; Whisper mishears as "Гемма" / "Джемма"
+    (r"\bГемма\b", "Gemma"),
+    (r"\bДжемма\b", "Gemma"),
+    # Anthropic — parent company of Claude; фонетическое «Антропик»
+    (r"\bАнтропик\b", "Anthropic"),
+    # Claude — model name; already handled separately but adding Клод fallback
+    # (r"\bКлод\b", "Claude") already exists above — no duplicate needed
+    # LM Studio — already has entries above; adding "Элэм Студио" variant
+    (r"\bЭлэм\s*Студио\b", "LM Studio"),
+    # Krab Ear — extended: "Краб Ир" already above; add "КрабИр" variant (merged)
+    # (already present as \bКрабИр\b above)
 ]
 BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(pat, re.IGNORECASE), repl) for pat, repl in _BRAND_REPLACEMENTS_RAW
@@ -228,6 +240,63 @@ _HALLUCINATION_PATTERNS: list[re.Pattern] = [
         r"(?:\.\s+)?спасибо\.?\s*$",  # standalone trailing "Спасибо."
     ]
 ]
+
+# ── Repetition-loop detector (Phase C.4, 2026-05-04) ───────────────────────
+# Whisper sometimes enters pathological loops on silent / ambiguous audio:
+#   «Атакса хвостимда. Атакса хвостимда.»  — repeated bigram × 2
+#   «согласен да согласен да согласен да...» — repeated trigram × 70+
+#
+# Three independent heuristics — any one is sufficient to flag the text.
+_SENTENCE_SPLIT_LOOP_RE = re.compile(r"[.!?…]+\s*")
+
+
+def is_likely_repetition_loop(text: str) -> tuple[bool, str]:
+    """Detect Whisper repetition-hallucination loops.
+
+    Returns:
+        ``(is_loop, reason)`` — ``is_loop`` is True when the text looks like a
+        Whisper repetition artefact.  ``reason`` is an ASCII-safe debug string
+        (empty when ``is_loop`` is False).
+
+    Heuristics (any one sufficient):
+    1. ≥5 identical adjacent bigrams  — classic "X Y X Y X Y …" loop.
+    2. ≥3 identical sentences in a row — sentence-level repetition.
+    3. text length > 60 chars **and** unique-token ratio < 0.15 — extreme
+       redundancy typical of 70+-word loops.
+
+    The function never raises and never imports heavy ML modules.
+    """
+    if not text or len(text) < 20:
+        return (False, "")
+
+    tokens = text.lower().split()
+    if len(tokens) < 6:
+        return (False, "")
+
+    # ── Heuristic 1: repeated bigrams ──────────────────────────────────────
+    from collections import Counter
+    bigrams = [(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)]
+    bigram_counts = Counter(bigrams)
+    most_common_bigram, count = bigram_counts.most_common(1)[0]
+    if count >= 5:
+        return (True, f"repeated_bigram x{count}: {' '.join(most_common_bigram)}")
+
+    # ── Heuristic 2: repeated sentences ────────────────────────────────────
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_LOOP_RE.split(text) if s.strip()]
+    if len(sentences) >= 3:
+        sent_counts = Counter(s.lower() for s in sentences)
+        most_common_sent, sent_count = sent_counts.most_common(1)[0]
+        if sent_count >= 3:
+            preview = most_common_sent[:40] + ("…" if len(most_common_sent) > 40 else "")
+            return (True, f"repeated_sentence x{sent_count}: {preview}")
+
+    # ── Heuristic 3: low unique-token ratio ─────────────────────────────────
+    if len(tokens) > 30 and len(text) > 60:
+        unique_ratio = len(set(tokens)) / len(tokens)
+        if unique_ratio < 0.15:
+            return (True, f"low_unique_ratio={unique_ratio:.2f}")
+
+    return (False, "")
 
 
 class TextUtils:
