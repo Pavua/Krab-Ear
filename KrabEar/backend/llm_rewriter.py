@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -263,6 +264,31 @@ class LLMRewriter:
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
 
+    def _push_error(self, code: str, message_debug: str, severity: str = "warn") -> None:
+        """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=severity,
+                component="rewriter",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Rewriter ошибка"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"model": self._model, "base_url": self._base_url},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:  # never raise from rewriter
+            logger.exception("error_bus.push failed for code=%s", code)
+
     def _postprocess(self, content: str) -> str:
         """Убирает типичный мусор в ответе LLM (кавычки, префиксы, multi-paragraph)."""
         s = (content or "").strip()
@@ -323,6 +349,15 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
 
+        # 2a. Testing hook: KRAB_EAR_LLM_FORCE_TIMEOUT simulates timeout without HTTP call
+        if os.getenv("KRAB_EAR_LLM_FORCE_TIMEOUT") == "1":
+            self._circuit.record_failure()
+            self._last_error = "timeout"
+            self._push_error("rewriter.timeout", "forced via KRAB_EAR_LLM_FORCE_TIMEOUT")
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="timeout", latency_ms=None
+            )
+
         # 3. Подготовка запроса
         payload = {
             "model": self._model,
@@ -355,6 +390,7 @@ class LLMRewriter:
                 "LLM rewriter failure: kind=timeout model=%s base_url=%s elapsed_ms=%s",
                 self._model, self._base_url, int(self._timeout * 1000),
             )
+            self._push_error("rewriter.timeout", f"timeout after {self._timeout}s")
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="timeout", latency_ms=None
             )
@@ -366,6 +402,7 @@ class LLMRewriter:
                 self._model, self._base_url, int((time.monotonic() - start) * 1000),
                 type(exc).__name__,
             )
+            self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc}")
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="connection_error", latency_ms=None
             )
@@ -396,6 +433,7 @@ class LLMRewriter:
                     "LLM rewriter failure: kind=timeout model=%s base_url=%s elapsed_ms=%s",
                     self._model, self._base_url, int(self._timeout * 1000),
                 )
+                self._push_error("rewriter.timeout", f"timeout after {self._timeout}s (503 retry)")
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="timeout", latency_ms=None
                 )
@@ -407,6 +445,7 @@ class LLMRewriter:
                     self._model, self._base_url, int((time.monotonic() - start) * 1000),
                     type(exc).__name__,
                 )
+                self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc} (503 retry)")
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="connection_error", latency_ms=None
                 )
@@ -421,6 +460,7 @@ class LLMRewriter:
                 "LLM rewriter failure: kind=http_error model=%s base_url=%s elapsed_ms=%s status=%s body=%s",
                 self._model, self._base_url, latency_ms, response.status_code, body_preview,
             )
+            self._push_error("rewriter.timeout", f"http_{response.status_code}_after_retry")
             return LLMRewriteResult(
                 ok=False,
                 text=None,
@@ -431,19 +471,40 @@ class LLMRewriter:
         # 6. Parse JSON response
         try:
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"]
+            content = message.get("content") if isinstance(message, dict) else message["content"]
+            # 6a. tool_calls_emitted guard — gemma-4 / tool-capable models leak tool_calls
+            if not content and isinstance(message, dict) and message.get("tool_calls"):
+                self._circuit.record_failure()
+                self._last_error = "tool_calls_emitted"
+                logger.warning(
+                    "LLM emitted tool_calls instead of content model=%s base_url=%s",
+                    self._model, self._base_url,
+                )
+                self._push_error(
+                    "rewriter.tool_calls_emitted",
+                    f"model={self._model} emitted tool_calls instead of text content",
+                )
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="tool_calls_emitted", latency_ms=latency_ms
+                )
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             self._last_error = f"parse_error: {exc}"
+            self._push_error("rewriter.parse_error", f"parse_error: {exc}")
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="parse_error", latency_ms=latency_ms
             )
 
         # 7. Postprocess
-        cleaned = self._postprocess(content)
+        cleaned = self._postprocess(content or "")
         if not cleaned:
             self._circuit.record_failure()
             self._last_error = "empty_response"
+            self._push_error(
+                "rewriter.empty_response",
+                f"model={self._model} returned empty content",
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="empty_response", latency_ms=latency_ms
             )

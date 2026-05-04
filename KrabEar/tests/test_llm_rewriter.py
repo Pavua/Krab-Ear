@@ -1,7 +1,10 @@
 """Unit tests для backend/llm_rewriter.py — CircuitBreaker + LLMRewriter."""
 
+import os
 import unittest
 from unittest.mock import patch, MagicMock
+
+import requests
 
 
 class CircuitBreakerTestCase(unittest.TestCase):
@@ -832,6 +835,81 @@ class LLMRewriter503JitRetryTestCase(unittest.TestCase):
         )
         self.rewriter.rewrite("исходный текст для проверки retry")
         self.assertEqual(self.rewriter._session.post.call_count, 2)
+
+
+class LLMRewriterErrorBusPushTests(unittest.TestCase):
+    """Verify error_bus.push is called at all 6 failure paths in _rewrite_impl."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.error_bus = MagicMock()
+        self.rewriter = LLMRewriter(
+            base_url="http://127.0.0.1:1234/v1",
+            api_key="x",
+            model="gemma-4-e4b-it-mlx",
+            timeout_sec=0.01,
+        )
+        self.rewriter._error_bus = self.error_bus  # late injection per Task 7
+
+    def _pushed_codes(self):
+        return [c.args[0].code for c in self.error_bus.push.call_args_list]
+
+    def test_timeout_pushes_rewriter_timeout(self):
+        with patch.object(self.rewriter._session, "post", side_effect=requests.Timeout()):
+            self.rewriter.rewrite("text")
+        self.assertIn("rewriter.timeout", self._pushed_codes())
+
+    def test_connection_error_pushes_rewriter_connection_error(self):
+        with patch.object(self.rewriter._session, "post",
+                          side_effect=requests.ConnectionError("refused")):
+            self.rewriter.rewrite("text")
+        self.assertIn("rewriter.connection_error", self._pushed_codes())
+
+    def test_http_500_pushes_rewriter_error(self):
+        # After non-200 response — should push a rewriter.* code
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = "internal error"
+        with patch.object(self.rewriter._session, "post", return_value=resp):
+            self.rewriter.rewrite("text")
+        codes = self._pushed_codes()
+        self.assertTrue(any(c.startswith("rewriter.") for c in codes))
+
+    def test_tool_calls_only_pushes_rewriter_tool_calls_emitted(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "choices": [{"message": {"content": "", "tool_calls": [{"id": "1"}]}}]
+        }
+        with patch.object(self.rewriter._session, "post", return_value=resp):
+            self.rewriter.rewrite("text")
+        self.assertIn("rewriter.tool_calls_emitted", self._pushed_codes())
+
+    def test_empty_content_pushes_rewriter_empty_response(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"choices": [{"message": {"content": ""}}]}
+        with patch.object(self.rewriter._session, "post", return_value=resp):
+            self.rewriter.rewrite("text")
+        self.assertIn("rewriter.empty_response", self._pushed_codes())
+
+    def test_parse_error_pushes_rewriter_parse_error(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.side_effect = ValueError("bad json")
+        with patch.object(self.rewriter._session, "post", return_value=resp):
+            self.rewriter.rewrite("text")
+        self.assertIn("rewriter.parse_error", self._pushed_codes())
+
+    def test_force_timeout_env_simulates_timeout(self):
+        os.environ["KRAB_EAR_LLM_FORCE_TIMEOUT"] = "1"
+        try:
+            result = self.rewriter.rewrite("text")
+            self.assertFalse(result.ok)
+            self.assertEqual(result.fallback_reason, "timeout")
+            self.assertIn("rewriter.timeout", self._pushed_codes())
+        finally:
+            os.environ.pop("KRAB_EAR_LLM_FORCE_TIMEOUT", None)
 
 
 if __name__ == "__main__":
