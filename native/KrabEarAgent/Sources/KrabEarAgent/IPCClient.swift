@@ -117,6 +117,11 @@ final class IPCClient: @unchecked Sendable {
         }
         defer { close(fd) }
 
+        // SO_NOSIGPIPE: write() в закрытый сокет вернёт EPIPE вместо SIGPIPE-kill.
+        // Дублирует global signal(SIGPIPE, SIG_IGN) из main.swift (KRAB-EAR-AGENT-F).
+        var noSigpipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+
         // Per-method timeout: status calls могут использовать quickTimeoutSec (5s);
         // transcribe / LLM ops — defaultTimeoutSec (60s, см. PR #316 rationale).
         // AGENT-3 root cause (sync IPC на main thread) покрыт PRs #299/#300/#315.
