@@ -153,6 +153,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Phase C C.6: POSIX flock — race-free single-instance guard.
+        // Должен быть ДО killOtherAgentInstances — если другой экземпляр уже держит lock,
+        // немедленно завершаем этот процесс (не убивая старый экземпляр).
+        guard acquireFileLock(logger: logger) else {
+            // Другой экземпляр Krab Ear уже запущен и держит lock.
+            NSApp.terminate(nil)
+            return
+        }
+
+        // Phase C C.6: Cleanup worktree shadow .app bundles из LaunchServices DB.
+        // Выполняется до основного UI setup, чтобы LaunchServices не открывала shadow copy.
+        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
+        cleanupWorktreeShadows(projectRoot: projectRootURL, logger: logger)
+
         // Single-instance guard: убиваем orphan-дубликаты KrabEarAgent
         // (например, устаревший native/runtime/KrabEarAgent --launched-by-launchd).
         let killed = killOtherAgentInstances()
@@ -310,6 +324,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         stopLiveSubsCapture()
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
+        // Phase C C.6: release file lock so a subsequent launch can acquire it immediately.
+        releaseFileLock(logger: logger)
     }
 
     // MARK: - PR 1.5: Wake Word Setup
@@ -795,6 +811,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onQuit() {
+        SentryConfig.recordTerminate(callsite: "onQuit")
         NSApp.terminate(nil)
     }
 
@@ -820,6 +837,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         case "toggle_recording":
             handleRecordToggleRequest()
         case "quit":
+            SentryConfig.recordTerminate(callsite: "handleControlNotification_quit")
             NSApp.terminate(nil)
         default:
             break
@@ -949,6 +967,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopAgent() {
+        SentryConfig.recordTerminate(callsite: "stopAgent")
         NSApp.terminate(nil)
     }
 
@@ -959,6 +978,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", "\"\(escaped)\" --show-history >/dev/null 2>&1 &"]
         try? process.run()
+        SentryConfig.recordTerminate(callsite: "restartAgent")
         NSApp.terminate(nil)
     }
 
@@ -968,6 +988,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = body
         alert.addButton(withTitle: "Закрыть")
         alert.runModal()
+        SentryConfig.recordTerminate(callsite: "showFatalAndTerminate")
         NSApp.terminate(nil)
     }
 

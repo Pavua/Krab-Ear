@@ -125,6 +125,7 @@ from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
     init_sentry,
+    install_signal_handlers,
 )
 from backend.calendar_link import CalendarLinker
 
@@ -5357,6 +5358,10 @@ def main() -> None:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
     else:
         logger.debug("Sentry telemetry отключена (DSN не задан)")
+
+    # Phase C C.7: Sentry-aware signal handlers (SIGTERM/SIGABRT/SIGSEGV).
+    # Idempotent; no-op if Sentry not initialized.
+    install_signal_handlers()
 
     # Auto-create Sentry release + deploy when SENTRY_AUTO_RELEASE=1
     if os.environ.get("SENTRY_AUTO_RELEASE") == "1" and sentry_ok:

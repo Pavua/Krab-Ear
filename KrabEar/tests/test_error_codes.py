@@ -45,6 +45,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "rewriter.parse_error",
             "rewriter.model_evicted",
             "stt.load_fail", "stt.empty_text",
+            # Added 2026-05-04 Phase C.4 — Whisper repetition-loop hallucination
+            "stt.repetition_loop",
             "diarization.no_token", "diarization.pipeline_fail",
             "translation.timeout",
             "mlx.oom",

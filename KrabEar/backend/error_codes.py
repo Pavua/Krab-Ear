@@ -127,6 +127,17 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "info",
         "dedupe_seconds": 5,
     },
+    # Phase C.4 (2026-05-04) — Whisper repetition-loop hallucination.
+    # Observed live: «Атакса хвостимда» × 2, «согласен да» × 70+.
+    # Detected by is_likely_repetition_loop() in core/utils.py.
+    "stt.repetition_loop": {
+        "user_msg_ru": "Whisper зациклился — переговори фразу",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 60,
+    },
 
     # ── Layer: diarization ───────────────────────────────────────
     "diarization.no_token": {

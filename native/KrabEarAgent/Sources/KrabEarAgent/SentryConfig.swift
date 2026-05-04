@@ -19,6 +19,9 @@ import Sentry
 
 @MainActor
 enum SentryConfig {
+    /// True после успешного вызова `initialize(dsn:)` с непустым DSN.
+    /// Используется `recordTerminate(callsite:)` для guard-проверки.
+    private(set) static var isActive: Bool = false
     /// Инициализирует Sentry SDK.
     /// - Parameters:
     ///   - dsn: DSN проекта. Nil или пустая строка — SDK не запускается (no-op).
@@ -45,6 +48,7 @@ enum SentryConfig {
             // Не отправлять PII (IP, username, headers с токенами).
             options.sendDefaultPii = false
         }
+        isActive = true
     }
 
     /// Инициализирует Sentry SDK из словаря IPC-настроек.
@@ -69,6 +73,32 @@ enum SentryConfig {
             ?? (settings["sentry_dsn"] as? String)?.nonEmpty
             ?? ""
         initialize(dsn: dsn.isEmpty ? nil : dsn, environment: environment, release: release)
+    }
+
+    // MARK: - Terminate breadcrumb
+
+    /// Записывает Sentry breadcrumb перед завершением процесса.
+    ///
+    /// Вызывать непосредственно перед каждым `NSApp.terminate(nil)`.
+    /// No-op если Sentry SDK не был инициализирован (DSN отсутствует).
+    ///
+    /// - Parameter callsite: имя callsite, например `"onQuit"`, `"stopAgent"`.
+    static func recordTerminate(callsite: String) {
+        // No-op если DSN не задан и SDK не был инициализирован.
+        guard isActive else { return }
+
+        SentrySDK.addBreadcrumb({
+            let crumb = Breadcrumb()
+            crumb.category = "lifecycle"
+            crumb.level = .info
+            crumb.message = "NSApp.terminate from \(callsite)"
+            crumb.data = ["callsite": callsite]
+            return crumb
+        }())
+
+        // Flush breadcrumb so it's guaranteed to be attached to the next event
+        // (important when the process exits immediately after).
+        SentrySDK.flush(timeout: 0.5)
     }
 }
 
