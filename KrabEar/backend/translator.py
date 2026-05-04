@@ -73,6 +73,32 @@ class Translator:
         self._unavailable: set[tuple[str, bool]] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
+        # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
+
+    def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
+        """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=severity or entry.get("severity", "warn"),
+                component="translation",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка перевода"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("error_bus.push failed for code=%s", code)
 
     def translate(
         self,
@@ -310,6 +336,12 @@ class Translator:
             )
         except Exception as exc:
             logger.warning("Ошибка перевода (%s): %s", resolved_mode, exc)
+            # Phase B.2: translation.timeout — any translation failure
+            self._push_error(
+                "translation.timeout",
+                f"{type(exc).__name__}: {exc} (mode={resolved_mode})",
+                severity="warn",
+            )
             return TranslationResult(
                 text="",
                 status="translate_error",

@@ -34,6 +34,31 @@ class VocabularyStore:
         self.data_dir = data_dir
         self.path = data_dir / _VOCABULARY_FILENAME
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Phase B.2 — error_bus late-injection
+
+    def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
+        """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=severity or entry.get("severity", "warn"),
+                component="vocabulary",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка словаря"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"path": str(self.path)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("error_bus.push failed for code=%s", code)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -49,10 +74,22 @@ class VocabularyStore:
             raw = self.path.read_text(encoding="utf-8")
         except OSError as exc:
             logger.warning("vocabulary.json повреждён, возвращаем пустой список: %s", exc)
+            # Phase B.2: vocabulary.load_fail — file read error
+            self._push_error(
+                "vocabulary.load_fail",
+                f"OSError reading vocabulary.json: {exc}",
+                severity="warn",
+            )
             return []
         payload = safe_json_loads(raw, default=None, context="vocabulary.json")
         if payload is None:
             logger.warning("vocabulary.json повреждён, возвращаем пустой список")
+            # Phase B.2: vocabulary.load_fail — corrupted JSON
+            self._push_error(
+                "vocabulary.load_fail",
+                "vocabulary.json parse error (invalid JSON) — STT will run without vocabulary bias",
+                severity="warn",
+            )
             return []
 
         if not isinstance(payload, dict):
