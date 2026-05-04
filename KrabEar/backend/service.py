@@ -201,6 +201,42 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+
+        # Phase B.1 — error bus + active LLM probe
+        from backend.error_bus import ErrorBus
+        from backend.error_codes import ERROR_REGISTRY
+        from backend.llm_probe import LLMHttpProbe
+        from backend import error_actions as _error_actions
+        try:
+            import sentry_sdk as _sentry_sdk
+        except ImportError:
+            _sentry_sdk = None
+
+        self._error_bus = ErrorBus(
+            event_bus=event_bus,
+            registry=ERROR_REGISTRY,
+            sentry_client=_sentry_sdk,
+            default_dedupe_window_sec=30.0,
+            ring_buffer_size=200,
+        )
+
+        # Wire error_bus into rewriter so it can push timeout/connection/etc errors
+        if self._llm_rewriter is not None:
+            self._llm_rewriter._error_bus = self._error_bus
+
+        self._llm_probe: LLMHttpProbe | None = None
+        if self._llm_rewriter is not None:
+            _settings_dict = self._settings_svc.cached_settings()
+            self._llm_probe = LLMHttpProbe(
+                rewriter=self._llm_rewriter,
+                error_bus=self._error_bus,
+                event_bus=event_bus,
+                settings_provider=lambda: self._settings_svc.cached_settings(),
+                base_interval_sec=float(_settings_dict.get("llm_probe_interval_sec", 30.0)),
+            )
+            if _settings_dict.get("llm_probe_enabled", True):
+                self._llm_probe.start()
+
         self._system_monitor = SystemMonitor()
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
@@ -811,6 +847,11 @@ class BackendService:
             "add_summary_profile": self._history.handle_add_summary_profile,  # добавить кастомный профиль резюмирования
             "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
+            # --- Phase B.1: error bus + LLM probe ---
+            "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
+            "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
+            "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
+            "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
@@ -2045,6 +2086,44 @@ class BackendService:
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
         return self._health_checker.check_all()
+
+    # ------------------------------------------------------------------
+    # Phase B.1 — error bus + LLM probe handlers
+    # ------------------------------------------------------------------
+
+    def _handle_list_recent_errors(self, params: dict) -> dict:
+        """Возвращает до *limit* последних KrabError из ring-буфера ErrorBus."""
+        limit = int(params.get("limit", 200))
+        items = self._error_bus.list_recent(limit)
+        return {"errors": [item.model_dump(mode="json") for item in items]}
+
+    def _handle_clear_recent_errors(self, params: dict) -> dict:
+        """Очищает ring-буфер и dedupe-состояние ErrorBus. Возвращает количество удалённых записей."""
+        n = self._error_bus.clear()
+        return {"cleared": n}
+
+    def _handle_handle_error_action(self, params: dict) -> dict:
+        """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
+        from backend import error_actions as _error_actions
+        action_id = params.get("action_id")
+        if not action_id:
+            return {"executed": False, "reason": "missing action_id", "side_effect": None}
+        return _error_actions.handle_action(
+            action_id,
+            settings_service=self._settings_svc,
+            store=getattr(self, "store", None),
+        )
+
+    def _handle_probe_llm_http(self, params: dict) -> dict:
+        """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
+        if self._llm_rewriter is None:
+            return {"reachable": False, "latency_ms": 0, "model": None}
+        ok = self._llm_rewriter.warmup()
+        return {
+            "reachable": bool(ok),
+            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
+            "model": getattr(self._llm_rewriter, "_model", None),
+        }
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
