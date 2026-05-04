@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import signal
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,45 @@ def mask_phone(phone: str) -> str:
     if len(digits) >= 4:
         return "*****" + digits[-4:]
     return "*****"
+
+
+def install_signal_handlers() -> None:
+    """Install Sentry-aware handlers for SIGABRT/SIGSEGV/SIGTERM.
+
+    Sends a Sentry event with the signal name before propagating the signal
+    to the default handler so the process terminates normally.
+
+    Idempotent — multiple calls don't re-install handlers.
+    No-op if Sentry SDK is not initialized (DSN not set).
+    """
+    if getattr(install_signal_handlers, "_installed", False):
+        return
+    install_signal_handlers._installed = True  # type: ignore[attr-defined]
+
+    def _handler(signum: int, frame: object) -> None:
+        signame = signal.Signals(signum).name
+        try:
+            import sentry_sdk  # noqa: PLC0415
+
+            if _sentry_initialized:
+                with sentry_sdk.push_scope() as scope:
+                    scope.set_tag("signal", signame)
+                    scope.set_level("fatal")
+                    sentry_sdk.capture_message(f"Backend received {signame}")
+                    sentry_sdk.flush(timeout=2.0)
+        except Exception:  # noqa: BLE001
+            pass  # телеметрия не должна мешать штатному завершению
+        # Re-raise via default handler so the process actually terminates.
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+
+    for sig in (signal.SIGTERM, signal.SIGABRT, signal.SIGSEGV):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            # SIGSEGV / SIGABRT may not be settable in all contexts
+            # (e.g. inside threads or restricted environments).
+            pass
 
 
 def add_breadcrumb(

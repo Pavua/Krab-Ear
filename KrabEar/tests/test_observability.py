@@ -355,5 +355,81 @@ class TestMaskPhone(unittest.TestCase):
         self.assertTrue(result.startswith("*"))
 
 
+# ---------------------------------------------------------------------------
+# install_signal_handlers tests (Phase C C.7)
+# ---------------------------------------------------------------------------
+
+class TestInstallSignalHandlers(unittest.TestCase):
+    """install_signal_handlers is idempotent and never raises."""
+
+    def setUp(self):
+        _reload_observability()
+        # Reset the idempotency flag so each test starts fresh.
+        import backend.observability as mod
+        if hasattr(mod.install_signal_handlers, "_installed"):
+            del mod.install_signal_handlers._installed  # type: ignore[attr-defined]
+
+    def tearDown(self):
+        # Restore default SIGTERM handler to avoid side-effects between tests.
+        import signal as _signal
+        try:
+            _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+        except Exception:
+            pass
+        # Reset idempotency flag after each test.
+        import backend.observability as mod
+        if hasattr(mod.install_signal_handlers, "_installed"):
+            del mod.install_signal_handlers._installed  # type: ignore[attr-defined]
+
+    def test_first_call_does_not_raise(self):
+        """First call must succeed without exception."""
+        from backend.observability import install_signal_handlers
+        try:
+            install_signal_handlers()
+        except Exception as exc:
+            self.fail(f"install_signal_handlers() raised {exc!r}")
+
+    def test_idempotent_two_calls_no_exception(self):
+        """Calling twice must not raise."""
+        from backend.observability import install_signal_handlers
+        try:
+            install_signal_handlers()
+            install_signal_handlers()
+        except Exception as exc:
+            self.fail(f"Second call raised {exc!r}")
+
+    def test_idempotent_flag_set_after_first_call(self):
+        """_installed flag is set after first call."""
+        import backend.observability as mod
+        mod.install_signal_handlers()
+        self.assertTrue(getattr(mod.install_signal_handlers, "_installed", False))
+
+    def test_idempotent_second_call_does_not_reinstall(self):
+        """Second call does not change signal handlers that were set by first call."""
+        import signal as _signal
+        from backend.observability import install_signal_handlers
+
+        install_signal_handlers()
+        handler_after_first = _signal.getsignal(_signal.SIGTERM)
+
+        install_signal_handlers()
+        handler_after_second = _signal.getsignal(_signal.SIGTERM)
+
+        self.assertEqual(handler_after_first, handler_after_second)
+
+    def test_no_op_when_sentry_not_initialized(self):
+        """Handler can be invoked without crashing even if Sentry is absent."""
+        import signal as _signal
+        import backend.observability as mod
+
+        # Ensure Sentry is NOT initialized.
+        mod._sentry_initialized = False
+        mod.install_signal_handlers()
+
+        # The SIGTERM handler should be a callable (our wrapper).
+        handler = _signal.getsignal(_signal.SIGTERM)
+        self.assertTrue(callable(handler))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -795,6 +795,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onQuit() {
+        SentryConfig.recordTerminate(callsite: "onQuit")
         NSApp.terminate(nil)
     }
 
@@ -820,6 +821,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         case "toggle_recording":
             handleRecordToggleRequest()
         case "quit":
+            SentryConfig.recordTerminate(callsite: "handleControlNotification_quit")
             NSApp.terminate(nil)
         default:
             break
@@ -949,6 +951,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopAgent() {
+        SentryConfig.recordTerminate(callsite: "stopAgent")
         NSApp.terminate(nil)
     }
 
@@ -959,6 +962,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", "\"\(escaped)\" --show-history >/dev/null 2>&1 &"]
         try? process.run()
+        SentryConfig.recordTerminate(callsite: "restartAgent")
         NSApp.terminate(nil)
     }
 
@@ -968,6 +972,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = body
         alert.addButton(withTitle: "Закрыть")
         alert.runModal()
+        SentryConfig.recordTerminate(callsite: "showFatalAndTerminate")
         NSApp.terminate(nil)
     }
 
