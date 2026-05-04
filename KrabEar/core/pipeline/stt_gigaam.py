@@ -104,6 +104,9 @@ class GigaAMAdapter:
         self._subprocess: Optional["_GigaAMSubprocessSession"] = None  # lazy subprocess
         # Активный transport определится на первом вызове transcribe (или _resolve_transport).
         self._active_transport: Optional[str] = None
+        # Optional OOM callback: callable(name: str, rc: int, stderr: str)
+        # Set by engine.py after adapter creation to forward OOM events to ErrorBus.
+        self._oom_callback: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -294,6 +297,9 @@ class GigaAMAdapter:
             mode=self._mode,
             device=self._device,
         )
+        # Forward OOM callback to session so crash events reach the ErrorBus.
+        if self._oom_callback is not None:
+            session.oom_callback = self._oom_callback
         session.start()  # spawn + load model
         self._subprocess = session
         return session
@@ -396,6 +402,29 @@ class GigaAMAdapter:
 # ---------------------------------------------------------------------------
 
 
+def detect_subprocess_oom(returncode: int, stderr: str) -> bool:
+    """Return True if subprocess exit indicates OOM/SIGABRT.
+
+    Heuristics:
+    - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
+    - returncode == -9 (SIGKILL) — kernel OOM killer
+    - stderr contains "out of memory" / "MallocStackLogging" / "OutOfMemoryError"
+
+    Public so it can be imported by tests without instantiating any class.
+    """
+    if returncode in (-6, -9):
+        return True
+    if stderr:
+        low = stderr.lower()
+        return any(s in low for s in (
+            "out of memory",
+            "outofmemoryerror",
+            "metal out of memory",
+            "mallocstacklogging",
+        ))
+    return False
+
+
 class _GigaAMSubprocessSession:
     """Управляет долгоживущим subprocess-воркером (gigaam_worker.py).
 
@@ -410,6 +439,9 @@ class _GigaAMSubprocessSession:
         session.close()           # graceful shutdown
 
     Threading: внутренний lock сериализует transcribe-вызовы (worker single-threaded).
+
+    OOM detection: set `oom_callback` to a callable(name: str, rc: int, stderr: str)
+    to receive notification when the worker crashes with an OOM signal/pattern.
     """
 
     def __init__(
@@ -426,6 +458,8 @@ class _GigaAMSubprocessSession:
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._loaded = False
+        # Optional callback for OOM detection: callable(name, returncode, stderr)
+        self.oom_callback: Optional[object] = None
 
     def is_loaded(self) -> bool:
         """True если worker запущен и модель загружена."""
@@ -553,6 +587,8 @@ class _GigaAMSubprocessSession:
                 timer.cancel()
 
         if not line:
+            # Worker exited without responding — check for OOM before raising.
+            self._check_proc_oom_on_exit()
             raise RuntimeError(
                 "_GigaAMSubprocessSession: empty response (worker exited or timed out)"
             )
@@ -562,6 +598,36 @@ class _GigaAMSubprocessSession:
             raise RuntimeError(
                 f"_GigaAMSubprocessSession: invalid JSON from worker: {exc}; line={line!r}"
             ) from exc
+
+    def _check_proc_oom_on_exit(self) -> None:
+        """Check if the worker process exited with OOM and fire oom_callback if so.
+
+        Called whenever the worker produces no response (crash / silent exit).
+        Never raises.
+        """
+        try:
+            if self._proc is None:
+                return
+            rc = self._proc.poll()
+            if rc is None:
+                # Process still running — not a crash, skip.
+                return
+            # Drain stderr (non-blocking attempt — process already exited).
+            stderr_text = ""
+            try:
+                if self._proc.stderr is not None:
+                    stderr_text = self._proc.stderr.read() or ""
+            except Exception:
+                pass
+            if detect_subprocess_oom(rc, stderr_text):
+                cb = self.oom_callback
+                if callable(cb):
+                    try:
+                        cb("gigaam_worker", rc, stderr_text)
+                    except Exception:
+                        pass
+        except Exception:
+            pass  # must never raise
 
     def _timeout_kill(self) -> None:
         """Вызывается Timer'ом если worker не ответил вовремя."""
