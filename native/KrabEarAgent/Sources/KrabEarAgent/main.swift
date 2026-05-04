@@ -255,6 +255,18 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 self?.handleQuickReplayPaste()
             }
         }
+        // Phase B.2 F9: fire-and-forget IPC when RegisterEventHotKey returns
+        // eventHotKeyExistsErr — another app holds the chord.
+        nonisolated(unsafe) let ipcClientForHotkey = self.ipcClient
+        hotkeyManager?.reportHotkeyConflictHandler = { chord in
+            DispatchQueue.global(qos: .utility).async {
+                _ = try? ipcClientForHotkey.call(
+                    method: "report_hotkey_conflict",
+                    params: ["chord": chord],
+                    timeoutSec: IPCClient.quickTimeoutSec
+                )
+            }
+        }
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован (mode=\(settings.hotkeyMode))")
 
@@ -876,6 +888,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             guard let result = response["result"] as? [String: Any] else {
                 return .default
             }
+            // Phase B.2 F10: re-init Sentry with IPC settings so sentry_dsn_agent
+            // (agent-specific project) takes precedence over generic sentry_dsn.
+            let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
+            SentryConfig.initializeFromSettings(result, environment: sentryEnv)
             return AgentSettings(from: result)
         } catch {
             return .default

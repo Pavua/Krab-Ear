@@ -866,6 +866,7 @@ class BackendService:
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
             # --- Phase B.1: error bus + LLM probe ---
             "report_paste_failure": self._handle_report_paste_failure,  # Swift→backend paste failure report (ax_denied / app_unsupported)
+            "report_hotkey_conflict": self._handle_report_hotkey_conflict,  # Swift→backend hotkey conflict (chord taken by another app)
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
@@ -2167,6 +2168,33 @@ class BackendService:
         )
         self._error_bus.push(err)
         return {"ok": True, "code": code}
+
+    def _handle_report_hotkey_conflict(self, params: dict) -> dict:
+        """Swift→backend report когда RegisterEventHotKey returns eventHotKeyExistsErr.
+
+        Backend transforms into KrabError and pushes to error_bus.
+
+        Params:
+            chord (str): chord identifier e.g. "right_option"
+        """
+        from backend.error_bus import KrabError
+        from backend.error_codes import ERROR_REGISTRY
+        from datetime import datetime, timezone
+        chord = params.get("chord", "")
+        entry = ERROR_REGISTRY["hotkey.conflict"]
+        err = KrabError(
+            severity=entry["severity"],
+            component="hotkey",
+            code="hotkey.conflict",
+            message_user=entry["user_msg_ru"],
+            message_debug=f"hotkey conflict chord={chord}",
+            timestamp=datetime.now(timezone.utc),
+            context={"chord": chord},
+            actionable=entry["actionable"],
+            action_id=entry["action_id"],
+        )
+        self._error_bus.push(err)
+        return {"ok": True}
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
