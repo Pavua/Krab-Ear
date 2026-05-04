@@ -153,6 +153,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Phase C C.6: POSIX flock — race-free single-instance guard.
+        // Должен быть ДО killOtherAgentInstances — если другой экземпляр уже держит lock,
+        // немедленно завершаем этот процесс (не убивая старый экземпляр).
+        guard acquireFileLock(logger: logger) else {
+            // Другой экземпляр Krab Ear уже запущен и держит lock.
+            NSApp.terminate(nil)
+            return
+        }
+
+        // Phase C C.6: Cleanup worktree shadow .app bundles из LaunchServices DB.
+        // Выполняется до основного UI setup, чтобы LaunchServices не открывала shadow copy.
+        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
+        cleanupWorktreeShadows(projectRoot: projectRootURL, logger: logger)
+
         // Single-instance guard: убиваем orphan-дубликаты KrabEarAgent
         // (например, устаревший native/runtime/KrabEarAgent --launched-by-launchd).
         let killed = killOtherAgentInstances()
@@ -319,6 +333,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         stopRealtimeOverlayPolling()
         tearDownHealthMonitor()
         backendSupervisor.stopBackend()
+        // Phase C C.6: release file lock so a subsequent launch can acquire it immediately.
+        releaseFileLock(logger: logger)
     }
 
     // MARK: - PR 1.5: Wake Word Setup
