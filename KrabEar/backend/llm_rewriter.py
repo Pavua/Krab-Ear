@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 
@@ -243,7 +244,7 @@ class LLMRewriter:
         base_url: str,
         api_key: str,
         model: str,
-        timeout_sec: float = 4.0,
+        timeout_sec: float = 45.0,  # was 4.0 → raised to 15.0 for JIT cold load; now 45.0 for vision multimodal (gemma-4-E4B-it-MLX-4bit + vision add-on cold load ~20-30s on M-series from external SSD)
         circuit_fail_threshold: int = 3,
         circuit_initial_reset_sec: int = 60,
         circuit_max_reset_sec: int = 600,
@@ -350,12 +351,21 @@ class LLMRewriter:
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"
+            logger.warning(
+                "LLM rewriter failure: kind=timeout model=%s base_url=%s elapsed_ms=%s",
+                self._model, self._base_url, int(self._timeout * 1000),
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="timeout", latency_ms=None
             )
         except (requests.ConnectionError, requests.RequestException) as exc:
             self._circuit.record_failure()
             self._last_error = f"connection_error: {exc}"
+            logger.warning(
+                "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
+                self._model, self._base_url, int((time.monotonic() - start) * 1000),
+                type(exc).__name__,
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="connection_error", latency_ms=None
             )
@@ -363,10 +373,54 @@ class LLMRewriter:
         latency_ms = int((time.monotonic() - start) * 1000)
         self._last_latency_ms = latency_ms
 
-        # 5. HTTP status check
+        # 5. HTTP status check — JIT retry on 503 (LM Studio model cold loading)
+        if response.status_code == 503:
+            logger.warning(
+                "LLM rewriter: 503 from LM Studio (JIT cold load), waiting 10s before retry "
+                "model=%s base_url=%s",
+                self._model, self._base_url,
+            )
+            time.sleep(10)
+            start = time.monotonic()
+            try:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
+            except requests.Timeout:
+                self._circuit.record_failure()
+                self._last_error = "timeout"
+                logger.warning(
+                    "LLM rewriter failure: kind=timeout model=%s base_url=%s elapsed_ms=%s",
+                    self._model, self._base_url, int(self._timeout * 1000),
+                )
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="timeout", latency_ms=None
+                )
+            except (requests.ConnectionError, requests.RequestException) as exc:
+                self._circuit.record_failure()
+                self._last_error = f"connection_error: {exc}"
+                logger.warning(
+                    "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
+                    self._model, self._base_url, int((time.monotonic() - start) * 1000),
+                    type(exc).__name__,
+                )
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="connection_error", latency_ms=None
+                )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            self._last_latency_ms = latency_ms
+
         if response.status_code != 200:
             self._circuit.record_failure()
             self._last_error = f"http_{response.status_code}"
+            body_preview = (response.text or "")[:120]
+            logger.warning(
+                "LLM rewriter failure: kind=http_error model=%s base_url=%s elapsed_ms=%s status=%s body=%s",
+                self._model, self._base_url, latency_ms, response.status_code, body_preview,
+            )
             return LLMRewriteResult(
                 ok=False,
                 text=None,
@@ -633,6 +687,64 @@ class LLMRewriter:
         return LLMRewriteResult(
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
+
+    def warmup(self) -> bool:
+        """Отправляет минимальный probe в LLM endpoint для прогрева модели в памяти.
+
+        Использует тот же _session и headers что и rewrite().
+        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
+        Возвращает True если HTTP 200, False при любой ошибке.
+        Проглатывает все exceptions.
+        """
+        start = time.monotonic()
+        try:
+            payload = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": "."}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            }
+            response = self._session.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self._timeout,
+            )
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            ok = response.status_code == 200
+            logger.info("LLM warmup: ok=%s elapsed_ms=%d", ok, elapsed_ms)
+            return ok
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            logger.warning(
+                "LLM warmup failed: exc=%s elapsed_ms=%d", type(exc).__name__, elapsed_ms
+            )
+            return False
+
+    def set_model(self, model: str) -> None:
+        """Обновляет активную модель и запускает фоновый warmup новой модели.
+
+        Сбрасывает circuit breaker и метрики — новая модель начинает с чистого листа.
+        После сброса запускает warmup в фоне: user-facing вызов всё равно работает,
+        потому что circuit CLOSED после reset.
+        """
+        if self._model == model:
+            return
+        self._model = model
+        # Reset state for new model
+        self._last_latency_ms = None
+        self._last_error = None
+        self._circuit = CircuitBreaker(
+            fail_threshold=self._circuit._fail_threshold,
+            initial_reset_sec=self._circuit._initial_reset_sec,
+            max_reset_sec=self._circuit._max_reset_sec,
+        )
+        # warm up new model in background; user-facing call still works because circuit is CLOSED
+        threading.Thread(target=self.warmup, daemon=True).start()
 
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.

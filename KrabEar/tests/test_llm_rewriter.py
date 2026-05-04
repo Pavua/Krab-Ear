@@ -651,5 +651,188 @@ class LLMRewriterTimeoutHandlingTestCase(unittest.TestCase):
         self.assertEqual(self.rewriter._session.post.call_count, 3)
 
 
+class LLMRewriterWarmupTestCase(unittest.TestCase):
+    """Tests for warmup() method and set_model() auto-warmup."""
+
+    def _make_rewriter(self):
+        from backend.llm_rewriter import LLMRewriter
+        r = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+        )
+        return r
+
+    def _mock_resp(self, status_code=200, text="ok"):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.text = text
+        resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        return resp
+
+    def test_warmup_returns_true_on_200(self):
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(200))
+        result = r.warmup()
+        self.assertTrue(result)
+
+    def test_warmup_returns_false_on_500(self):
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(500))
+        result = r.warmup()
+        self.assertFalse(result)
+
+    def test_warmup_swallows_exceptions(self):
+        import requests as req
+        r = self._make_rewriter()
+        r._session.post = MagicMock(side_effect=req.ConnectionError("down"))
+        # Should not raise
+        result = r.warmup()
+        self.assertFalse(result)
+
+    def test_warmup_does_not_touch_circuit_breaker(self):
+        """warmup failures must NOT count as circuit failures."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(500))
+        for _ in range(10):
+            r.warmup()
+        # Circuit should still be CLOSED
+        self.assertEqual(r._circuit.state, "closed")
+
+    def test_set_model_fires_warmup_thread(self):
+        """set_model with a new model should start a background warmup."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(200))
+        r.set_model("new-model")
+        # Give the daemon thread a short window to run
+        import time as _time
+        _time.sleep(0.1)
+        # warmup should have been called (post was invoked)
+        self.assertTrue(r._session.post.called)
+
+    def test_set_model_same_model_no_warmup(self):
+        """set_model with the same model should be a no-op (no warmup)."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(200))
+        r.set_model("test-model")  # same as initial
+        import time as _time
+        _time.sleep(0.05)
+        self.assertFalse(r._session.post.called)
+
+    def test_set_model_resets_circuit_breaker(self):
+        """set_model should reset the circuit breaker for the new model."""
+        from backend.llm_rewriter import LLMRewriter
+        import requests as req
+        r = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="model-a",
+            circuit_fail_threshold=3,
+        )
+        r._session.post = MagicMock(side_effect=req.Timeout())
+        for _ in range(3):
+            r.rewrite("текст")
+        self.assertEqual(r._circuit.state, "open")
+        # Switch model — circuit should reset
+        r.set_model("model-b")
+        self.assertEqual(r._circuit.state, "closed")
+
+
+class LLMRewriterLoudFailuresTestCase(unittest.TestCase):
+    """Tests that timeout/connection/non-200 paths log a warning."""
+
+    def _make_rewriter(self):
+        from backend.llm_rewriter import LLMRewriter
+        return LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=5.0,
+        )
+
+    def _mock_resp(self, status_code=200, body=""):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.text = body
+        resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        return resp
+
+    def test_timeout_logs_warning(self):
+        import requests as req
+        r = self._make_rewriter()
+        r._session.post = MagicMock(side_effect=req.Timeout("timed out"))
+        with self.assertLogs("KrabEar.Backend.LLMRewriter", level="WARNING") as cm:
+            r.rewrite("текст один два три")
+        self.assertTrue(any("kind=timeout" in line for line in cm.output))
+
+    def test_connection_error_logs_warning(self):
+        import requests as req
+        r = self._make_rewriter()
+        r._session.post = MagicMock(side_effect=req.ConnectionError("refused"))
+        with self.assertLogs("KrabEar.Backend.LLMRewriter", level="WARNING") as cm:
+            r.rewrite("текст один два три")
+        self.assertTrue(any("kind=connection_error" in line for line in cm.output))
+
+    def test_non_200_logs_warning(self):
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(500, "Internal Error"))
+        with self.assertLogs("KrabEar.Backend.LLMRewriter", level="WARNING") as cm:
+            r.rewrite("текст один два три")
+        self.assertTrue(any("kind=http_error" in line for line in cm.output))
+        self.assertTrue(any("status=500" in line for line in cm.output))
+
+
+class LLMRewriter503JitRetryTestCase(unittest.TestCase):
+    """Tests for the 503 JIT retry path (section 5 of _rewrite_impl)."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=5.0,
+        )
+
+    def _resp(self, status_code, content=None):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.text = ""
+        if content is not None:
+            mock.json.return_value = {"choices": [{"message": {"content": content}}]}
+        return mock
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_succeeds(self, mock_sleep):
+        rewritten = "Исправленный текст готов."
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(200, rewritten)]
+        )
+        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text_or_fallback("raw"), rewritten)
+        self.assertIsNotNone(result.latency_ms)
+        mock_sleep.assert_called_once_with(10)
+        self.assertEqual(self.rewriter._circuit.state, "closed")
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_then_503_fails(self, mock_sleep):
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(503)]
+        )
+        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.fallback_reason.startswith("http_503"))
+        self.assertEqual(self.rewriter._circuit._consecutive_failures, 1)
+
+    @patch("backend.llm_rewriter.time.sleep")
+    def test_jit_retry_503_no_recursion(self, mock_sleep):
+        self.rewriter._session.post = MagicMock(
+            side_effect=[self._resp(503), self._resp(503)]
+        )
+        self.rewriter.rewrite("исходный текст для проверки retry")
+        self.assertEqual(self.rewriter._session.post.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
