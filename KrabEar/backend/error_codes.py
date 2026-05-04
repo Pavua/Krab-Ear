@@ -6,13 +6,13 @@ Adding a new code:
 3. Wire `error_bus.push(KrabError(code="...", ...))` at the call site.
 4. If actionable, add a real handler in error_actions.py.
 """
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 
 class _Entry(TypedDict):
     user_msg_ru: str
     actionable: bool
-    action_id: Optional[str]
+    action_id: str | None
     action_label: str
     severity: str
     dedupe_seconds: int
