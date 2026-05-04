@@ -722,6 +722,19 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    def close(self) -> None:
+        """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
+
+        Идемпотентен — безопасно вызывать несколько раз. Используется в
+        signal handler run_server() и в finally serve_forever().
+        """
+        probe = getattr(self, "_llm_probe", None)
+        if probe is not None:
+            try:
+                probe.stop()
+            except Exception:
+                logger.exception("LLMHttpProbe.stop() raised during close()")
+
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
         request_id = payload.get("id")
@@ -5286,11 +5299,15 @@ def main() -> None:
     def _signal_handler(signum: int, frame: Any) -> None:
         logger.info("Получен сигнал %s, завершаем backend", signum)
         server.stop()
+        service.close()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        service.close()
 
 
 if __name__ == "__main__":
