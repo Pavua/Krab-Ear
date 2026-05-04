@@ -80,19 +80,11 @@ extension AgentAppDelegate {
         // Запускаем SSE подписку на krab_error события
         startErrorBusSSEStream()
 
-        // Task 13: HealthMonitor подписывается на rewriter_recovered → flashGreen.
-        // subscribeToProbeEvents также вызывается из setupHealthMonitor (main+HealthMonitor.swift).
-        // Этот вызов — explicit wire для случая когда error bus стартует после health monitor.
-        let indicator = self.statusIndicatorView
-        if let monitor = self.healthMonitor {
-            Task {
-                await monitor.subscribeToProbeEvents(
-                    restBaseURL: "http://127.0.0.1:5005",
-                    statusIndicator: indicator
-                )
-            }
-        }
-        logger.info("Error bus SSE stream запущен + probe subscription wired")
+        // Task 13 wiring (HealthMonitor → rewriter_recovered → flashGreen) лежит ИСКЛЮЧИТЕЛЬНО
+        // в setupHealthMonitor (main+HealthMonitor.swift) — оно выполняется первым в startup
+        // последовательности. Дублировать здесь = silently no-op (если monitor не готов) +
+        // double-subscribe (если оба путя выполнены) — оба сценария вредны. Single source of truth.
+        logger.info("Error bus SSE stream запущен")
     }
 
     // MARK: - SSE stream for krab_error events
