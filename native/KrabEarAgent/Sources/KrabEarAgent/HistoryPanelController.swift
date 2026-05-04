@@ -28,6 +28,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         case conversation = "conversation"
         /// Вкладка «Автозвонки» — Phase 3.4 Call Automation.
         case callAutomation = "call_automation"
+        /// Вкладка «Диагностика» — Phase B.2 F6 Diagnostics Tab UI.
+        case diagnostics = "diagnostics"
 
         static func from(settingsValue: String) -> PanelTab {
             switch settingsValue {
@@ -39,6 +41,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 return .conversation
             case PanelTab.callAutomation.rawValue:
                 return .callAutomation
+            case PanelTab.diagnostics.rawValue:
+                return .diagnostics
             default:
                 return .history
             }
@@ -537,7 +541,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.layer?.backgroundColor = NSColor.clear.cgColor
         mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
-        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI", "Автозвонки"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
+        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI", "Автозвонки", "Диагностика"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
         tabSelector.selectedSegment = 0
         tabSelector.translatesAutoresizingMaskIntoConstraints = false
         tabSelector.segmentStyle = .rounded
@@ -594,6 +598,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAutoContentView.translatesAutoresizingMaskIntoConstraints = false
         callAutoContentView.wantsLayer = true
         callAutoContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // Вкладка «Диагностика» — Phase B.2 F6.
+        let diagnosticsContentView = NSView()
+        diagnosticsContentView.translatesAutoresizingMaskIntoConstraints = false
+        diagnosticsContentView.wantsLayer = true
+        diagnosticsContentView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         // Pre-warm all tabs: make all tab views layer-backed и attached to the view
         // hierarchy before user sees them. Это предотвращает мерцание при первом
@@ -621,10 +630,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         callAutoTab.label = "Автозвонки"
         callAutoTab.view = callAutoContentView
         mainTabView.addTabViewItem(callAutoTab)
+        let diagnosticsTab = NSTabViewItem(identifier: PanelTab.diagnostics.rawValue)
+        diagnosticsTab.label = "Диагностика"
+        diagnosticsTab.view = diagnosticsContentView
+        mainTabView.addTabViewItem(diagnosticsTab)
         // Встроить ConversationViewController в voiceContentView.
         setupConversationTab(contentView: voiceContentView)
         // Встроить CallAutomationController в callAutoContentView. Phase 3.4.
         setupCallAutomationTab(contentView: callAutoContentView)
+        // Встроить DiagnosticsTabViewController в diagnosticsContentView. Phase B.2 F6.
+        setupDiagnosticsTab(contentView: diagnosticsContentView)
 
         topBar.orientation = .vertical
         topBar.spacing = KrabEarTheme.Metrics.tight
