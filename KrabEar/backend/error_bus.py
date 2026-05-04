@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, field_serializer
 
@@ -30,7 +30,7 @@ class KrabError(BaseModel):
     timestamp: datetime
     context: dict
     actionable: bool
-    action_id: Optional[str]
+    action_id: str | None
 
     @field_serializer("timestamp")
     def _serialise_timestamp(self, value: datetime, _info) -> str:

@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-import pytest
+import pydantic
 
 from backend.error_bus import KrabError
 
@@ -23,7 +23,7 @@ class KrabErrorModelTests(unittest.TestCase):
         self.assertIsNone(err.action_id)
 
     def test_invalid_severity_rejected(self):
-        with pytest.raises(Exception):
+        with self.assertRaises(pydantic.ValidationError):
             KrabError(
                 severity="catastrophic",  # not in Literal
                 component="rewriter",
@@ -37,7 +37,7 @@ class KrabErrorModelTests(unittest.TestCase):
             )
 
     def test_invalid_component_rejected(self):
-        with pytest.raises(Exception):
+        with self.assertRaises(pydantic.ValidationError):
             KrabError(
                 severity="warn",
                 component="nonexistent",  # not in Literal
