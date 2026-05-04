@@ -142,6 +142,22 @@ final class ErrorActionHandler {
         toastPresenter.present(error: payload)
     }
 
+    // MARK: - Raw SSE data handling
+
+    /// Декодирует JSON строку krab_error SSE события и вызывает handleErrorEvent.
+    /// Вызывается из ErrorSSEBox (main+Errors.swift).
+    func handleRawSSEData(_ jsonStr: String) {
+        guard let data = jsonStr.data(using: .utf8) else { return }
+        do {
+            let payload = try JSONDecoder().decode(KrabErrorPayload.self, from: data)
+            Task { @MainActor in
+                await self.handleErrorEvent(payload)
+            }
+        } catch {
+            logger.error("krab_error decode failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Action tap dispatch
 
     /// Вызывается когда пользователь нажал action button в toast.

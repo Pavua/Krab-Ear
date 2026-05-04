@@ -126,6 +126,36 @@ final class StatusIndicatorView: NSView {
         }
     }
 
+    // MARK: - Phase B.1: flash green on probe recovery
+
+    /// Кратковременно (800ms) мигает dot ярко-зелёным, затем возвращает прежний цвет.
+    ///
+    /// Используется HealthMonitor.subscribeToProbeEvents при `rewriter_recovered` событии.
+    /// Thread-safe — безопасно вызывать из любого потока.
+    /// - Parameter reason: причина для лог-записи.
+    func flashGreen(reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?._flashGreen(reason: reason)
+        }
+    }
+
+    private func _flashGreen(reason: String) {
+        // Запоминаем текущий цвет чтобы восстановить после вспышки
+        let previousColor = dotColor
+        dotColor = .systemGreen
+        needsDisplay = true
+
+        // Через 800ms возвращаем прежний цвет
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self else { return }
+            // Восстанавливаем только если цвет не изменился из-за другого updateState
+            if self.dotColor == .systemGreen {
+                self.dotColor = previousColor
+                self.needsDisplay = true
+            }
+        }
+    }
+
     // MARK: - Private badge helpers (must be called on Main thread)
 
     private func _applyErrorBadge(severity: String) {
