@@ -53,6 +53,8 @@ class Transcriber:
         lang_hint: str | None = None,
         history_context: list[Any] | None = None,
         stt_hotwords: list[str] | None = None,
+        settings: dict | None = None,
+        diarize: bool | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -60,7 +62,22 @@ class Transcriber:
             lang_hint: ISO 639-1 код языка или None/"auto" для авто-определения whisper'ом.
             history_context: Последние HistoryItem'ы для построения initial_prompt в Whisper.
             stt_hotwords: Пользовательские термины для Glossary-префикса в initial_prompt.
+            settings: Опциональный dict настроек текущего запроса (для проверки
+                      diarization_enabled + HF_TOKEN). Если None — проверка не производится.
+            diarize: Явное управление диаризацией для текущего вызова. None = использовать
+                     глобальный settings.DIARIZATION_ENABLED. Если settings передан и
+                     diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
         """
+        # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
+        # If diarization is requested (explicitly or via settings dict) but token
+        # is missing, push diarization.no_token and override diarize=False so the
+        # engine skips diarization gracefully. Defense in depth: engine.py still
+        # logs its own warning inside _maybe_run_diarization.
+        if settings is not None:
+            _diarize_intent = diarize if diarize is not None else settings.get("diarization_enabled", False)
+            if _diarize_intent:
+                if not self._push_diarization_no_token_if_needed(settings):
+                    diarize = False
         self.engine.set_quality_profile(quality_profile)
         return self.engine.transcribe(
             audio_data,
@@ -71,6 +88,7 @@ class Transcriber:
             lang_hint=lang_hint,
             history_context=history_context,
             stt_hotwords=stt_hotwords,
+            diarize=diarize,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

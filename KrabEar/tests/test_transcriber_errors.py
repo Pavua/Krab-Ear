@@ -219,5 +219,105 @@ class DiarizationNoTokenTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Test cases: Transcriber.transcribe() call-site wiring (Task 9 critical gap)
+# ---------------------------------------------------------------------------
+
+class TranscribeCallSiteDiarizationTests(unittest.TestCase):
+    """Integration tests: Transcriber.transcribe() with settings+diarize wiring."""
+
+    def _make_transcriber_with_fake_engine(self):
+        """Build a minimal Transcriber backed by a MagicMock engine."""
+        from backend.transcriber import Transcriber
+
+        fake_engine = MagicMock()
+        # engine.transcribe returns a dict (minimal valid result)
+        fake_engine.transcribe.return_value = {
+            "text": "test",
+            "segments": [],
+            "diarization": None,
+            "engine": "mock",
+            "model": None,
+            "language": "ru",
+        }
+        fake_engine.set_quality_profile.return_value = None
+
+        t = Transcriber.__new__(Transcriber)
+        t.engine = fake_engine  # Transcriber uses self.engine (not self._engine)
+        t._error_bus = MagicMock()
+        return t, fake_engine
+
+    def test_transcribe_no_token_skips_diarization_and_pushes(self) -> None:
+        """Real call-site: transcribe(diarize=True, settings=...) without HF_TOKEN
+        must push diarization.no_token AND override diarize=False to the engine."""
+        t, fake_engine = self._make_transcriber_with_fake_engine()
+
+        for k in ("HF_TOKEN", "KRAB_EAR_HF_TOKEN"):
+            os.environ.pop(k, None)
+
+        settings_dict = {"diarization_enabled": True}
+        t.transcribe(np.zeros(16000, dtype=np.float32), settings=settings_dict, diarize=True)
+
+        # error_bus must have received diarization.no_token
+        self.assertEqual(t._error_bus.push.call_count, 1)
+        pushed_err = t._error_bus.push.call_args[0][0]
+        self.assertEqual(pushed_err.code, "diarization.no_token")
+
+        # engine.transcribe must have been called with diarize=False
+        call_kwargs = fake_engine.transcribe.call_args[1]
+        self.assertIs(call_kwargs.get("diarize"), False,
+                      "engine.transcribe should receive diarize=False when token is missing")
+
+    def test_transcribe_with_token_passes_diarize_true(self) -> None:
+        """When HF_TOKEN is set and diarization_enabled, diarize=True passes through."""
+        t, fake_engine = self._make_transcriber_with_fake_engine()
+
+        os.environ["HF_TOKEN"] = "hf_fake_token_xyz"
+        try:
+            settings_dict = {"diarization_enabled": True}
+            t.transcribe(np.zeros(16000, dtype=np.float32), settings=settings_dict, diarize=True)
+
+            # No push should occur
+            t._error_bus.push.assert_not_called()
+
+            # engine.transcribe should get diarize=True (token present, not overridden)
+            call_kwargs = fake_engine.transcribe.call_args[1]
+            self.assertIs(call_kwargs.get("diarize"), True,
+                          "engine.transcribe should receive diarize=True when token present")
+        finally:
+            os.environ.pop("HF_TOKEN", None)
+
+    def test_transcribe_no_settings_passes_diarize_none(self) -> None:
+        """When settings=None (legacy callers), no push and diarize=None forwarded."""
+        t, fake_engine = self._make_transcriber_with_fake_engine()
+
+        for k in ("HF_TOKEN", "KRAB_EAR_HF_TOKEN"):
+            os.environ.pop(k, None)
+
+        # settings=None means skip the guard entirely
+        t.transcribe(np.zeros(16000, dtype=np.float32))
+
+        # No push (guard not triggered)
+        t._error_bus.push.assert_not_called()
+
+        # engine.transcribe gets diarize=None (engine uses global config)
+        call_kwargs = fake_engine.transcribe.call_args[1]
+        self.assertIsNone(call_kwargs.get("diarize"),
+                          "diarize should be None when settings not provided")
+
+    def test_transcribe_diarization_disabled_in_settings_no_push(self) -> None:
+        """When settings has diarization_enabled=False, no push even without token."""
+        t, fake_engine = self._make_transcriber_with_fake_engine()
+
+        for k in ("HF_TOKEN", "KRAB_EAR_HF_TOKEN"):
+            os.environ.pop(k, None)
+
+        settings_dict = {"diarization_enabled": False}
+        t.transcribe(np.zeros(16000, dtype=np.float32), settings=settings_dict, diarize=False)
+
+        # No push when diarization is off
+        t._error_bus.push.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
