@@ -18,6 +18,14 @@ struct PasteAttemptResult {
 
 /// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
 final class PasteService {
+
+    // MARK: - IPC failure reporter (injectable for tests)
+
+    /// Fire-and-forget hook: вызывается при ошибках вставки (AX-denied, app-unsupported).
+    /// Параметры: reason ("ax_denied" | "app_unsupported"), appBundle (опционально).
+    /// Реализация по умолчанию пустая — wire в main.swift после init ipcClient.
+    var reportPasteFailureHandler: ((_ reason: String, _ appBundle: String?) -> Void)?
+
     // macOS virtual key codes for modifier keys
     private let rightOptionKeyCode: CGKeyCode = Keycode.rightOption.rawValue
     private let leftOptionKeyCode: CGKeyCode = Keycode.leftOption.rawValue
@@ -134,6 +142,8 @@ final class PasteService {
         }
 
         guard inserted else {
+            // Report failure to backend (fire-and-forget via injected handler).
+            fireReportHandler(internalReason: resultReason)
             return PasteAttemptResult(ok: false, reason: resultReason)
         }
 
@@ -360,5 +370,32 @@ final class PasteService {
             waitedMs += 20
         }
         return false
+    }
+
+    // MARK: - Private IPC reporting
+
+    /// Маппирует внутренний resultReason в IPC reason и вызывает reportPasteFailureHandler.
+    /// Вызывается из paste path при неудаче; также доступен тестам через
+    /// `callReportPasteFailureForTesting`.
+    private func fireReportHandler(internalReason: String) {
+        let ipcReason: String
+        switch internalReason {
+        case "accessibility_not_granted":
+            ipcReason = "ax_denied"
+        case "event_post_failed":
+            ipcReason = "app_unsupported"
+        default:
+            ipcReason = internalReason
+        }
+        let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        reportPasteFailureHandler?(ipcReason, bundle)
+    }
+
+    // MARK: - Test helpers
+
+    /// Публичный шлюз к `fireReportHandler` для юнит-тестов:
+    /// позволяет верифицировать маппинг reason-ов без симуляции реального paste.
+    func callReportPasteFailureForTesting(internalReason: String) {
+        fireReportHandler(internalReason: internalReason)
     }
 }

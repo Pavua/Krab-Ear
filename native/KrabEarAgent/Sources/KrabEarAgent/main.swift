@@ -213,6 +213,23 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func completeStartupAfterBackendReady() {
         ipcClient = IPCClient(socketPath: backendSupervisor.socketPath)
+
+        // Wire PasteService → backend IPC: fire-and-forget on AX-denied / app-unsupported.
+        // Capture ipcClient by value so the closure works even if self deallocates.
+        let ipc = ipcClient
+        pasteService.reportPasteFailureHandler = { reason, appBundle in
+            // Capture typed locals — [String: Any] is not Sendable so build inside Task.
+            let reasonCopy = reason
+            let bundleCopy = appBundle
+            Task {
+                var params: [String: Any] = ["reason": reasonCopy]
+                if let bundle = bundleCopy {
+                    params["app_bundle"] = bundle
+                }
+                try? await ipc.callAsync(method: "report_paste_failure", params: params)
+            }
+        }
+
         settings = loadSettings()
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
         logger.info(
