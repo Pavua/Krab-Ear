@@ -531,6 +531,7 @@ class AudioEngine:
         history_context: list[Any] | None = None,
         stt_hotwords: list[str] | None = None,
         silence_ranges: list[tuple[float, float]] | None = None,
+        diarize: bool | None = None,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -584,7 +585,8 @@ class AudioEngine:
                 dynamic_prompt = f"{context_suffix} {dynamic_prompt}"
 
             # Добавляем speaker-aware dialogue hint если включено и спикеров ≥ threshold.
-            if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and settings.DIARIZATION_ENABLED:
+            _diarize_for_prompt = diarize if diarize is not None else settings.DIARIZATION_ENABLED
+            if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and _diarize_for_prompt:
                 try:
                     _speaker_cache: dict[str, Any] = {}
                     num_spk = self._estimate_num_speakers(audio_data, cache=_speaker_cache)
@@ -712,9 +714,10 @@ class AudioEngine:
 
             raw_text = str(result.get("text", "")).strip()
             segments = result.get("segments", [])
-            if not is_preview and settings.DIARIZATION_ENABLED:
+            _diarize_effective = diarize if diarize is not None else settings.DIARIZATION_ENABLED
+            if not is_preview and _diarize_effective:
                 _report("diarize")
-            diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview)
+            diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview, diarize=diarize)
 
             # После STT + diarization — освобождаем MLX промежуточные массивы.
             # MLX держит Metal-буферы пока Python GC не удалит ссылки на mx.array.
@@ -2450,11 +2453,16 @@ class AudioEngine:
         whisper_segments: list[dict[str, Any]],
         *,
         is_preview: bool,
+        diarize: bool | None = None,
     ) -> dict[str, Any]:
         """Пытается проставить спикеров для файловой транскрибации.
 
         Решение сделано мягким: любая ошибка diarization логируется и попадает в
         результат как служебное поле, но не ломает базовую STT-транскрибацию.
+
+        Args:
+            diarize: Explicit override from caller (e.g. Transcriber skips when no HF_TOKEN).
+                     When None, falls back to settings.DIARIZATION_ENABLED.
         """
         base_result: dict[str, Any] = {
             "enabled": False,
@@ -2462,7 +2470,8 @@ class AudioEngine:
             "annotated_segments": [],
             "speaker_turns": [],
         }
-        if is_preview or not settings.DIARIZATION_ENABLED:
+        _diarize_enabled = diarize if diarize is not None else settings.DIARIZATION_ENABLED
+        if is_preview or not _diarize_enabled:
             return base_result
 
         audio_path = self._resolve_audio_path(audio_data)
