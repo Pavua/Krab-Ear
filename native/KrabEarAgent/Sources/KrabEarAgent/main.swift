@@ -1189,6 +1189,11 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+// Fixes KRAB-EAR-AGENT-F: write() в закрытый Unix-сокет (после restart backend
+// или во время Phase C.2 reconnect) посылал SIGPIPE → fatal kill агента.
+// Игнорируем сигнал; write() вернёт -1/EPIPE, что уже обрабатывает IPCError.writeFailed.
+signal(SIGPIPE, SIG_IGN)
+
 let options = LaunchOptions(arguments: CommandLine.arguments)
 let app = NSApplication.shared
 let delegate = AgentAppDelegate(options: options)
