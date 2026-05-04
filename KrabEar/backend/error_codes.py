@@ -197,6 +197,16 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 600,
     },
 
+    # ── Layer: ipc ───────────────────────────────────────────────
+    "ipc.reconnect": {
+        "user_msg_ru": "Связь с backend восстановлена",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "info",
+        "dedupe_seconds": 60,
+    },
+
     # ── Layer: hotkey ────────────────────────────────────────────
     "hotkey.conflict": {
         "user_msg_ru": "Right Option занят другим приложением",

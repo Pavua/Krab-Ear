@@ -53,5 +53,7 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "history.write_fail",
             "vocabulary.load_fail",
             "hotkey.conflict",
+            # Added 2026-05-04 Phase C.2 — IPC reconnect telemetry
+            "ipc.reconnect",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

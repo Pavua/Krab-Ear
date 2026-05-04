@@ -37,6 +37,16 @@ enum IPCError: Error, LocalizedError {
             return "Backend ошибка: \(message)"
         }
     }
+
+    /// Transient errors: socket missing or connection reset — safe to retry.
+    var isTransient: Bool {
+        switch self {
+        case .socketConnectFailed, .writeFailed, .readFailed:
+            return true
+        case .socketCreateFailed, .timeout, .invalidResponse, .backendError:
+            return false
+        }
+    }
 }
 
 /// Клиент JSON-команд к локальному Unix socket backend.
@@ -60,6 +70,109 @@ final class IPCClient: @unchecked Sendable {
 
     func call(method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         return try call(method: method, params: params, timeoutSec: Self.defaultTimeoutSec)
+    }
+
+    // MARK: – Exponential-backoff reconnect (Phase C C.2)
+
+    /// Backoff delays between reconnect attempts: 250ms → 500ms → 1s → 2s → 4s.
+    /// Index 0 corresponds to the delay *before* attempt 2, etc.
+    private static let backoffDelays: [TimeInterval] = [0.25, 0.5, 1.0, 2.0, 4.0]
+
+    /// Calls `method` with automatic exponential-backoff reconnect on transient
+    /// socket errors (ENOENT / ECONNRESET / EPIPE = socketConnectFailed /
+    /// writeFailed / readFailed). Up to 5 retries; raises on exhaustion or
+    /// non-transient errors. On success after ≥1 retry, fires `report_reconnect`
+    /// telemetry to the backend (best-effort, no throw on failure).
+    ///
+    /// Use in place of `callAsync` when the call site must survive a
+    /// backend restart (e.g. HealthMonitor.ping, HistoryPanel load).
+    func callWithReconnect(
+        method: String,
+        params: [String: Any] = [:],
+        timeoutSec: Int = IPCClient.defaultTimeoutSec
+    ) async throws -> [String: Any] {
+        let startTime = Date()
+        var lastError: Error = IPCError.invalidResponse
+        // Attempt 0 is the initial try (no delay). Attempts 1–5 apply backoff.
+        let totalAttempts = 1 + Self.backoffDelays.count  // = 6
+        for attempt in 0..<totalAttempts {
+            if attempt > 0 {
+                let delay = Self.backoffDelays[attempt - 1]
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            do {
+                let result = try await callAsync(method: method, params: params, timeoutSec: timeoutSec)
+                // Successfully reconnected after at least one retry — report telemetry.
+                if attempt > 0 {
+                    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+                    Task.detached { [weak self] in
+                        guard let self else { return }
+                        try? await self.callAsync(
+                            method: "report_reconnect",
+                            params: [
+                                "attempts": attempt,
+                                "duration_ms": durationMs,
+                            ],
+                            timeoutSec: IPCClient.quickTimeoutSec
+                        )
+                    }
+                }
+                return result
+            } catch let err as IPCError where err.isTransient {
+                lastError = err
+                let attemptsLeft = totalAttempts - attempt - 1
+                if attemptsLeft > 0 {
+                    // Use os.log-compatible approach (no OSLog import needed here)
+                    NSLog(
+                        "[IPCClient] transient error attempt %d/%d: %@",
+                        attempt + 1, totalAttempts,
+                        err.localizedDescription
+                    )
+                }
+            } catch {
+                // Non-transient (timeout, invalidResponse, backendError) — rethrow immediately.
+                throw error
+            }
+        }
+        throw lastError
+    }
+
+    /// Performs the backend handshake on first connect.
+    ///
+    /// Sends `swift_agent_version` + `capabilities` to backend and logs any
+    /// version mismatch warnings. Gracefully degrades — never throws on
+    /// unexpected `backend_version` or missing `phase_b_capable`.
+    ///
+    /// Call once after the socket path becomes reachable (e.g. in
+    /// BackendSupervisor after backend reports ready).
+    func performHandshake(
+        swiftAgentVersion: String = "1.0.0",
+        capabilities: [String] = ["error_bus_consumer", "live_subs", "selection_translator"]
+    ) async {
+        do {
+            let result = try await callAsync(
+                method: "handshake",
+                params: [
+                    "swift_agent_version": swiftAgentVersion,
+                    "capabilities": capabilities,
+                ],
+                timeoutSec: IPCClient.quickTimeoutSec
+            )
+            let backendVersion = result["result"] as? [String: Any]
+            let bv = backendVersion?["backend_version"] as? String ?? "unknown"
+            let phaseB = (backendVersion?["phase_b_capable"] as? Bool) ?? false
+            let phaseC = (backendVersion?["phase_c_capable"] as? Bool) ?? false
+            if !phaseB {
+                NSLog("[IPCClient] WARNING: backend does not report phase_b_capable")
+            }
+            NSLog(
+                "[IPCClient] handshake OK: backend_version=%@ phase_b=%d phase_c=%d",
+                bv, phaseB ? 1 : 0, phaseC ? 1 : 0
+            )
+        } catch {
+            // Handshake failure is non-fatal — older backends don't have the method.
+            NSLog("[IPCClient] handshake skipped (backend error: %@)", error.localizedDescription)
+        }
     }
 
     /// Async-friendly wrapper: выполняет sync `call(...)` на background queue,
