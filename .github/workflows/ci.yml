@@ -138,3 +138,13 @@ jobs:
 
       - name: Build Swift agent
         run: cd native/KrabEarAgent && swift build -c release
+
+  verify-claude-md:
+    name: CLAUDE.md drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify CLAUDE.md file references
+        run: python3 scripts/verify_claude_md.py
