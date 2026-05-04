@@ -1189,6 +1189,8 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+// Игнорируем SIGPIPE — write() на закрытый socket вернёт EPIPE, IPC reconnect отработает (Sentry KRAB-EAR-AGENT-F).
+signal(SIGPIPE, SIG_IGN)
 let options = LaunchOptions(arguments: CommandLine.arguments)
 let app = NSApplication.shared
 let delegate = AgentAppDelegate(options: options)
