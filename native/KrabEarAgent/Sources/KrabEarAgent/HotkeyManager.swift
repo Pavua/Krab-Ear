@@ -12,6 +12,7 @@
 */
 
 import AppKit
+import Carbon
 import Foundation
 
 
@@ -111,6 +112,13 @@ final class HotkeyManager {
     /// Callback на Cmd+Option+V — задаётся из main.swift.
     var onQuickReplay: (@MainActor () -> Void)?
 
+    // MARK: Phase B.2 — hotkey conflict reporting
+
+    /// Fire-and-forget callback вызывается когда RegisterEventHotKey возвращает
+    /// eventHotKeyExistsErr (-9878), т.е. другое приложение уже держит chord.
+    /// Задаётся из main.swift после того как ipcClient готов.
+    var reportHotkeyConflictHandler: ((String) -> Void)?
+
     init(
         variant: String,
         onToggle: @escaping @MainActor () -> Void,
@@ -125,6 +133,13 @@ final class HotkeyManager {
 
     func start() {
         stop() // Safety check
+
+        // Phase B.2: Probe whether the chord is already registered by another app.
+        // RegisterEventHotKey with a temporary EventHotKeyID is the only reliable
+        // way to detect kSystemUIServer / Spotlight / other global shortcuts before
+        // our own NSEvent monitors are set up.
+        probeChordConflict()
+
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handle(event: event)
@@ -156,6 +171,50 @@ final class HotkeyManager {
                 self?.handleKeyDown(event: event)
             }
         }
+    }
+
+    /// Проверяет занят ли chord другим приложением через RegisterEventHotKey.
+    /// Если RegisterEventHotKey возвращает eventHotKeyExistsErr (-9878) —
+    /// вызывает reportHotkeyConflictHandler с chord identifier.
+    /// При успехе — немедленно отменяет регистрацию (UnregisterEventHotKey).
+    private func probeChordConflict() {
+        // Определяем keyCode и modifiers для текущего варианта.
+        // Для right_option / right_option_toggle используем Option key.
+        let (keyCode, modifiers): (UInt32, UInt32)
+        switch variant {
+        case .rightOption, .rightOptionToggle:
+            keyCode = UInt32(Keycode.rightOption.rawValue)
+            modifiers = UInt32(optionKey)
+        case .leftOption:
+            keyCode = UInt32(Keycode.leftOption.rawValue)
+            modifiers = UInt32(optionKey)
+        case .anyOption:
+            keyCode = UInt32(Keycode.rightOption.rawValue)
+            modifiers = UInt32(optionKey)
+        }
+
+        let probeID = EventHotKeyID(signature: OSType(0x4B524142), id: UInt32(9878))  // 'KRAB', probe sentinel
+        var hotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            probeID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        if status == OSStatus(eventHotKeyExistsErr) {
+            // Another app holds the chord — fire error bus report.
+            let chordName = variant.rawValue
+            AgentLogger.shared.warn("HotkeyManager: chord '\(chordName)' занят другим приложением (eventHotKeyExistsErr)")
+            reportHotkeyConflictHandler?(chordName)
+        } else if status == noErr, let ref = hotKeyRef {
+            // Successfully registered — immediately unregister, this was only a probe.
+            UnregisterEventHotKey(ref)
+        }
+        // Other non-zero statuses (e.g. paramErr) are silently ignored —
+        // they don't indicate a conflict, just that the probe wasn't supported.
     }
 
     func stop() {

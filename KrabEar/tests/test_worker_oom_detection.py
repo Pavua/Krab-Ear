@@ -1,0 +1,298 @@
+"""Tests for Phase B.2 F11 — worker subprocess OOM detection.
+
+Tests cover:
+- _detect_subprocess_oom heuristics (returncode -6/-9, stderr patterns)
+- _push_mlx_oom_for_worker fires mlx.oom via ErrorBus
+- _GigaAMSubprocessSession._check_proc_oom_on_exit fires oom_callback
+- Normal (non-OOM) exits do not trigger callbacks
+
+IMPORTANT: DO NOT import mlx_whisper or gigaam — memory constraint.
+All subprocess interaction is mocked.
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# Import helpers under test
+# ---------------------------------------------------------------------------
+
+from core.engine import AudioEngine
+from core.pipeline.stt_gigaam import detect_subprocess_oom, _GigaAMSubprocessSession
+
+
+# ---------------------------------------------------------------------------
+# detect_subprocess_oom — pure function tests (no process, no MLX)
+# ---------------------------------------------------------------------------
+
+class DetectSubprocessOomTests(unittest.TestCase):
+    """Unit tests for detect_subprocess_oom heuristic."""
+
+    def test_returncode_minus_6_detected_as_oom(self) -> None:
+        """SIGABRT (-6) must be detected as OOM."""
+        self.assertTrue(detect_subprocess_oom(-6, ""))
+
+    def test_returncode_minus_9_detected_as_oom(self) -> None:
+        """SIGKILL (-9) must be detected as OOM."""
+        self.assertTrue(detect_subprocess_oom(-9, ""))
+
+    def test_returncode_zero_not_oom(self) -> None:
+        """Clean exit (0) must not be detected as OOM."""
+        self.assertFalse(detect_subprocess_oom(0, ""))
+
+    def test_returncode_1_not_oom(self) -> None:
+        """Normal error exit (1) must not be detected as OOM."""
+        self.assertFalse(detect_subprocess_oom(1, ""))
+
+    def test_returncode_minus_15_not_oom(self) -> None:
+        """SIGTERM (-15) is not OOM (graceful termination)."""
+        self.assertFalse(detect_subprocess_oom(-15, ""))
+
+    def test_stderr_out_of_memory_detected(self) -> None:
+        """stderr containing 'out of memory' must be detected as OOM."""
+        self.assertTrue(detect_subprocess_oom(1, "Python: out of memory\n"))
+
+    def test_stderr_outofmemoryerror_detected(self) -> None:
+        """OutOfMemoryError in stderr must be detected as OOM."""
+        self.assertTrue(detect_subprocess_oom(1, "OutOfMemoryError: torch.mps"))
+
+    def test_stderr_metal_out_of_memory_detected(self) -> None:
+        """Metal out of memory in stderr must be detected as OOM."""
+        self.assertTrue(detect_subprocess_oom(1, "Metal out of memory: allocation failed"))
+
+    def test_stderr_mallocstacklogging_detected(self) -> None:
+        """MallocStackLogging in stderr (macOS kernel OOM trace) must be detected."""
+        self.assertTrue(detect_subprocess_oom(1, "MallocStackLogging: recording stacks"))
+
+    def test_stderr_case_insensitive(self) -> None:
+        """Pattern matching must be case-insensitive."""
+        self.assertTrue(detect_subprocess_oom(1, "OUT OF MEMORY"))
+        self.assertTrue(detect_subprocess_oom(1, "Metal Out Of Memory"))
+
+    def test_stderr_normal_exit_not_oom(self) -> None:
+        """Normal stderr content must not trigger OOM detection."""
+        self.assertFalse(detect_subprocess_oom(0, "gigaam_worker: started\ngigaam_worker: exiting\n"))
+
+    def test_empty_stderr_no_oom_for_normal_exit(self) -> None:
+        """Empty stderr with normal exit must not trigger OOM."""
+        self.assertFalse(detect_subprocess_oom(0, ""))
+
+    def test_none_like_empty_stderr_no_crash(self) -> None:
+        """Empty string stderr does not crash the function."""
+        # Should return False for code 1 + empty stderr
+        result = detect_subprocess_oom(1, "")
+        self.assertFalse(result)
+
+    def test_returncode_minus_6_takes_priority_over_empty_stderr(self) -> None:
+        """returncode -6 must trigger OOM even without OOM keywords in stderr."""
+        self.assertTrue(detect_subprocess_oom(-6, "gigaam_worker: started\n"))
+
+
+# ---------------------------------------------------------------------------
+# AudioEngine._detect_subprocess_oom — static method alias on engine
+# ---------------------------------------------------------------------------
+
+class AudioEngineDetectOomStaticTests(unittest.TestCase):
+    """AudioEngine._detect_subprocess_oom must delegate to same logic."""
+
+    def test_static_method_minus_6(self) -> None:
+        self.assertTrue(AudioEngine._detect_subprocess_oom(-6, ""))
+
+    def test_static_method_minus_9(self) -> None:
+        self.assertTrue(AudioEngine._detect_subprocess_oom(-9, ""))
+
+    def test_static_method_stderr_pattern(self) -> None:
+        self.assertTrue(AudioEngine._detect_subprocess_oom(1, "out of memory: Metal"))
+
+    def test_static_method_normal_exit(self) -> None:
+        self.assertFalse(AudioEngine._detect_subprocess_oom(0, "clean exit"))
+
+
+# ---------------------------------------------------------------------------
+# AudioEngine._push_mlx_oom_for_worker — fires mlx.oom via ErrorBus
+# ---------------------------------------------------------------------------
+
+def _make_engine_stub() -> AudioEngine:
+    """Build minimal AudioEngine stub without triggering model loading."""
+    engine = AudioEngine.__new__(AudioEngine)
+    engine.current_model = "mlx-community/whisper-base-mlx"
+    engine.quality_profile = "balanced"
+    engine._unavailable_models = set()
+    engine._error_bus = MagicMock()
+    engine._llm_rewriter = None
+    engine._settings_get = lambda k, d: d
+    return engine
+
+
+class PushMlxOomForWorkerTests(unittest.TestCase):
+    """Tests for AudioEngine._push_mlx_oom_for_worker."""
+
+    def test_fires_error_bus_with_mlx_oom_code(self) -> None:
+        """_push_mlx_oom_for_worker must push mlx.oom code."""
+        engine = _make_engine_stub()
+        engine._push_mlx_oom_for_worker("gigaam_worker", -6, "some stderr")
+        self.assertEqual(engine._error_bus.push.call_count, 1)
+        pushed = engine._error_bus.push.call_args[0][0]
+        self.assertEqual(pushed.code, "mlx.oom")
+
+    def test_fires_with_critical_severity(self) -> None:
+        """mlx.oom must be pushed with critical severity."""
+        engine = _make_engine_stub()
+        engine._push_mlx_oom_for_worker("gigaam_worker", -9, "")
+        pushed = engine._error_bus.push.call_args[0][0]
+        self.assertEqual(pushed.severity, "critical")
+
+    def test_debug_message_contains_name_and_rc(self) -> None:
+        """message_debug must contain worker name and returncode."""
+        engine = _make_engine_stub()
+        engine._push_mlx_oom_for_worker("gigaam_worker", -6, "stderr output")
+        pushed = engine._error_bus.push.call_args[0][0]
+        self.assertIn("gigaam_worker", pushed.message_debug)
+        self.assertIn("-6", pushed.message_debug)
+
+    def test_no_bus_does_not_raise(self) -> None:
+        """_push_mlx_oom_for_worker must not raise when no _error_bus."""
+        engine = AudioEngine.__new__(AudioEngine)
+        engine.current_model = "model"
+        engine.quality_profile = "balanced"
+        # No _error_bus
+        engine._push_mlx_oom_for_worker("gigaam_worker", -6, "oom")  # must not raise
+
+    def test_broken_bus_does_not_raise(self) -> None:
+        """_push_mlx_oom_for_worker must not raise when push raises."""
+        engine = _make_engine_stub()
+        engine._error_bus.push.side_effect = RuntimeError("bus broken")
+        engine._push_mlx_oom_for_worker("gigaam_worker", -9, "oom")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _GigaAMSubprocessSession._check_proc_oom_on_exit — callback wiring
+# ---------------------------------------------------------------------------
+
+class SubprocessSessionOomCallbackTests(unittest.TestCase):
+    """Tests for _GigaAMSubprocessSession._check_proc_oom_on_exit."""
+
+    def _make_session(self) -> _GigaAMSubprocessSession:
+        """Build a session with mocked _proc (no real subprocess)."""
+        session = _GigaAMSubprocessSession(
+            venv_python="/fake/python",
+            worker_path="/fake/worker.py",
+            mode="rnnt",
+            device="cpu",
+        )
+        return session
+
+    def test_oom_callback_fired_on_sigabrt(self) -> None:
+        """oom_callback must be called when proc exits with returncode -6."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -6
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once_with("gigaam_worker", -6, "")
+
+    def test_oom_callback_fired_on_sigkill(self) -> None:
+        """oom_callback must be called when proc exits with returncode -9."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -9
+        mock_proc.stderr.read.return_value = "kernel: memory pressure"
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertEqual(args[0], "gigaam_worker")
+        self.assertEqual(args[1], -9)
+
+    def test_oom_callback_fired_on_stderr_pattern(self) -> None:
+        """oom_callback must be called when stderr contains OOM pattern."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # non-OOM rc, but OOM in stderr
+        mock_proc.stderr.read.return_value = "RuntimeError: out of memory\n"
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once()
+
+    def test_no_callback_on_normal_exit(self) -> None:
+        """oom_callback must NOT be called for normal exit (rc=0)."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        mock_proc.stderr.read.return_value = "gigaam_worker: done\n"
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()
+        callback.assert_not_called()
+
+    def test_no_callback_on_still_running(self) -> None:
+        """oom_callback must NOT be called when process is still alive (poll=None)."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()
+        callback.assert_not_called()
+
+    def test_no_callback_set_does_not_raise(self) -> None:
+        """_check_proc_oom_on_exit must not raise when no oom_callback set."""
+        session = self._make_session()
+        # No oom_callback set
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -6
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()  # must not raise
+
+    def test_no_proc_does_not_raise(self) -> None:
+        """_check_proc_oom_on_exit must not raise when _proc is None."""
+        session = self._make_session()
+        session._proc = None
+        session._check_proc_oom_on_exit()  # must not raise
+
+    def test_broken_callback_does_not_raise(self) -> None:
+        """_check_proc_oom_on_exit must not raise when oom_callback itself raises."""
+        session = self._make_session()
+        session.oom_callback = MagicMock(side_effect=RuntimeError("callback crashed"))
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -6
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+
+        session._check_proc_oom_on_exit()  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()

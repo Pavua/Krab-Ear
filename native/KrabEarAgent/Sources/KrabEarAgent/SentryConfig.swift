@@ -6,7 +6,11 @@
 
  Включение:
  1. Заведите проект на sentry.io или self-hosted GlitchTip.
- 2. Сохраните DSN в settings через IPC-метод set_settings { "sentry_dsn": "https://..." }.
+ 2. Сохраните DSN агента в settings через IPC-метод:
+      set_settings { "sentry_dsn_agent": "https://..." }   ← только Swift-агент
+      set_settings { "sentry_dsn": "https://..." }         ← только Python-backend (fallback)
+    Если sentry_dsn_agent задан — агент использует его.
+    Иначе fallback на sentry_dsn (backward-compat).
  3. DSN будет прочитан при следующем старте агента.
 */
 
@@ -42,4 +46,35 @@ enum SentryConfig {
             options.sendDefaultPii = false
         }
     }
+
+    /// Инициализирует Sentry SDK из словаря IPC-настроек.
+    ///
+    /// Приоритет DSN:
+    ///   1. `sentry_dsn_agent` — специальный ключ для Swift-агента (krab-ear-agent project).
+    ///   2. `sentry_dsn`       — общий ключ (krab-ear-backend project); backward-compat fallback.
+    ///
+    /// Разделение позволяет направлять Swift-крэши в отдельный Sentry-проект
+    /// (`krab-ear-agent`), а Python-крэши — в `krab-ear-backend`.
+    ///
+    /// - Parameters:
+    ///   - settings: словарь, возвращённый IPC-методом `get_settings`.
+    ///   - environment: окружение (production / staging / development).
+    ///   - release: строка релиза. Nil = не передаётся.
+    static func initializeFromSettings(
+        _ settings: [String: Any],
+        environment: String = "production",
+        release: String? = nil
+    ) {
+        let dsn = (settings["sentry_dsn_agent"] as? String)?.nonEmpty
+            ?? (settings["sentry_dsn"] as? String)?.nonEmpty
+            ?? ""
+        initialize(dsn: dsn.isEmpty ? nil : dsn, environment: environment, release: release)
+    }
+}
+
+// MARK: - Helpers
+
+private extension String {
+    /// Возвращает self если непустая строка, иначе nil.
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

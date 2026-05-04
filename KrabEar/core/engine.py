@@ -424,6 +424,46 @@ class AudioEngine:
         except Exception:
             logger.exception("error_bus.push failed for code=%s", code)
 
+    # ------------------------------------------------------------------
+    # Phase B.2 F11 — worker subprocess OOM detection helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_subprocess_oom(returncode: int, stderr: str) -> bool:
+        """Return True if subprocess exit indicates OOM/SIGABRT.
+
+        Heuristics:
+        - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
+        - returncode == -9 (SIGKILL) — kernel OOM killer
+        - stderr contains "out of memory" / "MallocStackLogging" / "OutOfMemoryError"
+        """
+        if returncode in (-6, -9):
+            return True
+        if stderr:
+            low = stderr.lower()
+            return any(s in low for s in (
+                "out of memory",
+                "outofmemoryerror",
+                "metal out of memory",
+                "mallocstacklogging",
+            ))
+        return False
+
+    def _push_mlx_oom_for_worker(self, name: str, rc: int, stderr: str) -> None:
+        """Push mlx.oom KrabError for a crashed worker subprocess.
+
+        Called after _detect_subprocess_oom returns True. Never raises.
+        """
+        try:
+            stderr_tail = (stderr or "")[-200:]
+            self._push_error(
+                "mlx.oom",
+                f"worker={name} returncode={rc} stderr_tail={stderr_tail!r}",
+                severity="critical",
+            )
+        except Exception:
+            pass  # helper must never raise
+
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
         clean_profile = profile.strip().lower()
@@ -2215,6 +2255,15 @@ class AudioEngine:
             raise RuntimeError(
                 "GigaAM adapter недоступен (STT_GIGAAM_ENABLED=False или ImportError)"
             )
+
+        # Phase B.2 F11: wire OOM callback so worker subprocess crashes surface as
+        # mlx.oom ErrorBus events. Idempotent — already set callbacks are preserved.
+        if getattr(adapter, "_oom_callback", None) is None:
+            adapter._oom_callback = self._push_mlx_oom_for_worker
+            # Propagate to already-spawned session (if any).
+            sess = getattr(adapter, "_subprocess", None)
+            if sess is not None and getattr(sess, "oom_callback", None) is None:
+                sess.oom_callback = self._push_mlx_oom_for_worker
 
         # Нормализуем audio_data в numpy float32
         if isinstance(audio_data, (str, Path)):
