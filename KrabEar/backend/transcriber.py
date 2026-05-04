@@ -78,3 +78,49 @@ class Transcriber:
         # Preview всегда идёт в balanced для минимальной задержки
         self.engine.set_quality_profile("balanced")
         return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
+
+    # ------------------------------------------------------------------
+    # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)
+    # ------------------------------------------------------------------
+
+    def _push_diarization_no_token_if_needed(self, settings: dict) -> bool:
+        """Check if diarization can proceed; push diarization.no_token if HF_TOKEN missing.
+
+        Returns:
+            True  — diarization is disabled OR token is present (safe to proceed).
+            False — diarization is enabled but HF_TOKEN missing (error pushed, skip diarization).
+        """
+        if not settings.get("diarization_enabled", False):
+            return True  # diarization off — no token needed
+
+        import os
+        token = (
+            os.environ.get("HF_TOKEN")
+            or os.environ.get("KRAB_EAR_HF_TOKEN")
+            or ""
+        )
+        if token:
+            return True  # token present — diarization can proceed
+
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is not None:
+            try:
+                from backend.error_bus import KrabError
+                from backend.error_codes import ERROR_REGISTRY
+                from datetime import datetime, timezone
+                entry = ERROR_REGISTRY["diarization.no_token"]
+                err = KrabError(
+                    severity=entry["severity"],
+                    component="diarization",
+                    code="diarization.no_token",
+                    message_user=entry["user_msg_ru"],
+                    message_debug="HF_TOKEN env not set; diarization skipped",
+                    timestamp=datetime.now(timezone.utc),
+                    context={},
+                    actionable=entry["actionable"],
+                    action_id=entry["action_id"],
+                )
+                error_bus.push(err)
+            except Exception:
+                logger.exception("error_bus.push diarization.no_token failed")
+        return False

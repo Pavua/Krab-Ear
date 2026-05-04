@@ -224,6 +224,10 @@ class BackendService:
         if self._llm_rewriter is not None:
             self._llm_rewriter._error_bus = self._error_bus
 
+        # Wire error_bus into transcriber for diarization.no_token and related push
+        if self.transcriber is not None:
+            self.transcriber._error_bus = self._error_bus
+
         self._llm_probe: LLMHttpProbe | None = None
         if self._llm_rewriter is not None:
             _settings_dict = self._settings_svc.cached_settings()
@@ -861,6 +865,7 @@ class BackendService:
             "filter_by_confidence": self._history.handle_filter_by_confidence,  # фильтрация истории по STT confidence score
             "health_check": self._handle_health_check,  # агрегированный health check всех подсистем
             # --- Phase B.1: error bus + LLM probe ---
+            "report_paste_failure": self._handle_report_paste_failure,  # Swift→backend paste failure report (ax_denied / app_unsupported)
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
@@ -2126,6 +2131,42 @@ class BackendService:
             settings_service=self._settings_svc,
             store=getattr(self, "store", None),
         )
+
+    def _handle_report_paste_failure(self, params: dict) -> dict:
+        """Swift→backend report когда paste fails (AX denied / app unsupported).
+
+        Backend transforms into KrabError and pushes to error_bus.
+
+        Params:
+            reason (str): "ax_denied" | "app_unsupported"
+            app_bundle (str): bundle identifier of the target app
+        """
+        from backend.error_bus import KrabError
+        from backend.error_codes import ERROR_REGISTRY
+        from datetime import datetime, timezone
+        reason = params.get("reason", "")
+        app_bundle = params.get("app_bundle", "")
+        code_map = {
+            "ax_denied": "paste.ax_denied",
+            "app_unsupported": "paste.app_unsupported",
+        }
+        code = code_map.get(reason)
+        if code is None:
+            return {"ok": False, "reason": "unknown_paste_reason"}
+        entry = ERROR_REGISTRY[code]
+        err = KrabError(
+            severity=entry["severity"],
+            component="paste",
+            code=code,
+            message_user=entry["user_msg_ru"],
+            message_debug=f"paste failed reason={reason} app={app_bundle}",
+            timestamp=datetime.now(timezone.utc),
+            context={"app_bundle": app_bundle, "reason": reason},
+            actionable=entry["actionable"],
+            action_id=entry["action_id"],
+        )
+        self._error_bus.push(err)
+        return {"ok": True, "code": code}
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
