@@ -180,6 +180,12 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`WakeWordListener.swift`** — openWakeWord adapter bridge (Swift↔Python); triggers recording on wake-word detection; hotkey remains primary fallback.
 - **`HotkeyDoubleTapDetector.swift`** — detects Right Option double-tap (300 ms window) to start Voice Assistant conversation.
 
+#### Phase A — Auto-heal (2026-05-02) Swift additions:
+- **`BackendSupervisor.swift`** — двухкольцевой supervisor; passive mode (launchd Variant B = `KeepAlive=true`) или active mode (standalone). Exp backoff restart 0/2/5/15s + circuit breaker (5 fails в 60s window → 5 min cooldown). Spec: `docs/superpowers/specs/2026-05-02-stability-roadmap-design.md` Phase A.
+- **`HealthMonitor.swift`** — actor с 3s ping `handle_ping` IPC; 2 fails подряд → SIGTERM Python backend → wait → SIGKILL → respawn. Phase B.1 расширит подпиской на `rewriter_recovered` события из active LLM probe.
+- **`BackendToast.swift`** — non-modal toast (severity-aware), используется для backend restart notifications в Phase A. Phase B.1 добавит `ErrorToastView` для UI ошибок (отдельный компонент).
+- **`StatusIndicatorView.swift` / `StatusIndicatorImage.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
+
 ### `.app` bundle (`Krab Ear.app/`):
 - Standard macOS app bundle (`com.antigravity.krab-ear`, LSUIElement=true, macOS 13+).
 - `Contents/MacOS/KrabEarAgent` is the compiled Swift binary (same as `native/runtime/KrabEarAgent`).
@@ -408,11 +414,12 @@ python scripts/check_performance_budget.py
 
 Параллелизм > глубина: **многих Haiku параллельно** лучше чем одного Opus linear (5-10× throughput при comparable cost).
 
-### Gemini 3.1 Pro для дизайна (strict rule)
+### Gemini 3 Pro для дизайна (strict rule)
 
-Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini 3.1 Pro API:
-- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=AIzaSyCBHw753dZVMQY6wA_08YlVdv2mq8-gtsE`
-- Pattern: draft brief `/tmp/krab-ear-gemini/<name>_payload.json` → `curl POST` → save response → apply by sub-agent.
+Визуальный дизайн (цвета, шрифты, layout, themes, design tokens) делается **ТОЛЬКО** через Gemini API:
+- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent?key=$KEY`
+- **Key source:** читать из `/Users/pablito/Antigravity_AGENTS/Краб/.env` (или `Krab_ascii/.env`) под `GEMINI_API_KEY=`. **НЕ хардкодить** в Krab Ear repo (он public). Старый ключ в этой строке был revoked 2026-04-20 — см. `memory/reference_gemini_key_status.md`.
+- Pattern: `KEY=$(grep "^GEMINI_API_KEY=" /Users/pablito/Antigravity_AGENTS/Краб/.env | cut -d= -f2)` → draft brief `/tmp/krab-ear-gemini/<name>_payload.json` → `curl POST` → save response → apply by sub-agent.
 - Claude НЕ делает визуал сам. Граница: "стало выглядеть иначе" → Gemini; "стало себя вести иначе" → Claude/Sonnet.
 - Behavior код (Auto Layout mechanics, ThemeButton tracking areas, state machines) — ОК для Claude.
 
