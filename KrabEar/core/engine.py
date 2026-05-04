@@ -103,7 +103,7 @@ except Exception:
 from .config import settings
 from .confidence_calibrator import ConfidenceCalibrator
 from .text_diff import TextDiffAnalyzer
-from .utils import TextUtils
+from .utils import TextUtils, is_likely_repetition_loop
 
 # Profiler — module-level singleton (thread-safe, sliding window).
 # Импорт лениво-совместим: при отсутствии numpy на ранней стадии init'а
@@ -783,6 +783,19 @@ class AudioEngine:
                 )
 
             raw_text = str(result.get("text", "")).strip()
+
+            # Phase C C.4-wire: stt.repetition_loop — fires when Whisper returns a
+            # hallucination loop (repeated bigrams / sentences / low unique-ratio).
+            # Text is returned UNMODIFIED — «не врём про input»: user sees actual
+            # Whisper output plus warning toast and can decide whether to re-record.
+            if raw_text and not is_preview:
+                _is_loop, _loop_reason = is_likely_repetition_loop(raw_text)
+                if _is_loop:
+                    logger.warning("Whisper repetition loop detected: %s", _loop_reason)
+                    self._push_error(
+                        "stt.repetition_loop",
+                        f"reason={_loop_reason} text_len={len(raw_text)}",
+                    )
 
             # Phase B.2: stt.empty_text — fires when STT returns empty AND audio is
             # non-trivial (>2s), to distinguish real silence from transcription failures.
