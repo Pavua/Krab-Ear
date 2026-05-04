@@ -43,6 +43,70 @@ class KrabError(BaseModel):
         return value.isoformat()
 
 
+class WarnBatcher:
+    """Accumulates warn-severity errors per code and flushes to Sentry in batches.
+
+    Flush is triggered when either:
+    - ``len(buffer[code]) >= batch_size``, or
+    - ``(now - first_seen[code]) >= window`` seconds have elapsed since first arrival.
+
+    Thread-safe via its own internal Lock (independent of ErrorBus._lock).
+
+    Parameters
+    ----------
+    sentry_client:
+        Duck-typed Sentry client; must expose
+        ``capture_message(message, level=..., tags=..., extras=...)``.
+    batch_size:
+        Number of accumulated errors per code that triggers a flush (default 10).
+    window:
+        Time window in seconds after which a non-empty batch is flushed (default 30.0).
+    """
+
+    def __init__(self, sentry_client, batch_size: int = 10, window: float = 30.0) -> None:
+        self._sentry = sentry_client
+        self._batch_size = batch_size
+        self._window = window
+        self._lock = threading.Lock()
+        self._buffer: dict[str, list[KrabError]] = {}
+        self._first_seen: dict[str, float] = {}
+
+    def add(self, err: KrabError) -> None:
+        """Add a warn error to the batch buffer for its code; flush if threshold reached."""
+        code = err.code
+        with self._lock:
+            now = time.monotonic()
+            if code not in self._buffer:
+                self._buffer[code] = []
+                self._first_seen[code] = now
+            self._buffer[code].append(err)
+
+            # Flush if batch_size reached
+            should_flush = len(self._buffer[code]) >= self._batch_size
+            # Flush if window elapsed since first seen
+            if not should_flush and (now - self._first_seen[code]) >= self._window:
+                should_flush = True
+
+            if should_flush:
+                self._flush_locked(code)
+
+    def _flush_locked(self, code: str) -> None:
+        """Flush the buffer for *code* to Sentry. Must be called while holding self._lock."""
+        batch = self._buffer.pop(code, [])
+        self._first_seen.pop(code, None)
+        if not batch:
+            return
+        latest = batch[-1]
+        count = len(batch)
+        summary = f"[warn batch x{count}] {latest.message_debug}"
+        self._sentry.capture_message(
+            summary,
+            level="warn",
+            tags={"phase": "b", "code": code, "component": latest.component},
+            extras={"count": count, **latest.context},
+        )
+
+
 class ErrorBus:
     """Thread-safe error pusher with dedupe, ring buffer, and event emission.
 
@@ -54,11 +118,16 @@ class ErrorBus:
         Mapping of error code → dedupe window in seconds.
         Codes absent from the registry fall back to ``default_dedupe_window_sec``.
     sentry_client:
-        Reserved for Task 4; not used yet.
+        Duck-typed Sentry client; used for tier-based routing.
+        Pass ``None`` to disable Sentry integration entirely.
     default_dedupe_window_sec:
         Window applied when a code is not found in ``registry``.
     ring_buffer_size:
         Maximum number of recent errors kept in memory.
+    warn_batch_size:
+        Number of warn errors per code before flushing to Sentry (default 10).
+    warn_window_sec:
+        Time window (seconds) after which a non-empty warn batch is flushed (default 30.0).
     """
 
     def __init__(
@@ -68,15 +137,22 @@ class ErrorBus:
         sentry_client=None,
         default_dedupe_window_sec: float = 30.0,
         ring_buffer_size: int = 200,
+        warn_batch_size: int = 10,
+        warn_window_sec: float = 30.0,
     ) -> None:
         self._event_bus = event_bus
         self._registry: dict[str, float] = registry
-        self._sentry_client = sentry_client
+        self._sentry = sentry_client
         self._default_dedupe_window_sec = default_dedupe_window_sec
         self._ring: deque[KrabError] = deque(maxlen=ring_buffer_size)
         # code -> last_emitted monotonic timestamp
         self._last_emitted: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._warn_batcher: WarnBatcher | None = (
+            WarnBatcher(sentry_client, batch_size=warn_batch_size, window=warn_window_sec)
+            if sentry_client is not None
+            else None
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,7 +176,7 @@ class ErrorBus:
         # Emit outside the lock so event_bus callbacks can't dead-lock us.
         payload = err.model_dump(mode="json")
         self._event_bus.emit("krab_error", payload)
-        self._route_to_sentry(err)  # TODO(Task 4): real Sentry tier routing
+        self._route_to_sentry(err)
         return True
 
     def list_recent(self, limit: int = 200) -> list[KrabError]:
@@ -125,7 +201,24 @@ class ErrorBus:
         """Return the dedupe window (seconds) for *code*, falling back to default."""
         return self._registry.get(code, self._default_dedupe_window_sec)
 
-    def _route_to_sentry(self, err: KrabError) -> None:  # noqa: ARG002
-        """No-op stub — Task 4 will replace this body with real Sentry tier routing."""
-        # TODO(Task 4): real Sentry tier routing
-        return None
+    def _route_to_sentry(self, err: KrabError) -> None:
+        """Route error to Sentry according to severity tier.
+
+        - info   → skip (never sent)
+        - warn   → accumulate in WarnBatcher; flush at batch_size or window threshold
+        - error  → immediate capture_message(level="error")
+        - critical → immediate capture_message(level="critical")
+        """
+        if self._sentry is None or err.severity == "info":
+            return
+        if err.severity == "warn":
+            if self._warn_batcher:
+                self._warn_batcher.add(err)
+            return
+        # error / critical — immediate
+        self._sentry.capture_message(
+            err.message_debug,
+            level=err.severity,
+            tags={"phase": "b", "code": err.code, "component": err.component},
+            extras=err.context,
+        )

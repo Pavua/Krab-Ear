@@ -189,3 +189,98 @@ class ErrorBusPushTests(unittest.TestCase):
         for t in threads:
             t.join()
         self.assertEqual(errors, [], f"Thread errors: {errors}")
+
+
+# ---------------------------------------------------------------------------
+# Task 4 tests: Sentry tier routing
+# ---------------------------------------------------------------------------
+
+def _make_err_component(
+    code: str = "stt.empty_text",
+    severity: str = "warn",
+    component: str = "stt",
+) -> KrabError:
+    return KrabError(
+        severity=severity,
+        component=component,
+        code=code,
+        message_user="test user",
+        message_debug="test debug",
+        timestamp=datetime.now(timezone.utc),
+        context={"k": "v"},
+        actionable=False,
+        action_id=None,
+    )
+
+
+class ErrorBusSentryRoutingTests(unittest.TestCase):
+
+    def _make_bus_with_sentry(
+        self,
+        default_dedupe_window_sec: float = 0.0,
+        warn_batch_size: int = 10,
+        warn_window_sec: float = 30.0,
+    ) -> tuple["ErrorBus", MagicMock, MagicMock]:
+        event_bus = MagicMock()
+        sentry = MagicMock()
+        bus = ErrorBus(
+            event_bus=event_bus,
+            registry={},
+            sentry_client=sentry,
+            default_dedupe_window_sec=default_dedupe_window_sec,
+            warn_batch_size=warn_batch_size,
+            warn_window_sec=warn_window_sec,
+        )
+        return bus, event_bus, sentry
+
+    def test_info_skipped(self):
+        """push() with severity=info must NOT call sentry.capture_message."""
+        bus, _, sentry = self._make_bus_with_sentry()
+        err = _make_err_component(code="stt.empty_text", severity="info", component="stt")
+        bus.push(err)
+        sentry.capture_message.assert_not_called()
+
+    def test_error_immediate(self):
+        """push() with severity=error calls sentry.capture_message once with level='error'
+        and tags containing phase='b' and the error code."""
+        bus, _, sentry = self._make_bus_with_sentry()
+        err = _make_err_component(code="paste.ax_denied", severity="error", component="paste")
+        bus.push(err)
+        sentry.capture_message.assert_called_once()
+        call_kwargs = sentry.capture_message.call_args
+        # message is positional arg 0
+        self.assertIn("test debug", call_kwargs[0][0])
+        self.assertEqual(call_kwargs[1]["level"], "error")
+        tags = call_kwargs[1]["tags"]
+        self.assertEqual(tags["phase"], "b")
+        self.assertEqual(tags["code"], "paste.ax_denied")
+
+    def test_critical_immediate(self):
+        """push() with severity=critical calls sentry.capture_message with level='critical'."""
+        bus, _, sentry = self._make_bus_with_sentry()
+        err = _make_err_component(code="mlx.crash", severity="critical", component="mlx")
+        bus.push(err)
+        sentry.capture_message.assert_called_once()
+        call_kwargs = sentry.capture_message.call_args
+        self.assertEqual(call_kwargs[1]["level"], "critical")
+
+    def test_warn_batched(self):
+        """9 consecutive warn pushes must NOT call sentry.capture_message (batch not full)."""
+        bus, _, sentry = self._make_bus_with_sentry(warn_batch_size=10, warn_window_sec=30.0)
+        for i in range(9):
+            bus._dedupe.pop("rewriter.timeout", None) if hasattr(bus, "_dedupe") else None
+            bus._last_emitted.pop("rewriter.timeout", None)
+            bus.push(_make_err_component(
+                code="rewriter.timeout", severity="warn", component="rewriter"
+            ))
+        sentry.capture_message.assert_not_called()
+
+    def test_warn_batch_flush_at_10(self):
+        """10 consecutive warn pushes MUST call sentry.capture_message (batch flushed)."""
+        bus, _, sentry = self._make_bus_with_sentry(warn_batch_size=10, warn_window_sec=30.0)
+        for i in range(10):
+            bus._last_emitted.pop("rewriter.timeout", None)
+            bus.push(_make_err_component(
+                code="rewriter.timeout", severity="warn", component="rewriter"
+            ))
+        sentry.capture_message.assert_called_once()
