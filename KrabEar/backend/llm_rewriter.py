@@ -219,8 +219,8 @@ class LLMRewriteResult:
     """Результат попытки rewrite'а. Всегда возвращается, никогда не raises."""
 
     ok: bool
-    text: Optional[str]
-    fallback_reason: Optional[str]
+    text: str | None
+    fallback_reason: str | None
     latency_ms: Optional[int]
 
     def text_or_fallback(self, fallback: str) -> str:
@@ -260,7 +260,7 @@ class LLMRewriter:
             max_reset_sec=circuit_max_reset_sec,
         )
         self._last_latency_ms: Optional[int] = None
-        self._last_error: Optional[str] = None
+        self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
 
@@ -553,7 +553,7 @@ class LLMRewriter:
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
 
-    def fix_punctuation_only(self, text: str, language: str = "ru") -> Optional[str]:
+    def fix_punctuation_only(self, text: str, language: str = "ru") -> str | None:
         """Минимальный LLM pass: только пунктуация, слова не меняются.
 
         В отличие от rewrite(), который допускает лёгкую редактуру, этот метод
