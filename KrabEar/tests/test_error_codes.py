@@ -43,6 +43,7 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "rewriter.tool_calls_emitted",
             "rewriter.empty_response",
             "rewriter.parse_error",
+            "rewriter.model_evicted",
             "stt.load_fail", "stt.empty_text",
             "diarization.no_token", "diarization.pipeline_fail",
             "translation.timeout",

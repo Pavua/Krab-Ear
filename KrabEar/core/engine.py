@@ -394,6 +394,36 @@ class AudioEngine:
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
+    def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
+        """Push KrabError to attached ErrorBus if available. Late-injected attribute.
+
+        Never raises — production paths must not break due to error reporting.
+        Phase B.2: called from stt chain / diarization / mlx oom paths.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code, {})
+            component = code.split(".")[0] if "." in code else "stt"
+            err = KrabError(
+                severity=severity or entry.get("severity", "warn"),
+                component=component,
+                code=code,
+                message_user=entry.get("user_msg_ru", "STT ошибка"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"model": self.current_model, "profile": self.quality_profile},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("error_bus.push failed for code=%s", code)
+
     def set_quality_profile(self, profile: str) -> bool:
         """Переключает профиль качества (balanced или max)."""
         clean_profile = profile.strip().lower()
@@ -713,6 +743,20 @@ class AudioEngine:
                 )
 
             raw_text = str(result.get("text", "")).strip()
+
+            # Phase B.2: stt.empty_text — fires when STT returns empty AND audio is
+            # non-trivial (>2s), to distinguish real silence from transcription failures.
+            if not raw_text and not is_preview:
+                _audio_dur = result.get("audio_duration_sec") or 0.0
+                if _audio_dur <= 0.0 and isinstance(audio_data, __import__("numpy").ndarray):
+                    _audio_dur = len(audio_data) / 16000.0
+                if _audio_dur > 2.0:
+                    self._push_error(
+                        "stt.empty_text",
+                        f"empty STT result for {_audio_dur:.1f}s audio (model={result.get('model_used', self.current_model)})",
+                        severity="info",
+                    )
+
             segments = result.get("segments", [])
             _diarize_effective = diarize if diarize is not None else settings.DIARIZATION_ENABLED
             if not is_preview and _diarize_effective:
@@ -1591,11 +1635,23 @@ class AudioEngine:
             except MemoryError:
                 logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
                 self._unavailable_models.add(model_name)
+                # Phase B.2: stt.load_fail — model failed to init due to OOM
+                self._push_error(
+                    "stt.load_fail",
+                    f"MemoryError loading {model_name} — switching to balanced",
+                    severity="error",
+                )
             except OSError as e:
                 # errno 12 = Cannot allocate memory — ядро отказало в mmap
                 if e.errno == 12 or "Cannot allocate memory" in str(e):
                     logger.error("OOM (OSError) при модели %s: %s — помечаю как недоступную", model_name, e)
                     self._unavailable_models.add(model_name)
+                    # Phase B.2: stt.load_fail — OOM at OS level
+                    self._push_error(
+                        "stt.load_fail",
+                        f"OOM (OSError errno={e.errno}) loading {model_name}",
+                        severity="error",
+                    )
                 else:
                     logger.warning("Модель %s не сработала (OSError): %s", model_name, e)
                     self._unavailable_models.add(model_name)
@@ -1659,6 +1715,18 @@ class AudioEngine:
                     else:
                         return mlx_whisper.transcribe(audio_data, **params)
                 except TypeError as e:
+                    last_err = e
+                except (MemoryError, RuntimeError) as e:
+                    # Phase B.2: mlx.oom — MLX Metal GPU ran out of memory during inference.
+                    _emsg = str(e).lower()
+                    if isinstance(e, MemoryError) or any(
+                        kw in _emsg for kw in ("allocat", "out of memory", "metal", "oom")
+                    ):
+                        self._push_error(
+                            "mlx.oom",
+                            f"{type(e).__name__}: {e} (model={model_name})",
+                            severity="critical",
+                        )
                     last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
@@ -2490,6 +2558,12 @@ class AudioEngine:
             }
         except Exception as exc:
             logger.warning("Diarization недоступен для %s: %s", audio_path, exc)
+            # Phase B.2: diarization.pipeline_fail — inference error (not startup/no_token)
+            self._push_error(
+                "diarization.pipeline_fail",
+                f"{type(exc).__name__}: {exc}",
+                severity="warn",
+            )
             return {**base_result, "error": str(exc)}
 
     def _resolve_audio_path(self, audio_data: Any) -> str | None:

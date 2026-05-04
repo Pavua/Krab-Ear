@@ -72,6 +72,32 @@ class StateStore:
 
         # Инвертированный индекс для быстрого полнотекстового поиска.
         self._search_index: SearchIndex = SearchIndex()
+        # Phase B.2 — error_bus late-injection
+
+    def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
+        """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=severity or entry.get("severity", "warn"),
+                component="history",
+                code=code,
+                message_user=entry.get("user_msg_ru", "Ошибка хранилища"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"data_dir": str(self.data_dir)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("error_bus.push failed for code=%s", code)
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
@@ -177,8 +203,18 @@ class StateStore:
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
         )
-        with self._lock():
-            self._append_ndjson(self.history_path, item.to_dict())
+        try:
+            with self._lock():
+                self._append_ndjson(self.history_path, item.to_dict())
+        except Exception as exc:
+            logger.error("Ошибка записи в history.ndjson: %s", exc)
+            # Phase B.2: history.write_fail — disk full, permission denied, lock timeout
+            self._push_error(
+                "history.write_fail",
+                f"{type(exc).__name__}: {exc}",
+                severity="critical",
+            )
+            raise
         return item
 
     def set_paste_status(self, item_id: str, paste_status: str) -> bool:

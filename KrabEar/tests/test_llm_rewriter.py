@@ -912,5 +912,51 @@ class LLMRewriterErrorBusPushTests(unittest.TestCase):
             os.environ.pop("KRAB_EAR_LLM_FORCE_TIMEOUT", None)
 
 
+class LLMRewriterPassiveHealthCheckTestCase(unittest.TestCase):
+    """Tests for passive_health_check() — GET /v1/models, no JIT reload."""
+
+    def setUp(self):
+        from backend.llm_rewriter import LLMRewriter
+        self.rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="gemma-4-e4b-it-mlx",
+        )
+
+    def _mock_get_response(self, data: dict, status_code: int = 200):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = data
+        return resp
+
+    def test_passive_health_check_returns_true_when_model_loaded(self):
+        """GET /v1/models returns our model in data list → (True, True)."""
+        resp = self._mock_get_response({"data": [{"id": "gemma-4-e4b-it-mlx"}]})
+        with patch.object(self.rewriter._session, "get", return_value=resp) as mock_get:
+            result = self.rewriter.passive_health_check()
+        self.assertEqual(result, (True, True))
+        mock_get.assert_called_once()
+        call_url = mock_get.call_args[0][0]
+        self.assertIn("/models", call_url)
+        self.assertNotIn("chat", call_url)  # must NOT be a chat/completions call
+
+    def test_passive_health_check_returns_false_when_model_not_loaded(self):
+        """GET /v1/models returns a different model → (True, False) — reachable but our
+        model is not in the loaded list."""
+        resp = self._mock_get_response({"data": [{"id": "llama-3-8b"}]})
+        with patch.object(self.rewriter._session, "get", return_value=resp):
+            result = self.rewriter.passive_health_check()
+        self.assertEqual(result, (True, False))
+
+    def test_passive_health_check_returns_false_when_unreachable(self):
+        """ConnectionError from session.get → (False, False) — never raises."""
+        import requests as req
+        with patch.object(
+            self.rewriter._session, "get", side_effect=req.ConnectionError("refused")
+        ):
+            result = self.rewriter.passive_health_check()
+        self.assertEqual(result, (False, False))
+
+
 if __name__ == "__main__":
     unittest.main()

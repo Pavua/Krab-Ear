@@ -241,4 +241,39 @@ extension HistoryPanelController {
             }
         }
     }
+
+    // MARK: - Diagnostics Tab (Phase B.2 F6)
+    //
+    // DiagnosticsTabViewController — полноценная вкладка с фильтрами severity/component
+    // и NSTableView журнала ошибок. Добавляется в mainTabView следующей за «Автозвонки».
+
+    nonisolated(unsafe) static var diagnosticsTabVCKey: UInt8 = 0
+
+    /// Контроллер вкладки «Диагностика». Создаётся один раз в setupDiagnosticsTab().
+    var diagnosticsTabVC: DiagnosticsTabViewController? {
+        get { objc_getAssociatedObject(self, &HistoryPanelController.diagnosticsTabVCKey) as? DiagnosticsTabViewController }
+        set { objc_setAssociatedObject(self, &HistoryPanelController.diagnosticsTabVCKey, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+
+    /// Создать и встроить DiagnosticsTabViewController в NSTabView.
+    /// Вызывается из setupUI() после setupCallAutomationTab().
+    func setupDiagnosticsTab(contentView: NSView) {
+        let vc = DiagnosticsTabViewController(ipcClient: ipcClient)
+        diagnosticsTabVC = vc
+
+        vc.view.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(vc.view)
+        NSLayoutConstraint.activate([
+            vc.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+            vc.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            vc.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            vc.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+        ])
+
+        // Trigger viewDidLoad (loads view hierarchy + initial refresh)
+        _ = vc.view
+    }
+
+    /// Индекс сегмента «Диагностика» в tabSelector (после «Автозвонки», index 5).
+    var diagnosticsTabSegmentIndex: Int { 5 }
 }

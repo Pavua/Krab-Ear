@@ -1,9 +1,15 @@
 """Active LM Studio HTTP probe thread.
 
-LLMHttpProbe periodically calls rewriter.warmup() to detect whether LM Studio
-is reachable. On state transitions it pushes KrabError events (alive→dead) and
-emits EventBus events (dead→alive). Interval adapts when cold-load latency is
-detected.
+LLMHttpProbe periodically calls rewriter.passive_health_check() to detect
+whether LM Studio is reachable and has our target model loaded.  This avoids
+the JIT reload churn that POST /v1/chat/completions caused (gemma-4 6.86 GB
+was evicted every idle cycle → 5-7 s reload → timeout → repeat).
+
+On state transitions it pushes KrabError events (alive→dead) and emits
+EventBus events (dead→alive).  When LM Studio is reachable but the model is
+not in the loaded list, a deduplicated info-severity
+``rewriter.model_evicted`` event is pushed so the user gets one diagnostic
+without toast spam.
 
 Usage::
 
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -32,12 +39,15 @@ logger = logging.getLogger("KrabEar.Backend.LLMHttpProbe")
 class LLMHttpProbe:
     """Background thread that actively probes LM Studio HTTP endpoint.
 
+    Uses ``rewriter.passive_health_check()`` (GET /v1/models) rather than
+    POST /v1/chat/completions to avoid triggering JIT model reloads.
+
     Parameters
     ----------
     rewriter:
         LLMRewriter (or duck-typed stand-in). Must expose:
-        - ``warmup() -> None`` — may raise on failure
-        - ``_last_latency_ms: int | None`` — last measured latency in ms
+        - ``passive_health_check() -> tuple[bool, bool]`` —
+          returns (is_reachable, has_target_model); never raises.
     error_bus:
         ErrorBus instance; ``push(KrabError)`` called on alive→dead.
     event_bus:
@@ -48,13 +58,12 @@ class LLMHttpProbe:
     base_interval_sec:
         Normal probe interval in seconds (default 30.0).
     cold_load_threshold_ms:
-        If ``rewriter._last_latency_ms`` exceeds this value after a successful
-        warmup, the probe interval is extended (default 3000 ms).
+        Kept for API compatibility; no longer used since GET /models is always
+        fast (~50 ms). May be removed in a future cleanup pass.
     max_interval_sec:
-        Upper bound for the adaptive interval (default 300.0 s).
+        Kept for API compatibility; no longer used.
     recovery_consecutive:
-        Number of consecutive fast-response ticks required before the interval
-        resets back to ``base_interval_sec`` (default 3).
+        Kept for API compatibility; no longer used.
     """
 
     def __init__(
@@ -74,16 +83,22 @@ class LLMHttpProbe:
         self._settings_provider = settings_provider
 
         self._base_interval_sec = base_interval_sec
+        # Kept for API/test compatibility; GET /models is always fast.
         self._cold_load_threshold_ms = cold_load_threshold_ms
         self._max_interval_sec = max_interval_sec
         self._recovery_consecutive = recovery_consecutive
 
-        # Adaptive interval state
+        # Interval is now fixed — GET /models latency is ~50 ms, no adaptation needed.
         self._current_interval_sec: float = base_interval_sec
-        self._fast_streak: int = 0
+        self._fast_streak: int = 0  # kept for API compatibility
 
         # Probe liveness state: None = unknown, True = alive, False = dead
         self._alive: bool | None = None
+
+        # Dedupe tracker for rewriter.model_evicted (emit at most once per 600 s)
+        self._last_model_evicted_ts: float | None = None
+        _MODEL_EVICTED_DEDUPE_SEC = 600
+        self._model_evicted_dedupe_sec: int = _MODEL_EVICTED_DEDUPE_SEC
 
         # Thread management
         self._thread: threading.Thread | None = None
@@ -124,7 +139,7 @@ class LLMHttpProbe:
             self._tick()
 
     def _tick(self) -> None:
-        """Single probe tick. Checks settings, calls warmup, adapts interval,
+        """Single probe tick. Checks settings, calls passive_health_check,
         and handles state transitions."""
         try:
             settings = self._settings_provider()
@@ -137,57 +152,56 @@ class LLMHttpProbe:
             return
 
         old_alive = self._alive
-        latency_ms: int | None = None
 
-        try:
-            self._rewriter.warmup()
-            new_alive = True
-            # Read latency after successful warmup
-            latency_ms = getattr(self._rewriter, "_last_latency_ms", None)
-        except Exception as exc:
-            new_alive = False
-            logger.debug("LLMHttpProbe: warmup failed — %s", exc)
+        # Use passive GET /v1/models — never triggers JIT model reload.
+        reachable, has_model = self._rewriter.passive_health_check()
+        new_alive = reachable and has_model
 
-        # Adapt interval based on latency
-        self._adapt_interval(new_alive=new_alive, latency_ms=latency_ms)
+        # If LM Studio is up but our model was evicted, emit a deduplicated diagnostic.
+        if reachable and not has_model:
+            self._maybe_emit_model_evicted()
 
         # Handle state transitions
         if old_alive != new_alive:
-            self._on_state_change(old=old_alive, new=new_alive, latency_ms=latency_ms)
+            self._on_state_change(old=old_alive, new=new_alive, latency_ms=None)
 
         self._alive = new_alive
 
+    def _maybe_emit_model_evicted(self) -> None:
+        """Push rewriter.model_evicted info KrabError at most once per dedupe window."""
+        now = time.monotonic()
+        if (
+            self._last_model_evicted_ts is not None
+            and (now - self._last_model_evicted_ts) < self._model_evicted_dedupe_sec
+        ):
+            return  # dedupe — already emitted recently
+        self._last_model_evicted_ts = now
+
+        ts = datetime.now(timezone.utc).isoformat()
+        err = KrabError(
+            severity="info",
+            component="rewriter",
+            code="rewriter.model_evicted",
+            message_user="LM Studio доступен, но модель выгружена из памяти",
+            message_debug=(
+                f"LLMHttpProbe: passive_health_check reachable=True has_model=False; ts={ts}"
+            ),
+            timestamp=datetime.now(timezone.utc),
+            context={},
+            actionable=False,
+            action_id=None,
+        )
+        try:
+            self._error_bus.push(err)
+        except Exception as exc:
+            logger.warning("LLMHttpProbe: error_bus.push(model_evicted) failed — %s", exc)
+        logger.info("LLMHttpProbe: model evicted (reachable but not loaded)")
+
     def _adapt_interval(self, *, new_alive: bool, latency_ms: int | None) -> None:
-        """Adjust probe interval based on latency.
+        """No-op: GET /v1/models is always fast (~50 ms), no adaptive interval needed.
 
-        - If latency > threshold (cold load): extend interval (×10, capped at max).
-        - Otherwise: track fast streak; reset to base after recovery_consecutive ticks.
+        Kept for API compatibility. The _current_interval_sec stays at base_interval_sec.
         """
-        if not new_alive:
-            # Dead — don't touch interval
-            return
-
-        if latency_ms is not None and latency_ms > self._cold_load_threshold_ms:
-            self._current_interval_sec = min(
-                self._current_interval_sec * 10,
-                self._max_interval_sec,
-            )
-            self._fast_streak = 0
-            logger.debug(
-                "LLMHttpProbe: cold-load latency %dms → interval extended to %.1fs",
-                latency_ms,
-                self._current_interval_sec,
-            )
-        else:
-            self._fast_streak += 1
-            if self._fast_streak >= self._recovery_consecutive:
-                if self._current_interval_sec != self._base_interval_sec:
-                    logger.debug(
-                        "LLMHttpProbe: %d consecutive fast ticks → interval reset to %.1fs",
-                        self._fast_streak,
-                        self._base_interval_sec,
-                    )
-                self._current_interval_sec = self._base_interval_sec
 
     def _on_state_change(
         self,
@@ -212,7 +226,7 @@ class LLMHttpProbe:
                 code="rewriter.unavailable",
                 message_user="LM Studio недоступен (active probe)",
                 message_debug=(
-                    f"LLMHttpProbe: rewriter.warmup() raised; "
+                    f"LLMHttpProbe: passive_health_check returned (False, *); "
                     f"previous_state={old!r}; ts={ts}"
                 ),
                 timestamp=datetime.now(timezone.utc),

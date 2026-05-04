@@ -786,6 +786,32 @@ class LLMRewriter:
             )
             return False
 
+    def passive_health_check(self) -> tuple[bool, bool]:
+        """Passive health check via GET /v1/models. Does NOT trigger JIT reload.
+
+        Returns: (is_reachable, has_target_model)
+            is_reachable=True если HTTP 200
+            has_target_model=True если self._model in response.data[*].id
+
+        Designed for LLMHttpProbe to avoid JIT churn. Use warmup() for
+        explicit cold-start triggers.
+        """
+        try:
+            response = self._session.get(
+                f"{self._base_url}/models",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=5.0,  # short timeout — /models is fast metadata call
+            )
+            if response.status_code != 200:
+                return (False, False)
+            data = response.json()
+            ids = [m.get("id") for m in data.get("data", [])]
+            return (True, self._model in ids)
+        except (requests.ConnectionError, requests.Timeout, requests.RequestException):
+            return (False, False)
+        except (ValueError, KeyError):
+            return (True, False)  # reachable but bad JSON
+
     def set_model(self, model: str) -> None:
         """Обновляет активную модель и запускает фоновый warmup новой модели.
 

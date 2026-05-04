@@ -101,6 +101,14 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 120,
     },
+    "rewriter.model_evicted": {
+        "user_msg_ru": "LM Studio доступен, но модель выгружена из памяти",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "info",
+        "dedupe_seconds": 600,
+    },
 
     # ── Layer: stt ───────────────────────────────────────────────
     "stt.load_fail": {
