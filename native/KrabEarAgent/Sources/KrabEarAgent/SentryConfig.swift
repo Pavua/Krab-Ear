@@ -100,6 +100,29 @@ enum SentryConfig {
         // (important when the process exits immediately after).
         SentrySDK.flush(timeout: 0.5)
     }
+
+    // MARK: - General breadcrumb
+
+    /// Записывает Sentry breadcrumb с произвольной категорией и данными.
+    ///
+    /// No-op если Sentry SDK не был инициализирован (DSN отсутствует).
+    ///
+    /// - Parameters:
+    ///   - category: категория breadcrumb, например `"live_subs"`, `"lifecycle"`.
+    ///   - message: краткое описание события.
+    ///   - data: дополнительные структурированные данные (опционально).
+    static func recordBreadcrumb(category: String, message: String, data: [String: Any] = [:]) {
+        guard isActive else { return }
+
+        SentrySDK.addBreadcrumb({
+            let crumb = Breadcrumb()
+            crumb.category = category
+            crumb.message = message
+            crumb.data = data.isEmpty ? nil : data
+            crumb.level = .info
+            return crumb
+        }())
+    }
 }
 
 // MARK: - Helpers

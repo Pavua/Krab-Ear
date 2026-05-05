@@ -42,6 +42,9 @@ final class SystemAudioCapture: NSObject {
     private let ipcClient: IPCClient
     private let logger = AgentLogger.shared
 
+    /// Флаг для однократной отправки breadcrumb при первом аудио-сэмпле.
+    private var didReceiveFirstSample = false
+
     // MARK: - Audio buffering
 
     /// Накопленные Int16 сэмплы (нативная частота дискретизации SCStream)
@@ -66,6 +69,7 @@ final class SystemAudioCapture: NSObject {
     /// Запускает захват системного аудио. Асинхронный — SCStream конфигурируется через async API.
     func start() {
         guard !isCapturing else { return }
+        SentryConfig.recordBreadcrumb(category: "live_subs", message: "capture.start_called")
         Task { @MainActor in
             await startCapture()
         }
@@ -74,6 +78,7 @@ final class SystemAudioCapture: NSObject {
     /// Останавливает захват и отправляет flush на бэкенд.
     func stop() {
         guard isCapturing else { return }
+        SentryConfig.recordBreadcrumb(category: "live_subs", message: "capture.stop_called")
         isCapturing = false
         flushTimer?.invalidate()
         flushTimer = nil
@@ -101,6 +106,11 @@ final class SystemAudioCapture: NSObject {
         do {
             // Получаем список shareable content (нужен для SCStreamConfiguration)
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            SentryConfig.recordBreadcrumb(
+                category: "live_subs",
+                message: "screencapture.permission_ok",
+                data: ["displays_count": content.displays.count]
+            )
 
             let config = SCStreamConfiguration()
             config.capturesAudio = true
@@ -112,17 +122,28 @@ final class SystemAudioCapture: NSObject {
             // Берём первый дисплей как источник (аудио от всей системы)
             guard let display = content.displays.first else {
                 logger.warn("SystemAudioCapture: дисплей не найден, захват аудио невозможен")
+                SentryConfig.recordBreadcrumb(
+                    category: "live_subs",
+                    message: "stream.error",
+                    data: ["error": "no_display_found"]
+                )
                 return
             }
             let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
             let newStream = SCStream(filter: filter, configuration: config, delegate: nil)
             try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "krabear.sysaudio", qos: .userInteractive))
+            SentryConfig.recordBreadcrumb(category: "live_subs", message: "stream.initialized")
 
             try await newStream.startCapture()
             stream = newStream
             isCapturing = true
             logger.info("SystemAudioCapture: захват запущен")
+            SentryConfig.recordBreadcrumb(
+                category: "live_subs",
+                message: "stream.started",
+                data: ["target_lang": targetLang]
+            )
 
             // Flush-таймер: раз в секунду отправляем накопленный буфер
             flushTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -135,6 +156,11 @@ final class SystemAudioCapture: NSObject {
             }
         } catch {
             logger.error("SystemAudioCapture: ошибка запуска — \(error.localizedDescription)")
+            SentryConfig.recordBreadcrumb(
+                category: "live_subs",
+                message: "stream.error",
+                data: ["error": error.localizedDescription]
+            )
         }
     }
 
@@ -231,6 +257,15 @@ extension SystemAudioCapture: SCStreamOutput {
         Task { @MainActor in
             self.nativeSampleRate = sr
             self.ringBuffer.append(contentsOf: samples)
+            // Первый аудио-сэмпл — однократный breadcrumb для диагностики
+            if !self.didReceiveFirstSample {
+                self.didReceiveFirstSample = true
+                SentryConfig.recordBreadcrumb(
+                    category: "live_subs",
+                    message: "first_sample_received",
+                    data: ["sample_rate": sr, "samples_count": samples.count]
+                )
+            }
             // Не ждём таймер — если накопили целый chunk, отправим сразу
             if self.ringBuffer.count >= self.chunkSamples {
                 self.sendChunk(isFinal: false)

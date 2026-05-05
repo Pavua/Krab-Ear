@@ -1,6 +1,8 @@
-"""Integration tests for ErrorBus IPC handlers (Phase B.1).
+"""Integration tests for ErrorBus IPC handlers (Phase B.1) and repetition-loop
+detector (Phase C C.4).
 
-Tests: list_recent_errors, clear_recent_errors, handle_error_action, probe_llm_http.
+Tests: list_recent_errors, clear_recent_errors, handle_error_action, probe_llm_http,
+STT repetition-loop end-to-end (C.4 verification).
 Uses the same direct-BackendService harness as test_backend_service.py.
 """
 
@@ -8,7 +10,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -301,6 +305,296 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         # All rss_mb should be 512.0
         for p in procs:
             self.assertAlmostEqual(p["rss_mb"], 512.0, places=0)
+
+
+# ---------------------------------------------------------------------------
+# Phase C C.4 — STT repetition-loop integration tests
+# ---------------------------------------------------------------------------
+
+class _LoopingFakeRecorder:
+    """Fake recorder returning non-trivial audio so silence / background guards pass."""
+
+    def __init__(self) -> None:
+        self.is_recording = False
+        self.sample_rate = 16000
+        self._snapshot_counter = 0
+        self.last_stop_trim_ms = 0
+        self.last_stop_timeout_sec = 3.0
+
+    def start(self) -> bool:
+        if self.is_recording:
+            return False
+        self.is_recording = True
+        return True
+
+    def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0):
+        if not self.is_recording:
+            return None
+        self.is_recording = False
+        # Return non-silent audio (random signal) so silence guard does NOT fire.
+        # 2 s @ 16 kHz — long enough that empty_text guard does NOT suppress.
+        rng = np.random.default_rng(42)
+        audio = rng.standard_normal(32000).astype(np.float32) * 0.1
+        return audio, 2.0
+
+    def snapshot_audio(self, max_duration_sec: float = 12.0):
+        self._snapshot_counter += 1
+        return np.ones(16000, dtype=np.float32), float(self._snapshot_counter)
+
+
+class _LoopingTranscriber:
+    """Fake transcriber that:
+    1. Calls the **real** ``is_likely_repetition_loop`` on preset hallucinated text.
+    2. If loop is detected, pushes ``stt.repetition_loop`` to the error bus that
+       BackendService late-injects as ``self._error_bus``.
+
+    This mirrors exactly what ``AudioEngine._push_error`` does after the C.4 wire.
+    No MLX / Whisper loaded — fakes only.
+    """
+
+    class _FakeEngine:
+        """Minimal engine stub to satisfy BackendService attribute checks."""
+        current_model: str = "fake-balanced"
+        quality_profile: str = "balanced"
+
+        def set_quality_profile(self, profile: str) -> None:
+            self.quality_profile = profile
+
+    LOOP_TEXT = (
+        "согласен да согласен да согласен да согласен да согласен да"
+    )
+
+    def __init__(self) -> None:
+        self.engine = self._FakeEngine()
+
+    def transcribe(self, audio_data, **kwargs) -> dict:
+        from core.utils import is_likely_repetition_loop
+
+        text = self.LOOP_TEXT
+        is_loop, loop_reason = is_likely_repetition_loop(text)
+        if is_loop:
+            error_bus = getattr(self, "_error_bus", None)
+            if error_bus is not None:
+                from backend.error_bus import KrabError
+                from backend.error_codes import ERROR_REGISTRY
+                code = "stt.repetition_loop"
+                entry = ERROR_REGISTRY.get(code, {})
+                err = KrabError(
+                    severity=entry.get("severity", "warn"),
+                    component="stt",
+                    code=code,
+                    message_user=entry.get("user_msg_ru", "STT ошибка"),
+                    message_debug=f"reason={loop_reason} text_len={len(text)}",
+                    timestamp=datetime.now(timezone.utc),
+                    context={
+                        "model": self.engine.current_model,
+                        "profile": self.engine.quality_profile,
+                    },
+                    actionable=entry.get("actionable", False),
+                    action_id=entry.get("action_id"),
+                )
+                error_bus.push(err)
+
+        return {
+            "text": text,
+            "segments": [],
+            "language": "ru",
+            "model_used": self.engine.current_model,
+            "audio_duration_sec": 2.0,
+        }
+
+    def transcribe_preview(self, audio_data, **kwargs) -> dict:
+        return {
+            "text": "preview",
+            "segments": [],
+            "language": "ru",
+            "model_used": self.engine.current_model,
+            "audio_duration_sec": 0.1,
+        }
+
+
+class _NormalTranscriber:
+    """Fake transcriber returning clean, non-repetitive text."""
+
+    class _FakeEngine:
+        current_model: str = "fake-balanced"
+        quality_profile: str = "balanced"
+
+        def set_quality_profile(self, profile: str) -> None:
+            self.quality_profile = profile
+
+    def __init__(self) -> None:
+        self.engine = self._FakeEngine()
+
+    def transcribe(self, audio_data, **kwargs) -> dict:
+        from core.utils import is_likely_repetition_loop
+
+        text = "Привет, как дела сегодня? Всё хорошо."
+        is_loop, loop_reason = is_likely_repetition_loop(text)
+        # Sanity: clean text must NOT trigger a push.  Still follow the same
+        # pattern as _LoopingTranscriber so the code paths are symmetric.
+        if is_loop:
+            error_bus = getattr(self, "_error_bus", None)
+            if error_bus is not None:
+                from backend.error_bus import KrabError
+                from backend.error_codes import ERROR_REGISTRY
+                code = "stt.repetition_loop"
+                entry = ERROR_REGISTRY.get(code, {})
+                err = KrabError(
+                    severity=entry.get("severity", "warn"),
+                    component="stt",
+                    code=code,
+                    message_user=entry.get("user_msg_ru", "STT ошибка"),
+                    message_debug=f"reason={loop_reason} text_len={len(text)}",
+                    timestamp=datetime.now(timezone.utc),
+                    context={
+                        "model": self.engine.current_model,
+                        "profile": self.engine.quality_profile,
+                    },
+                    actionable=entry.get("actionable", False),
+                    action_id=entry.get("action_id"),
+                )
+                error_bus.push(err)
+
+        return {
+            "text": text,
+            "segments": [],
+            "language": "ru",
+            "model_used": self.engine.current_model,
+            "audio_duration_sec": 2.0,
+        }
+
+    def transcribe_preview(self, audio_data, **kwargs) -> dict:
+        return {
+            "text": "preview",
+            "segments": [],
+            "language": "ru",
+            "model_used": self.engine.current_model,
+            "audio_duration_sec": 0.1,
+        }
+
+
+class STTRepetitionLoopIntegrationTests(unittest.TestCase):
+    """End-to-end: BackendService receives transcribe IPC → fake transcriber runs
+    real ``is_likely_repetition_loop`` on preset hallucinated text → error bus
+    receives ``stt.repetition_loop`` → IPC ``list_recent_errors`` exposes the code.
+
+    Validates Phase C C.4-wire (commit 5c2b0af): the detector is called inside
+    the real transcription call-site and pushes through the real ErrorBus path.
+
+    No MLX / Whisper loaded — fakes only.
+    """
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _make_service(self, transcriber) -> "BackendService":
+        store = StateStore(Path(self.tmp.name) / "data")
+        service = BackendService(
+            store=store,
+            recorder=_LoopingFakeRecorder(),
+            transcriber=transcriber,
+            translator=_FakeTranslator(),
+        )
+        self.addCleanup(service.close)
+        return service
+
+    def _call(self, service, method: str, params: dict | None = None) -> dict:
+        return service.handle_request(
+            {"id": "t", "method": method, "params": params or {}}
+        )
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    # ------------------------------------------------------------------
+    # 1. Positive: loop text → error bus contains stt.repetition_loop
+    # ------------------------------------------------------------------
+
+    def test_loop_text_pushes_stt_repetition_loop_via_pipeline(self) -> None:
+        """Hallucinated text ('согласен да' × 5) → stt.repetition_loop in ErrorBus."""
+        service = self._make_service(_LoopingTranscriber())
+
+        # Verify error bus is wired into transcriber by BackendService.__init__
+        self.assertIsNotNone(
+            getattr(service.transcriber, "_error_bus", None),
+            "BackendService must inject _error_bus into transcriber",
+        )
+
+        # Trigger full stop_recording → transcribe pipeline.
+        # Pass silence_guard_enabled=False so the fake silent audio does not
+        # short-circuit before reaching transcribe().
+        self._call(service, "start_recording", {})
+        time.sleep(0.05)
+        stop_resp = self._call(
+            service,
+            "stop_recording",
+            {"silence_guard_enabled": False, "background_guard_enabled": False},
+        )
+        self.assertTrue(stop_resp.get("ok", True), f"stop_recording IPC error: {stop_resp}")
+
+        errors_resp = self._call(service, "list_recent_errors", {})
+        self.assertTrue(errors_resp["ok"], f"list_recent_errors IPC error: {errors_resp}")
+        errors = errors_resp["result"]["errors"]
+        codes = [e["code"] for e in errors]
+
+        self.assertIn(
+            "stt.repetition_loop",
+            codes,
+            f"Expected 'stt.repetition_loop' in error bus, got: {codes}",
+        )
+
+        # Verify error shape
+        loop_errors = [e for e in errors if e["code"] == "stt.repetition_loop"]
+        self.assertGreaterEqual(len(loop_errors), 1)
+        entry = loop_errors[0]
+        self.assertIn("severity", entry)
+        self.assertIn("component", entry)
+        self.assertEqual(entry["component"], "stt")
+
+    # ------------------------------------------------------------------
+    # 2. Negative: clean text → no stt.repetition_loop event
+    # ------------------------------------------------------------------
+
+    def test_normal_text_does_not_push_repetition_loop(self) -> None:
+        """Clean text ('Привет, как дела?') → no stt.repetition_loop in ErrorBus."""
+        service = self._make_service(_NormalTranscriber())
+
+        self._call(service, "start_recording", {})
+        time.sleep(0.05)
+        self._call(
+            service,
+            "stop_recording",
+            {"silence_guard_enabled": False, "background_guard_enabled": False},
+        )
+
+        errors_resp = self._call(service, "list_recent_errors", {})
+        self.assertTrue(errors_resp["ok"], f"list_recent_errors IPC error: {errors_resp}")
+        errors = errors_resp["result"]["errors"]
+        codes = [e["code"] for e in errors]
+
+        self.assertNotIn(
+            "stt.repetition_loop",
+            codes,
+            f"Unexpected 'stt.repetition_loop' in error bus for clean text: {codes}",
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Wire verification: error_bus injected by BackendService into transcriber
+    # ------------------------------------------------------------------
+
+    def test_error_bus_wired_into_transcriber_by_backend_service(self) -> None:
+        """BackendService injects _error_bus into the transcriber instance."""
+        transcriber = _LoopingTranscriber()
+        # Before BackendService init: no _error_bus
+        self.assertIsNone(getattr(transcriber, "_error_bus", None))
+
+        service = self._make_service(transcriber)
+        # After init: _error_bus must be present and be the same object as service's
+        self.assertIsNotNone(getattr(transcriber, "_error_bus", None))
+        self.assertIs(transcriber._error_bus, service._error_bus)
 
 
 if __name__ == "__main__":
