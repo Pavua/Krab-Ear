@@ -476,6 +476,18 @@ class BackendService:
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
+        # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
+        if settings.STT_AUTO_SEED_HOTWORDS:
+            try:
+                from backend.default_hotwords import seed_hotwords as _seed_hotwords
+                _seeded_count = _seed_hotwords(self._settings_svc, only_if_empty=True)
+                if _seeded_count > 0:
+                    logger.info(
+                        "STT hotwords: авто-сид %d дефолтных брендов/терминов", _seeded_count
+                    )
+            except Exception:
+                logger.exception("STT hotwords: ошибка авто-сида")
+
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
         if not settings.LLM_ENABLED:
@@ -1107,6 +1119,8 @@ class BackendService:
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- Default STT hotwords seed ---
+            "seed_default_hotwords": self._handle_seed_default_hotwords,  # заполнить hotwords дефолтным списком брендов/терминов
         }
 
         handler = handlers.get(method)
@@ -1552,8 +1566,10 @@ class BackendService:
         # Контекст передаётся в AudioEngine для построения initial_prompt Whisper
         # (точность непрерывной диктовки +10-15%).
         _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
-        _stt_hotwords: list[str] = self._settings_svc.cached_settings().get(
-            "stt_hotwords", []
+        _cached_settings_hw = self._settings_svc.cached_settings()
+        _stt_hotwords_enabled = bool(_cached_settings_hw.get("stt_hotwords_enabled", True))
+        _stt_hotwords: list[str] = (
+            _cached_settings_hw.get("stt_hotwords", []) if _stt_hotwords_enabled else []
         )
 
         # Авто-глоссарий из истории: обогащаем initial_prompt именами и терминами.
@@ -2105,21 +2121,37 @@ class BackendService:
     def _handle_import_glossary_csv(self, params: dict[str, Any]) -> dict[str, Any]:
         """Импортирует CSV в translation_glossary.
 
-        params: {"csv": str, "mode": "merge" | "replace"}
-        Returns: {"ok": bool, "imported_count": N, "skipped_count": N, "error": str | None}
+        params:
+          csv: str — CSV-строка с заголовком source,target
+          mode: "merge" | "replace" — merge добавляет/обновляет, replace полностью заменяет
+          on_conflict: "skip" | "overwrite" | "error" — поведение при конфликте в merge-режиме
+            "skip"      — (по умолчанию) существующий термин сохраняется, конфликт записывается
+            "overwrite" — существующий термин перезаписывается
+            "error"     — импорт прерывается на первом конфликте
+
+        Returns:
+          {ok, imported_count, skipped_count, conflict_count,
+           conflicts: [{source, existing_target, new_target}], total}
         """
         import csv
         import io
 
         csv_str = params.get("csv", "")
         mode = params.get("mode", "merge").lower()
+        on_conflict = params.get("on_conflict", "skip").lower()
+
         if mode not in ("merge", "replace"):
             return {"ok": False, "error": f"invalid mode: {mode}"}
+        if on_conflict not in ("skip", "overwrite", "error"):
+            return {"ok": False, "error": f"invalid on_conflict: {on_conflict}"}
 
         settings = self._settings_svc.cached_settings()
         current: dict = dict(settings.get("translation_glossary", {}) or {})
         new_entries: dict = {} if mode == "replace" else dict(current)
         skipped = 0
+        conflicts: list = []
+        # Track sources seen in this CSV file for within-CSV deduplication
+        seen_in_csv: dict = {}
 
         try:
             reader = csv.reader(io.StringIO(csv_str))
@@ -2134,6 +2166,37 @@ class BackendService:
                 if not src or not tgt:
                     skipped += 1
                     continue
+                # Skip rows where source == target (no-op entries)
+                if src == tgt:
+                    skipped += 1
+                    continue
+                # Within-CSV deduplication: skip duplicate source rows, keep first
+                if src in seen_in_csv:
+                    skipped += 1
+                    continue
+                seen_in_csv[src] = tgt
+
+                # Conflict detection in merge mode
+                if mode == "merge" and src in current and current[src] != tgt:
+                    conflicts.append({
+                        "source": src,
+                        "existing_target": current[src],
+                        "new_target": tgt,
+                    })
+                    if on_conflict == "error":
+                        return {
+                            "ok": False,
+                            "error": f"conflict on source '{src}': existing='{current[src]}' new='{tgt}'",
+                            "imported_count": 0,
+                            "skipped_count": skipped,
+                            "conflict_count": len(conflicts),
+                            "conflicts": conflicts,
+                        }
+                    elif on_conflict == "skip":
+                        # Keep existing — don't overwrite
+                        continue
+                    # on_conflict == "overwrite": fall through to set new value
+
                 new_entries[src] = tgt
         except Exception as exc:
             return {"ok": False, "error": f"parse error: {exc}"}
@@ -2146,6 +2209,8 @@ class BackendService:
             "ok": True,
             "imported_count": max(imported, 0),
             "skipped_count": skipped,
+            "conflict_count": len(conflicts),
+            "conflicts": conflicts,
             "total": len(new_entries),
         }
 
@@ -5128,13 +5193,19 @@ end tell'''
     # STT hotwords (initial_prompt boost)
     # ------------------------------------------------------------------
 
+    # Whisper initial_prompt hard limit: ~224 tokens ≈ ~170 avg words.
+    # We cap hotwords at 100 entries (≈ safe budget) to avoid prompt overflow.
+    # When the list exceeds this limit, oldest entries are dropped (FIFO).
+    _STT_HOTWORDS_MAX: int = 100
+
     def _handle_add_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
         """Добавляет термин в список STT hotwords.
 
         Параметры:
           - word: str — термин для добавления (имя, бренд, технический термин).
 
-        Возвращает: {hotwords: list[str]} — обновлённый список.
+        Возвращает: {hotwords: list[str], truncated: bool} — обновлённый список.
+          truncated=True если список обрезан до _STT_HOTWORDS_MAX.
         """
         word = str(params.get("word") or "").strip()
         if not word:
@@ -5142,10 +5213,20 @@ end tell'''
         current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
         if not isinstance(current, list):
             current = []
+        truncated = False
         if word not in current:
             current = current + [word]
+            # Enforce per-IPC budget: drop oldest entries when limit exceeded.
+            if len(current) > self._STT_HOTWORDS_MAX:
+                excess = len(current) - self._STT_HOTWORDS_MAX
+                logger.warning(
+                    "stt_hotwords: список превышает лимит %d — удаляем %d старых записей",
+                    self._STT_HOTWORDS_MAX, excess,
+                )
+                current = current[excess:]
+                truncated = True
             self._settings_svc.handle_set_settings({"stt_hotwords": current})
-        return {"hotwords": current}
+        return {"hotwords": current, "truncated": truncated}
 
     def _handle_remove_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет термин из списка STT hotwords.
@@ -5169,12 +5250,46 @@ end tell'''
     def _handle_list_stt_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущий список STT hotwords.
 
-        Возвращает: {hotwords: list[str]}
+        Учитывает флаг stt_hotwords_enabled: если False — возвращает пустой список.
+
+        Возвращает: {hotwords: list[str], enabled: bool}
         """
-        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
+        s = self._settings_svc.cached_settings()
+        enabled = bool(s.get("stt_hotwords_enabled", True))
+        if not enabled:
+            return {"hotwords": [], "enabled": False}
+        current: list[str] = s.get("stt_hotwords", [])
         if not isinstance(current, list):
             current = []
-        return {"hotwords": current}
+        return {"hotwords": sorted(current), "enabled": True}
+
+    def _handle_seed_default_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Заполняет STT hotwords дефолтным списком брендов/терминов.
+
+        Параметры:
+          - category (str, optional): фильтр по категории
+            ("ai", "dev_tools", "languages", "formats", "infra", "apple", "common").
+            Отсутствие параметра → все категории.
+          - only_if_empty (bool, optional): по умолчанию True.
+            True = добавлять только если список полностью пуст.
+            False = мерж поверх существующего списка (без дублей).
+
+        Возвращает: {ok: bool, added_count: int, skipped: bool}
+        """
+        from backend.default_hotwords import seed_hotwords as _seed_hotwords
+
+        category: str | None = params.get("category") or None
+        only_if_empty: bool = bool(params.get("only_if_empty", True))
+
+        added = _seed_hotwords(
+            self._settings_svc,
+            category=category,
+            only_if_empty=only_if_empty,
+        )
+        skipped = added == 0 and only_if_empty and bool(
+            self._settings_svc.cached_settings().get("stt_hotwords", [])
+        )
+        return {"ok": True, "added_count": added, "skipped": skipped}
 
     # ── Auto-Glossary IPC handlers ───────────────────────────────────────────
 
