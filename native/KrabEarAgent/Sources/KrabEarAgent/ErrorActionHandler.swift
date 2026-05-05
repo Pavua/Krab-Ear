@@ -182,7 +182,7 @@ final class ErrorActionHandler {
 
     /// Обрабатывает `side_effect` строку из IPC response.
     /// Постит соответствующий NotificationCenter event для Settings panel.
-    private func handleSideEffect(from response: [String: Any], actionId: String) {
+    private func handleSideEffect(from response: IPCResponse, actionId: String) {
         guard
             let result = response["result"] as? [String: Any],
             let sideEffect = result["side_effect"] as? String

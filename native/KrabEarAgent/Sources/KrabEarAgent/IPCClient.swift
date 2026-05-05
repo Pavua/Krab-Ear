@@ -165,6 +165,18 @@ enum IPCError: Error, LocalizedError {
     }
 }
 
+/// Sendable wrapper around the IPC response dictionary. Crosses actor boundaries
+/// safely; values are read via `dict[key]` / `result["key"]` subscript or properties.
+struct IPCResponse: @unchecked Sendable {
+    let dict: [String: Any]
+
+    init(_ dict: [String: Any]) { self.dict = dict }
+
+    /// Convenience subscript so existing call sites that did `response["key"]`
+    /// continue to work after the migration.
+    subscript(key: String) -> Any? { dict[key] }
+}
+
 /// Клиент JSON-команд к локальному Unix socket backend.
 final class IPCClient: @unchecked Sendable {
     private let socketPath: String
@@ -220,7 +232,7 @@ final class IPCClient: @unchecked Sendable {
         method: String,
         params: [String: Any] = [:],
         timeoutSec: Int = IPCClient.defaultTimeoutSec
-    ) async throws -> [String: Any] {
+    ) async throws -> IPCResponse {
         let startTime = Date()
         var lastError: Error = IPCError.invalidResponse
         // Attempt 0 is the initial try (no delay). Attempts 1–5 apply backoff.
@@ -323,7 +335,7 @@ final class IPCClient: @unchecked Sendable {
         method: String,
         params: [String: Any] = [:],
         timeoutSec: Int = IPCClient.defaultTimeoutSec
-    ) async throws -> [String: Any] {
+    ) async throws -> IPCResponse {
         // Route through injected provider if present (test mode).
         if let provider = socketProvider {
             return try await callViaProvider(
@@ -331,7 +343,7 @@ final class IPCClient: @unchecked Sendable {
             )
         }
 
-        // [String: Any] не Sendable — оборачиваем в @unchecked Sendable box
+        // [String: Any] не Sendable — используем IPCResponse (@unchecked Sendable wrapper)
         // чтобы передать через @Sendable closure без data race warning.
         // IPC params/response — immutable JSON dict, гонок нет.
         struct SendableCapture: @unchecked Sendable {
@@ -339,13 +351,8 @@ final class IPCClient: @unchecked Sendable {
             let params: [String: Any]
             let timeoutSec: Int
         }
-        // SendableBox bridges [String: Any] across the CheckedContinuation boundary.
-        // Swift 6 strict-concurrency requires T: Sendable in CheckedContinuation<T,_>;
-        // IPC dicts are freshly JSON-decoded and never shared between threads after
-        // resume, so @unchecked Sendable is safe here.
-        struct SendableBox: @unchecked Sendable { let value: [String: Any] }
         let captured = SendableCapture(method: method, params: params, timeoutSec: timeoutSec)
-        let box = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SendableBox, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<IPCResponse, Error>) in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else {
                     continuation.resume(throwing: IPCError.invalidResponse)
@@ -357,13 +364,12 @@ final class IPCClient: @unchecked Sendable {
                         params: captured.params,
                         timeoutSec: captured.timeoutSec
                     )
-                    continuation.resume(returning: SendableBox(value: result))
+                    continuation.resume(returning: IPCResponse(result))
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
         }
-        return box.value
     }
 
     /// Sends a request through the injected `IPCSocketProviding` and decodes the JSON response.
@@ -372,7 +378,7 @@ final class IPCClient: @unchecked Sendable {
         params: [String: Any],
         timeoutSec: Int,
         provider: any IPCSocketProviding
-    ) async throws -> [String: Any] {
+    ) async throws -> IPCResponse {
         let request: [String: Any] = [
             "id": UUID().uuidString,
             "method": method,
@@ -398,7 +404,7 @@ final class IPCClient: @unchecked Sendable {
             throw IPCError.backendError(message)
         }
 
-        return json
+        return IPCResponse(json)
     }
 
     /// Variant с explicit timeout. Используй `IPCClient.quickTimeoutSec` (5s) для
