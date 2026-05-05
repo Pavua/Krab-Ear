@@ -128,6 +128,7 @@ from backend.observability import (
     install_signal_handlers,
 )
 from backend.calendar_link import CalendarLinker
+from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
 from datetime import datetime, timedelta
@@ -919,6 +920,7 @@ class BackendService:
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
+            "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
@@ -4226,6 +4228,25 @@ class BackendService:
             store=self.store,
             speaker_manager=self._speaker_manager,
         )
+
+    def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние записи privacy audit log.
+
+        Параметры:
+            limit — максимальное число записей (default 100).
+
+        Возвращает:
+            entries     — список NDJSON-записей {ts, category, action, details}.
+            total_count — общее число записей в файле.
+        """
+        limit = int(params.get("limit", 100))
+        audit = get_privacy_audit_logger()
+        entries = audit.read_entries(limit=limit)
+        total = audit.total_count()
+        return {
+            "entries": entries,
+            "total_count": total,
+        }
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
