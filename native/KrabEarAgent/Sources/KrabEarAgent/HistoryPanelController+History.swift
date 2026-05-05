@@ -478,6 +478,45 @@ extension HistoryPanelController {
         }
     }
 
+    // MARK: - Apple Reminders (Phase D.4)
+
+    /// Отправляет выбранную запись истории в Apple Reminders через IPC create_apple_reminder.
+    @objc func onSendToReminders() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showInfoAlert(title: "Reminders", body: "Выберите запись для отправки.")
+            return
+        }
+        sendHistoryItemToReminders(items[selected])
+    }
+
+    func sendHistoryItemToReminders(_ item: HistoryItem) {
+        let title = String(item.text.prefix(60))
+        let body = item.text
+        let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipcClient.call(
+                method: "create_apple_reminder",
+                params: ["title": title, "body": body]
+            )
+            let result = response?["result"] as? [String: Any]
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let alert = NSAlert()
+                if let ok = result?["ok"] as? Bool, ok {
+                    alert.messageText = "Напоминание создано"
+                    alert.informativeText = "Открыть Reminders для просмотра."
+                } else {
+                    alert.messageText = "Ошибка отправки"
+                    alert.informativeText = result?["error"] as? String ?? "unknown"
+                }
+                alert.runModal()
+            }
+        }
+    }
+
     // MARK: - Load / Append
 
     func loadInitial() {

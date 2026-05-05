@@ -445,6 +445,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
     let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
     let sendToAppleNotesButton = ThemeSecondaryButton(title: "Apple Notes", target: nil, action: nil)
+    let sendToRemindersButton = ThemeSecondaryButton(title: "Reminders", target: nil, action: nil)
     let historyEnhancementsRow = NSStackView()
 
     init(
@@ -1939,7 +1940,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
                        exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
-                       sendToAppleNotesButton] as [NSButton] {
+                       sendToAppleNotesButton, sendToRemindersButton] as [NSButton] {
             button.applyThemeSecondary()
         }
 
