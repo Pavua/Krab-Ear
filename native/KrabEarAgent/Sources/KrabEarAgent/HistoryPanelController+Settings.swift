@@ -532,6 +532,11 @@ extension HistoryPanelController {
         fetchAndPopulateLLMModels(currentModel: currentModel)
         llmModelSelector.isEnabled = settings.llmRewriteEnabled
         glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
+        // Reload glossary search list with current filter query.
+        reloadGlossaryList(
+            glossary: settings.translationGlossary,
+            query: glossarySearchField.stringValue
+        )
 
         switch settings.hotkey {
         case "left_option":

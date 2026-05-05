@@ -112,10 +112,14 @@ extension HistoryPanelController {
         callAssistSection.contentStackView.addArrangedSubview(callAssistCard)
         self.liveCallAssistSection = callAssistSection
 
+        // Glossary search section (feat/phase-d-batch9 glossary search).
+        let glossarySection = setupGlossarySearchSection()
+
         // Assemble liveStack — Phase 2 stream view вверху, потом header + sections.
         liveStack.addArrangedSubview(streamSection)
         liveStack.addArrangedSubview(liveHeaderRow)
         liveStack.addArrangedSubview(translationSection)
+        liveStack.addArrangedSubview(glossarySection)
         liveStack.addArrangedSubview(gatewaySection)
         liveStack.addArrangedSubview(callAssistSection)
 
