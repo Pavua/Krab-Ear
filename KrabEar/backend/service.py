@@ -1071,6 +1071,8 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- iMessage integration (Phase D.4) ---
+            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._handle_call_session_get,  # получить сессию по id
@@ -4774,6 +4776,57 @@ end tell'''
             result = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── iMessage integration (Phase D.4) ────────────────────────────────────
+
+    def _handle_send_imessage(self, params: dict) -> dict:
+        """Send iMessage/SMS via Messages.app using osascript.
+
+        params:
+          recipient: str (required) — phone number, email, or contact name
+          body: str (required) — message text
+          service: str (optional, default "iMessage") — "iMessage" | "SMS"
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        recipient = params.get("recipient", "").strip()
+        if not recipient:
+            return {"ok": False, "error": "recipient is required"}
+
+        body = params.get("body", "").strip()
+        if not body:
+            return {"ok": False, "error": "body is required"}
+
+        service_name = params.get("service", "iMessage") or "iMessage"
+        if service_name not in ("iMessage", "SMS"):
+            service_name = "iMessage"
+
+        # Map service name to AppleScript service type constant
+        service_type = "iMessage" if service_name == "iMessage" else "SMS"
+
+        # Escape double quotes to prevent AppleScript injection
+        recipient_esc = recipient.replace('"', '\\"')
+        body_esc = body.replace('"', '\\"')
+
+        script = f'''tell application "Messages"
+    set targetService to 1st service whose service type = {service_type}
+    set targetBuddy to buddy "{recipient_esc}" of targetService
+    send "{body_esc}" to targetBuddy
+end tell'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
                 return {"ok": True, "error": None}
