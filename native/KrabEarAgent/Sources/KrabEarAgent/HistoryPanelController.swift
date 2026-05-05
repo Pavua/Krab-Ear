@@ -1951,8 +1951,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
                        exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
                        sendToAppleNotesButton, sendToRemindersButton, createCalendarEventButton,
-                       sendToImessageButton] as [NSButton] {
-                       sendToTelegramButton] as [NSButton] {
+                       sendToImessageButton, sendToTelegramButton] as [NSButton] {
             button.applyThemeSecondary()
         }
 

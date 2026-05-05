@@ -149,6 +149,22 @@ public final class RealtimeOverlayController: NSObject {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
+    // MARK: M2: Position Memory
+
+    /// UserDefaults key for saved overlay origin (NSPoint archived as NSValue/NSString).
+    private let savedOriginKey = "RealtimeOverlay_LastOrigin"
+    /// Global NSEvent monitor for drag gesture while overlay is visible.
+    private var dragMonitor: Any?
+    /// Position where drag started inside the panel frame.
+    private var dragStartWindowLocation: NSPoint = .zero
+
+    // MARK: M4: Multi-line Ring Buffer
+
+    /// Maximum number of transcript lines to show simultaneously.
+    private let maxVisibleLines = 4
+    /// Ring buffer of live transcript lines (oldest at front, newest at back).
+    private var lineRingBuffer: [String] = []
+
     // MARK: Layout constants
 
     private let minWidth:   CGFloat = 420
@@ -180,7 +196,9 @@ public final class RealtimeOverlayController: NSObject {
         setupPanel()
         setupEffectView()
         setupUI()
-        setupHoverTracking()  // F7-5: hover dimming affordance
+        // Note: hover dimming (F7-5) removed — panel.ignoresMouseEvents = true (M6)
+        // means NSTrackingArea events never fire. Drag repositioning (M2) uses a
+        // global NSEvent monitor instead.
     }
 
     // MARK: - Public API
@@ -189,22 +207,28 @@ public final class RealtimeOverlayController: NSObject {
         revealTask?.cancel()
         guard overlayState == .hidden else { return }
         overlayState = .live
+        lineRingBuffer = []  // M4: reset ring buffer on each new recording
         stageBadge.isHidden = true
         tintView.tintColor = NSColor.systemRed.withAlphaComponent(0.06)
-        positionNearCursor()
+        // M2: restore last user-dragged position; fall back to near-cursor if off-screen or not saved.
+        if !restoreSavedPosition() {
+            positionNearCursor()
+        }
         panel.alphaValue = 0
         panel.orderFront(nil)
         animateShow()
-        startDotPulse()    // 4a
-        startLabelPulse()  // 4d
-        startBreathing()   // F7-1: breathing tint alpha
+        startDotPulse()     // 4a / M3: 0.4↔1.0, 1.5 s period
+        startLabelPulse()   // 4d
+        startBreathing()    // F7-1: breathing tint alpha
         recordingDot.isHidden = false
+        startDragMonitor()  // M2: track user reposition via drag
     }
 
     public func hide() {
         revealTask?.cancel()
         stopAllPulse()
-        stopBreathing()    // F7-1: remove breathing on hide
+        stopBreathing()     // F7-1: remove breathing on hide
+        stopDragMonitor()   // M2: stop drag tracking
         if overlayState == .hidden { return }
         overlayState = .hidden
         recordingDot.isHidden = true
@@ -225,18 +249,30 @@ public final class RealtimeOverlayController: NSObject {
 
         let clean = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty {
-            setPrimaryText("Слушаю…")    // F7-4: kern-attributed
+            setPrimaryText("Слушаю…")
         } else {
+            // M4: Multi-line ring buffer — push new text as a new line, keep max 4 lines.
+            // Each IPC update provides the current partial sentence; we treat each non-empty
+            // update as a new line only when it differs from the last ring-buffer line.
             let cleanTrans = (translatedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleanTrans.isEmpty {
-                setPrimaryText(clean)    // F7-4
-            } else {
-                setPrimaryText("\(clean)\n\n↔ Перевод\n\(cleanTrans)")  // F7-4
+            let newLine = cleanTrans.isEmpty ? clean : "\(clean)  ↔  \(cleanTrans)"
+
+            if lineRingBuffer.last != newLine {
+                lineRingBuffer.append(newLine)
+                // Clip oldest lines so at most maxVisibleLines are shown.
+                if lineRingBuffer.count > maxVisibleLines {
+                    lineRingBuffer.removeFirst(lineRingBuffer.count - maxVisibleLines)
+                }
             }
+            setPrimaryText(lineRingBuffer.joined(separator: "\n"))
         }
         if panel.isVisible {
             adjustHeight()
-            positionNearCursor()
+            // M2: Don't reposition to cursor after user has dragged the overlay.
+            // If user has a saved (dragged) position, keep it; otherwise follow cursor.
+            if !hasSavedPosition() {
+                positionNearCursor()
+            }
         }
     }
 
@@ -322,7 +358,9 @@ public final class RealtimeOverlayController: NSObject {
         panel.isOpaque            = false
         panel.backgroundColor     = .clear
         panel.hasShadow           = false
-        panel.ignoresMouseEvents  = false  // F7-5: allow hover tracking (nonactivatingPanel prevents focus steal)
+        // M6: click-through — overlay passes all mouse events to apps below.
+        // nonactivatingPanel already prevents focus steal; ignoresMouseEvents makes it fully transparent to clicks.
+        panel.ignoresMouseEvents  = true
     }
 
     private func setupEffectView() {
@@ -448,6 +486,7 @@ public final class RealtimeOverlayController: NSObject {
     // MARK: - Animations
 
     private func animateShow() {
+        // M1: fade-in 250 ms, easeInEaseOut. Reduce-motion: instant.
         if reduceMotion {
             panel.alphaValue = targetAlpha
             return
@@ -461,7 +500,7 @@ public final class RealtimeOverlayController: NSObject {
 
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             ctx.allowsImplicitAnimation = true
             panel.animator().alphaValue = targetAlpha
             panel.contentView?.layer?.transform = CATransform3DIdentity
@@ -469,14 +508,15 @@ public final class RealtimeOverlayController: NSObject {
     }
 
     private func animateHide(completion: @escaping @Sendable () -> Void) {
+        // M1: fade-out 350 ms, easeInEaseOut. Reduce-motion: instant.
         if reduceMotion {
             panel.alphaValue = 0
             completion()
             return
         }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.20
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ctx.duration = 0.35
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             ctx.allowsImplicitAnimation = true
             panel.animator().alphaValue = 0
             if let layer = panel.contentView?.layer {
@@ -490,7 +530,9 @@ public final class RealtimeOverlayController: NSObject {
         })
     }
 
-    // MARK: - 4a: Recording Dot Pulse (CABasicAnimation)
+    // MARK: - 4a / M3: Recording Dot Pulse (CABasicAnimation)
+    // M3: pulse range 0.4↔1.0 per spec (was 1.0→0.2 which looked like blinking-off).
+    // 1.5 s period (0.75 s per half), autoreverses, reduce-motion skipped.
 
     private func startDotPulse() {
         guard !reduceMotion else {
@@ -500,12 +542,12 @@ public final class RealtimeOverlayController: NSObject {
         recordingDot.layer?.removeAnimation(forKey: dotPulseKey)
 
         let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 1.0
-        pulse.toValue   = 0.2
-        pulse.duration  = KrabEarTheme.Motion.Duration.long
-        pulse.autoreverses  = true
-        pulse.repeatCount   = .infinity
-        pulse.timingFunction = KrabEarTheme.Motion.Easing.easeInOut
+        pulse.fromValue = 0.4   // M3: min opacity (was 1.0)
+        pulse.toValue   = 1.0   // M3: max opacity (was 0.2)
+        pulse.duration  = 0.75  // half-period → 1.5 s full cycle
+        pulse.autoreverses   = true
+        pulse.repeatCount    = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
 
         recordingDot.layer?.add(pulse, forKey: dotPulseKey)
     }
@@ -688,34 +730,107 @@ public final class RealtimeOverlayController: NSObject {
         primaryLabel.attributedStringValue = NSAttributedString(string: text, attributes: attrs)
     }
 
-    // MARK: - F7-5: Hover Dimming
+    // MARK: - M2: Position Memory + Drag Monitor
 
-    private func setupHoverTracking() {
-        guard let contentView = panel.contentView else { return }
-        let tracking = NSTrackingArea(
-            rect: contentView.bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        contentView.addTrackingArea(tracking)
+    /// Returns true and repositions the panel if a valid saved origin exists on any current screen.
+    @discardableResult
+    private func restoreSavedPosition() -> Bool {
+        guard let dict = UserDefaults.standard.dictionary(forKey: savedOriginKey),
+              let x = dict["x"] as? CGFloat,
+              let y = dict["y"] as? CGFloat
+        else { return false }
+
+        let origin = NSPoint(x: x, y: y)
+        let width = clamp(value: 520, min: minWidth, max: maxWidth)
+        let height = currentPanelHeight()
+        let candidate = NSRect(origin: origin, size: CGSize(width: width, height: height))
+
+        // Validate: at least 80% of the frame must be on some screen (handles monitor disconnect).
+        let isOnScreen = NSScreen.screens.contains { screen in
+            let intersection = candidate.intersection(screen.visibleFrame)
+            let coveredArea = intersection.width * intersection.height
+            let totalArea = width * height
+            return coveredArea / totalArea >= 0.80
+        }
+        guard isOnScreen else { return false }
+
+        panel.setFrame(candidate, display: true)
+        borderLayer.frame = effectView.bounds
+        return true
     }
 
-    // NSResponder-compatible (NSObject inherits from NSResponder via Objective-C runtime)
-    @objc public func mouseEntered(with event: NSEvent) {
-        guard overlayState != .hidden else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            panel.animator().alphaValue = 0.8 * targetAlpha
+    /// Returns true if the user has a valid saved position (i.e., they've dragged the overlay before).
+    private func hasSavedPosition() -> Bool {
+        return UserDefaults.standard.dictionary(forKey: savedOriginKey) != nil
+    }
+
+    /// Saves the current panel origin to UserDefaults.
+    private func saveCurrentPosition() {
+        let origin = panel.frame.origin
+        UserDefaults.standard.set(["x": origin.x, "y": origin.y], forKey: savedOriginKey)
+    }
+
+    /// Installs a global NSEvent monitor to detect when the user drags the overlay window.
+    /// Since `ignoresMouseEvents = true`, we use a global monitor to observe drags anywhere.
+    /// We detect a drag near the overlay by checking if mouseDown is inside the panel frame.
+    private func startDragMonitor() {
+        stopDragMonitor()
+
+        // We capture leftMouseDown + leftMouseDragged at the global level.
+        // When mouseDown is within the panel frame, we allow dragging by temporarily
+        // disabling ignoresMouseEvents during the drag gesture.
+        var isDragging = false
+        var dragStartMouseLocation: NSPoint = .zero
+        var dragStartFrameOrigin: NSPoint = .zero
+
+        dragMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let mouseLocation = NSEvent.mouseLocation
+                switch event.type {
+                case .leftMouseDown:
+                    // Check if click is within the panel frame (or within 8pt of border for easy grab)
+                    let panelFrame = self.panel.frame.insetBy(dx: -8, dy: -8)
+                    if panelFrame.contains(mouseLocation) {
+                        isDragging = true
+                        dragStartMouseLocation = mouseLocation
+                        dragStartFrameOrigin = self.panel.frame.origin
+                        // Enable mouse events temporarily so the panel responds to drag
+                        self.panel.ignoresMouseEvents = false
+                    }
+                case .leftMouseDragged where isDragging:
+                    let dx = mouseLocation.x - dragStartMouseLocation.x
+                    let dy = mouseLocation.y - dragStartMouseLocation.y
+                    let newOrigin = NSPoint(
+                        x: dragStartFrameOrigin.x + dx,
+                        y: dragStartFrameOrigin.y + dy
+                    )
+                    var newFrame = self.panel.frame
+                    newFrame.origin = newOrigin
+                    self.panel.setFrame(newFrame, display: true)
+                    self.borderLayer.frame = self.effectView.bounds
+                case .leftMouseUp where isDragging:
+                    isDragging = false
+                    self.panel.ignoresMouseEvents = true  // M6: restore click-through
+                    self.saveCurrentPosition()            // M2: persist dragged position
+                default:
+                    break
+                }
+            }
         }
     }
 
-    @objc public func mouseExited(with event: NSEvent) {
-        guard overlayState != .hidden else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            panel.animator().alphaValue = targetAlpha
+    /// Removes the global drag event monitor.
+    private func stopDragMonitor() {
+        if let monitor = dragMonitor {
+            NSEvent.removeMonitor(monitor)
+            dragMonitor = nil
         }
+        // Ensure click-through is restored if drag monitor is stopped mid-drag.
+        panel.ignoresMouseEvents = true
     }
 
     // MARK: - Helpers
