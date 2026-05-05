@@ -229,6 +229,19 @@ def _handle_transcribe(params: dict) -> dict:
                 "longform": True,
                 "segments_count": len(segments) if segments else 0,
             }
+            # H2: free pyannote segments + pyannote intermediates held in segments list.
+            # pyannote.audio stores diarization output (embeddings, numpy arrays) inside
+            # each segment dict — these are not freed until GC sweeps the list.
+            # del + gc.collect() immediately releases ~tens of MB per longform call.
+            # Wrapped in try/except so naming mismatches never raise.
+            try:
+                del segments
+            except NameError:
+                pass
+            try:
+                gc.collect()
+            except Exception:
+                pass
         else:
             result = _MODEL.transcribe(audio_path)
             # gigaam.transcribe() может вернуть строку или объект с .text — адаптируем.
