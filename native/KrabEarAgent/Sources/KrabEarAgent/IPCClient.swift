@@ -313,6 +313,12 @@ final class IPCClient: @unchecked Sendable {
     /// When `socketProvider` is injected (test mode), routes through the provider
     /// instead of the POSIX socket stack so reconnect/backoff tests run without
     /// a real backend process.
+    ///
+    /// - Note: `[String: Any]` is technically non-Sendable under Swift 6
+    ///   strict-concurrency, but IPC responses are freshly decoded from JSON and
+    ///   never mutated after returning — crossing the actor boundary is data-race-free.
+    ///   `SendableBox` wraps the result to satisfy the continuation's `Sendable`
+    ///   constraint without touching any call sites.
     func callAsync(
         method: String,
         params: [String: Any] = [:],
@@ -333,8 +339,13 @@ final class IPCClient: @unchecked Sendable {
             let params: [String: Any]
             let timeoutSec: Int
         }
+        // SendableBox bridges [String: Any] across the CheckedContinuation boundary.
+        // Swift 6 strict-concurrency requires T: Sendable in CheckedContinuation<T,_>;
+        // IPC dicts are freshly JSON-decoded and never shared between threads after
+        // resume, so @unchecked Sendable is safe here.
+        struct SendableBox: @unchecked Sendable { let value: [String: Any] }
         let captured = SendableCapture(method: method, params: params, timeoutSec: timeoutSec)
-        return try await withCheckedThrowingContinuation { continuation in
+        let box = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SendableBox, Error>) in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else {
                     continuation.resume(throwing: IPCError.invalidResponse)
@@ -346,12 +357,13 @@ final class IPCClient: @unchecked Sendable {
                         params: captured.params,
                         timeoutSec: captured.timeoutSec
                     )
-                    continuation.resume(returning: result)
+                    continuation.resume(returning: SendableBox(value: result))
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
         }
+        return box.value
     }
 
     /// Sends a request through the injected `IPCSocketProviding` and decodes the JSON response.
