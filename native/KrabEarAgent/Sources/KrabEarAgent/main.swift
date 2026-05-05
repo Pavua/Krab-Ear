@@ -312,6 +312,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             logger.info("Bookmark hotkey активирован (Cmd+Shift+B)")
         }
 
+        startQuickReplaceHotkeyMonitor()
+        logger.info("Quick Replace hotkey активирован (Cmd+Shift+R)")
+
         setupWakeWordListenerIfEnabled()
 
         applyMode(settings.mode, persist: false)
