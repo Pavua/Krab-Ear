@@ -773,12 +773,26 @@ extension HistoryPanelController {
         gigaamRow.addArrangedSubview(gigaamRowInner)
         gigaamRow.addArrangedSubview(gigaamSubCaption)
 
+        // 4. STT engine indicator — read-only label showing last active engine.
+        sttEngineLabel.font = KrabEarTheme.Typography.body
+        sttEngineLabel.textColor = KrabEarTheme.Colors.accent
+        sttEngineLabel.setContentHuggingPriority(.required, for: .horizontal)
+        sttEngineLabel.setAccessibilityLabel("Последний использованный STT движок")
+
+        let engineRow = makeSettingRow(
+            label: "Активный STT движок",
+            description: "Движок, использованный при последней транскрибации. Обновляется автоматически.",
+            control: sttEngineLabel
+        )
+
         // Assemble card (ThemeCardView content stack уже vertical + leading).
         card.contentStackView.addArrangedSubview(diarRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(qualRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(gigaamRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        card.contentStackView.addArrangedSubview(engineRow)
 
         section.contentStackView.addArrangedSubview(card)
         return section
@@ -1250,6 +1264,46 @@ extension HistoryPanelController {
                 DispatchQueue.main.async {
                     self.showInfoAlert(title: "Ошибка пресета", body: error.localizedDescription)
                 }
+            }
+        }
+    }
+
+    // MARK: - STT Engine Indicator
+
+    /// Преобразует сырое значение engine (из get_diagnostics stt.last_engine) в читаемое имя.
+    nonisolated func humanReadableSTTEngine(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "—" }
+        if raw.hasPrefix("gigaam-") {
+            let mode = raw.replacingOccurrences(of: "gigaam-", with: "").uppercased()
+            return "GigaAM (\(mode))"
+        }
+        if raw.contains("whisper-large-v3-mlx") { return "Whisper Large v3 (MLX)" }
+        if raw.contains("russian") || raw.contains("antony66") { return "Whisper RU fine-tune" }
+        if raw.contains("turbo") { return "Whisper Turbo (MLX)" }
+        if raw.contains("whisper") { return "Whisper (MLX)" }
+        if raw == "remote" { return "Whisper Remote" }
+        if raw == "vad_skip" { return "VAD пропуск (тишина)" }
+        return raw
+    }
+
+    /// Асинхронно запрашивает get_diagnostics и обновляет sttEngineLabel на main thread.
+    /// Вызывается при открытии вкладки Settings и после каждой записи.
+    func fetchAndUpdateSTTEngineLabel() {
+        let ipc = ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let engineRaw: String?
+            do {
+                let resp = try ipc.call(method: "get_diagnostics", params: [:])
+                let result = resp["result"] as? [String: Any]
+                let stt = result?["stt"] as? [String: Any]
+                engineRaw = stt?["last_engine"] as? String
+            } catch {
+                engineRaw = nil
+            }
+            let label = self.humanReadableSTTEngine(engineRaw)
+            DispatchQueue.main.async { [weak self] in
+                self?.sttEngineLabel.stringValue = label
             }
         }
     }

@@ -163,6 +163,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     /// Требует ~/.venv_krab_ear_gigaam (см. scripts/install_gigaam_venv.command).
     /// Pre-flight check на наличие venv делается в onGigaamEnabledChanged.
     let gigaamEnabledButton = NSButton(checkboxWithTitle: "GigaAM-RNNT v2 (RU, опционально)", target: nil, action: nil)
+    /// Показывает имя последнего использованного STT движка (из get_diagnostics stt.last_engine).
+    let sttEngineLabel = NSTextField(labelWithString: "—")
     let llmModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let overlayOpacitySlider = NSSlider(value: 45, minValue: 15, maxValue: 90, target: nil, action: nil)
     let overlayOpacityValueLabel = NSTextField(labelWithString: "45%")

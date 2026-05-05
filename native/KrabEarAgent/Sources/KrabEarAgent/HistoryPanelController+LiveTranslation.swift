@@ -44,6 +44,10 @@ extension HistoryPanelController {
         let raw = String(describing: tabViewItem?.identifier ?? PanelTab.history.rawValue)
         let tab = PanelTab.from(settingsValue: raw)
         applySettingsPatch(["ui_last_tab": tab.rawValue])
+        // Обновляем индикатор STT движка при открытии вкладки «Диктовка».
+        if tab == .dictation {
+            fetchAndUpdateSTTEngineLabel()
+        }
     }
 
     func startPreviewPolling() {
