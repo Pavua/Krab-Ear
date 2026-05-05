@@ -208,7 +208,7 @@ class BackendService:
         from backend.error_bus import ErrorBus
         from backend.error_codes import ERROR_REGISTRY
         from backend.llm_probe import LLMHttpProbe
-        from backend import error_actions as _error_actions
+        from backend import error_actions as _error_actions  # noqa: F401 — side-effect: registers default error action handlers on import
         try:
             import sentry_sdk as _sentry_sdk
         except ImportError:
@@ -1115,7 +1115,6 @@ class BackendService:
             # --- Quick word replacement (Cmd+Shift+R) ---
             "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
             # --- Privacy audit log ---
-            "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
@@ -4402,25 +4401,6 @@ class BackendService:
             speaker_manager=self._speaker_manager,
         )
 
-    def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последние записи privacy audit log.
-
-        Параметры:
-            limit — максимальное число записей (default 100).
-
-        Возвращает:
-            entries     — список NDJSON-записей {ts, category, action, details}.
-            total_count — общее число записей в файле.
-        """
-        limit = int(params.get("limit", 100))
-        audit = get_privacy_audit_logger()
-        entries = audit.read_entries(limit=limit)
-        total = audit.total_count()
-        return {
-            "entries": entries,
-            "total_count": total,
-        }
-
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
         days = int(params.get("days", 7))
@@ -5006,6 +4986,7 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
     def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных чатов через main Krab userbot.
 

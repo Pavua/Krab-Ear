@@ -194,8 +194,6 @@ def _handle_transcribe(params: dict) -> dict:
         hf_token:   str (optional) — HuggingFace API token для pyannote VAD.
                     Если пустой — fallback на cached token.
     """
-    global _MODEL, _MODE
-
     if _MODEL is None:
         return _err("model_not_loaded: call load first")
 

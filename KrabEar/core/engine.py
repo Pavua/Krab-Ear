@@ -374,6 +374,7 @@ class AudioEngine:
         # на первой диктовке (subprocess spawn + model load = ~30 сек).
         if getattr(settings, "STT_GIGAAM_ENABLED", False):
             import threading
+
             def _warmup_bg() -> None:
                 try:
                     self._router.warmup_gigaam()
@@ -2311,7 +2312,7 @@ class AudioEngine:
                     from core.audio_chunker import AudioChunker
                     chunker = AudioChunker()
                     chunks = chunker.chunk(audio_data_np, sample_rate=16000,
-                                          max_chunk_sec=_GIGAAM_MAX_CHUNK_SEC)
+                                           max_chunk_sec=_GIGAAM_MAX_CHUNK_SEC)
                     logger.info(
                         "GigaAM chunker path: duration=%.1fs → %d chunks (max %.0fs each)",
                         duration_sec, len(chunks), _GIGAAM_MAX_CHUNK_SEC,

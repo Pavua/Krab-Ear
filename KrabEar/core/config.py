@@ -726,6 +726,7 @@ def reload_settings_from_json() -> int:
             pass
     return updated
 
+
 # Дефолтные настройки для UI и логики (из legacy моделей)
 DEFAULT_SETTINGS: dict[str, Any] = {
     "mode": "headless",
