@@ -162,9 +162,19 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Phase C C.6.2: Kill orphan native/runtime/KrabEarAgent processes.
+        // These are legacy dev binaries — the .app bundle path is canonical.
+        // Must run AFTER acquireFileLock so we hold the lock before eliminating orphans.
+        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
+        let killedOrphans = killOrphanRuntimeProcesses(projectRoot: projectRootURL, logger: logger)
+        if killedOrphans > 0 {
+            logger.warn("Phase C C.6.2: Killed \(killedOrphans) orphan native/runtime/KrabEarAgent process(es)")
+        } else {
+            logger.info("Phase C C.6.2: No orphan native/runtime/KrabEarAgent processes found")
+        }
+
         // Phase C C.6: Cleanup worktree shadow .app bundles из LaunchServices DB.
         // Выполняется до основного UI setup, чтобы LaunchServices не открывала shadow copy.
-        let projectRootURL = URL(fileURLWithPath: options.projectRoot)
         cleanupWorktreeShadows(projectRoot: projectRootURL, logger: logger)
 
         // Single-instance guard: убиваем orphan-дубликаты KrabEarAgent
