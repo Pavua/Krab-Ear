@@ -79,7 +79,11 @@ class PrivacyAuditLogger:
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         except Exception:
-            logger.exception("PrivacyAuditLogger: ошибка записи события category=%s action=%s", category, action)
+            logger.exception(
+                "PrivacyAuditLogger: ошибка записи события category=%s action=%s",
+                category,
+                action,
+            )
 
     def read_entries(self, limit: int = 100) -> list[dict[str, Any]]:
         """Читает последние *limit* записей из лога.
@@ -110,7 +114,9 @@ class PrivacyAuditLogger:
                 try:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
-                    logger.warning("PrivacyAuditLogger: не удалось разобрать строку: %r", line)
+                    logger.warning(
+                        "PrivacyAuditLogger: не удалось разобрать строку: %r", line
+                    )
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка чтения лога")
 
@@ -134,6 +140,14 @@ class PrivacyAuditLogger:
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка подсчёта записей")
         return count
+
+    def clear(self) -> None:
+        """Удаляет файл лога. Идемпотентно — не ошибается если файл не существует."""
+        try:
+            if self._log_path.exists():
+                self._log_path.unlink()
+        except Exception:
+            logger.exception("PrivacyAuditLogger: ошибка удаления лога")
 
 
 # Удобная точка доступа к singleton
