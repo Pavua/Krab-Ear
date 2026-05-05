@@ -23,15 +23,81 @@ Protocol (одна JSON строка на запрос, одна на ответ
 
 Использование из main backend — через core/pipeline/stt_gigaam.py
 (класс GigaAMAdapter с transport="subprocess").
+
+Memory profiling (opt-in, zero overhead when off):
+    KRAB_EAR_TRACE_GIGAAM_MEM=1 python gigaam_worker.py
+    Logs RSS after each transcribe + top-10 tracemalloc allocations every 10 requests.
+    See docs/audit/gigaam-worker-memory-2026-05-05.md for details.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from typing import Any, Optional
 
+
+# ---------------------------------------------------------------------------
+# Memory tracing — opt-in via KRAB_EAR_TRACE_GIGAAM_MEM=1
+# Zero overhead when env var absent: the check happens once at module load.
+# ---------------------------------------------------------------------------
+
+_TRACE_MEM: bool = os.environ.get("KRAB_EAR_TRACE_GIGAAM_MEM") == "1"
+
+if _TRACE_MEM:
+    import tracemalloc as _tracemalloc
+    _tracemalloc.start()
+    try:
+        sys.stderr.write("gigaam_worker: tracemalloc started (KRAB_EAR_TRACE_GIGAAM_MEM=1)\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _log_rss(label: str = "") -> None:
+    """Log current process RSS to stderr. No-op when tracing disabled."""
+    if not _TRACE_MEM:
+        return
+    try:
+        import resource as _resource
+        usage = _resource.getrusage(_resource.RUSAGE_SELF)
+        # ru_maxrss is bytes on Linux, KB on macOS
+        rss_raw = usage.ru_maxrss
+        # On macOS (darwin) ru_maxrss is in bytes
+        import platform
+        if platform.system() == "Darwin":
+            rss_mb = rss_raw / 1024 / 1024
+        else:
+            rss_mb = rss_raw / 1024
+        tag = f" [{label}]" if label else ""
+        sys.stderr.write(f"[mem{tag}] rss={rss_mb:.1f} MB pid={os.getpid()}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _log_tracemalloc_snapshot(request_count: int) -> None:
+    """Log top-10 tracemalloc allocations every 10 requests. No-op when off."""
+    if not _TRACE_MEM:
+        return
+    if request_count % 10 != 0:
+        return
+    try:
+        snap = _tracemalloc.take_snapshot()
+        top = snap.statistics("lineno")[:10]
+        sys.stderr.write(f"[tmalloc] === snapshot at request #{request_count} ===\n")
+        for i, stat in enumerate(top, 1):
+            sys.stderr.write(f"[tmalloc] #{i}: {stat}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Worker global state
+# ---------------------------------------------------------------------------
 
 # Глобальное состояние воркера: одна загруженная модель на жизнь процесса.
 # Перезагрузка модели при изменении mode/device — отдельная команда "load".
@@ -144,6 +210,10 @@ def _handle_transcribe(params: dict) -> dict:
     except Exception as exc:
         return _err(f"transcribe_failed: {type(exc).__name__}: {exc}")
 
+    # Memory tracing (opt-in: KRAB_EAR_TRACE_GIGAAM_MEM=1).
+    # Logs RSS after inference so we can track MPS/PyTorch buffer pool growth.
+    _log_rss(label="after_transcribe")
+
     # Имя движка соответствует тому что использует in-process адаптер
     # (core/pipeline/stt_gigaam.py — _engine_name).
     mode_base = (_MODE or "rnnt").replace("v2_", "").replace("v1_", "")
@@ -191,6 +261,9 @@ def main() -> int:
     except Exception:
         pass
 
+    # Request counter — used for periodic tracemalloc snapshots (opt-in).
+    _request_count = 0
+
     while True:
         try:
             line = sys.stdin.readline()
@@ -204,12 +277,17 @@ def main() -> int:
             # EOF — клиент закрыл pipe, выходим.
             return 0
 
+        _request_count += 1
+
         try:
             response = _process_request(line)
         except Exception as exc:
             # Ловим ВСЁ — воркер не должен падать от неожиданного ввода.
             tb = traceback.format_exc(limit=3)
             response = _err(f"unexpected: {type(exc).__name__}: {exc}\n{tb}")
+
+        # Periodic tracemalloc snapshot — every 10 requests (opt-in only).
+        _log_tracemalloc_snapshot(_request_count)
 
         if response is None:
             # shutdown — exit cleanly без ответа.

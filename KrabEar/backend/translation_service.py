@@ -252,8 +252,14 @@ class TranslationService:
         settings = self._cached_settings()
         current_glossary: dict[str, str] = settings.get("translation_glossary", {}) or {}
 
-        # Бренды из utils.py — канонические замены, которые стоит добавить в глоссарий
-        brand_canonicals: list[str] = [canonical for _pat, canonical in _BRAND_REPLACEMENTS_RAW]
+        # Бренды из utils.py — канонические замены, которые стоит добавить в глоссарий.
+        # Filter to str только: некоторые entries в _BRAND_REPLACEMENTS_RAW используют
+        # lambda replacements (для regex backreferences), мы их не предлагаем как канон.
+        brand_canonicals: list[str] = [
+            canonical
+            for _pat, canonical in _BRAND_REPLACEMENTS_RAW
+            if isinstance(canonical, str)
+        ]
 
         # Собираем частоту заглавных слов и пары source→translated из истории
         pair_counts: dict[str, dict[str, int]] = {}  # source_word → {translated_word: count}

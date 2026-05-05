@@ -116,9 +116,9 @@ extension HistoryPanelController {
         actionItemsStatusLabel.stringValue = "Извлекаю из \(String(item.id.prefix(8)))…  (LLM, может занять до 20 сек)"
         actionItemsResultsView.string = ""
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let itemID = item.id
-        nonisolated(unsafe) let lang = language
+        let ipcClient = self.ipcClient
+        let itemID = item.id
+        let lang = language
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -229,7 +229,7 @@ extension HistoryPanelController {
     /// уже включают `action_items`/`decisions`/`questions` если их извлекали ранее).
     @objc func exportAllActionItemsAction() {
         actionItemsStatusLabel.stringValue = "Загружаю историю…"
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(

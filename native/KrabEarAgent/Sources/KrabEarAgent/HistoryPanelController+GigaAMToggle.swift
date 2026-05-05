@@ -21,7 +21,7 @@ extension HistoryPanelController {
 
     /// Default путь к venv — соответствует scripts/install_gigaam_venv.command.
     /// Должен быть в sync с STT_GIGAAM_VENV_PYTHON default из core/config.py.
-    private static var defaultGigaamVenvPython: String {
+    nonisolated private static var defaultGigaamVenvPython: String {
         return NSString(string: "~/.venv_krab_ear_gigaam/bin/python").expandingTildeInPath
     }
 
@@ -54,7 +54,7 @@ extension HistoryPanelController {
         }
 
         // OK — apply через IPC.
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let params: [String: Any] = [
                 "stt_gigaam_enabled": isOn,

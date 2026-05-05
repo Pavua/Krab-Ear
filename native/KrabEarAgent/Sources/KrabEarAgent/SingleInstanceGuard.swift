@@ -62,6 +62,71 @@ let defaultPgrepRunner: @Sendable ([String]) -> String = { arguments in
     return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 }
 
+// MARK: - Orphan runtime binary cleanup (Phase C C.6.2)
+
+/// Ищет и убивает все процессы KrabEarAgent, запущенные из `native/runtime/KrabEarAgent`
+/// (legacy dev binary) — не из основного .app bundle.
+/// Использует `ps -axo pid,command` + kill(SIGKILL).
+/// Idempotent — safe при повторном вызове.
+///
+/// - Parameters:
+///   - projectRoot: Корень проекта (содержащий `native/runtime/KrabEarAgent`).
+///   - logger: Используется для warning/error логов; если nil — silent.
+///   - psRunner: Замена для Process-запуска ps (инъекция для тестов).
+/// - Returns: Количество убитых orphan-процессов.
+@discardableResult
+func killOrphanRuntimeProcesses(
+    projectRoot: URL,
+    logger: AgentLogger? = nil,
+    psRunner: (_ arguments: [String]) -> String = defaultPsRunner
+) -> Int {
+    let runtimeBinaryPath = projectRoot
+        .appendingPathComponent("native/runtime/KrabEarAgent")
+        .path
+
+    let output = psRunner(["-axo", "pid,command"])
+    guard !output.isEmpty else { return 0 }
+
+    let myPid = getpid()
+    var killed = 0
+
+    for line in output.components(separatedBy: "\n") {
+        guard line.contains(runtimeBinaryPath) else { continue }
+
+        // Парсим PID из начала строки (ведущие пробелы + цифры)
+        let parts = line.trimmingCharacters(in: .whitespaces)
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+        guard let firstPart = parts.first, let pid = Int32(firstPart) else { continue }
+        guard pid != myPid else { continue }  // никогда не убиваем себя
+
+        logger?.warn("Killing orphan runtime KrabEarAgent pid=\(pid) path=\(runtimeBinaryPath)")
+        kill(pid, SIGKILL)
+        killed += 1
+    }
+
+    return killed
+}
+
+// MARK: - Default ps runner
+
+/// Запускает `/bin/ps` с переданными аргументами и возвращает stdout.
+let defaultPsRunner: @Sendable ([String]) -> String = { arguments in
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/ps")
+    task.arguments = arguments
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = Pipe() // silence stderr
+    do {
+        try task.run()
+        task.waitUntilExit()
+    } catch {
+        return ""
+    }
+    return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+}
+
 // MARK: - Worktree shadow cleanup (Phase C C.6)
 
 /// Ищет все `Krab Ear.app` в `.claude/worktrees/agent-*/` под projectRoot,

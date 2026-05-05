@@ -338,18 +338,22 @@ extension HistoryPanelController {
 
     func applyGlossarySuggestions(selectedIds: [Int], allSuggestions: [GlossarySuggestion]) {
         guard !selectedIds.isEmpty else { return }
-        let rawSuggestions = allSuggestions.map { item -> [String: Any] in
-            [
-                "source_term": item.sourceTerm,
-                "target_term": item.targetTerm,
-                "frequency":   item.frequency,
-                "domain":      item.domain,
-                "confidence":  item.confidence,
-            ]
+        // Build typed capture data so closure captures only Sendable types
+        let suggestionData: [(sourceTerm: String, targetTerm: String, frequency: Int, domain: String, confidence: Double)] = allSuggestions.map {
+            ($0.sourceTerm, $0.targetTerm, $0.frequency, $0.domain, $0.confidence)
         }
         let client = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            let rawSuggestions: [[String: Any]] = suggestionData.map { item in
+                [
+                    "source_term": item.sourceTerm,
+                    "target_term": item.targetTerm,
+                    "frequency":   item.frequency,
+                    "domain":      item.domain,
+                    "confidence":  item.confidence,
+                ]
+            }
             do {
                 let result = try client.call(
                     method: "apply_glossary_suggestions",

@@ -235,16 +235,20 @@ final class StatusIndicatorView: NSView {
         // Начальное состояние — полная непрозрачность
         badgeLayer?.opacity = 1.0
 
+        // isVisible is captured by the class instance to avoid Sendable mutation warnings
         var isVisible = true
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self, let badge = self.badgeLayer else { return }
-            isVisible.toggle()
-            // CATransaction.withDisabledActions отключает implicit animation чтобы
-            // переключение было мгновенным (alpha skips, не fade)
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            badge.opacity = isVisible ? 1.0 : 0.5
-            CATransaction.commit()
+            // Timer callbacks run on the main run loop; assumeIsolated is safe here.
+            MainActor.assumeIsolated {
+                guard let self, let badge = self.badgeLayer else { return }
+                isVisible.toggle()
+                // CATransaction.withDisabledActions отключает implicit animation чтобы
+                // переключение было мгновенным (alpha skips, не fade)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                badge.opacity = isVisible ? 1.0 : 0.5
+                CATransaction.commit()
+            }
         }
         // Добавляем в .common чтобы таймер работал при трекинге мыши
         RunLoop.current.add(timer, forMode: .common)

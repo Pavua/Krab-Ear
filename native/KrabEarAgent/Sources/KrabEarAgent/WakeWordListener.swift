@@ -28,7 +28,7 @@
 */
 
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 
 // MARK: - Porcupine protocol (для mock в тестах без реального SDK)
@@ -272,13 +272,16 @@ final class WakeWordListener {
         ) else { return }
 
         var error: NSError?
-        var sourceConsumed = false
-        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-            if sourceConsumed {
+        // Use a reference-type box to safely mutate across the @Sendable converter callback.
+        // The callback is invoked synchronously/sequentially by AVAudioConverter — no data race.
+        final class BoolBox: @unchecked Sendable { var value = false }
+        let consumedBox = BoolBox()
+        converter.convert(to: convertedBuffer, error: &error) { [consumedBox] _, outStatus in
+            if consumedBox.value {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            sourceConsumed = true
+            consumedBox.value = true
             outStatus.pointee = .haveData
             return inputBuffer
         }

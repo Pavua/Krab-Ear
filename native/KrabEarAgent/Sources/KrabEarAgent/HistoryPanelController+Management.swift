@@ -196,7 +196,7 @@ extension HistoryPanelController {
     // MARK: - IPC Helper
 
     private func executeIPC(method: String, params: [String: Any] = [:], completion: @escaping @MainActor (String) -> Void) {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         let methodCopy = method
         nonisolated(unsafe) let paramsCopy = params
         DispatchQueue.global(qos: .userInitiated).async {

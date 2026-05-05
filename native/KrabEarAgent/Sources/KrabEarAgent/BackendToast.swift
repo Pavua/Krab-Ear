@@ -94,7 +94,9 @@ final class BackendToast {
             ctx.duration = 0.25
             panel.animator().alphaValue = 0.0
         }, completionHandler: {
-            panel.orderOut(nil)
+            MainActor.assumeIsolated {
+                panel.orderOut(nil)
+            }
         })
     }
 }

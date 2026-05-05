@@ -19,8 +19,9 @@ extension AgentAppDelegate {
 
     // MARK: - Accessors (stored via objc associated objects)
 
-    private static var captureKey = "systemAudioCapture"
-    private static var overlayKey = "liveSubsOverlay"
+    // UInt8 keys: address is what uniquely identifies the key, not the value
+    private static var captureKey: UInt8 = 0
+    private static var overlayKey: UInt8 = 0
 
     var systemAudioCapture: SystemAudioCapture {
         if let existing = objc_getAssociatedObject(self, &Self.captureKey) as? SystemAudioCapture {

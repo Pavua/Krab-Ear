@@ -210,7 +210,7 @@ extension HistoryPanelController {
         guard panel.runModal() == .OK, let inputURL = panel.url else { return }
         let inputPath = inputURL.path
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -281,7 +281,7 @@ extension HistoryPanelController {
         let networkMode = providerSettings.networkMode
         let shouldPasteTranslated = translateAndPasteButton.state == .on
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let translateResponse = try? ipcClient.call(
@@ -352,7 +352,7 @@ extension HistoryPanelController {
             return
         }
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -400,14 +400,14 @@ extension HistoryPanelController {
         tableView.reloadData()
 
         // IPC удаление — на background, не блокирует UI.
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async {
             _ = try? ipcClient.call(method: "delete_history_item", params: ["id": itemID])
         }
     }
 
     @objc func onCompact() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let response = try? ipcClient.call(method: "compact_history", params: [:])
             if let result = response?["result"] as? [String: Any] {
@@ -418,8 +418,8 @@ extension HistoryPanelController {
                 let afterActive = (result["after_active_count"] as? Int) ?? 0
                 let body = """
                 Активных записей: \(beforeActive) -> \(afterActive)
-                Размер: \(HistoryPanelController.formatBytes(beforeBytes) ?? "?") -> \(HistoryPanelController.formatBytes(afterBytes) ?? "?")
-                Освобождено: \(HistoryPanelController.formatBytes(max(0, reclaimed)) ?? "?")
+                Размер: \(HistoryPanelController.formatBytes(beforeBytes)) -> \(HistoryPanelController.formatBytes(afterBytes))
+                Освобождено: \(HistoryPanelController.formatBytes(max(0, reclaimed)))
                 """
                 DispatchQueue.main.async {
                     self?.showInfoAlert(title: "Оптимизация истории", body: body)
@@ -480,8 +480,8 @@ extension HistoryPanelController {
     ///
     /// `completion` вызывается на main thread с success-flag. Nil completion = no-op.
     func appendPageAsync(method: String, params: [String: Any], completion: (@MainActor @Sendable (Bool) -> Void)?) {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let methodCopy = method
+        let ipcClient = self.ipcClient
+        let methodCopy = method
         nonisolated(unsafe) let paramsCopy = params
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -659,7 +659,7 @@ extension HistoryPanelController {
         historyStatusLabel.stringValue = baseText
 
         // Background: получить stats + overview, потом update labels на main.
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // Inline fetch stats (re-implemented because fetchHistoryStats() — instance method).
             var statsSuffix = ""

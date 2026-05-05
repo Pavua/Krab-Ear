@@ -217,7 +217,7 @@ extension AgentAppDelegate {
         // Fire-and-forget: вызывается из handleTranscriptionResult на main thread.
         // Без async wrap'а IPC socket read блокирует main → AppHang (>2s).
         // Closes Sentry KRAB-EAR-AGENT-8.
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .utility).async {
             _ = try? ipcClient.call(
                 method: "set_paste_status",

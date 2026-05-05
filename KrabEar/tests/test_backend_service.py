@@ -1968,5 +1968,117 @@ class MetricsDashboardPreviewLoopTestCase(unittest.TestCase):
         self.assertLessEqual(pl["last_reset_ts"], after)
 
 
+class ListLlmModelsTestCase(unittest.TestCase):
+    """Тесты IPC-метода list_llm_models (динамический список LM Studio моделей)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = StateStore(Path(self.tmp.name) / "data")
+        self.service = BackendService(
+            store=self.store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def _req(self, params=None):
+        return self.service.handle_request(
+            {"id": "llm_models_1", "method": "list_llm_models", "params": params or {}}
+        )
+
+    def test_method_registered(self) -> None:
+        """list_llm_models зарегистрирован и не возвращает unknown_method."""
+        from unittest.mock import patch, MagicMock
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"data": [{"id": "model-a"}, {"id": "model-b"}]}
+        with patch("requests.get", return_value=fake_resp):
+            resp = self._req()
+
+        # Must not be unknown_method — handler is registered
+        self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
+        result = resp.get("result", {})
+        # Result shape sanity
+        self.assertIn("models", result)
+
+    def test_returns_sorted_model_list(self) -> None:
+        """При успешном HTTP 200 возвращает отсортированный список model id."""
+        from unittest.mock import patch, MagicMock
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {
+            "data": [
+                {"id": "zzz-model"},
+                {"id": "aaa-model"},
+                {"id": "mmm-model"},
+            ]
+        }
+        with patch("backend.service.BackendService._handle_list_llm_models",
+                   wraps=self.service._handle_list_llm_models):
+            with patch("requests.get", return_value=fake_resp):
+                resp = self._req()
+
+        self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
+        result = resp["result"]
+        self.assertIn("models", result)
+        self.assertEqual(result["models"], sorted(["zzz-model", "aaa-model", "mmm-model"]))
+        self.assertIsNone(result["error"])
+
+    def test_http_error_returns_empty_list(self) -> None:
+        """HTTP ошибка (например 401) → models=[], error содержит описание."""
+        from unittest.mock import patch, MagicMock
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 401
+        with patch("requests.get", return_value=fake_resp):
+            resp = self._req()
+
+        self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
+        result = resp["result"]
+        self.assertEqual(result["models"], [])
+        self.assertIsNotNone(result["error"])
+        self.assertIn("401", result["error"])
+
+    def test_connection_error_returns_empty_list(self) -> None:
+        """При сетевой ошибке (LM Studio недоступен) → models=[], error непустой."""
+        from unittest.mock import patch
+        import requests
+
+        with patch("requests.get", side_effect=requests.ConnectionError("refused")):
+            resp = self._req()
+
+        self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
+        result = resp["result"]
+        self.assertEqual(result["models"], [])
+        self.assertIsNotNone(result["error"])
+        self.assertGreater(len(result["error"]), 0)
+
+    def test_skips_items_without_id(self) -> None:
+        """Элементы без поля id пропускаются."""
+        from unittest.mock import patch, MagicMock
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {
+            "data": [
+                {"id": "good-model"},
+                {"name": "no-id-here"},
+                {},
+                {"id": "another-good"},
+            ]
+        }
+        with patch("requests.get", return_value=fake_resp):
+            resp = self._req()
+
+        self.assertTrue(resp.get("ok"), f"unexpected: {resp}")
+        models = resp["result"]["models"]
+        self.assertIn("good-model", models)
+        self.assertIn("another-good", models)
+        self.assertEqual(len(models), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

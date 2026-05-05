@@ -9,7 +9,7 @@
 import Foundation
 
 /// Сервис уведомлений без зависимости от app-bundle.
-final class NotificationService {
+final class NotificationService: @unchecked Sendable {
     func requestAuthorizationIfNeeded() {
         // Для osascript-разрешения не требуются.
     }

@@ -215,6 +215,113 @@ final class SingleInstanceGuardTests: XCTestCase {
         XCTAssertEqual(reregisterCount, 1, "Main bundle re-register вызывается один раз")
     }
 
+    // MARK: - killOrphanRuntimeProcesses (Phase C C.6.2)
+
+    /// Если в выводе ps нет процессов с путём native/runtime/KrabEarAgent — возвращает 0.
+    func testKillOrphanRuntimeProcesses_returnsZero_whenNoOrphan() {
+        let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        let runner: ([String]) -> String = { _ in
+            // ps output without any native/runtime/KrabEarAgent lines
+            "  1 /sbin/launchd\n  100 /usr/bin/something\n"
+        }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: projectRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, 0, "No matching processes — should return 0")
+    }
+
+    /// Если строка содержит runtimeBinaryPath — процесс убивается (возвращается 1).
+    /// Используем несуществующий PID 99988 — kill() вернёт ESRCH, это безвредно.
+    func testKillOrphanRuntimeProcesses_returnsOne_whenOrphanFound() {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let runtimePath = tempRoot
+            .appendingPathComponent("native/runtime/KrabEarAgent")
+            .path
+        let orphanPid: Int32 = 99988
+        let runner: ([String]) -> String = { _ in
+            // Simulate a ps line matching the runtime binary path
+            "  \(orphanPid) \(runtimePath)\n"
+        }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: tempRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, 1, "One matching orphan should return 1")
+    }
+
+    /// Self PID никогда не убивается — даже если путь совпадает.
+    func testKillOrphanRuntimeProcesses_doesNotKillSelf() {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let runtimePath = tempRoot
+            .appendingPathComponent("native/runtime/KrabEarAgent")
+            .path
+        let myPid = getpid()
+        let runner: ([String]) -> String = { _ in
+            // Simulate a ps line with OUR OWN pid and matching path
+            "  \(myPid) \(runtimePath)\n"
+        }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: tempRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, 0, "Self PID must never be killed — should return 0")
+        // If we got here, we did not kill ourselves
+        XCTAssertTrue(true, "Process is still running after call — self-protection works")
+    }
+
+    /// Пустой вывод ps — безопасно возвращает 0.
+    func testKillOrphanRuntimeProcesses_emptyOutput_returnsZero() {
+        let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        let runner: ([String]) -> String = { _ in "" }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: projectRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, 0, "Empty ps output — should return 0")
+    }
+
+    /// Несколько orphan-строк — все засчитываются (мок, kill на ESRCH-PID безвреден).
+    func testKillOrphanRuntimeProcesses_multipleOrphans_returnsCorrectCount() {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let runtimePath = tempRoot
+            .appendingPathComponent("native/runtime/KrabEarAgent")
+            .path
+        let pids: [Int32] = [99980, 99981, 99982]
+        let psOutput = pids.map { "  \($0) \(runtimePath)" }.joined(separator: "\n") + "\n"
+        let runner: ([String]) -> String = { _ in psOutput }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: tempRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, pids.count, "All orphan PIDs should be counted")
+    }
+
+    /// Строки без совпадения с runtimeBinaryPath не влияют на счётчик.
+    func testKillOrphanRuntimeProcesses_nonMatchingLines_ignored() {
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let runner: ([String]) -> String = { _ in
+            "  200 /Applications/KrabEarAgent.app/Contents/MacOS/KrabEarAgent\n" +
+            "  201 /usr/bin/KrabEarAgent\n" +
+            "  202 /some/other/KrabEar\n"
+        }
+        let result = killOrphanRuntimeProcesses(
+            projectRoot: tempRoot,
+            logger: nil,
+            psRunner: runner
+        )
+        XCTAssertEqual(result, 0, "Lines not matching runtimeBinaryPath should be ignored")
+    }
+
     // MARK: - acquireFileLock / releaseFileLock (Phase C C.6)
 
     /// Первый вызов acquireFileLock в изолированном temp-lock-path должен вернуть true.

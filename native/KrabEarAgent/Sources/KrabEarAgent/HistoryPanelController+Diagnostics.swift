@@ -9,7 +9,7 @@ extension HistoryPanelController {
     // (Sentry KRAB-EAR-AGENT-3, 19 events 2026-04-24). Образец паттерна — +Analytics.swift.
 
     @objc func onDiagnostics() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_diagnostics", params: [:]),
                   let result = response["result"] as? [String: Any] else {
@@ -26,7 +26,7 @@ extension HistoryPanelController {
     }
 
     @objc func onMetrics() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_metrics_dashboard", params: [:]),
                   let result = response["result"] as? [String: Any] else {
@@ -43,7 +43,7 @@ extension HistoryPanelController {
     }
 
     @objc func onRecordingStats() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_recording_stats", params: [:]),
                   let result = response["result"] as? [String: Any] else {
@@ -60,7 +60,7 @@ extension HistoryPanelController {
     }
 
     @objc func onStorageInfo() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_storage_info", params: [:]),
                   let result = response["result"] as? [String: Any] else {
@@ -107,7 +107,7 @@ extension HistoryPanelController {
         let selectedTitle = profilePresetSelector.titleOfSelectedItem ?? ""
         guard !selectedTitle.isEmpty, selectedTitle != "Загрузка..." else { return }
         let presetName = (profilePresetSelector.selectedItem?.representedObject as? String) ?? selectedTitle.lowercased()
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "apply_profile_preset", params: ["preset": presetName]),
                   let result = response["result"] as? [String: Any],
@@ -126,7 +126,7 @@ extension HistoryPanelController {
     }
 
     func loadProfilePresets() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "list_profile_presets", params: [:]),
                   let result = response["result"] as? [String: Any],
@@ -146,7 +146,7 @@ extension HistoryPanelController {
     }
 
     func loadAudioDevices() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_audio_devices", params: [:]),
                   let result = response["result"] as? [String: Any],
@@ -167,7 +167,7 @@ extension HistoryPanelController {
     @objc func onTestMicrophone() {
         micTestResultLabel.stringValue = "Тестирование..."
         micTestResultLabel.textColor = KrabEarTheme.Colors.textSecondary
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "test_microphone", params: ["duration_sec": 2]),
                   let result = response["result"] as? [String: Any] else {
@@ -192,7 +192,7 @@ extension HistoryPanelController {
     // MARK: - Clipboard History handlers
 
     @objc func onClipboardHistory() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
                   let result = response["result"] as? [String: Any],
@@ -217,8 +217,8 @@ extension HistoryPanelController {
     }
 
     @objc func onRepasteItem() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let notificationService = self.notificationService
+        let ipcClient = self.ipcClient
+        let notificationService = self.notificationService
         DispatchQueue.global(qos: .userInitiated).async {
             guard let response = try? ipcClient.call(method: "get_clipboard_history", params: [:]),
                   let result = response["result"] as? [String: Any],
