@@ -1,8 +1,29 @@
 #!/bin/zsh
+# DEPRECATED — DO NOT USE FOR NEW INSTALLS (2026-05-05)
+#
+# Этот скрипт запускает Krab Ear Agent через native/runtime/KrabEarAgent
+# (legacy dev path). Это вызывает recurring two-binary drift issues:
+#   1. Dock показывает "KrabEarAgent" вместо "Krab Ear"
+#   2. macOS LaunchServices индексирует bundle и runtime отдельно
+#   3. Phase C C.6.2 killOrphanRuntimeProcesses вынужден SIGKILL'ить orphan
+#
+# Замена: использовать .app bundle напрямую через `open "Krab Ear.app"` ИЛИ
+# autostart через LaunchAgentManager.swift (бандл-ориентированный LaunchAgent).
+#
+# Migration: запусти scripts/migrate_to_canonical_launchagent.command
+# чтобы:
+#   - удалить старый com.krabear.agent.plist (если установлен)
+#   - установить новый com.antigravity.krab-ear.plist пускающий .app bundle
 # ------------------------------------------------------------------
 # Единый запуск нативного Krab Ear Agent (Swift + Python backend).
 # Запускать двойным кликом или через launchd.
 # ------------------------------------------------------------------
+
+echo ""
+echo "⚠️  start_agent.command is DEPRECATED — see scripts/migrate_to_canonical_launchagent.command"
+echo ""
+echo "Запускаю legacy runtime binary в любом случае (для backward compat)..."
+echo ""
 
 set -euo pipefail
 
