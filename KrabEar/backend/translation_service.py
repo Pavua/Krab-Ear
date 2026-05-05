@@ -90,9 +90,23 @@ class TranslationService:
         mode = str(params.get("translation_mode", "off"))
         translation_style = str(params.get("translation_style", "neutral"))
         settings = self._cached_settings()
-        network_mode = str(params.get("network_mode") or settings.get("network_mode", "offline_default"))
+        original_network_mode = str(params.get("network_mode") or settings.get("network_mode", "offline_default"))
+        network_mode = original_network_mode
         # Privacy mode: force offline translation — no external network requests.
         if settings.get("privacy_mode_enabled"):
+            if original_network_mode != "offline_only":
+                try:
+                    from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+                    get_privacy_audit_logger().log_event(
+                        category="translation",
+                        action="forced_offline",
+                        details={
+                            "original_mode": original_network_mode,
+                            "method": "handle_translate_text",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             network_mode = "offline_only"
         glossary = settings.get("translation_glossary", {})
         result = self.translator.translate(
@@ -181,9 +195,23 @@ class TranslationService:
             mode = self._AUTO_DIRECTION.get(source_lang, "ru_to_es")
 
         settings = self._cached_settings()
-        network_mode = str(settings.get("network_mode", "offline_default"))
+        original_network_mode = str(settings.get("network_mode", "offline_default"))
+        network_mode = original_network_mode
         # Privacy mode: force offline translation — no external network requests.
         if settings.get("privacy_mode_enabled"):
+            if original_network_mode != "offline_only":
+                try:
+                    from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+                    get_privacy_audit_logger().log_event(
+                        category="translation",
+                        action="forced_offline",
+                        details={
+                            "original_mode": original_network_mode,
+                            "method": "handle_translate_selection",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             network_mode = "offline_only"
         translation_style = str(settings.get("translation_style", "neutral"))
         glossary = settings.get("translation_glossary", {})
