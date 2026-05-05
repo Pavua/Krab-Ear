@@ -207,7 +207,7 @@ class BackendService:
         from backend.error_bus import ErrorBus
         from backend.error_codes import ERROR_REGISTRY
         from backend.llm_probe import LLMHttpProbe
-        from backend import error_actions as _error_actions
+        from backend import error_actions as _error_actions  # noqa: F401  side-effect: registers ACTION_HANDLERS for ErrorActionRouter
         try:
             import sentry_sdk as _sentry_sdk
         except ImportError:
@@ -2204,7 +2204,7 @@ class BackendService:
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
-        from backend import error_actions as _error_actions
+        from backend import error_actions as _error_actions  # noqa: F401  side-effect: registers ACTION_HANDLERS for ErrorActionRouter
         action_id = params.get("action_id")
         if not action_id:
             return {"executed": False, "reason": "missing action_id", "side_effect": None}
