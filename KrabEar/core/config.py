@@ -356,6 +356,21 @@ class Settings(BaseSettings):
     # HuggingFace repo ID для MLX Parakeet модели.
     STT_PARAKEET_MODEL: str = "mlx-community/parakeet-tdt-0.6b-v2"
 
+    # --- SenseVoice adapter (East Asian multilingual — zh/yue/ja/ko/en) ---
+    # FunAudioLLM/SenseVoiceSmall via funasr package. PyTorch + MPS (NOT MLX).
+    # Install: pip install funasr
+    # HuggingFace: FunAudioLLM/SenseVoiceSmall (~250 MB)
+    # Opt-in: выключено по умолчанию. Включить для East Asian language transcription.
+    # Когда STT_SENSEVOICE_ENABLED=True И is_available() → добавляется в STTRouter
+    # ПЕРЕД Whisper (более высокий приоритет для zh/yue/ja/ko, acceptable для en).
+    # mlx_lock НЕ нужен — PyTorch runtime, не MLX.
+    STT_SENSEVOICE_ENABLED: bool = False
+    # HuggingFace repo ID или локальный путь к модели.
+    STT_SENSEVOICE_MODEL: str = "FunAudioLLM/SenseVoiceSmall"
+    # Устройство для инференса: "mps" (Apple Silicon GPU), "cpu", или "auto".
+    # "auto" выбирает MPS при наличии torch.backends.mps.is_available().
+    STT_SENSEVOICE_DEVICE: str = "auto"
+
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
     # По умолчанию выключено (opt-in); требует pyannote.audio.
@@ -848,6 +863,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_enabled": False,
     "stt_gigaam_mode": "rnnt",
     "stt_gigaam_device": "mps",
+    # --- SenseVoice adapter (East Asian multilingual) ---
+    "stt_sensevoice_enabled": False,
+    "stt_sensevoice_model": "FunAudioLLM/SenseVoiceSmall",
+    "stt_sensevoice_device": "auto",
     # --- STT hotwords (initial_prompt boost) ---
     "stt_hotwords": [],
     # --- STT speaker-aware initial_prompt hint ---
