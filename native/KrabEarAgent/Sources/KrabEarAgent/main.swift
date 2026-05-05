@@ -1202,14 +1202,92 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+// MARK: - Defense-in-depth: runtime → bundle self-redirect (Phase C root-cause fix)
+//
+// Структурное исправление two-binary drift, задокументированного в:
+//   memory/blocker_two_binary_drift_2026-05-03.md
+//
+// Парное исправление с scripts/start_agent.command redirect (commit 6781a4e):
+//   - scripts/start_agent.command закрывает ВНЕШНИЙ источник runtime-запусков
+//     (script-driven start → теперь `exec /usr/bin/open -W "Krab Ear.app"`)
+//   - Этот guard закрывает ВНУТРЕННИЙ путь: если runtime-бинарь всё-таки запущен
+//     (устаревший launchd plist, прямой shell-скрипт, тест), он сам перенаправляется
+//     в bundle-версию и завершается.
+//
+// Поведение:
+//   1. Проверяем argv[0] — совпадает ли с `<root>/native/runtime/KrabEarAgent`
+//   2. Если да — ищем `<root>/Krab Ear.app/Contents/MacOS/KrabEarAgent`
+//   3. Если bundle-бинарь существует и исполняем → запускаем его через Process
+//      с теми же аргументами, затем exit(0)
+//   4. Если bundle не найден → fallthrough (dev-режим: `swift run` или тесты)
+private func redirectRuntimeToBundleIfPresent() {
+    let exePath = ProcessInfo.processInfo.arguments[0]
+    let exeURL = URL(fileURLWithPath: exePath).resolvingSymlinksInPath()
+
+    // Проверяем: путь должен заканчиваться на .../native/runtime/KrabEarAgent
+    let pathComponents = exeURL.pathComponents
+    guard pathComponents.count >= 3,
+          pathComponents[pathComponents.count - 1] == "KrabEarAgent",
+          pathComponents[pathComponents.count - 2] == "runtime",
+          pathComponents[pathComponents.count - 3] == "native" else {
+        return  // не из runtime/ — редирект не нужен
+    }
+
+    // Строим путь к bundle: <root>/Krab Ear.app/Contents/MacOS/KrabEarAgent
+    let rootURL = exeURL
+        .deletingLastPathComponent()  // .../runtime
+        .deletingLastPathComponent()  // .../native
+        .deletingLastPathComponent()  // .../<root>
+    let bundleExe = rootURL
+        .appendingPathComponent("Krab Ear.app")
+        .appendingPathComponent("Contents")
+        .appendingPathComponent("MacOS")
+        .appendingPathComponent("KrabEarAgent")
+
+    guard FileManager.default.isExecutableFile(atPath: bundleExe.path) else {
+        NSLog("[KrabEarAgent] WARN: running from native/runtime/, no bundle at %@. Continuing in dev mode.",
+              bundleExe.path)
+        return  // dev-режим — bundle не найден, продолжаем as-is
+    }
+
+    NSLog("[KrabEarAgent] Two-binary drift detected: runtime path → redirecting to bundle: %@",
+          bundleExe.path)
+
+    // Запускаем bundle с теми же аргументами (без argv[0])
+    let task = Process()
+    task.executableURL = bundleExe
+    let originalArgs = ProcessInfo.processInfo.arguments
+    task.arguments = originalArgs.count > 1 ? Array(originalArgs.dropFirst()) : []
+
+    do {
+        try task.run()
+        NSLog("[KrabEarAgent] Bundle launched (pid=%d), runtime exiting.", task.processIdentifier)
+        exit(0)
+    } catch {
+        NSLog("[KrabEarAgent] Failed to launch bundle (%@) — falling back to runtime mode.",
+              error.localizedDescription)
+        // Fall through — лучше запустить runtime, чем упасть совсем
+    }
+}
+
+// Самое первое исполняемое выражение — до NSApp setup, до SingleInstanceGuard,
+// до SentryConfig, до всего остального.
+redirectRuntimeToBundleIfPresent()
+
 // Fixes KRAB-EAR-AGENT-F: write() в закрытый Unix-сокет (после restart backend
 // или во время Phase C.2 reconnect) посылал SIGPIPE → fatal kill агента.
 // Игнорируем сигнал; write() вернёт -1/EPIPE, что уже обрабатывает IPCError.writeFailed.
 signal(SIGPIPE, SIG_IGN)
 
-let options = LaunchOptions(arguments: CommandLine.arguments)
-let app = NSApplication.shared
-let delegate = AgentAppDelegate(options: options)
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+// MainActor.assumeIsolated: top-level main.swift runs on main thread synchronously,
+// но nominally nonisolated. AgentAppDelegate.init(options:) и NSApplication setup
+// помечены @MainActor в Foundation/AppKit (Swift 6 SDK). Без этой обёртки CI ловит:
+// "call to main actor-isolated initializer 'init(options:)' in synchronous nonisolated context".
+MainActor.assumeIsolated {
+    let options = LaunchOptions(arguments: CommandLine.arguments)
+    let app = NSApplication.shared
+    let delegate = AgentAppDelegate(options: options)
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    app.run()
+}

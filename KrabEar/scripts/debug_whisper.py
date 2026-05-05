@@ -7,11 +7,11 @@ _krabear_dir = os.path.dirname(_script_dir)
 if _krabear_dir not in sys.path:
     sys.path.insert(0, _krabear_dir)
 
-import mlx_whisper
-import numpy as np
-import soundfile as sf
+import mlx_whisper  # noqa: E402
+import numpy as np  # noqa: E402
+import soundfile as sf  # noqa: E402
 
-from core.mlx_lock import mlx_lock
+from core.mlx_lock import mlx_lock  # noqa: E402
 
 
 def test_whisper_direct():

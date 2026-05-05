@@ -11,7 +11,6 @@ Run:
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 import tracemalloc
@@ -440,7 +439,6 @@ class TestH2GcCollectAfterLongform(unittest.TestCase):
 
     def test_h2_gc_collect_path_exists_in_worker(self) -> None:
         """Verify the H2 code path (del segments + gc.collect) is present in worker source."""
-        import inspect
         import os
 
         worker_path = os.path.normpath(
@@ -514,9 +512,6 @@ class TestH3StderrDrainThread(unittest.TestCase):
 
     def test_h3_stderr_drain_thread_started_after_popen(self) -> None:
         """_start_stderr_drain() must create a daemon thread named gigaam-stderr-drain-*."""
-        import io
-        import threading
-        import types as _types
         from unittest.mock import MagicMock
 
         session = self._make_session()
