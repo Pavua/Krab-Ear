@@ -106,6 +106,12 @@ extension HistoryPanelController {
         applySettingsPatch(["quick_edit_enabled": enabled])
     }
 
+    @objc func onPrivacyModeChanged() {
+        guard !isSyncingSettings else { return }
+        let enabled = privacyModeButton.state == .on
+        applySettingsPatch(["privacy_mode_enabled": enabled])
+    }
+
     @objc func onStartSoundChanged() {
         guard !isSyncingSettings else { return }
         let playStartSound = startSoundButton.state == .on
@@ -464,6 +470,7 @@ extension HistoryPanelController {
         modeSelector.selectItem(at: settings.mode == "menubar" ? 1 : 0)
         autoPasteButton.state = settings.autoPaste ? .on : .off
         quickEditButton.state = settings.quickEditEnabled ? .on : .off
+        privacyModeButton.state = settings.privacyModeEnabled ? .on : .off
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
         translateAndPasteButton.state = settings.translateAndPaste ? .on : .off
@@ -1222,6 +1229,47 @@ extension HistoryPanelController {
         descLabel.translatesAutoresizingMaskIntoConstraints = false
         card.contentStackView.addArrangedSubview(buttonStack)
         card.contentStackView.addArrangedSubview(descLabel)
+        section.contentStackView.addArrangedSubview(card)
+        return section
+    }
+
+    // MARK: - Privacy & Security Section (Phase D.5)
+
+    /// Секция «Безопасность и приватность» в Dictation tab.
+    /// Содержит единственный toggle Privacy Mode:
+    ///   - Sentry telemetry полностью отключается.
+    ///   - Перевод принудительно переводится в offline_only режим.
+    ///   - LM Studio (127.0.0.1) остаётся разрешённым — он локальный.
+    func buildPrivacySection() -> CollapsibleSectionView {
+        let section = CollapsibleSectionView(
+            sectionId: "settings_privacy_security",
+            title: "Безопасность и приватность",
+            isExpanded: true
+        )
+        let card = ThemeCardView()
+
+        privacyModeButton.title = ""
+        privacyModeButton.setButtonType(.switch)
+        privacyModeButton.target = self
+        privacyModeButton.action = #selector(onPrivacyModeChanged)
+        privacyModeButton.setAccessibilityLabel(
+            "Режим приватности: отключает Sentry telemetry и принудительно переводит перевод в offline-режим."
+        )
+
+        let shieldBadge = makeBadge(
+            text: "🔒",
+            color: KrabEarTheme.Colors.accent,
+            tooltip: "Данные не покидают устройство. LM Studio (127.0.0.1) по-прежнему доступен."
+        )
+
+        let privacyRow = makeSwitchRow(
+            label: "Режим приватности",
+            description: "Отключает Sentry crash-telemetry и принудительно переводит перевод в offline-режим. Никакие данные не покидают устройство. LM Studio (127.0.0.1) остаётся разрешённым. По умолчанию выключен — opt-in.",
+            button: privacyModeButton,
+            statusBadge: shieldBadge
+        )
+
+        card.contentStackView.addArrangedSubview(privacyRow)
         section.contentStackView.addArrangedSubview(card)
         return section
     }

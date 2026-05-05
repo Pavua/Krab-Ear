@@ -91,6 +91,9 @@ class TranslationService:
         translation_style = str(params.get("translation_style", "neutral"))
         settings = self._cached_settings()
         network_mode = str(params.get("network_mode") or settings.get("network_mode", "offline_default"))
+        # Privacy mode: force offline translation — no external network requests.
+        if settings.get("privacy_mode_enabled"):
+            network_mode = "offline_only"
         glossary = settings.get("translation_glossary", {})
         result = self.translator.translate(
             text=text,
@@ -179,6 +182,9 @@ class TranslationService:
 
         settings = self._cached_settings()
         network_mode = str(settings.get("network_mode", "offline_default"))
+        # Privacy mode: force offline translation — no external network requests.
+        if settings.get("privacy_mode_enabled"):
+            network_mode = "offline_only"
         translation_style = str(settings.get("translation_style", "neutral"))
         glossary = settings.get("translation_glossary", {})
 

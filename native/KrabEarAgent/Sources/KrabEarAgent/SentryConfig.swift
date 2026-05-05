@@ -20,11 +20,20 @@ enum SentryConfig {
     ///   - dsn: DSN проекта. Nil или пустая строка — SDK не запускается (no-op).
     ///   - environment: окружение (production / staging / development).
     ///   - release: строка релиза, например "krab-ear@1.2.3". Nil = не передаётся.
+    ///   - settings: текущие настройки из IPC. Если ``privacy_mode_enabled`` = true,
+    ///               Sentry инициализация полностью пропускается (no-op).
     static func initialize(
         dsn: String?,
         environment: String = "production",
-        release: String? = nil
+        release: String? = nil,
+        settings: [String: Any]? = nil
     ) {
+        // Privacy mode: skip all telemetry regardless of DSN.
+        if let settings, (settings["privacy_mode_enabled"] as? Bool) == true {
+            // Privacy mode active — Sentry skipped.
+            return
+        }
+
         guard let dsn, !dsn.isEmpty else {
             // DSN не задан — telemetry отключена, не логируем (normal path).
             return

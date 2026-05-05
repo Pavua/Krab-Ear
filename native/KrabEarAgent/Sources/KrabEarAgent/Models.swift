@@ -93,6 +93,8 @@ struct AgentSettings {
     // Quick Edit before paste
     var quickEditEnabled: Bool
     var quickEditTimeoutSec: Double
+    // Privacy Mode (D.5): disables all telemetry and external network ops.
+    var privacyModeEnabled: Bool
 
     static let `default` = AgentSettings(
         mode: "headless",
@@ -142,7 +144,8 @@ struct AgentSettings {
         callCostWarnUSD: 5.0,
         callAutoEndOnSilence: true,
         quickEditEnabled: false,
-        quickEditTimeoutSec: 5.0
+        quickEditTimeoutSec: 5.0,
+        privacyModeEnabled: false
     )
 
     init(from payload: [String: Any]) {
@@ -215,6 +218,7 @@ struct AgentSettings {
         self.callAutoEndOnSilence = (payload["call_auto_end_on_silence"] as? Bool) ?? Self.default.callAutoEndOnSilence
         self.quickEditEnabled = (payload["quick_edit_enabled"] as? Bool) ?? Self.default.quickEditEnabled
         self.quickEditTimeoutSec = (payload["quick_edit_timeout_sec"] as? Double) ?? Self.default.quickEditTimeoutSec
+        self.privacyModeEnabled = (payload["privacy_mode_enabled"] as? Bool) ?? Self.default.privacyModeEnabled
     }
 
     init(
@@ -262,7 +266,8 @@ struct AgentSettings {
         callCostWarnUSD: Double,
         callAutoEndOnSilence: Bool,
         quickEditEnabled: Bool,
-        quickEditTimeoutSec: Double
+        quickEditTimeoutSec: Double,
+        privacyModeEnabled: Bool = false
     ) {
         self.mode = mode
         self.showDockIcon = showDockIcon
@@ -309,6 +314,7 @@ struct AgentSettings {
         self.callAutoEndOnSilence = callAutoEndOnSilence
         self.quickEditEnabled = quickEditEnabled
         self.quickEditTimeoutSec = quickEditTimeoutSec
+        self.privacyModeEnabled = privacyModeEnabled
     }
 
     func toPayload() -> [String: Any] {
@@ -358,6 +364,7 @@ struct AgentSettings {
             "bookmarks_hotkey_enabled": bookmarksHotkeyEnabled,
             "quick_edit_enabled": quickEditEnabled,
             "quick_edit_timeout_sec": quickEditTimeoutSec,
+            "privacy_mode_enabled": privacyModeEnabled,
         ]
     }
 }
