@@ -383,6 +383,50 @@ class AudioEngine:
             threading.Thread(target=_warmup_bg, name="GigaAM-warmup", daemon=True).start()
             logger.info("GigaAM warmup запущен в background thread")
 
+    def warmup(self) -> dict[str, Any]:
+        """Prewarm Whisper model to eliminate first-dictation cold-start latency.
+
+        Loads the currently active model by running a tiny (1-second silent)
+        inference.  The audio buffer is all-zeros — Whisper returns quickly with
+        an empty or minimal result, but the model weights are now resident in GPU
+        memory so the next real transcription pays no load penalty.
+
+        Must be called in a background thread (MLX is single-threaded / GPU-bound).
+        Returns a dict:
+          {
+            "loaded": bool,      # True if warmup inference succeeded
+            "latency_ms": int,   # wall-clock ms for the inference call
+            "model_name": str,   # model that was warmed up
+            "error": str | None, # error message if loaded=False
+          }
+        """
+        if mlx_whisper is None:
+            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "mlx_whisper not available"}
+
+        model_name = self.current_model
+        # 1 second of silence at 16 kHz — float32 zeros.
+        import numpy as _np
+        silent_audio = _np.zeros(16000, dtype=_np.float32)
+
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            with mlx_lock():
+                mlx_whisper.transcribe(
+                    silent_audio,
+                    path_or_hf_repo=model_name,
+                    language="ru",
+                    temperature=0.0,
+                    verbose=False,
+                )
+            latency_ms = int((_time.monotonic() - t0) * 1000)
+            logger.info("STT warmup завершён: модель=%s, latency=%dms", model_name, latency_ms)
+            return {"loaded": True, "latency_ms": latency_ms, "model_name": model_name, "error": None}
+        except Exception as exc:
+            latency_ms = int((_time.monotonic() - t0) * 1000)
+            logger.warning("STT warmup не удался (модель=%s): %s", model_name, exc)
+            return {"loaded": False, "latency_ms": latency_ms, "model_name": model_name, "error": str(exc)}
+
     def _llm_rewrite_allowed(self) -> bool:
         """Runtime check: включён ли LLM rewriter И user runtime toggle."""
         if self._llm_rewriter is None:
