@@ -396,13 +396,20 @@ class LLMRewriter:
             )
         except (requests.ConnectionError, requests.RequestException) as exc:
             self._circuit.record_failure()
-            self._last_error = f"connection_error: {exc}"
+            exc_str = str(exc)
+            self._last_error = f"connection_error: {exc_str}"
             logger.warning(
                 "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
                 self._model, self._base_url, int((time.monotonic() - start) * 1000),
                 type(exc).__name__,
             )
-            self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc}")
+            if "channel error" in exc_str.lower():
+                self._push_error(
+                    "rewriter.channel_error",
+                    f"{type(exc).__name__}: {exc_str[:500]}",
+                )
+            else:
+                self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc_str}")
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="connection_error", latency_ms=None
             )
@@ -439,13 +446,20 @@ class LLMRewriter:
                 )
             except (requests.ConnectionError, requests.RequestException) as exc:
                 self._circuit.record_failure()
-                self._last_error = f"connection_error: {exc}"
+                exc_str = str(exc)
+                self._last_error = f"connection_error: {exc_str}"
                 logger.warning(
                     "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
                     self._model, self._base_url, int((time.monotonic() - start) * 1000),
                     type(exc).__name__,
                 )
-                self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc} (503 retry)")
+                if "channel error" in exc_str.lower():
+                    self._push_error(
+                        "rewriter.channel_error",
+                        f"{type(exc).__name__}: {exc_str[:500]} (503 retry)",
+                    )
+                else:
+                    self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc_str} (503 retry)")
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="connection_error", latency_ms=None
                 )
@@ -460,7 +474,13 @@ class LLMRewriter:
                 "LLM rewriter failure: kind=http_error model=%s base_url=%s elapsed_ms=%s status=%s body=%s",
                 self._model, self._base_url, latency_ms, response.status_code, body_preview,
             )
-            self._push_error("rewriter.timeout", f"http_{response.status_code}_after_retry")
+            if "channel error" in body_preview.lower():
+                self._push_error(
+                    "rewriter.channel_error",
+                    f"http_{response.status_code}: {body_preview}",
+                )
+            else:
+                self._push_error("rewriter.timeout", f"http_{response.status_code}_after_retry")
             return LLMRewriteResult(
                 ok=False,
                 text=None,
@@ -749,14 +769,30 @@ class LLMRewriter:
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
 
-    def warmup(self) -> bool:
+    def warmup(self, timeout_sec: Optional[float] = None) -> bool:
         """Отправляет минимальный probe в LLM endpoint для прогрева модели в памяти.
 
         Использует тот же _session и headers что и rewrite().
         НЕ трогает circuit breaker — warmup не является user-facing вызовом.
         Возвращает True если HTTP 200, False при любой ошибке.
         Проглатывает все exceptions.
+
+        Args:
+            timeout_sec: таймаут запроса. Если None — используется self._timeout.
         """
+        result = self.warmup_probe(timeout_sec=timeout_sec)
+        return result["ok"]
+
+    def warmup_probe(self, timeout_sec: Optional[float] = None) -> dict:
+        """Отправляет минимальный probe и возвращает структурированный результат.
+
+        Используется IPC-методом warmup_rewriter для возврата латентности и ошибки.
+        НЕ трогает circuit breaker.
+
+        Returns:
+            dict с ключами: ok (bool), latency_ms (int), error (str | None).
+        """
+        effective_timeout = timeout_sec if timeout_sec is not None else self._timeout
         start = time.monotonic()
         try:
             payload = {
@@ -773,18 +809,37 @@ class LLMRewriter:
                 f"{self._base_url}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=self._timeout,
+                timeout=effective_timeout,
             )
             elapsed_ms = int((time.monotonic() - start) * 1000)
             ok = response.status_code == 200
+            error: Optional[str] = None if ok else f"http_{response.status_code}"
             logger.info("LLM warmup: ok=%s elapsed_ms=%d", ok, elapsed_ms)
-            return ok
+            return {"ok": ok, "latency_ms": elapsed_ms, "error": error}
+        except requests.Timeout:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            logger.warning(
+                "LLM warmup failed: exc=Timeout elapsed_ms=%d timeout_sec=%.1f",
+                elapsed_ms, effective_timeout,
+            )
+            return {"ok": False, "latency_ms": elapsed_ms, "error": "timeout"}
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             logger.warning(
                 "LLM warmup failed: exc=%s elapsed_ms=%d", type(exc).__name__, elapsed_ms
             )
-            return False
+            return {"ok": False, "latency_ms": elapsed_ms, "error": type(exc).__name__}
+
+    def warmup_sync(self, timeout_sec: Optional[float] = None) -> None:
+        """Синхронный wrapper для запуска warmup в daemon-треде.
+
+        Вызывается через threading.Thread(target=...) при старте backend'а.
+        Результат логируется, исключения проглатываются.
+
+        Args:
+            timeout_sec: таймаут warmup-пробы. Если None — используется self._timeout.
+        """
+        self.warmup(timeout_sec=timeout_sec)
 
     def passive_health_check(self) -> tuple[bool, bool]:
         """Passive health check via GET /v1/models. Does NOT trigger JIT reload.
