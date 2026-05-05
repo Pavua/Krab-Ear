@@ -521,6 +521,12 @@ class Settings(BaseSettings):
     # Меньше = быстрее (~50ms @ 5s vs ~100ms @ 30s).
     STT_AUDIO_LANG_ID_PREVIEW_SEC: float = 5.0
 
+    # --- Авто-сид дефолтных STT hotwords при первом запуске ---
+    # При True: backend при старте вызывает seed_hotwords(only_if_empty=True) —
+    # заполняет список брендов/терминов только если он пуст (не перезаписывает).
+    # Отключить: KRAB_EAR_STT_AUTO_SEED_HOTWORDS=false
+    STT_AUTO_SEED_HOTWORDS: bool = True
+
     # --- Ежедневный дайджест на email (opt-in) ---
     # При RECAP_EMAIL_ENABLED=True: каждый день в RECAP_TIME_HOUR (локальное время)
     # автоматически генерируется DailyDigest и отправляется на RECAP_EMAIL_TO.
@@ -873,6 +879,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_sensevoice_device": "auto",
     # --- STT hotwords (initial_prompt boost) ---
     "stt_hotwords": [],
+    "stt_hotwords_enabled": True,
     # --- STT speaker-aware initial_prompt hint ---
     "stt_speaker_aware_prompt_enabled": True,
     "stt_dialogue_hint_threshold": 2,
