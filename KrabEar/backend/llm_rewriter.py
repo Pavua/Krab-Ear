@@ -270,6 +270,10 @@ class LLMRewriter:
 
         Includes ``Authorization: Bearer <token>`` only when api_key is set.
         Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
+        """Build HTTP headers for LM Studio requests.
+
+        Includes ``Authorization: Bearer <token>`` only when api_key is set.
+        Empty api_key: no Authorization header (backward-compat with LM Studio < 0.3
         that did not require authentication).
         """
         headers: dict = {"Content-Type": "application/json"}
