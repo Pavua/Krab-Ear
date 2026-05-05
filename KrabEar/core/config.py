@@ -926,4 +926,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Quick Edit before paste ---
     "quick_edit_enabled": False,
     "quick_edit_timeout_sec": 5.0,
+    # --- Privacy Mode (D.5) ---
+    # When True: Sentry is disabled, translation forced to offline_only.
+    # No data leaves the machine (LM Studio at 127.0.0.1 is still allowed).
+    # Default False: opt-in by user.
+    "privacy_mode_enabled": False,
 }
