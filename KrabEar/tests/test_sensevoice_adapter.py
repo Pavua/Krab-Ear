@@ -1,292 +1,286 @@
-"""Тесты SenseVoice adapter в fallback chain AudioEngine.
+"""Tests for SenseVoice STT adapter — Phase D.2.2.
 
-Проверяет интеграцию без реальной загрузки модели (FakeAudioEngine паттерн).
+All tests use mocks; real funasr/model is never loaded.
+Follows the same mock pattern as test_parakeet_mlx_adapter.py.
 """
-
 from __future__ import annotations
 
 import sys
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.engine import AudioEngine
-from backend.models import HistoryItem
+from core.pipeline.stt_sensevoice import (
+    SenseVoiceSTTAdapter,
+    _SUPPORTED_LANGUAGES,
+    _strip_emotion_tags,
+)
+from core.pipeline.stt_adapter import STTResult
 
 
-class TestSenseVoiceAdapterDisabled(unittest.TestCase):
-    """SenseVoice не участвует в chain когда SENSEVOICE_ENABLED=False."""
+# ---------------------------------------------------------------------------
+# Availability tests
+# ---------------------------------------------------------------------------
 
-    @patch("core.engine.settings")
-    def test_sensevoice_skipped_when_disabled(self, mock_settings: Any) -> None:
-        """_transcribe_with_fallback_impl не вставляет SENSEVOICE_MARKER если флаг выключен."""
-        mock_settings.SENSEVOICE_ENABLED = False
-        mock_settings.SENSEVOICE_MODEL = "iic/SenseVoiceSmall"
-        mock_settings.SENSEVOICE_EMOTION_TO_HISTORY = True
-        mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.MODEL_MAX_CANDIDATES = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.TRANSCRIBE_TIMEOUT_SEC = 30
-        mock_settings.NETWORK_MODE = "offline_strict"
-        mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
+class TestSenseVoiceAvailability(unittest.TestCase):
+    """is_available() reflects whether funasr is importable."""
 
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._router = None
-        engine.quality_profile = "balanced"
-        engine.current_model = "mlx-community/whisper-large-v3-turbo"
-        engine._unavailable_models = set()
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = None
+    def test_is_available_when_funasr_installed(self) -> None:
+        """is_available() → True when funasr can be imported."""
+        mock_auto_model = MagicMock()
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=mock_auto_model):
+            adapter = SenseVoiceSTTAdapter()
+            self.assertTrue(adapter.is_available())
 
-        with patch("core.engine._profiler") as mock_profiler:
-            mock_profiler.start_span.return_value.__enter__ = lambda s: s
-            mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
-            with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                mock_pool = MagicMock()
-                mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                mock_future = MagicMock()
-                mock_future.result.return_value = {"text": "тест", "segments": [], "language": "ru"}
-                mock_pool.submit.return_value = mock_future
-                engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
-
-        # Проверяем что SENSEVOICE_MARKER не оказался в unavailable (не вставлялся)
-        self.assertNotIn(engine._SENSEVOICE_MARKER, engine._unavailable_models)
+    def test_is_available_when_funasr_missing(self) -> None:
+        """is_available() → False when funasr import fails."""
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=None):
+            adapter = SenseVoiceSTTAdapter()
+            self.assertFalse(adapter.is_available())
 
 
-class TestSenseVoiceAdapterEnabled(unittest.TestCase):
-    """SenseVoice участвует в chain когда включён.
+# ---------------------------------------------------------------------------
+# Language support tests
+# ---------------------------------------------------------------------------
 
-    Реализация вставляет SENSEVOICE_MARKER на позицию 1 в candidates:
-    [balanced_whisper, SENSEVOICE_MARKER, ...остальные max-кандидаты].
-    SenseVoice пробуется только после того, как balanced_whisper недоступен.
-    """
+class TestSenseVoiceLanguageSupport(unittest.TestCase):
+    """supports_language() covers the expected East-Asian + EN set."""
 
-    @patch("core.engine.settings")
-    def test_sensevoice_reached_when_balanced_unavailable(self, mock_settings: Any) -> None:
-        """Когда balanced whisper помечен недоступным — SenseVoice успешно транскрибирует."""
-        mock_settings.SENSEVOICE_ENABLED = True
-        mock_settings.SENSEVOICE_MODEL = "iic/SenseVoiceSmall"
-        mock_settings.SENSEVOICE_EMOTION_TO_HISTORY = True
-        mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.MODEL_MAX_CANDIDATES = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.TRANSCRIBE_TIMEOUT_SEC = 30
-        mock_settings.NETWORK_MODE = "offline_strict"
-        mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
+    def setUp(self) -> None:
+        self.adapter = SenseVoiceSTTAdapter()
 
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._router = None
-        engine.quality_profile = "balanced"
-        engine.current_model = "mlx-community/whisper-large-v3-turbo"
-        # Помечаем balanced whisper как недоступный — SenseVoice должен сработать
-        engine._unavailable_models = {"mlx-community/whisper-large-v3-turbo"}
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = None
+    def test_supports_language_zh_yue_ja_ko_en(self) -> None:
+        """Adapter supports zh, yue, ja, ko, en, and auto."""
+        for lang in ("zh", "yue", "ja", "ko", "en", "auto"):
+            with self.subTest(lang=lang):
+                self.assertTrue(
+                    self.adapter.supports_language(lang),
+                    f"Expected supports_language({lang!r}) == True",
+                )
 
-        engine._transcribe_sensevoice = lambda *a, **kw: {  # type: ignore[method-assign]
-            "text": "привет мир",
-            "engine": "sensevoice",
-            "emotion": "happy",
-            "language": "ru",
-            "segments": [],
-        }
+    def test_does_not_support_language_ru_es(self) -> None:
+        """Adapter does NOT support ru or es (Whisper handles those)."""
+        for lang in ("ru", "es", "de", "fr", "pt"):
+            with self.subTest(lang=lang):
+                self.assertFalse(
+                    self.adapter.supports_language(lang),
+                    f"Expected supports_language({lang!r}) == False",
+                )
 
-        with patch("core.engine._profiler") as mock_profiler:
-            mock_profiler.start_span.return_value.__enter__ = lambda s: s
-            mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
-            result = engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
-
-        self.assertEqual(result["text"], "привет мир")
-        self.assertEqual(result["engine"], "sensevoice")
-        self.assertEqual(result["emotion"], "happy")
-
-    @patch("core.engine.settings")
-    def test_sensevoice_marker_inserted_in_candidates(self, mock_settings: Any) -> None:
-        """Когда SENSEVOICE_ENABLED=True — SENSEVOICE_MARKER вставляется на позицию 1 в chain."""
-        mock_settings.SENSEVOICE_ENABLED = True
-        mock_settings.SENSEVOICE_MODEL = "iic/SenseVoiceSmall"
-        mock_settings.SENSEVOICE_EMOTION_TO_HISTORY = True
-        mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.TRANSCRIBE_TIMEOUT_SEC = 30
-        mock_settings.NETWORK_MODE = "offline_strict"
-        # max profile: 2 кандидата — marker вставится между ними
-        mock_settings.model_max_list = [
-            "mlx-community/whisper-large-v3-mlx",
-            "mlx-community/whisper-large-v3-turbo",
-        ]
-
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._router = None
-        engine.quality_profile = "max"
-        engine.current_model = "mlx-community/whisper-large-v3-mlx"
-        engine._unavailable_models = set()
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = None
-
-        visited: list[str] = []
-
-        def fake_transcribe_model(audio_data: Any, model_name: str, prompt: str, language: Any = None) -> dict:
-            visited.append(model_name)
-            raise RuntimeError("VRAM out")  # все whisper-кандидаты падают
-
-        engine._transcribe_model = fake_transcribe_model  # type: ignore[method-assign]
-        # SenseVoice тоже падает чтобы не прерывать chain
-        engine._transcribe_sensevoice = MagicMock(side_effect=RuntimeError("funasr not installed"))  # type: ignore[method-assign]
-
-        with patch("core.engine._profiler") as mock_profiler:
-            mock_profiler.start_span.return_value.__enter__ = lambda s: s
-            mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
-            with patch("core.engine._get_available_memory_gb", return_value=16.0):
-                with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("VRAM out")
-                    mock_pool.submit.return_value = mock_future
-                    with self.assertRaises(RuntimeError):
-                        engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
-
-        # SenseVoice marker должен быть помечен недоступным после сбоя
-        self.assertIn(engine._SENSEVOICE_MARKER, engine._unavailable_models)
-
-    @patch("core.engine.settings")
-    def test_sensevoice_marker_not_retried_after_failure(self, mock_settings: Any) -> None:
-        """Если SenseVoice однажды упал — он не вставляется в chain повторно."""
-        mock_settings.SENSEVOICE_ENABLED = True
-        mock_settings.SENSEVOICE_MODEL = "iic/SenseVoiceSmall"
-        mock_settings.SENSEVOICE_EMOTION_TO_HISTORY = True
-        mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
-        mock_settings.TRANSCRIBE_TIMEOUT_SEC = 30
-        mock_settings.NETWORK_MODE = "offline_strict"
-        mock_settings.model_max_list = ["mlx-community/whisper-large-v3-turbo"]
-
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._router = None
-        engine.quality_profile = "balanced"
-        engine.current_model = "mlx-community/whisper-large-v3-turbo"
-        # Маркер уже помечен недоступным после предыдущего сбоя
-        engine._unavailable_models = {engine._SENSEVOICE_MARKER}
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = None
-
-        sv_call_count = []
-        engine._transcribe_sensevoice = lambda *a, **kw: sv_call_count.append(True) or {}  # type: ignore[method-assign]
-
-        with patch("core.engine._profiler") as mock_profiler:
-            mock_profiler.start_span.return_value.__enter__ = lambda s: s
-            mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
-            with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                mock_pool = MagicMock()
-                mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                mock_future = MagicMock()
-                mock_future.result.return_value = {"text": "вискер", "segments": [], "language": "ru"}
-                mock_pool.submit.return_value = mock_future
-                engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
-
-        self.assertEqual(len(sv_call_count), 0, "SenseVoice не должен вызываться если маркер уже недоступен")
+    def test_supported_languages_set_is_correct(self) -> None:
+        """The module-level _SUPPORTED_LANGUAGES constant has expected members."""
+        self.assertIn("zh", _SUPPORTED_LANGUAGES)
+        self.assertIn("yue", _SUPPORTED_LANGUAGES)
+        self.assertIn("ja", _SUPPORTED_LANGUAGES)
+        self.assertIn("ko", _SUPPORTED_LANGUAGES)
+        self.assertIn("en", _SUPPORTED_LANGUAGES)
+        self.assertNotIn("ru", _SUPPORTED_LANGUAGES)
+        self.assertNotIn("es", _SUPPORTED_LANGUAGES)
 
 
-class TestSenseVoiceLoadNoFunASR(unittest.TestCase):
-    """_load_sensevoice_model корректно обрабатывает отсутствие funasr."""
+# ---------------------------------------------------------------------------
+# Transcription tests
+# ---------------------------------------------------------------------------
 
-    def test_load_raises_when_funasr_missing(self) -> None:
-        """Без funasr _load_sensevoice_model поднимает RuntimeError."""
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = None
+class TestSenseVoiceTranscribe(unittest.TestCase):
+    """transcribe() returns well-formed STTResult (no real model loaded)."""
 
-        with patch("core.engine._SenseVoiceAutoModel", None):
-            with self.assertRaises(RuntimeError) as ctx:
-                engine._load_sensevoice_model()
-        self.assertIn("funasr", str(ctx.exception).lower())
-        # Ошибка кэшируется для последующих вызовов
-        self.assertIsNotNone(engine._sensevoice_load_error)
+    def _make_adapter_with_mock_model(self, raw_text: str = "你好世界") -> tuple:
+        """Return adapter with a mock model pre-injected (bypasses lazy load)."""
+        adapter = SenseVoiceSTTAdapter(model_id_or_path="FunAudioLLM/SenseVoiceSmall")
+        mock_model = MagicMock()
+        mock_model.generate.return_value = [{"text": raw_text, "key": "input_0"}]
+        adapter._model = mock_model
+        adapter._load_failed = False
+        return adapter, mock_model
 
-    def test_load_raises_from_cache_on_second_call(self) -> None:
-        """После первого сбоя _load_sensevoice_model сразу поднимает RuntimeError без попытки загрузки."""
-        engine = AudioEngine.__new__(AudioEngine)
-        engine._sensevoice_model = None
-        engine._sensevoice_load_error = "funasr не установлен"
+    def test_transcribe_returns_stt_result(self) -> None:
+        """transcribe() returns STTResult instance with clean text."""
+        import numpy as np
+        adapter, _ = self._make_adapter_with_mock_model("<|zh|><|NEUTRAL|><|Speech|>你好世界")
+        audio = np.zeros(16000, dtype="float32")
 
-        load_attempts = []
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=MagicMock()):
+            result = adapter.transcribe(audio, language="zh")
 
-        with patch("core.engine._SenseVoiceAutoModel") as mock_cls:
-            mock_cls.side_effect = lambda **kw: load_attempts.append(True)
-            with self.assertRaises(RuntimeError):
-                engine._load_sensevoice_model()
+        self.assertIsInstance(result, STTResult)
+        self.assertIsInstance(result.text, str)
+        # Emotion tags must be stripped from text
+        self.assertNotIn("<|NEUTRAL|>", result.text)
+        self.assertNotIn("<|Speech|>", result.text)
+        self.assertNotIn("<|zh|>", result.text)
+        self.assertEqual(result.engine, "sensevoice/SenseVoiceSmall")
 
-        self.assertEqual(len(load_attempts), 0, "Повторная загрузка не должна происходить")
+    def test_transcribe_strips_emotion_tags_keeps_in_metadata(self) -> None:
+        """Emotion/event tags removed from text but preserved in metadata."""
+        import numpy as np
+        raw = "<|zh|><|HAPPY|><|Speech|>你好"
+        adapter, _ = self._make_adapter_with_mock_model(raw)
+        audio = np.zeros(8000, dtype="float32")
+
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=MagicMock()):
+            result = adapter.transcribe(audio, language="zh")
+
+        self.assertNotIn("<|HAPPY|>", result.text)
+        self.assertIn("<|HAPPY|>", result.metadata.get("emotion_tags", []))
+
+    def test_transcribe_empty_result_returns_empty_stt_result(self) -> None:
+        """Empty generate() output → STTResult with empty text, no exception."""
+        import numpy as np
+        adapter = SenseVoiceSTTAdapter()
+        mock_model = MagicMock()
+        mock_model.generate.return_value = []
+        adapter._model = mock_model
+        adapter._load_failed = False
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=MagicMock()):
+            result = adapter.transcribe(audio)
+
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.word_count, 0)
+
+    def test_transcribe_raises_import_error_when_funasr_missing(self) -> None:
+        """transcribe() raises ImportError when funasr is not installed."""
+        import numpy as np
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=None):
+            adapter = SenseVoiceSTTAdapter()
+            with self.assertRaises(ImportError):
+                adapter.transcribe(np.zeros(16000, dtype="float32"))
+
+    def test_transcribe_uses_mps_when_available(self) -> None:
+        """When device='auto' and MPS available, model loaded with device='mps'."""
+        mock_auto_model_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.generate.return_value = [{"text": "hello", "key": "0"}]
+        mock_auto_model_cls.return_value = mock_instance
+
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=mock_auto_model_cls):
+            with patch("torch.backends.mps.is_available", return_value=True):
+                adapter = SenseVoiceSTTAdapter(device="auto")
+                adapter.warmup()
+                call_kwargs = mock_auto_model_cls.call_args
+                device_used = (
+                    call_kwargs.kwargs.get("device")
+                    or (call_kwargs[1].get("device") if call_kwargs[1] else None)
+                )
+                self.assertEqual(device_used, "mps")
+
+    def test_transcribe_uses_cpu_when_mps_unavailable(self) -> None:
+        """When device='auto' and MPS unavailable, model loaded with device='cpu'."""
+        mock_auto_model_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.generate.return_value = [{"text": "hello", "key": "0"}]
+        mock_auto_model_cls.return_value = mock_instance
+
+        with patch("core.pipeline.stt_sensevoice._try_import_funasr", return_value=mock_auto_model_cls):
+            with patch("torch.backends.mps.is_available", return_value=False):
+                adapter = SenseVoiceSTTAdapter(device="auto")
+                adapter.warmup()
+                call_kwargs = mock_auto_model_cls.call_args
+                device_used = (
+                    call_kwargs.kwargs.get("device")
+                    or (call_kwargs[1].get("device") if call_kwargs[1] else None)
+                )
+                self.assertEqual(device_used, "cpu")
 
 
-class TestSenseVoiceEmotionTagParsing(unittest.TestCase):
-    """_parse_sensevoice_output корректно извлекает emotion из inline-тегов."""
+# ---------------------------------------------------------------------------
+# Router factory integration tests
+# ---------------------------------------------------------------------------
 
-    def test_emotion_extracted_from_text_tags(self) -> None:
-        """FunASR кодирует эмоцию в теги внутри текста; статический парсер должен их извлечь."""
-        text = "<|HAPPY|><|ru|><|Speech|>привет мир"
-        clean, emotion, lang = AudioEngine._parse_sensevoice_output(text)
-        self.assertEqual(clean, "привет мир")
-        self.assertEqual(emotion, "happy")
-        self.assertEqual(lang, "ru")
+class TestSenseVoiceRouterFactory(unittest.TestCase):
+    """build_router() correctly includes/excludes SenseVoice based on settings."""
 
-    def test_neutral_emotion_tag(self) -> None:
-        clean, emotion, lang = AudioEngine._parse_sensevoice_output("<|NEUTRAL|><|en|>hello world")
-        self.assertEqual(clean, "hello world")
-        self.assertEqual(emotion, "neutral")
-        self.assertEqual(lang, "en")
+    def test_factory_excludes_when_disabled(self) -> None:
+        """SenseVoice NOT included when stt_sensevoice_enabled=False."""
+        from core.pipeline.stt_router_factory import build_router
 
-    def test_no_emotion_tag_returns_none(self) -> None:
-        clean, emotion, lang = AudioEngine._parse_sensevoice_output("<|ru|>просто текст")
-        self.assertEqual(clean, "просто текст")
-        self.assertIsNone(emotion)
-        self.assertEqual(lang, "ru")
+        with patch("core.pipeline.stt_router_factory.WhisperMLXAdapter") as mock_whisper_cls:
+            mock_whisper = MagicMock()
+            mock_whisper.is_available.return_value = True
+            mock_whisper_cls.return_value = mock_whisper
 
-    def test_empty_string_returns_empty(self) -> None:
-        clean, emotion, lang = AudioEngine._parse_sensevoice_output("")
-        self.assertEqual(clean, "")
-        self.assertIsNone(emotion)
-        self.assertIsNone(lang)
+            router = build_router({"stt_sensevoice_enabled": False})
+
+        adapter_types = [type(a).__name__ for a in router._adapters]
+        self.assertNotIn("SenseVoiceSTTAdapter", adapter_types)
+
+    def test_factory_includes_when_enabled_and_available(self) -> None:
+        """SenseVoice IS included (before Whisper) when enabled and available."""
+        from core.pipeline.stt_router_factory import build_router
+
+        with patch("core.pipeline.stt_router_factory.SenseVoiceSTTAdapter") as mock_sv_cls:
+            mock_sv = MagicMock()
+            mock_sv.is_available.return_value = True
+            mock_sv._model_id_or_path = "FunAudioLLM/SenseVoiceSmall"
+            mock_sv._device_setting = "auto"
+            mock_sv_cls.return_value = mock_sv
+
+            with patch("core.pipeline.stt_router_factory.WhisperMLXAdapter") as mock_whisper_cls:
+                mock_whisper = MagicMock()
+                mock_whisper.is_available.return_value = True
+                mock_whisper_cls.return_value = mock_whisper
+
+                router = build_router({
+                    "stt_sensevoice_enabled": True,
+                    "stt_sensevoice_model": "FunAudioLLM/SenseVoiceSmall",
+                    "stt_sensevoice_device": "auto",
+                })
+
+        adapters = router._adapters
+        self.assertGreaterEqual(len(adapters), 2)
+        # SenseVoice should appear BEFORE WhisperMLX
+        self.assertIs(adapters[0], mock_sv)
+
+    def test_factory_skips_sensevoice_when_not_installed(self) -> None:
+        """SenseVoice omitted from router when enabled but funasr not installed."""
+        from core.pipeline.stt_router_factory import build_router
+
+        with patch("core.pipeline.stt_router_factory.SenseVoiceSTTAdapter") as mock_sv_cls:
+            mock_sv = MagicMock()
+            mock_sv.is_available.return_value = False
+            mock_sv._model_id_or_path = "FunAudioLLM/SenseVoiceSmall"
+            mock_sv._device_setting = "auto"
+            mock_sv_cls.return_value = mock_sv
+
+            with patch("core.pipeline.stt_router_factory.WhisperMLXAdapter") as mock_whisper_cls:
+                mock_whisper = MagicMock()
+                mock_whisper.is_available.return_value = True
+                mock_whisper_cls.return_value = mock_whisper
+
+                router = build_router({"stt_sensevoice_enabled": True})
+
+        self.assertNotIn(mock_sv, router._adapters)
 
 
-class TestHistoryItemEmotionField(unittest.TestCase):
-    """HistoryItem поддерживает поле emotion без ошибок сериализации."""
+# ---------------------------------------------------------------------------
+# Utility function tests
+# ---------------------------------------------------------------------------
 
-    def test_create_with_emotion(self) -> None:
-        item = HistoryItem.create(text="тест", emotion="happy")
-        self.assertEqual(item.emotion, "happy")
+class TestStripEmotionTags(unittest.TestCase):
+    """_strip_emotion_tags() correctly removes SenseVoice embedded tags."""
 
-    def test_create_without_emotion_defaults_none(self) -> None:
-        item = HistoryItem.create(text="тест")
-        self.assertIsNone(item.emotion)
+    def test_strips_language_and_emotion_tags(self) -> None:
+        raw = "<|zh|><|HAPPY|><|Speech|>你好世界"
+        self.assertEqual(_strip_emotion_tags(raw), "你好世界")
 
-    def test_to_dict_includes_emotion(self) -> None:
-        item = HistoryItem.create(text="тест", emotion="neutral")
-        d = item.to_dict()
-        self.assertIn("emotion", d)
-        self.assertEqual(d["emotion"], "neutral")
+    def test_strips_multiple_tags(self) -> None:
+        raw = "<|en|><|NEUTRAL|><|BGM|>hello world"
+        self.assertEqual(_strip_emotion_tags(raw), "hello world")
 
-    def test_from_dict_roundtrip(self) -> None:
-        item = HistoryItem.create(text="тест", emotion="sad")
-        d = item.to_dict()
-        restored = HistoryItem.from_dict(d)
-        self.assertEqual(restored.emotion, "sad")
+    def test_no_tags_unchanged(self) -> None:
+        plain = "hello world こんにちは"
+        self.assertEqual(_strip_emotion_tags(plain), plain)
 
-    def test_from_dict_legacy_no_emotion_field(self) -> None:
-        """Старые записи без поля emotion загружаются без ошибок (emotion=None)."""
-        payload = {
-            "id": "abc",
-            "ts": "2026-01-01T00:00:00",
-            "text": "старая запись",
-        }
-        item = HistoryItem.from_dict(payload)
-        self.assertIsNone(item.emotion)
+    def test_only_tags_returns_empty(self) -> None:
+        self.assertEqual(_strip_emotion_tags("<|zh|><|HAPPY|>"), "")
 
 
 if __name__ == "__main__":
     unittest.main()
+
