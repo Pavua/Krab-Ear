@@ -184,7 +184,7 @@ public extension KrabEarTheme {
     
     /// Unified spacing & sizing system designed by Gemini 3.1 Pro (2026-04-16 v2).
     /// 4-pt grid aligned; 10pt/6pt legacy values migrate к standard/tight.
-    public enum Metrics {
+    enum Metrics {
         // MARK: - Spacing (4-pt grid)
         /// Minor offsets, disclosure padding (4pt).
         public static let tight: CGFloat = 4.0
@@ -211,7 +211,7 @@ public extension KrabEarTheme {
         public static let cardPadding: CGFloat = comfortable
     }
     
-    public static func applyTheme(to window: NSWindow) {
+    static func applyTheme(to window: NSWindow) {
         window.backgroundColor = .clear
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
@@ -244,7 +244,7 @@ public extension KrabEarTheme {
         }
     }
     
-    public static func styleCheckbox(_ checkbox: NSButton) {
+    static func styleCheckbox(_ checkbox: NSButton) {
         checkbox.setButtonType(.switch)
         checkbox.font = Typography.body
     }

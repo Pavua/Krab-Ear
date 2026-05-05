@@ -15,8 +15,8 @@ extension HistoryPanelController {
         }
         let item = items[selectedRow]
         let itemID = item.id
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let notificationService = self.notificationService
+        let ipcClient = self.ipcClient
+        let notificationService = self.notificationService
         DispatchQueue.global(qos: .userInitiated).async {
             guard let response = try? ipcClient.call(method: "export_history_srt", params: ["id": itemID]),
                   let result = response["result"] as? [String: Any],
@@ -44,8 +44,8 @@ extension HistoryPanelController {
         alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let notificationService = self.notificationService
+        let ipcClient = self.ipcClient
+        let notificationService = self.notificationService
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "cleanup_old_history", params: ["days": days]),
                   let result = response["result"] as? [String: Any],
@@ -63,7 +63,7 @@ extension HistoryPanelController {
     }
 
     @objc func onVocabSuggestions() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_vocabulary_suggestions", params: [:]),
                   let result = response["result"] as? [String: Any],
@@ -86,7 +86,7 @@ extension HistoryPanelController {
     }
 
     @objc func onGlossarySuggestions() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_glossary_suggestions", params: [:]),
                   let result = response["result"] as? [String: Any],
@@ -133,7 +133,7 @@ extension HistoryPanelController {
 
         showDiagnosticsOutput("Авто-саммари: обрабатываю \(targetIDs.count) записей…")
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         let idsCopy = targetIDs
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(
@@ -175,7 +175,7 @@ extension HistoryPanelController {
         let item = items[row]
         let itemID = item.id
         let fallbackText = item.text
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "get_history_item", params: ["id": itemID]),
                   let result = response["result"] as? [String: Any] else {
@@ -228,7 +228,7 @@ extension HistoryPanelController {
         let item = items[selected]
         showDiagnosticsOutput("Summary: обрабатываю запись \(item.id.prefix(8))…")
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         let itemID = item.id
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let response = try? ipcClient.call(method: "summarize_item", params: ["id": itemID]),

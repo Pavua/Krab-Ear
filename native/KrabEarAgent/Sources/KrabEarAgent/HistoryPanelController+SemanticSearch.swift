@@ -133,12 +133,12 @@ extension HistoryPanelController {
         let useFallback = modeIdx != 1   // 1 = "Только semantic" → fallback off
         let forceKeyword = modeIdx == 2  // 2 = "Только keyword" → используем фолбэк handler
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let queryCopy = query
-        nonisolated(unsafe) let resultsView = self.semanticResultsView
+        let ipcClient = self.ipcClient
+        let queryCopy = query
+        let resultsView = self.semanticResultsView
         let items = self.items
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
                 if forceKeyword {
                     let keywordResults = HistoryPanelController.keywordFallback(
@@ -161,7 +161,7 @@ extension HistoryPanelController {
                     method: "semantic_search",
                     params: ["query": queryCopy, "top_k": 10, "fallback": useFallback]
                 )
-                nonisolated(unsafe) let result = r["result"] as? [String: Any] ?? [:]
+                let result = r["result"] as? [String: Any] ?? [:]
                 let mode = result["mode"] as? String ?? "?"
                 let rawResults = result["results"] as? [[String: Any]] ?? []
                 let formatted = HistoryPanelController.formatSearchResults(
@@ -185,7 +185,7 @@ extension HistoryPanelController {
     }
 
     @objc func reindexSemanticSearchAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         semanticStatusLabel.stringValue = "Переиндексирую… (может занять минуту)"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -214,7 +214,7 @@ extension HistoryPanelController {
     }
 
     @objc func refreshSemanticStatusAction() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let r = try ipcClient.call(method: "semantic_search_status", params: [:])

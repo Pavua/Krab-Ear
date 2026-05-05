@@ -254,7 +254,7 @@ final class QuickEditOverlay: NSObject {
 
     // MARK: - Dismiss
 
-    private func dismiss(animated: Bool, completion: (() -> Void)? = nil) {
+    private func dismiss(animated: Bool, completion: (@MainActor @Sendable () -> Void)? = nil) {
         guard let panel else {
             completion?()
             return
@@ -264,11 +264,13 @@ final class QuickEditOverlay: NSObject {
                 ctx.duration = 0.15
                 panel.animator().alphaValue = 0
             }, completionHandler: {
-                panel.orderOut(nil)
-                self.panel = nil
-                self.textView = nil
-                self.countdownLabel = nil
-                completion?()
+                MainActor.assumeIsolated {
+                    panel.orderOut(nil)
+                    self.panel = nil
+                    self.textView = nil
+                    self.countdownLabel = nil
+                    completion?()
+                }
             })
         } else {
             panel.orderOut(nil)

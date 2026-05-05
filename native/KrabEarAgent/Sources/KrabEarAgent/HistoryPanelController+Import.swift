@@ -512,7 +512,7 @@ extension HistoryPanelController {
 
     func updateImportStatusLabel() {
         if isImportRunning {
-            let current = min(importJobsPlanned, importJobsCompleted + 1)
+            let _ = min(importJobsPlanned, importJobsCompleted + 1)
             let avgSec = importJobsCompleted > 0 ? (importDurationTotalSec / Double(importJobsCompleted)) : 0
             let remainingJobs = max(0, importJobsPlanned - importJobsCompleted)
             let eta = Int((Double(remainingJobs) * avgSec).rounded())

@@ -393,7 +393,7 @@ final class TranslationStreamView: NSView {
     /// Async (DispatchQueue.global) чтобы не блокировать main thread даже на 5s timeout.
     private func refreshGlossary() {
         guard let app = NSApp.delegate as? AgentAppDelegate else { return }
-        nonisolated(unsafe) let ipcClient = app.ipcClient
+        let ipcClient = app.ipcClient
         DispatchQueue.global(qos: .utility).async {
             guard
                 let response = try? ipcClient.call(

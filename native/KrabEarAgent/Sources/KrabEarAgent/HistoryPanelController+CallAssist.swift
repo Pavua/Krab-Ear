@@ -18,7 +18,7 @@ extension HistoryPanelController {
         let autoSummaryOn = callAutoSummaryButton.state == .on
         let notifyOn = callNotifyButton.state == .on
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -53,7 +53,7 @@ extension HistoryPanelController {
 
     @objc func onStopCallAssist() {
         let autoSummaryOn = callAutoSummaryButton.state == .on
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -92,7 +92,7 @@ extension HistoryPanelController {
 
     @objc func onLoadCallPhraseLibrary() {
         let pair = selectedCallPhraseDirection()
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -154,15 +154,19 @@ extension HistoryPanelController {
             return
         }
         let pair = selectedCallPhraseDirection()
-        let params: [String: Any] = [
-            "text": text,
-            "source_lang": pair.sourceLang,
-            "target_lang": pair.targetLang,
-            "voice": "default",
-            "style": "chat",
-        ]
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
+        // [String: Any] is not Sendable; capture typed copies instead of the dict
+        let paramText = text
+        let paramSource = pair.sourceLang
+        let paramTarget = pair.targetLang
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let params: [String: Any] = [
+                "text": paramText,
+                "source_lang": paramSource,
+                "target_lang": paramTarget,
+                "voice": "default",
+                "style": "chat",
+            ]
             guard
                 let response = try? ipcClient.call(method: "call_assist_quick_phrase", params: params),
                 let result = response["result"] as? [String: Any],
@@ -195,7 +199,7 @@ extension HistoryPanelController {
     // MARK: - Summary / Diagnostics / Cost
 
     @objc func onFetchCallSummary() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -218,7 +222,7 @@ extension HistoryPanelController {
     }
 
     @objc func onFetchCallDiagnostics() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -304,7 +308,7 @@ extension HistoryPanelController {
         let media = Double(mediaField.stringValue) ?? 400
         let useLivePricing = livePricingButton.state == .on
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -338,7 +342,7 @@ extension HistoryPanelController {
     // MARK: - Timeline
 
     @objc func onFetchCallTimeline() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -419,7 +423,7 @@ extension HistoryPanelController {
 
         let selected = formatSelector.indexOfSelectedItem
         let exportFormat = selected == 1 ? "ndjson" : "md"
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -468,7 +472,7 @@ extension HistoryPanelController {
 
     @objc func onClearCallTimeline() {
         let keepLast = selectedCallTimelineKeepLast()
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -494,7 +498,7 @@ extension HistoryPanelController {
     }
 
     @objc func onSaveCallTimelineToHistory() {
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(

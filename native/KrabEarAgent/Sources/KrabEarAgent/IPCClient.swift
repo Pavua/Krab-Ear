@@ -107,7 +107,7 @@ final class IPCClient: @unchecked Sendable {
                     let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
                     Task.detached { [weak self] in
                         guard let self else { return }
-                        try? await self.callAsync(
+                        _ = try? await self.callAsync(
                             method: "report_reconnect",
                             params: [
                                 "attempts": attempt,
@@ -184,10 +184,15 @@ final class IPCClient: @unchecked Sendable {
         params: [String: Any] = [:],
         timeoutSec: Int = IPCClient.defaultTimeoutSec
     ) async throws -> [String: Any] {
-        let captured: (String, [String: Any], Int) = (method, params, timeoutSec)
         // [String: Any] не Sendable — оборачиваем в @unchecked Sendable box
-        // чтобы передать через Task continuation без data race warning.
-        // IPC response это immutable JSON dict, гонок нет.
+        // чтобы передать через @Sendable closure без data race warning.
+        // IPC params/response — immutable JSON dict, гонок нет.
+        struct SendableCapture: @unchecked Sendable {
+            let method: String
+            let params: [String: Any]
+            let timeoutSec: Int
+        }
+        let captured = SendableCapture(method: method, params: params, timeoutSec: timeoutSec)
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else {
@@ -196,12 +201,11 @@ final class IPCClient: @unchecked Sendable {
                 }
                 do {
                     let result = try self.call(
-                        method: captured.0,
-                        params: captured.1,
-                        timeoutSec: captured.2
+                        method: captured.method,
+                        params: captured.params,
+                        timeoutSec: captured.timeoutSec
                     )
-                    nonisolated(unsafe) let resultBox = result
-                    continuation.resume(returning: resultBox)
+                    continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
                 }

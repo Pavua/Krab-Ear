@@ -42,13 +42,12 @@ private final class PartialSSEDelegate: NSObject, URLSessionDataDelegate, @unche
 }
 
 // MARK: - Associated object keys
-// nonisolated(unsafe) — стандартный паттерн для ObjC associated-object keys в Swift 6.
-// Адреса используются только как уникальные указатели, не для хранения данных.
-
-private nonisolated(unsafe) var partialSSEDelegateKey = "partialSSEDelegate"
-private nonisolated(unsafe) var partialSSESessionKey  = "partialSSESession"
-private nonisolated(unsafe) var partialSSETaskKey     = "partialSSETask"
-private nonisolated(unsafe) var partialSSEEventBufKey = "partialSSEEventBuf"
+// UInt8 variables as key addresses — safe for &key UnsafeRawPointer use
+// (no string-representation exposure). Each unique address = unique key.
+private nonisolated(unsafe) var partialSSEDelegateKey: UInt8 = 0
+private nonisolated(unsafe) var partialSSESessionKey:  UInt8 = 0
+private nonisolated(unsafe) var partialSSETaskKey:     UInt8 = 0
+private nonisolated(unsafe) var partialSSEEventBufKey: UInt8 = 0
 
 // MARK: - RealtimeOverlayController + PartialSSE extension
 

@@ -247,10 +247,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
             settingsProvider: { [weak self] in
-                (self as? AgentAppDelegate)?.settings ?? .default
+                self?.settings ?? .default
             },
             settingsUpdater: { [weak self] payload in
-                (self as? AgentAppDelegate)?.updateSettingsFromPanel(payload) ?? .default
+                self?.updateSettingsFromPanel(payload) ?? .default
             },
             onToggleRecording: { [weak self] in
                 self?.handleRecordToggleRequest()
@@ -281,7 +281,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         // Phase B.2 F9: fire-and-forget IPC when RegisterEventHotKey returns
         // eventHotKeyExistsErr — another app holds the chord.
-        nonisolated(unsafe) let ipcClientForHotkey = self.ipcClient
+        let ipcClientForHotkey = self.ipcClient
         hotkeyManager?.reportHotkeyConflictHandler = { chord in
             DispatchQueue.global(qos: .utility).async {
                 _ = try? ipcClientForHotkey.call(
@@ -507,7 +507,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     @objc func onCompactHistory() {
         // IPC compact может занять до нескольких секунд → на background.
         // showPanel() — UI, оставляем на main, открываем сразу (не ждём compact).
-        nonisolated(unsafe) let ipcClient = self.ipcClient
+        let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async {
             _ = try? ipcClient.call(method: "compact_history", params: [:])
         }
