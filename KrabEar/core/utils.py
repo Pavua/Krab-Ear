@@ -88,9 +88,14 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bКвент\b", "Qwen"),
     (r"\bквен\b", "Qwen"),
     (r"\bКвен\b", "Qwen"),
-    # GigaAM mishear
-    (r"\bГига\s*АМ\b", "GigaAM"),
+    # GigaAM mishear — 2026-05-05 session: added Хига/Джига/Higa/Jiga variants
+    # (GigaAM doesn't recognise its own name; Whisper phonetically maps «Гига» → «Хига»/«Джига»)
+    (r"\bГига[\s\-]?АМ\b", "GigaAM"),
     (r"\bГига\s*Эй\s*Эм\b", "GigaAM"),
+    (r"\b[Хх]ига[\s\-]?[Аа][Мм]\b", "GigaAM"),
+    (r"\b[Дд]жига[\s\-]?[Аа][Мм]\b", "GigaAM"),
+    (r"\bHiga[\s\-]?AM\b", "GigaAM"),
+    (r"\bJiga[\s\-]?AM\b", "GigaAM"),
     # MythoMax mishear
     (r"\bМито\s*Макс\b", "MythoMax"),
     (r"\bМитомакс\b", "MythoMax"),
