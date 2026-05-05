@@ -17,6 +17,7 @@ from typing import Any
 
 from .stt_router import STTRouter
 from .stt_gigaam_adapter import GigaAMSTTAdapter
+from .stt_parakeet import ParakeetSTTAdapter
 from .stt_whisper_mlx_adapter import WhisperMLXAdapter
 
 logger = logging.getLogger("KrabEar.STT.RouterFactory")
@@ -55,6 +56,27 @@ def build_router(settings_dict: dict[str, Any] | None = None) -> STTRouter:
             logger.debug("RouterFactory: GigaAM adapter added (mode=%s)", gigaam._mode)
         except ImportError as exc:
             logger.warning("RouterFactory: GigaAMSTTAdapter unavailable: %s", exc)
+
+    # ----------------------------------------------------------------
+    # Parakeet MLX (EN-only, optional — requires parakeet-mlx install)
+    # ----------------------------------------------------------------
+    if cfg.get("stt_parakeet_enabled", False):
+        try:
+            parakeet = ParakeetSTTAdapter(
+                model_path=cfg.get("stt_parakeet_model", None),
+            )
+            if parakeet.is_available():
+                adapters.append(parakeet)
+                logger.debug(
+                    "RouterFactory: Parakeet adapter added (model=%s)", parakeet._model_path
+                )
+            else:
+                logger.warning(
+                    "RouterFactory: Parakeet enabled but parakeet-mlx not installed; "
+                    "install with: pip install parakeet-mlx"
+                )
+        except Exception as exc:
+            logger.warning("RouterFactory: ParakeetSTTAdapter init failed: %s", exc)
 
     # ----------------------------------------------------------------
     # Whisper MLX (multilingual, always attempted)

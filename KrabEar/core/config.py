@@ -346,6 +346,16 @@ class Settings(BaseSettings):
     # fallback на ~/.cache/huggingface/token. См. reference_gigaam_bench_2026-04-26.
     STT_GIGAAM_HF_TOKEN: str = ""
 
+    # --- Parakeet MLX adapter (EN-only, Apple Silicon) ---
+    # NVIDIA Parakeet TDT 0.6B via parakeet-mlx (MLX port).
+    # Install: pip install parakeet-mlx
+    # Opt-in: выключено по умолчанию (lib не ubiquitous, EN-only).
+    # Когда STT_PARAKEET_ENABLED=True И is_available() → подключается в STTRouter
+    # как EN-специализированный адаптер (приоритет после GigaAM при lang=="en").
+    STT_PARAKEET_ENABLED: bool = False
+    # HuggingFace repo ID для MLX Parakeet модели.
+    STT_PARAKEET_MODEL: str = "mlx-community/parakeet-tdt-0.6b-v2"
+
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
     # По умолчанию выключено (opt-in); требует pyannote.audio.
