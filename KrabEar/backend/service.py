@@ -2520,6 +2520,50 @@ class BackendService:
             "model": getattr(self._llm_rewriter, "_model", None),
         }
 
+    def _handle_warmup_stt(self, params: dict) -> dict:
+        """Ручной запуск STT warmup — полезен после смены профиля или модели.
+
+        Загружает текущую активную Whisper-модель через tiny (1s silent) inference.
+        Блокирующий вызов — выполняется в потоке IPC handler'а, возвращает
+        результат только после завершения warmup (или ошибки).
+
+        Returns:
+            {
+              "loaded": bool,      # True если warmup inference прошёл без ошибок
+              "latency_ms": int,   # время inference в мс
+              "model_name": str,   # имя прогретой модели
+              "error": str | None  # сообщение об ошибке (None если loaded=True)
+            }
+        """
+        if not hasattr(self.transcriber, "engine"):
+            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
+        return self.transcriber.engine.warmup()
+
+    def _handle_warmup_rewriter(self, params: dict) -> dict:
+        """Ручной запуск LLM rewriter warmup probe.
+
+        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
+        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
+
+        Params:
+            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
+
+        Returns:
+            {
+              "ok": bool,          # True если HTTP 200
+              "latency_ms": int,   # время ответа в мс
+              "error": str | None, # описание ошибки или None
+              "model": str | None  # имя используемой модели
+            }
+        """
+        if self._llm_rewriter is None:
+            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
+        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
+        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
+        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
+        result["model"] = getattr(self._llm_rewriter, "_model", None)
+        return result
+
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
 
