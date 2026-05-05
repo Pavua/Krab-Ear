@@ -566,6 +566,68 @@ extension HistoryPanelController {
         }
     }
 
+    // MARK: - iMessage (Phase D.4)
+
+    /// Отправляет выбранную запись истории через iMessage.
+    /// Показывает NSAlert с полем для ввода получателя, затем вызывает send_imessage IPC.
+    @objc func onSendToImessage() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showInfoAlert(title: "iMessage", body: "Выберите запись для отправки.")
+            return
+        }
+        sendHistoryItemToImessage(items[selected])
+    }
+
+    func sendHistoryItemToImessage(_ item: HistoryItem) {
+        // Prompt user for recipient
+        let alert = NSAlert()
+        alert.messageText = "Отправить через iMessage"
+        alert.informativeText = "Введите номер телефона, email или имя контакта:"
+        alert.addButton(withTitle: "Отправить")
+        alert.addButton(withTitle: "Отмена")
+
+        let recipientField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        recipientField.placeholderString = "+7 999 123-45-67 или email"
+        alert.accessoryView = recipientField
+        alert.window.initialFirstResponder = recipientField
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let recipient = recipientField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !recipient.isEmpty else {
+            showInfoAlert(title: "iMessage", body: "Получатель не указан.")
+            return
+        }
+
+        let body = item.text
+        let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let params: [String: Any] = [
+                "recipient": recipient,
+                "body": body,
+                "service": "iMessage"
+            ]
+            let ipcResponse = try? ipcClient.call(method: "send_imessage", params: params)
+            let result = ipcResponse?["result"] as? [String: Any]
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let resultAlert = NSAlert()
+                if let ok = result?["ok"] as? Bool, ok {
+                    resultAlert.messageText = "Сообщение отправлено"
+                    resultAlert.informativeText = "iMessage отправлен получателю \(recipient)."
+                } else {
+                    resultAlert.messageText = "Ошибка отправки"
+                    resultAlert.informativeText = result?["error"] as? String ?? "unknown"
+                }
+                resultAlert.runModal()
+            }
+        }
+    }
+
     // MARK: - Load / Append
 
     func loadInitial() {
