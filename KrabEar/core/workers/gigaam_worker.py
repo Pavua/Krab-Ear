@@ -107,7 +107,13 @@ def _free_mps_pool() -> None:
     Both calls are wrapped in try/except — never raise even if torch.mps
     API changes or is unavailable (e.g. CPU-only env, future PyTorch versions).
     Safe to call on every cycle — idempotent, negligible overhead when empty.
+
+    Bypassed if KRAB_EAR_DISABLE_MPS_POOL_FREE=1 (for A/B validation).
+    Never raises.
     """
+    if os.environ.get("KRAB_EAR_DISABLE_MPS_POOL_FREE") == "1":
+        return  # control mode — leak as-was (C.1 A/B validation)
+
     try:
         import torch  # type: ignore[import]
         if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
