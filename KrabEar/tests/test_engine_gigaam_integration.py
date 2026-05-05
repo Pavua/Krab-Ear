@@ -87,6 +87,7 @@ class _FakeSettings:
     STT_GIGAAM_ENABLED: bool = False
     STT_GIGAAM_MODE: str = "rnnt"
     STT_GIGAAM_DEVICE: str = "mps"
+    STT_GIGAAM_HF_TOKEN: str = ""
     PARAKEET_ENABLED: bool = False
     PARAKEET_MODEL: str = "nvidia/parakeet-tdt-1.1b"
     SENSEVOICE_ENABLED: bool = False

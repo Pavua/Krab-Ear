@@ -59,6 +59,7 @@ class FakeAudioEngine:
         history_context: list[Any] | None = None,
         stt_hotwords: list[str] | None = None,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Имитация engine.transcribe()."""
         call_record = {
