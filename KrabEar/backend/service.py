@@ -1065,6 +1065,10 @@ class BackendService:
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
             # --- Apple Notes integration (Phase D.4) ---
             "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
+            # --- Apple Reminders integration (Phase D.4) ---
+            "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
+            # --- Apple Calendar integration (Phase D.4) ---
+            "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._handle_call_session_get,  # получить сессию по id
@@ -4648,6 +4652,115 @@ end tell
             return {"ok": False, "note_id": None, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "note_id": None, "error": str(exc)}
+
+    def _handle_create_apple_reminder(self, params: dict) -> dict:
+        """Create Apple Reminder from text via osascript.
+
+        params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
+        list_name = params.get("list_name") or None
+        due_date = params.get("due_date") or None
+
+        # Build properties clause
+        properties = f'name:"{title}"'
+        if body:
+            properties += f', body:"{body}"'
+        if due_date:
+            due_date_escaped = due_date.replace('"', '\\"')
+            properties += f', due date:date "{due_date_escaped}"'
+
+        if list_name:
+            list_name_escaped = list_name.replace('"', '\\"')
+            script = f'''
+tell application "Reminders"
+    tell list "{list_name_escaped}"
+        make new reminder with properties {{{properties}}}
+    end tell
+end tell
+'''
+        else:
+            script = f'''
+tell application "Reminders"
+    make new reminder with properties {{{properties}}}
+end tell
+'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
+
+    def _handle_create_calendar_event(self, params: dict) -> dict:
+        """Create Apple Calendar event via osascript.
+
+        params:
+          title: str (required)
+          notes: str (optional, default "")
+          start_date: str (required, ISO 8601 or AppleScript-parseable date string)
+          duration_minutes: int (optional, default 30)
+          calendar_name: str | None (optional, default first writable calendar)
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "").strip()
+        if not title:
+            return {"ok": False, "error": "title is required"}
+
+        title_esc = title.replace('"', '\\"')
+        notes = params.get("notes", "") or ""
+        notes_esc = notes.replace('"', '\\"')
+        start_date = str(params.get("start_date", "")).strip()
+        if not start_date:
+            return {"ok": False, "error": "start_date is required"}
+        start_date_esc = start_date.replace('"', '\\"')
+        duration_minutes = int(params.get("duration_minutes", 30) or 30)
+        calendar_name = params.get("calendar_name") or None
+
+        event_block = f'''
+        set startDate to date "{start_date_esc}"
+        set endDate to startDate + ({duration_minutes} * minutes)
+        make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
+
+        if calendar_name:
+            cal_esc = calendar_name.replace('"', '\\"')
+            script = f'''tell application "Calendar"
+    tell calendar "{cal_esc}"{event_block}
+    end tell
+end tell'''
+        else:
+            script = f'''tell application "Calendar"
+    tell (first calendar whose writable is true){event_block}
+    end tell
+end tell'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
 

@@ -119,12 +119,15 @@ extension HistoryPanelController {
         glossarySuggestionsButton.action = #selector(onGlossarySuggestions)
         sendToAppleNotesButton.target = self
         sendToAppleNotesButton.action = #selector(onSendToAppleNotes)
+        sendToRemindersButton.target = self
+        sendToRemindersButton.action = #selector(onSendToReminders)
         historyEnhancementsRow.addArrangedSubview(exportSrtButton)
         historyEnhancementsRow.addArrangedSubview(cleanupDaysSelector)
         historyEnhancementsRow.addArrangedSubview(cleanupHistoryButton)
         historyEnhancementsRow.addArrangedSubview(vocabSuggestionsButton)
         historyEnhancementsRow.addArrangedSubview(glossarySuggestionsButton)
         historyEnhancementsRow.addArrangedSubview(sendToAppleNotesButton)
+        historyEnhancementsRow.addArrangedSubview(sendToRemindersButton)
         historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
         advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
         advancedSection.contentStackView.addArrangedSubview(advancedCard)
