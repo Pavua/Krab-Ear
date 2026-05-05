@@ -210,6 +210,33 @@ class BrandExpansionTests(unittest.TestCase):
         result = self._normalize("Элэм Студио не запустился")
         self.assertIn("LM Studio", result)
 
+    # ── Phase C.4 expansion 2026-05-05 — Виспер / ХигаАМ mishears ────────────
+
+    def test_visper_replaced_with_Whisper(self):
+        """«Виспер» (RU phonetic transliteration) → «Whisper»."""
+        text = "использую Виспер для распознавания"
+        result = self._normalize(text)
+        self.assertIn("Whisper", result)
+        self.assertNotIn("Виспер", result)
+
+    def test_higa_am_replaced_with_GigaAM(self):
+        """Хига АМ / Хига-АМ / Higa AM variants → «GigaAM»."""
+        for variant in ["Хига АМ", "Хига-АМ", "Хига ам", "Higa AM", "Higa-AM"]:
+            with self.subTest(variant=variant):
+                text = f"подключил {variant} к проекту"
+                result = self._normalize(text)
+                self.assertIn("GigaAM", result)
+
+    def test_jiga_am_replaced_with_GigaAM(self):
+        """Джига АМ / Джига-АМ / Гига-АМ variants → «GigaAM»; Whisper also stays."""
+        for variant in ["Джига АМ", "Джига-АМ", "Гига АМ", "Гига-АМ"]:
+            with self.subTest(variant=variant):
+                text = f"тестирую {variant} вместо Whisper"
+                result = self._normalize(text)
+                self.assertIn("GigaAM", result)
+                # «Whisper» in original text must survive — it's not a mishear here
+                self.assertIn("Whisper", result)
+
     def test_no_false_positive_on_unrelated_text(self):
         """Normal text without brand keywords should pass through unchanged."""
         text = "Сегодня хорошая погода и настроение отличное"

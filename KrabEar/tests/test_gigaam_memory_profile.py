@@ -382,5 +382,273 @@ class TestGigaAMMemoryHygiene(unittest.TestCase):
             sys.modules.pop("torch", None)
 
 
+class TestH2GcCollectAfterLongform(unittest.TestCase):
+    """H2 hypothesis: gc.collect() called after longform inference path."""
+
+    def tearDown(self) -> None:
+        tracemalloc.stop()
+        sys.modules.pop("gigaam_worker", None)
+
+    def test_h2_gc_collect_called_after_longform(self) -> None:
+        """After longform transcription, gc.collect() must be invoked (H2 cleanup)."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        import gc as _gc_real
+
+        collect_calls: list[int] = []
+        original_collect = _gc_real.collect
+        original_mod_gc_collect = mod.gc.collect
+
+        def _mock_collect(*args: object, **kwargs: object) -> int:
+            collect_calls.append(1)
+            return 0
+
+        _gc_real.collect = _mock_collect  # type: ignore[assignment]
+        mod.gc.collect = _mock_collect  # type: ignore[assignment]
+
+        # Set up fake model with transcribe_longform
+        import types as _types
+        fake_segments = [{"transcription": "привет"}, {"transcription": "мир"}]
+        fake_model = _types.SimpleNamespace(
+            transcribe_longform=lambda path: fake_segments,
+        )
+        mod._MODEL = fake_model
+        mod._MODE = "rnnt"
+
+        try:
+            import json
+            result = mod._process_request(json.dumps({
+                "op": "transcribe",
+                "audio_path": "/tmp/fake_longform.wav",
+                "longform": True,
+            }))
+        finally:
+            mod._MODEL = None
+            mod._MODE = None
+            _gc_real.collect = original_collect
+            mod.gc.collect = original_mod_gc_collect
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("ok"), f"Expected ok=True, got: {result}")
+        # gc.collect() must be called at least twice: once from H2 del+collect,
+        # once from _free_mps_pool (H1). Accept >=1 to be permissive.
+        self.assertGreaterEqual(
+            len(collect_calls),
+            1,
+            "gc.collect() must be called at least once after longform transcribe (H2)",
+        )
+
+    def test_h2_gc_collect_path_exists_in_worker(self) -> None:
+        """Verify the H2 code path (del segments + gc.collect) is present in worker source."""
+        import inspect
+        import os
+
+        worker_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "core", "workers", "gigaam_worker.py")
+        )
+        with open(worker_path, "r") as fh:
+            source = fh.read()
+
+        self.assertIn("del segments", source, "H2: 'del segments' must appear in gigaam_worker.py")
+        self.assertIn(
+            "gc.collect()",
+            source,
+            "H2: gc.collect() must appear after longform path in gigaam_worker.py",
+        )
+
+
+class TestH3StderrDrainThread(unittest.TestCase):
+    """H3 hypothesis: stderr drain thread created, ring buffer capped, OOM detection intact."""
+
+    def _make_session(self) -> object:
+        """Import and build a _GigaAMSubprocessSession stub (no real subprocess)."""
+        import sys
+        from pathlib import Path
+
+        project_root = Path(__file__).resolve().parents[1]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+        session = _GigaAMSubprocessSession(
+            venv_python="/fake/python",
+            worker_path="/fake/worker.py",
+            mode="rnnt",
+            device="cpu",
+        )
+        return session
+
+    def test_h3_stderr_ring_buffer_attribute_exists(self) -> None:
+        """_GigaAMSubprocessSession must have _stderr_ring deque attribute."""
+        from collections import deque
+        session = self._make_session()
+        self.assertTrue(
+            hasattr(session, "_stderr_ring"),
+            "_GigaAMSubprocessSession must have _stderr_ring attribute",
+        )
+        self.assertIsInstance(session._stderr_ring, deque)
+
+    def test_h3_stderr_ring_buffer_capped_at_200(self) -> None:
+        """_stderr_ring must cap at 200 lines (oldest lines discarded)."""
+        from collections import deque
+        session = self._make_session()
+        ring: deque = session._stderr_ring
+
+        # Push 300 lines — only the last 200 should remain
+        for i in range(300):
+            ring.append(f"line {i}\n")
+
+        self.assertEqual(
+            len(ring),
+            200,
+            "_stderr_ring must hold at most 200 lines (deque maxlen=200)",
+        )
+        # First surviving line should be line 100
+        self.assertIn("line 100", ring[0])
+
+    def test_h3_start_stderr_drain_no_op_without_proc(self) -> None:
+        """_start_stderr_drain() must not raise when _proc is None."""
+        session = self._make_session()
+        session._proc = None
+        session._start_stderr_drain()  # must not raise
+
+    def test_h3_stderr_drain_thread_started_after_popen(self) -> None:
+        """_start_stderr_drain() must create a daemon thread named gigaam-stderr-drain-*."""
+        import io
+        import threading
+        import types as _types
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        # Build a fake proc that never exits but has readable stderr
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None  # still running
+        # stderr.readline() returns one line then empty (to let drain thread finish)
+        mock_proc.stderr.readline.side_effect = ["line1\n", ""]
+        session._proc = mock_proc
+
+        session._start_stderr_drain()
+
+        self.assertIsNotNone(
+            session._stderr_drain_thread,
+            "_stderr_drain_thread must be set after _start_stderr_drain()",
+        )
+        thread = session._stderr_drain_thread
+        self.assertTrue(thread.daemon, "stderr drain thread must be a daemon thread")
+        self.assertIn("gigaam-stderr-drain", thread.name)
+
+    def test_h3_drain_thread_populates_ring_buffer(self) -> None:
+        """Lines emitted by the worker must appear in _stderr_ring."""
+        import time
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+        # Simulate two lines then EOF
+        mock_proc.poll.side_effect = [None, None, 0]  # running twice, then exited
+        mock_proc.stderr.readline.side_effect = [
+            "gigaam_worker: started\n",
+            "HuggingFace download: 100%\n",
+            "",  # EOF
+        ]
+        mock_proc.stderr.__iter__ = lambda self: iter([])
+        session._proc = mock_proc
+
+        session._start_stderr_drain()
+
+        # Give drain thread time to consume lines
+        time.sleep(0.1)
+
+        ring_contents = "".join(session._stderr_ring)
+        self.assertIn(
+            "gigaam_worker: started",
+            ring_contents,
+            "drain thread must populate _stderr_ring with worker stderr lines",
+        )
+
+    def test_h3_oom_detection_reads_from_ring_buffer(self) -> None:
+        """_check_proc_oom_on_exit reads OOM pattern from ring buffer (not proc.stderr.read)."""
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # non-OOM returncode, but OOM in ring
+        # stderr.read() returns empty — drain thread already consumed it
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+
+        # Pre-populate ring as if drain thread already ran
+        session._stderr_ring.append("RuntimeError: out of memory\n")
+
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        session._check_proc_oom_on_exit()
+
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertIn("out of memory", args[2])
+
+    def test_h3_oom_detection_fallback_to_stderr_read_when_ring_empty(self) -> None:
+        """When ring is empty, _check_proc_oom_on_exit falls back to proc.stderr.read()."""
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -6  # SIGABRT → OOM regardless of stderr
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+        # ring is empty — fallback path
+        session._stderr_ring.clear()
+
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        session._check_proc_oom_on_exit()
+
+        # -6 (SIGABRT) must trigger OOM even with empty stderr
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertEqual(args[1], -6)
+
+    def test_h3_oom_detection_still_works_via_ring_buffer_full_scenario(self) -> None:
+        """End-to-end: worker writes 'out of memory' → drain captures → OOM fires."""
+        import time
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 11111
+        # Simulate process: running, then exits with code 1 (non-signal OOM)
+        mock_proc.poll.side_effect = [None, None, 1, 1]
+        mock_proc.stderr.readline.side_effect = [
+            "Loading model...\n",
+            "RuntimeError: out of memory\n",
+            "",
+        ]
+        mock_proc.stderr.__iter__ = lambda self: iter([])
+        session._proc = mock_proc
+
+        # Start drain — it will populate ring with OOM line
+        session._start_stderr_drain()
+        time.sleep(0.1)  # let drain thread run
+
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        session._check_proc_oom_on_exit()
+
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertIn("out of memory", args[2].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -350,5 +350,141 @@ class SubprocessSessionOomCallbackTests(unittest.TestCase):
         session._check_proc_oom_on_exit()  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# H3 backward-compat: ring-buffer OOM detection preserves F11 behaviour
+# ---------------------------------------------------------------------------
+
+class H3RingBufferOomCompatTests(unittest.TestCase):
+    """Verify H3 ring-buffer change preserves F11 OOM detection (backward-compat).
+
+    The key guarantee: existing tests that mock proc.stderr.read() must still work
+    when the ring buffer is empty (ring-empty fallback path in _check_proc_oom_on_exit).
+    When ring is populated (drain thread ran), OOM is still detected from ring content.
+    """
+
+    def _make_session(self) -> _GigaAMSubprocessSession:
+        session = _GigaAMSubprocessSession(
+            venv_python="/fake/python",
+            worker_path="/fake/worker.py",
+            mode="rnnt",
+            device="cpu",
+        )
+        return session
+
+    def test_ring_empty_fallback_sigabrt_still_detected(self) -> None:
+        """With empty ring, SIGABRT (-6) is still detected via returncode (F11 compat)."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -6
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+        session._stderr_ring.clear()
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once_with("gigaam_worker", -6, "")
+
+    def test_ring_empty_fallback_sigkill_still_detected(self) -> None:
+        """With empty ring, SIGKILL (-9) is still detected via returncode (F11 compat)."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = -9
+        mock_proc.stderr.read.return_value = "kernel: memory pressure"
+        session._proc = mock_proc
+        session._stderr_ring.clear()
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once()
+        self.assertEqual(callback.call_args[0][1], -9)
+
+    def test_ring_populated_oom_pattern_detected(self) -> None:
+        """When ring has OOM pattern, callback fires even with empty proc.stderr.read()."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.stderr.read.return_value = ""  # already drained by thread
+        session._proc = mock_proc
+
+        # Drain thread would have placed this:
+        session._stderr_ring.append("torch.cuda.OutOfMemoryError: out of memory\n")
+
+        session._check_proc_oom_on_exit()
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertIn("out of memory", args[2].lower())
+
+    def test_ring_normal_exit_does_not_fire_callback(self) -> None:
+        """Normal worker output in ring (no OOM keywords) must not trigger callback."""
+        session = self._make_session()
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        mock_proc.stderr.read.return_value = ""
+        session._proc = mock_proc
+
+        session._stderr_ring.append("gigaam_worker: started\n")
+        session._stderr_ring.append("gigaam_worker: model loaded\n")
+        session._stderr_ring.append("gigaam_worker: exiting\n")
+
+        session._check_proc_oom_on_exit()
+        callback.assert_not_called()
+
+    def test_ring_has_200_line_cap(self) -> None:
+        """_stderr_ring deque must be capped at exactly 200 lines."""
+        from collections import deque
+        session = self._make_session()
+        ring: deque = session._stderr_ring
+        self.assertEqual(ring.maxlen, 200, "_stderr_ring maxlen must be 200")
+
+    def test_stderr_drain_thread_attribute_exists(self) -> None:
+        """_GigaAMSubprocessSession must have _stderr_drain_thread attribute."""
+        session = self._make_session()
+        self.assertTrue(
+            hasattr(session, "_stderr_drain_thread"),
+            "_GigaAMSubprocessSession must have _stderr_drain_thread",
+        )
+        self.assertIsNone(
+            session._stderr_drain_thread,
+            "_stderr_drain_thread must be None before start()",
+        )
+
+    def test_start_stderr_drain_no_op_when_proc_none(self) -> None:
+        """_start_stderr_drain() must not raise and not set thread when proc is None."""
+        session = self._make_session()
+        session._proc = None
+        session._start_stderr_drain()
+        self.assertIsNone(session._stderr_drain_thread)
+
+    def test_start_stderr_drain_creates_daemon_thread(self) -> None:
+        """_start_stderr_drain() must create a daemon thread when proc is available."""
+        import threading
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 42000
+        mock_proc.poll.return_value = 0  # already exited → drain loop exits immediately
+        mock_proc.stderr.readline.return_value = ""
+        mock_proc.stderr.__iter__ = lambda self: iter([])
+        session._proc = mock_proc
+
+        session._start_stderr_drain()
+
+        self.assertIsNotNone(session._stderr_drain_thread)
+        self.assertIsInstance(session._stderr_drain_thread, threading.Thread)
+        self.assertTrue(session._stderr_drain_thread.daemon)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,22 @@ NEW_PLIST="$HOME/Library/LaunchAgents/com.antigravity.krab-ear.plist"
 echo "=== Krab Ear LaunchAgent migration ==="
 echo ""
 
+# ── Pre-migration diagnostic ─────────────────────────────────────────────────
+echo "Audit before migration:"
+FOUND_REFS=0
+for plist in "$HOME/Library/LaunchAgents/"*.plist 2>/dev/null; do
+    [ -f "$plist" ] || continue
+    if grep -qE "start_agent\.command|native/runtime/KrabEarAgent" "$plist" 2>/dev/null; then
+        echo "  [FOUND] $plist references start_agent.command or runtime/KrabEarAgent"
+        FOUND_REFS=1
+    fi
+done
+if [ "$FOUND_REFS" -eq 0 ]; then
+    echo "  (none) No installed plist references start_agent.command or runtime/KrabEarAgent"
+fi
+echo ""
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Validate bundle exists
 if [ ! -d "$BUNDLE" ]; then
     echo "ERROR: .app bundle not found at: $BUNDLE"

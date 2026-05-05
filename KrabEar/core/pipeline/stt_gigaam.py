@@ -35,6 +35,7 @@ import subprocess
 import tempfile
 import threading
 import wave
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -473,6 +474,12 @@ class _GigaAMSubprocessSession:
         self._loaded = False
         # Optional callback for OOM detection: callable(name, returncode, stderr)
         self.oom_callback: Optional[object] = None
+        # H3: ring buffer for stderr drain thread (capped at 200 lines).
+        # Prevents 64 KB OS pipe-full backpressure when gigaam_worker writes
+        # HuggingFace Hub progress / PyTorch warnings to stderr.
+        # _check_proc_oom_on_exit reads from this ring instead of proc.stderr.read().
+        self._stderr_ring: deque = deque(maxlen=200)
+        self._stderr_drain_thread: Optional[threading.Thread] = None
 
     def is_loaded(self) -> bool:
         """True если worker запущен и модель загружена."""
@@ -495,6 +502,11 @@ class _GigaAMSubprocessSession:
             raise RuntimeError(
                 f"_GigaAMSubprocessSession: не удалось запустить worker: {exc}"
             ) from exc
+
+        # H3: start stderr drain thread immediately after spawn so pipe never fills up.
+        # Must be called before _send(load) because model load emits HF Hub progress
+        # to stderr — enough to block the worker on a 64 KB pipe on long downloads.
+        self._start_stderr_drain()
 
         # Сразу шлём load-команду — модель в памяти к моменту первого transcribe.
         load_response = self._send(
@@ -612,10 +624,58 @@ class _GigaAMSubprocessSession:
                 f"_GigaAMSubprocessSession: invalid JSON from worker: {exc}; line={line!r}"
             ) from exc
 
+    def _start_stderr_drain(self) -> None:
+        """Start background thread that continuously reads stderr to prevent pipe-full backpressure.
+
+        H3 hypothesis fix (docs/audit/gigaam-worker-memory-2026-05-05.md):
+        gigaam_worker writes HuggingFace Hub progress bars and PyTorch warnings to stderr.
+        On a long model load these can exceed the 64 KB OS pipe buffer, causing the worker
+        to block on the next stderr write and appear hung (no stdout response → timeout kill).
+
+        Mitigation: dedicated daemon thread reads stderr lines into _stderr_ring (capped at
+        200 lines) — the pipe stays empty, the worker never blocks, and _check_proc_oom_on_exit
+        reads from the ring instead of the now-drained pipe.
+
+        Idempotent: does nothing if _proc is None or stderr is unavailable.
+        Never raises.
+        """
+        if self._proc is None or self._proc.stderr is None:
+            return
+
+        proc = self._proc  # capture ref for closure
+
+        def _drain_loop() -> None:
+            try:
+                while proc.poll() is None:
+                    line = proc.stderr.readline()
+                    if not line:
+                        break
+                    # Store in ring buffer for OOM detection; deque.append is thread-safe.
+                    self._stderr_ring.append(line if isinstance(line, str) else line.decode(errors="replace"))
+                # Drain any remaining lines after process exits.
+                try:
+                    for line in proc.stderr:
+                        if line:
+                            self._stderr_ring.append(line if isinstance(line, str) else line.decode(errors="replace"))
+                except Exception:
+                    pass
+            except Exception:
+                pass  # must never raise — daemon thread
+
+        thread = threading.Thread(
+            target=_drain_loop,
+            daemon=True,
+            name=f"gigaam-stderr-drain-{proc.pid}",
+        )
+        thread.start()
+        self._stderr_drain_thread = thread
+
     def _check_proc_oom_on_exit(self) -> None:
         """Check if the worker process exited with OOM and fire oom_callback if so.
 
         Called whenever the worker produces no response (crash / silent exit).
+        Reads stderr from _stderr_ring (populated by drain thread, H3) instead of
+        proc.stderr.read() — because the drain thread already consumed the pipe.
         Never raises.
         """
         try:
@@ -625,13 +685,17 @@ class _GigaAMSubprocessSession:
             if rc is None:
                 # Process still running — not a crash, skip.
                 return
-            # Drain stderr (non-blocking attempt — process already exited).
-            stderr_text = ""
-            try:
-                if self._proc.stderr is not None:
-                    stderr_text = self._proc.stderr.read() or ""
-            except Exception:
-                pass
+            # Read from ring buffer (H3): drain thread has been accumulating lines.
+            # Fall back to direct stderr.read() if ring is empty (e.g. no drain thread).
+            if self._stderr_ring:
+                stderr_text = "".join(self._stderr_ring)
+            else:
+                stderr_text = ""
+                try:
+                    if self._proc.stderr is not None:
+                        stderr_text = self._proc.stderr.read() or ""
+                except Exception:
+                    pass
             is_oom, _signal_name = detect_subprocess_oom(rc, stderr_text)
             if is_oom:
                 cb = self.oom_callback

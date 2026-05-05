@@ -316,6 +316,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
         applyMode(settings.mode, persist: false)
 
+        // Start dynamic menu bar tooltip refresh (10 s interval).
+        startTooltipRefresh()
+
         if !settings.onboardingCompleted && !options.launchedByLaunchd {
             openQuickStart()
         } else if options.showHistoryOnLaunch {
