@@ -260,6 +260,7 @@ class SettingsService:
         settings["stt_hotwords"] = list(dict.fromkeys(
             w.strip() for w in raw_hotwords if str(w).strip()
         ))
+        settings["stt_hotwords_enabled"] = bool(settings.get("stt_hotwords_enabled", True))
 
         # Final validation pass before persisting — raises on hard errors
         vr = self._validator.validate(settings)
