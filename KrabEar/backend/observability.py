@@ -42,16 +42,29 @@ def init_sentry(
     dsn: str | None,
     environment: str = "production",
     release: str | None = None,
+    settings: dict | None = None,
 ) -> bool:
     """Init Sentry (or GlitchTip) if DSN provided.
 
-    Returns True if SDK was initialized, False if DSN absent or import fails.
+    Returns True if SDK was initialized, False if DSN absent, privacy mode
+    enabled, or import fails.
     Compatible with any Sentry-protocol server (sentry.io, self-hosted GlitchTip, etc.).
 
     If *release* is None, calls :func:`release_from_git` to determine the
     release string automatically from the current git commit/tag.
+
+    Args:
+        dsn: Sentry DSN string. Empty or None → no-op.
+        environment: Sentry environment tag.
+        release: Release string. None → determined from git.
+        settings: Current settings dict. If ``privacy_mode_enabled`` is True,
+                  init is skipped regardless of DSN.
     """
     global _sentry_initialized
+
+    if settings and settings.get("privacy_mode_enabled"):
+        logger.info("Sentry init skipped — privacy_mode_enabled=True")
+        return False
 
     if not dsn:
         logger.debug("Sentry: DSN не задан — telemetry отключена")
