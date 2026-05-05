@@ -122,6 +122,9 @@ extension HistoryPanelController {
         historyEnhancementsRow.addArrangedSubview(cleanupHistoryButton)
         historyEnhancementsRow.addArrangedSubview(vocabSuggestionsButton)
         historyEnhancementsRow.addArrangedSubview(glossarySuggestionsButton)
+        sendToTelegramButton.target = self
+        sendToTelegramButton.action = #selector(onSendToTelegram)
+        historyEnhancementsRow.addArrangedSubview(sendToTelegramButton)
         historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
         advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
         advancedSection.contentStackView.addArrangedSubview(advancedCard)

@@ -438,7 +438,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
     let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
+    let sendToTelegramButton = ThemeSecondaryButton(title: "Отправить в Telegram", target: nil, action: nil)
     let historyEnhancementsRow = NSStackView()
+
+    // MARK: - Glossary search (GlossarySearch extension)
+    /// Search field placed above the glossary list in the Live Translation tab.
+    let glossarySearchField = NSSearchField()
+    /// Vertical stack that holds one row per glossary entry. Rebuilt by
+    /// reloadGlossaryList(glossary:query:) whenever the glossary or query changes.
+    let glossaryListStack = NSStackView()
 
     init(
         ipcClient: IPCClient,
@@ -1931,7 +1939,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        voiceGatewayCheckButton, dictationHistoryOpenButton,
                        diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
-                       exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton] as [NSButton] {
+                       exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
+                       sendToTelegramButton] as [NSButton] {
             button.applyThemeSecondary()
         }
 

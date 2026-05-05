@@ -253,6 +253,133 @@ extension HistoryPanelController {
         }
     }
 
+    // MARK: - Отправить в Telegram
+
+    @objc func onSendToTelegram() {
+        let selectedRow = tableView.selectedRow
+        guard selectedRow >= 0, selectedRow < items.count else {
+            notificationService.notify(title: "Krab Ear", body: "Выберите запись для отправки в Telegram")
+            return
+        }
+        let item = items[selectedRow]
+        let itemText = item.text
+        let itemID = item.id
+
+        nonisolated(unsafe) let ipcClient = self.ipcClient
+        nonisolated(unsafe) let notificationService = self.notificationService
+
+        // 1. Загрузить список чатов на background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            let chats: [[String: Any]]
+            if let response = try? ipcClient.call(method: "list_telegram_chats", params: [:]),
+               let result = response["result"] as? [String: Any],
+               let chatList = result["chats"] as? [[String: Any]] {
+                chats = chatList
+            } else {
+                chats = []
+            }
+
+            DispatchQueue.main.async {
+                // 2. Показать NSAlert с NSPopUpButton для выбора чата
+                let alert = NSAlert()
+                alert.messageText = "Отправить транскрипцию в Telegram"
+                alert.alertStyle = .informational
+
+                // Поле с текстом записи (редактируемое)
+                let bodyField = NSTextView(frame: NSRect(x: 0, y: 0, width: 380, height: 80))
+                bodyField.string = itemText
+                bodyField.isEditable = true
+                bodyField.isRichText = false
+                bodyField.font = NSFont.systemFont(ofSize: 12)
+                let bodyScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 80))
+                bodyScroll.documentView = bodyField
+                bodyScroll.hasVerticalScroller = true
+                bodyScroll.autohidesScrollers = true
+
+                // Кнопка выбора чата
+                let chatPopUp = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 380, height: 25), pullsDown: false)
+                if chats.isEmpty {
+                    chatPopUp.addItem(withTitle: "Сохранённые сообщения (self)")
+                    chatPopUp.lastItem?.representedObject = "self"
+                } else {
+                    for chat in chats {
+                        let title = chat["title"] as? String ?? String(describing: chat["id"] ?? "?")
+                        let chatID = chat["id"] ?? "self"
+                        chatPopUp.addItem(withTitle: title)
+                        chatPopUp.lastItem?.representedObject = chatID
+                    }
+                }
+
+                // Вертикальный стек: попап + поле текста
+                let container = NSStackView(frame: NSRect(x: 0, y: 0, width: 380, height: 120))
+                container.orientation = .vertical
+                container.spacing = 6
+                container.addArrangedSubview(chatPopUp)
+                container.addArrangedSubview(bodyScroll)
+                container.translatesAutoresizingMaskIntoConstraints = false
+
+                alert.accessoryView = container
+                alert.addButton(withTitle: "Отправить")
+                alert.addButton(withTitle: "Отмена")
+
+                let resp = alert.runModal()
+                guard resp == .alertFirstButtonReturn else { return }
+
+                let body = bodyField.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !body.isEmpty else {
+                    notificationService.notify(title: "Krab Ear", body: "Текст сообщения не может быть пустым")
+                    return
+                }
+
+                let selectedChatID: Any
+                if let selected = chatPopUp.selectedItem?.representedObject {
+                    selectedChatID = selected
+                } else {
+                    selectedChatID = "self"
+                }
+                let chatTitle = chatPopUp.selectedItem?.title ?? "Telegram"
+
+                // 3. Отправить на background thread
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let params: [String: Any] = [
+                        "chat_id": selectedChatID,
+                        "text": body,
+                    ]
+                    if let response = try? ipcClient.call(method: "send_to_telegram", params: params),
+                       let result = response["result"] as? [String: Any],
+                       result["message_id"] != nil {
+                        DispatchQueue.main.async {
+                            let successAlert = NSAlert()
+                            successAlert.messageText = "Отправлено в \(chatTitle)"
+                            successAlert.informativeText = "Запись \(itemID.prefix(8))… успешно отправлена."
+                            successAlert.alertStyle = .informational
+                            successAlert.addButton(withTitle: "ОК")
+                            successAlert.runModal()
+                        }
+                    } else {
+                        // Попробуем извлечь ошибку
+                        let errMsg: String
+                        if let response = try? ipcClient.call(method: "send_to_telegram", params: params),
+                           let errDict = response["error"] as? [String: Any],
+                           let msg = errDict["message"] as? String {
+                            errMsg = msg
+                        } else {
+                            errMsg = "Telegram bridge недоступен"
+                        }
+                        DispatchQueue.main.async {
+                            let errAlert = NSAlert()
+                            errAlert.messageText = "Ошибка отправки"
+                            errAlert.informativeText = errMsg
+                            errAlert.alertStyle = .warning
+                            errAlert.addButton(withTitle: "ОК")
+                            errAlert.runModal()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func updateHistoryFiltersBadge() {
         var count = 0
         if !currentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { count += 1 }
