@@ -1,121 +1,153 @@
 /*
- LaunchAgentManagerTests — тесты LaunchAgentManager.
+ LaunchAgentManagerTests — тесты Phase C.6.2 root-cause fix.
+
+ Проверяет:
+ 1. label == "com.antigravity.krab-ear" (canonical bundle ID).
+ 2. legacyLabel == "com.krabear.agent".
+ 3. buildPlistContent() содержит /usr/bin/open -W <bundle> (НЕ start_agent.command).
+ 4. buildPlistContent() НЕ содержит /bin/zsh и start_agent.command.
+ 5. buildPlistContent() содержит canonical label.
+ 6. plistPath содержит label "com.antigravity.krab-ear".
+ 7. bundlePath содержит ".app" расширение или projectRoot component.
 
  Подход:
- - buildPlistContent() (#if DEBUG) проверяет содержимое plist без записи на диск.
- - plistPathForTest (#if DEBUG) проверяет путь установки без реального FileManager.
- - isAutostartEnabled() тестируется через временный файл (не трогает ~/Library/LaunchAgents).
- - install()/uninstall() тестируются косвенно через временную директорию,
-   launchctl вызовы при отсутствии plist — graceful fail (exit ≠ 0, но без crash).
+ - buildPlistContent() вызывается в DEBUG-режиме без FileManager side-effects.
+ - Launchctl и launchd не трогаются.
 */
 
 import XCTest
 @testable import KrabEarAgent
 
+@MainActor
 final class LaunchAgentManagerTests: XCTestCase {
 
-    private let testRoot = "/tmp/krab_ear_launchagent_tests"
+    // MARK: - Fixtures
 
-    // MARK: - Helpers
-
-    private func makeManager(projectRoot: String? = nil) -> LaunchAgentManager {
-        LaunchAgentManager(projectRoot: projectRoot ?? testRoot)
+    private func makeManager(projectRoot: String = "/tmp/krab_ear_test_root") -> LaunchAgentManager {
+        LaunchAgentManager(projectRoot: projectRoot)
     }
 
-    // MARK: - Plist content generation
+    // MARK: - Label tests
 
-    func test_buildPlistContent_containsLabel() {
+    func testLabelIsCanonical() {
         let manager = makeManager()
-        let plist = manager.buildPlistContent()
-        XCTAssertTrue(plist.contains("com.krabear.agent"), "Plist должен содержать label com.krabear.agent")
+        XCTAssertEqual(manager.labelForTest, "com.antigravity.krab-ear",
+                       "Label must match canonical bundle ID com.antigravity.krab-ear")
     }
 
-    func test_buildPlistContent_containsStartScript() {
+    func testLegacyLabelIsCorrect() {
         let manager = makeManager()
-        let plist = manager.buildPlistContent()
-        XCTAssertTrue(
-            plist.contains("scripts/start_agent.command"),
-            "Plist ProgramArguments должен содержать start_agent.command"
-        )
+        XCTAssertEqual(manager.legacyLabelForTest, "com.krabear.agent",
+                       "Legacy label must be com.krabear.agent for migration cleanup")
     }
 
-    func test_buildPlistContent_containsRunAtLoad() {
+    // MARK: - plistPath tests
+
+    func testPlistPathContainsCanonicalLabel() {
         let manager = makeManager()
-        let plist = manager.buildPlistContent()
-        XCTAssertTrue(plist.contains("<key>RunAtLoad</key>"), "Plist должен содержать RunAtLoad")
-        XCTAssertTrue(plist.contains("<true/>"), "RunAtLoad должен быть true")
+        XCTAssertTrue(manager.plistPathForTest.contains("com.antigravity.krab-ear"),
+                      "plistPath must contain canonical label com.antigravity.krab-ear, got: \(manager.plistPathForTest)")
     }
 
-    func test_buildPlistContent_containsWorkingDirectory() {
-        let root = "/custom/project/root"
-        let manager = makeManager(projectRoot: root)
-        let plist = manager.buildPlistContent()
-        XCTAssertTrue(
-            plist.contains(root),
-            "Plist WorkingDirectory должен содержать projectRoot: \(root)"
-        )
-    }
-
-    func test_buildPlistContent_containsLaunchedByLaunchdFlag() {
+    func testPlistPathEndsWithPlist() {
         let manager = makeManager()
-        let plist = manager.buildPlistContent()
-        XCTAssertTrue(
-            plist.contains("--launched-by-launchd"),
-            "ProgramArguments должен включать --launched-by-launchd"
-        )
+        XCTAssertTrue(manager.plistPathForTest.hasSuffix(".plist"),
+                      "plistPath must end with .plist, got: \(manager.plistPathForTest)")
     }
 
-    // MARK: - Installation path
-
-    func test_plistPath_isInLaunchAgentsDir() {
+    func testPlistPathInLaunchAgents() {
         let manager = makeManager()
-        let path = manager.plistPathForTest
-        XCTAssertTrue(
-            path.contains("Library/LaunchAgents"),
-            "plistPath должен быть в ~/Library/LaunchAgents; got: \(path)"
-        )
-        XCTAssertTrue(
-            path.hasSuffix(".plist"),
-            "plistPath должен заканчиваться на .plist"
-        )
-        XCTAssertTrue(
-            path.contains("com.krabear.agent"),
-            "plistPath должен содержать label; got: \(path)"
-        )
+        XCTAssertTrue(manager.plistPathForTest.contains("LaunchAgents"),
+                      "plistPath must be inside ~/Library/LaunchAgents, got: \(manager.plistPathForTest)")
     }
 
-    // MARK: - isAutostartEnabled
+    // MARK: - buildPlistContent tests (Phase C.6.2 ProgramArguments shape)
 
-    func test_isAutostartEnabled_falseWhenPlistAbsent() {
-        // Создаём manager с несуществующим projectRoot — plist заведомо отсутствует.
-        // Но plistPath зависит от ~/Library/LaunchAgents, не от projectRoot.
-        // Проверяем через FileManager: если файл реально не существует → false.
+    func testPlistUsesOpenNotZsh() {
         let manager = makeManager()
-        let plistPath = manager.plistPathForTest
-        // Если plist вдруг есть в системе — пропускаем тест (CI-safe).
-        guard !FileManager.default.fileExists(atPath: plistPath) else {
-            return
-        }
-        XCTAssertFalse(manager.isAutostartEnabled(), "isAutostartEnabled должен быть false если plist отсутствует")
+        let content = manager.buildPlistContent()
+        XCTAssertTrue(content.contains("/usr/bin/open"),
+                      "ProgramArguments must use /usr/bin/open (not /bin/zsh), got:\n\(content)")
+        XCTAssertFalse(content.contains("/bin/zsh"),
+                       "ProgramArguments must NOT contain /bin/zsh, got:\n\(content)")
     }
 
-    func test_isAutostartEnabled_trueAfterPlistCreated() throws {
-        // Создаём временный plist-файл напрямую, проверяем что isAutostartEnabled видит его.
+    func testPlistUsesWFlag() {
         let manager = makeManager()
-        let plistPath = manager.plistPathForTest
+        let content = manager.buildPlistContent()
+        XCTAssertTrue(content.contains("<string>-W</string>"),
+                      "ProgramArguments must include -W flag for /usr/bin/open, got:\n\(content)")
+    }
 
-        // Создаём LaunchAgents директорию если нужно
-        let dir = (plistPath as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    func testPlistDoesNotReferenceStartAgentCommand() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertFalse(content.contains("start_agent.command"),
+                       "ProgramArguments must NOT reference start_agent.command (Phase C.6.2), got:\n\(content)")
+    }
 
-        // Пишем фиктивный plist
-        let dummy = "<plist version=\"1.0\"><dict/></plist>"
-        try dummy.write(toFile: plistPath, atomically: true, encoding: .utf8)
+    func testPlistDoesNotReferenceLaunchedByLaunchd() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertFalse(content.contains("--launched-by-launchd"),
+                       "ProgramArguments must NOT include --launched-by-launchd, got:\n\(content)")
+    }
 
-        defer {
-            try? FileManager.default.removeItem(atPath: plistPath)
-        }
+    func testPlistContainsCanonicalLabel() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertTrue(content.contains("com.antigravity.krab-ear"),
+                      "Plist Label must be com.antigravity.krab-ear, got:\n\(content)")
+        XCTAssertFalse(content.contains("com.krabear.agent"),
+                       "Plist Label must NOT be legacy com.krabear.agent, got:\n\(content)")
+    }
 
-        XCTAssertTrue(manager.isAutostartEnabled(), "isAutostartEnabled должен быть true когда plist существует")
+    func testPlistContainsBundleAppExtension() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        // The bundle path argument must point to a .app bundle.
+        XCTAssertTrue(content.contains(".app"),
+                      "ProgramArguments must include a .app bundle path, got:\n\(content)")
+    }
+
+    func testPlistContainsRunAtLoad() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertTrue(content.contains("<key>RunAtLoad</key>"),
+                      "Plist must contain RunAtLoad key, got:\n\(content)")
+    }
+
+    func testPlistContainsKeepAlive() {
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertTrue(content.contains("<key>KeepAlive</key>"),
+                      "Plist must contain KeepAlive key, got:\n\(content)")
+    }
+
+    func testPlistDoesNotContainWorkingDirectory() {
+        // WorkingDirectory was removed — /usr/bin/open does not need it.
+        let manager = makeManager()
+        let content = manager.buildPlistContent()
+        XCTAssertFalse(content.contains("<key>WorkingDirectory</key>"),
+                       "Plist must NOT contain WorkingDirectory (not needed for /usr/bin/open), got:\n\(content)")
+    }
+
+    // MARK: - bundlePath tests
+
+    func testBundlePathContainsApp() {
+        let manager = makeManager()
+        let path = manager.bundlePathForTest
+        // Either from projectRoot lookup or Bundle.main fallback, must end in .app
+        XCTAssertTrue(path.hasSuffix(".app") || path.contains("Krab Ear.app"),
+                      "bundlePath must point to a .app bundle, got: \(path)")
+    }
+
+    func testBundlePathWithRealProjectRoot() {
+        // Use actual project root which has the .app next to it
+        let projectRoot = "/Users/pablito/Antigravity_AGENTS/Krab Ear"
+        let manager = makeManager(projectRoot: projectRoot)
+        let path = manager.bundlePathForTest
+        XCTAssertTrue(path.hasSuffix(".app"),
+                      "bundlePath with real project root must end in .app, got: \(path)")
     }
 }

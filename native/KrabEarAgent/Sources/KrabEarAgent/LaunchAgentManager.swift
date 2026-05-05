@@ -3,14 +3,23 @@
 
  Связи модуля:
  1) PermissionWizard/main.swift: включение/выключение автозапуска.
- 2) scripts/start_agent.command: целевая команда launchd.
+ 2) Krab Ear.app bundle: canonical autostart target (Phase C.6.2).
+
+ Phase C.6.2 root-cause fix:
+ - Plist label: com.antigravity.krab-ear (canonical bundle ID).
+ - ProgramArguments: /usr/bin/open -W <bundle path> — launchd opens the .app bundle,
+   not start_agent.command → runtime/KrabEarAgent.
+ - install() removes legacy com.krabear.agent.plist on first run (idempotent).
 */
 
 import Foundation
 
 /// Управляет launchd автозапуском нативного агента.
 final class LaunchAgentManager {
-    private let label = "com.krabear.agent"
+    /// Canonical label matching the app's bundle ID (com.antigravity.krab-ear).
+    private let label = "com.antigravity.krab-ear"
+    /// Legacy label used before Phase C.6.2 — removed on install() for one-time migration.
+    private let legacyLabel = "com.krabear.agent"
     private let projectRoot: String
 
     init(projectRoot: String) {
@@ -20,6 +29,30 @@ final class LaunchAgentManager {
     private var plistPath: String {
         let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
         return (launchAgents as NSString).appendingPathComponent("\(label).plist")
+    }
+
+    /// Path of the legacy plist that must be removed during migration.
+    private var legacyPlistPath: String {
+        let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
+        return (launchAgents as NSString).appendingPathComponent("\(legacyLabel).plist")
+    }
+
+    /// Resolved path to the .app bundle.
+    /// Prefers the bundle adjacent to the project root; falls back to Bundle.main.
+    private var bundlePath: String {
+        let candidate = (projectRoot as NSString).appendingPathComponent("Krab Ear.app")
+        if FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
+        // Fallback: strip inner bundle paths to reach the .app container.
+        var url = Bundle.main.bundleURL
+        while url.pathExtension != "app" && url.path != "/" {
+            url.deleteLastPathComponent()
+        }
+        if url.pathExtension == "app" {
+            return url.path
+        }
+        return candidate
     }
 
     func setAutostart(enabled: Bool) {
@@ -38,7 +71,10 @@ final class LaunchAgentManager {
         let launchAgents = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
         try? FileManager.default.createDirectory(atPath: launchAgents, withIntermediateDirectories: true)
 
-        let startScript = (projectRoot as NSString).appendingPathComponent("scripts/start_agent.command")
+        // Phase C.6.2: Remove legacy com.krabear.agent.plist (idempotent).
+        removeLegacyPlistIfPresent()
+
+        let bundlePathValue = bundlePath
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,16 +84,14 @@ final class LaunchAgentManager {
             <string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>/bin/zsh</string>
-                <string>\(startScript)</string>
-                <string>--launched-by-launchd</string>
+                <string>/usr/bin/open</string>
+                <string>-W</string>
+                <string>\(bundlePathValue)</string>
             </array>
             <key>RunAtLoad</key>
             <true/>
             <key>KeepAlive</key>
             <true/>
-            <key>WorkingDirectory</key>
-            <string>\(projectRoot)</string>
             <key>StandardOutPath</key>
             <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath)</string>
             <key>StandardErrorPath</key>
@@ -70,11 +104,20 @@ final class LaunchAgentManager {
         reloadAgent()
     }
 
+    /// Removes the legacy com.krabear.agent.plist if it exists (idempotent one-time migration).
+    private func removeLegacyPlistIfPresent() {
+        let path = legacyPlistPath
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        let uid = getuid()
+        _ = runLaunchctl(args: ["bootout", "gui/\(uid)", path])
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
 #if DEBUG
     /// Тест-хук: возвращает сгенерированный plist XML без записи на диск.
     /// Используется в unit-тестах для проверки содержимого без FileManager side-effects.
     func buildPlistContent() -> String {
-        let startScript = (projectRoot as NSString).appendingPathComponent("scripts/start_agent.command")
+        let bundlePathValue = bundlePath
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -84,16 +127,14 @@ final class LaunchAgentManager {
             <string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>/bin/zsh</string>
-                <string>\(startScript)</string>
-                <string>--launched-by-launchd</string>
+                <string>/usr/bin/open</string>
+                <string>-W</string>
+                <string>\(bundlePathValue)</string>
             </array>
             <key>RunAtLoad</key>
             <true/>
             <key>KeepAlive</key>
             <true/>
-            <key>WorkingDirectory</key>
-            <string>\(projectRoot)</string>
             <key>StandardOutPath</key>
             <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath)</string>
             <key>StandardErrorPath</key>
@@ -108,6 +149,12 @@ final class LaunchAgentManager {
 
     /// Тест-хук: возвращает label агента.
     var labelForTest: String { label }
+
+    /// Тест-хук: возвращает legacy label для проверки миграции.
+    var legacyLabelForTest: String { legacyLabel }
+
+    /// Тест-хук: возвращает resolved bundle path без побочных эффектов.
+    var bundlePathForTest: String { bundlePath }
 #endif
 
     func uninstall() {
