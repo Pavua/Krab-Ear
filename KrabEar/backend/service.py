@@ -796,6 +796,8 @@ class BackendService:
             "get_glossary_suggestions": self._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
             "suggest_medical_glossary_terms": self._glossary_auto_learn.handle_suggest_medical_glossary_terms,  # мед. домен auto-learn: предлагает пары ES↔RU из истории переводов
             "apply_glossary_suggestions": self._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
+            "export_glossary_csv": self._handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
+            "import_glossary_csv": self._handle_import_glossary_csv,  # импорт CSV в translation_glossary (merge|replace)
             "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
@@ -1061,6 +1063,8 @@ class BackendService:
             "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            # --- Apple Notes integration (Phase D.4) ---
+            "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._handle_call_session_get,  # получить сессию по id
@@ -1087,6 +1091,8 @@ class BackendService:
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
+            # --- Quick word replacement (Cmd+Shift+R) ---
+            "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
         }
 
         handler = handlers.get(method)
@@ -2063,6 +2069,72 @@ class BackendService:
             "translation": translation,
         }
 
+    def _handle_export_glossary_csv(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует translation_glossary в CSV-строку.
+
+        Returns: {"ok": True, "csv": "source,target\\n...", "row_count": N}
+        """
+        import csv
+        import io
+
+        settings = self._settings_svc.cached_settings()
+        glossary: dict = settings.get("translation_glossary", {}) or {}
+
+        buf = io.StringIO()
+        writer = csv.writer(buf, quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(["source", "target"])
+        for source, target in sorted(glossary.items()):
+            writer.writerow([source, target])
+
+        return {"ok": True, "csv": buf.getvalue(), "row_count": len(glossary)}
+
+    def _handle_import_glossary_csv(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Импортирует CSV в translation_glossary.
+
+        params: {"csv": str, "mode": "merge" | "replace"}
+        Returns: {"ok": bool, "imported_count": N, "skipped_count": N, "error": str | None}
+        """
+        import csv
+        import io
+
+        csv_str = params.get("csv", "")
+        mode = params.get("mode", "merge").lower()
+        if mode not in ("merge", "replace"):
+            return {"ok": False, "error": f"invalid mode: {mode}"}
+
+        settings = self._settings_svc.cached_settings()
+        current: dict = dict(settings.get("translation_glossary", {}) or {})
+        new_entries: dict = {} if mode == "replace" else dict(current)
+        skipped = 0
+
+        try:
+            reader = csv.reader(io.StringIO(csv_str))
+            header = next(reader, None)
+            if not header or [h.strip().lower() for h in header] != ["source", "target"]:
+                return {"ok": False, "error": "header must be: source,target"}
+            for row in reader:
+                if len(row) != 2:
+                    skipped += 1
+                    continue
+                src, tgt = row[0].strip(), row[1].strip()
+                if not src or not tgt:
+                    skipped += 1
+                    continue
+                new_entries[src] = tgt
+        except Exception as exc:
+            return {"ok": False, "error": f"parse error: {exc}"}
+
+        self._settings_svc.handle_set_settings({"translation_glossary": new_entries})
+
+        prev_count = len(current)
+        imported = len(new_entries) - (prev_count if mode == "merge" else 0)
+        return {
+            "ok": True,
+            "imported_count": max(imported, 0),
+            "skipped_count": skipped,
+            "total": len(new_entries),
+        }
+
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
         try:
@@ -2686,6 +2758,62 @@ class BackendService:
             return {"models": sorted(ids), "error": None}
         except Exception as exc:
             return {"models": [], "error": str(exc)}
+
+    def _handle_replace_word_in_last_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Заменяет слово в последней (или указанной) записи истории без перезаписи.
+
+        Параметры:
+          - old_word: str — слово для замены (не пустое).
+          - new_word: str — новое слово (не пустое).
+          - history_id: str | None — ID записи; если не указан, берётся последняя запись.
+
+        Возвращает:
+          {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None}
+
+        Ошибки (ok=False):
+          - "missing_words"    — old_word или new_word пусты.
+          - "no_recent_history" — история пуста и history_id не указан.
+          - "item_not_found"   — запись с history_id не найдена.
+          - "word_not_found"   — слово не найдено в тексте (с учётом границ слова).
+        """
+        import re
+
+        old = str(params.get("old_word", "")).strip()
+        new = str(params.get("new_word", "")).strip()
+        if not old or not new:
+            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "missing_words"}
+
+        history_id = str(params.get("history_id", "")).strip() or None
+
+        if history_id is None:
+            # Берём самую последнюю запись
+            with self.store._lock():
+                active = self.store._load_active_items_unlocked()
+            history_id = active[-1].id if active else None
+
+        if history_id is None:
+            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "no_recent_history"}
+
+        item = self.store.get_history_item_by_id(history_id)
+        if item is None:
+            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
+
+        # Замена с учётом границ слова и без учёта регистра
+        pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
+        new_text, replaced_count = pattern.subn(new, item.text)
+
+        if replaced_count == 0:
+            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
+
+        self.store.update_history_item_text(history_id, new_text)
+        logger.info(
+            "replace_word_in_last_transcript: history_id=%s old=%r new=%r count=%d",
+            history_id,
+            old,
+            new,
+            replaced_count,
+        )
+        return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
 
     def _generate_summary(self, text: str) -> str | None:
         """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
@@ -4476,6 +4604,50 @@ class BackendService:
             raise RuntimeError(f"krab_unavailable: {msg}") from exc
 
         return result
+
+    # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
+
+    def _handle_create_apple_note(self, params: dict) -> dict:
+        """Create Apple Note from text via osascript.
+
+        params: {"title": str, "body": str, "folder": str | None}
+        Returns: {"ok": bool, "note_id": str | None, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "Krab Ear note").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
+        folder = params.get("folder", "") or ""
+
+        if folder:
+            folder_escaped = folder.replace('"', '\\"')
+            script = f'''
+tell application "Notes"
+    tell account "iCloud"
+        set targetFolder to folder "{folder_escaped}"
+        make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
+    end tell
+end tell
+'''
+        else:
+            script = f'''
+tell application "Notes"
+    make new note with properties {{name:"{title}", body:"{body}"}}
+end tell
+'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "note_id": result.stdout.strip(), "error": None}
+            return {"ok": False, "note_id": None, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "note_id": None, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "note_id": None, "error": str(exc)}
 
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
 
