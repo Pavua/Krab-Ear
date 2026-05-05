@@ -312,6 +312,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             logger.info("Bookmark hotkey активирован (Cmd+Shift+B)")
         }
 
+        startQuickReplaceHotkeyMonitor()
+        logger.info("Quick Replace hotkey активирован (Cmd+Shift+R)")
+
         setupWakeWordListenerIfEnabled()
 
         applyMode(settings.mode, persist: false)
@@ -985,12 +988,21 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func restartAgent() {
-        let scriptPath = (options.projectRoot as NSString).appendingPathComponent("scripts/start_agent.command")
-        let escaped = scriptPath.replacingOccurrences(of: "\"", with: "\\\"")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "\"\(escaped)\" --show-history >/dev/null 2>&1 &"]
-        try? process.run()
+        // Phase C.6.2 root-cause fix: open the canonical .app bundle instead of
+        // shelling out to start_agent.command → runtime/KrabEarAgent.
+        // This ensures launchd/Dock/TCC grants all reference the same binary path.
+        let bundleURL: URL
+        let bundleMain = Bundle.main.bundleURL
+        if bundleMain.pathExtension == "app" {
+            // Running from inside the .app bundle (production path).
+            bundleURL = bundleMain
+        } else {
+            // Running from native/runtime/ binary directly (dev path) — construct
+            // bundle URL from project root so we still open the canonical .app.
+            bundleURL = URL(fileURLWithPath: options.projectRoot, isDirectory: true)
+                .appendingPathComponent("Krab Ear.app", isDirectory: true)
+        }
+        NSWorkspace.shared.open(bundleURL)
         SentryConfig.recordTerminate(callsite: "restartAgent")
         NSApp.terminate(nil)
     }

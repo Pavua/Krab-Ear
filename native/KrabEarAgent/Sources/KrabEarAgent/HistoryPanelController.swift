@@ -171,6 +171,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let modeSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let autoPasteButton = NSButton(checkboxWithTitle: "Автовставка", target: nil, action: nil)
     let quickEditButton = NSButton(checkboxWithTitle: "Быстрое редактирование", target: nil, action: nil)
+    /// Privacy Mode (D.5): when ON, disables Sentry telemetry + forces translation offline.
+    let privacyModeButton = NSButton(checkboxWithTitle: "Режим приватности", target: nil, action: nil)
     let startSoundButton = NSButton(checkboxWithTitle: "Звук старта", target: nil, action: nil)
     let realtimePreviewButton = NSButton(checkboxWithTitle: "Realtime превью", target: nil, action: nil)
     let translateAndPasteButton = NSButton(checkboxWithTitle: "Перевод + вставка", target: nil, action: nil)
@@ -442,6 +444,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let cleanupDaysSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let vocabSuggestionsButton = ThemeSecondaryButton(title: "Словарь", target: nil, action: nil)
     let glossarySuggestionsButton = ThemeSecondaryButton(title: "Глоссарий авто", target: nil, action: nil)
+    let sendToAppleNotesButton = ThemeSecondaryButton(title: "Apple Notes", target: nil, action: nil)
     let historyEnhancementsRow = NSStackView()
 
     init(
@@ -914,6 +917,24 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         removeGlossaryButton.applyThemeSecondary()
         toolsRow.addArrangedSubview(removeGlossaryButton)
+
+        let exportGlossaryButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Экспорт CSV…", target: self, action: #selector(onExportGlossary))
+            b.isTransparentStyle = true
+            b.toolTip = "Сохранить глоссарий в CSV-файл для редактирования в Excel / Numbers"
+            return b
+        }()
+        exportGlossaryButton.applyThemeSecondary()
+        toolsRow.addArrangedSubview(exportGlossaryButton)
+
+        let importGlossaryButton: ThemeSecondaryButton = {
+            let b = ThemeSecondaryButton(title: "Импорт CSV…", target: self, action: #selector(onImportGlossary))
+            b.isTransparentStyle = true
+            b.toolTip = "Загрузить глоссарий из CSV-файла (merge или replace)"
+            return b
+        }()
+        importGlossaryButton.applyThemeSecondary()
+        toolsRow.addArrangedSubview(importGlossaryButton)
 
         toolsRow.addArrangedSubview(glossaryStatusLabel)
         toolsRow.addArrangedSubview(NSView())
@@ -1917,7 +1938,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        voiceGatewayCheckButton, dictationHistoryOpenButton,
                        diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
-                       exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton] as [NSButton] {
+                       exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
+                       sendToAppleNotesButton] as [NSButton] {
             button.applyThemeSecondary()
         }
 
@@ -2182,6 +2204,80 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 glossary.removeValue(forKey: source)
                 nextPayload["translation_glossary"] = glossary
                 _ = self.settingsUpdater(nextPayload)
+                self.syncSettingsControls()
+            }
+        }
+    }
+
+    @objc private func onExportGlossary() {
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            guard let resp = try? ipc.call(method: "export_glossary_csv", params: [:]),
+                  let result = resp["result"] as? [String: Any],
+                  let csv = result["csv"] as? String else {
+                DispatchQueue.main.async {
+                    self.showInfoAlert(title: "Экспорт глоссария", body: "Не удалось получить данные глоссария.")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = "krab-ear-glossary.csv"
+                panel.allowedContentTypes = [.commaSeparatedText]
+                panel.title = "Сохранить глоссарий"
+                if panel.runModal() == .OK, let url = panel.url {
+                    do {
+                        try csv.write(to: url, atomically: true, encoding: .utf8)
+                    } catch {
+                        self.showInfoAlert(title: "Экспорт глоссария", body: "Ошибка записи файла: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func onImportGlossary() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.title = "Загрузить глоссарий из CSV"
+        panel.message = "Файл должен содержать заголовок source,target"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let csv = try? String(contentsOf: url, encoding: .utf8) else {
+            showInfoAlert(title: "Импорт глоссария", body: "Не удалось прочитать файл.")
+            return
+        }
+
+        // Предложить режим: merge или replace
+        let modeAlert = NSAlert()
+        modeAlert.messageText = "Режим импорта"
+        modeAlert.informativeText = "Merge — добавить/обновить термины; Replace — полностью заменить глоссарий."
+        modeAlert.addButton(withTitle: "Merge")
+        modeAlert.addButton(withTitle: "Replace")
+        modeAlert.addButton(withTitle: "Отмена")
+        let modeResp = modeAlert.runModal()
+        guard modeResp != .alertThirdButtonReturn else { return }
+        let mode = modeResp == .alertFirstButtonReturn ? "merge" : "replace"
+
+        let ipc = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = (try? ipc.call(
+                method: "import_glossary_csv",
+                params: ["csv": csv, "mode": mode]
+            ))?["result"] as? [String: Any]
+            DispatchQueue.main.async {
+                if let err = result?["error"] as? String {
+                    self.showInfoAlert(title: "Импорт глоссария", body: "Ошибка: \(err)")
+                    return
+                }
+                let imported = result?["imported_count"] as? Int ?? 0
+                let skipped = result?["skipped_count"] as? Int ?? 0
+                let total = result?["total"] as? Int ?? 0
+                self.showInfoAlert(
+                    title: "Импорт глоссария",
+                    body: "Импортировано: \(imported), пропущено: \(skipped), итого в глоссарии: \(total)."
+                )
                 self.syncSettingsControls()
             }
         }
