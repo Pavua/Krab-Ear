@@ -39,7 +39,13 @@ let package = Package(
             ],
             path: "Sources/KrabEarAgent",
             swiftSettings: [
-                // Закомментированный импорт Porcupine SDK не приводит к ошибкам.
+                // Swift 5 language mode: codebase ещё не ready к full Swift 6
+                // strict-concurrency (sending 'self' / Sendable result types
+                // в десятках call-sites вокруг IPCClient + DispatchQueue closures).
+                // Local Xcode 26 был permissive, но Linux CI / macos-latest runner
+                // enforce'ят strict mode когда Package using tools 6.0. Migration
+                // tracked: docs/superpowers/specs/2026-05-XX-swift-6-migration.md (TBD)
+                .swiftLanguageMode(.v5),
             ]
         ),
         .testTarget(
