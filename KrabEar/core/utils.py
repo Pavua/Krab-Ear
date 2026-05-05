@@ -78,6 +78,16 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bПаблито\b", "Pablito"),
     (r"\bТелеграм\b", "Telegram"),
     (r"\bВиспер\b", "Whisper"),
+    # CLAUDE.md — must come BEFORE the bare «Клод» → Claude entry to avoid premature replacement.
+    # «эмди» ends in «и» (U+0438); [Ии]? makes the final letter optional for «эмд» typo variant.
+    (r"\bКЛОД\s*[Ээ][Мм][Дд][Ии]?\b", "CLAUDE.md"),      # «КЛОД эмди»
+    (r"\bКлауд\s*[Ээ][Мм][Дд][Ии]?\b", "CLAUDE.md"),      # «Клауд эмди»
+    (r"\bКлуд\s*[Ээ][Мм][Дд][Ии]?\b", "CLAUDE.md"),       # «клуд эмди»
+    (r"\bКлод\s*[Ээ][Мм][Дд][Ии]?\b", "CLAUDE.md"),       # «клод эмди»
+    (r"\bКлод\s*М\s*Д\b", "CLAUDE.md"),                    # «клод М Д»
+    (r"\bКлод[аеиа]\s*[Ээ][Мм][Дд]\b", "CLAUDE.md"),      # «клода эмди» (genitive)
+    (r"\bКлавдий\s*[Ээ][Мм][Дд][Ии]?\b", "CLAUDE.md"),    # «клавдий эмди»
+    (r"\bКлуд\s*М\s*Д\b", "CLAUDE.md"),                    # «клуд М Д»
     (r"\bКлод\b", "Claude"),
     (r"\bЭм\s*Эл\s*Икс\b", "MLX"),
     # Qwen brand mishears (live transcripts: "QN14B", "квен", "к Вен", "Квент", "QN1")
@@ -212,6 +222,113 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\b[Оо]пус\s+(\d[\d.]*)\b", r"Opus \1"),
     (r"\b[Сс]оннет\s+(\d[\d.]*)\b", r"Sonnet \1"),
     (r"\b[Хх]айку\s+(\d[\d.]*)\b", r"Haiku \1"),
+
+    # ── Dev tools / config files (batch-10, 2026-05-05) ────────────────────
+    # NOTE: CLAUDE.md patterns were moved BEFORE the bare «Клод» → Claude entry above
+    # (see inline comment there). Only keeping additional variants here.
+    # GitHub — additional mishears (Гит-Хаб already in v1, adding compound forms)
+    (r"\bгитхаб\b", "GitHub"),                              # слитное строчное
+    (r"\bgit\s+хаб\b", "GitHub"),                          # «git хаб» (mixed)
+    (r"\bгитхаб\.ком\b", "GitHub"),                        # «гитхаб.ком»
+    # GitLab
+    (r"\b[Гг]итлаб\b", "GitLab"),
+    # Bitbucket
+    (r"\b[Бб]итбакет\b", "Bitbucket"),
+    (r"\b[Бб]ит\s+[Бб]акет\b", "Bitbucket"),
+    # Slack — ONLY in dev/app context: followed by «канал»/«чат»/«ссылка»/«уведомлени»
+    # or in possessive construction «в слаке». «слак» alone (physical slack) not replaced.
+    (r"\bслак\s+(канал|чат)\b", r"Slack \1"),
+    (r"\bв\s+слак[ее]\b", "в Slack"),
+    # Jira — ONLY in tracker context
+    (r"\b[Жж]ира\s+тикет\b", "Jira тикет"),
+    (r"\bтикет\s+в\s+[Жж]ире\b", "тикет в Jira"),
+    (r"\b[Жж]ира\s+(борд|доска|задач)\b", r"Jira \1"),
+    # Notion
+    (r"\b[Нн]оушн\b", "Notion"),
+    # Linear (project tracker) — only with dev context to avoid confusion with adjective
+    (r"\b[Лл]инеар\s+(задач|тикет|борд|проект)\b", r"Linear \1"),
+    (r"\bв\s+[Лл]инеаре?\b", "в Linear"),
+    # Figma
+    (r"\b[Фф]игма\b", "Figma"),
+    (r"\bфиг\s+ма\b", "Figma"),
+    # PyCharm
+    (r"\b[Пп]айчарм\b", "PyCharm"),
+    (r"\bпай\s+чарм\b", "PyCharm"),
+    # VS Code — additional mishears beyond existing «Ви Эс Код»
+    (r"\bвс\s*код\b", "VS Code"),                          # «вс код»
+    (r"\bВ\.С\.\s*[Кк]од\b", "VS Code"),                  # «В.С. код»
+    # Xcode
+    (r"\b[Ии]кскод\b", "Xcode"),
+    (r"\bX[-\s]код\b", "Xcode"),
+    # Zed editor — only with explicit «редактор» context to avoid replacing the letter Zed
+    (r"\b[Зз]ед\s+[Рр]едактор\b", "Zed"),
+    # iTerm2
+    (r"\b[Ии][Тт]ерм\s*2?\b", "iTerm2"),
+    (r"\bай\s*[Тт]ерм\s*2?\b", "iTerm2"),
+    (r"\biTerm\s+2\b", "iTerm2"),
+
+    # ── Programming languages / runtimes (batch-10) ─────────────────────────
+    # Swift — only with code/package context to avoid false positives (Taylor Swift etc.)
+    (r"\b[Сс]вифт\s+(код|пакет|проект|компилятор|файл)\b", r"Swift \1"),
+    (r"\b[Сс]вифт\s+Package\b", "Swift Package"),
+    # Rust — with explicit language context
+    (r"\b[Рр]аст\s+[Яя]зык\b", "Rust"),
+    (r"\b[Рр]аст\s+[Лл]энгвидж\b", "Rust"),
+    # Python — additional mishears
+    (r"\b[Пп]айтон\s+3\b", "Python 3"),
+    (r"\b[Пп]айтон\b", "Python"),
+    (r"\b[Пп]итон\s+3\b", "Python 3"),
+    # JSON
+    (r"\b[Дд]жейсон\s+[Фф]ормат\b", "JSON формат"),
+    (r"\b[Дд]жейсон\b", "JSON"),
+    # YAML
+    (r"\b[ЯяEe]ямл\b", "YAML"),
+    (r"\b[Яя]мл\b", "YAML"),
+    # Docker — additional mishear (double-к)
+    (r"\b[Дд]оккер\b", "Docker"),
+    # Kubernetes — additional mishears
+    (r"\b[Кк]убер\b", "Kubernetes"),
+    (r"\b[Кк]уб\s+[Кк]онтейнер\b", "Kubernetes контейнер"),
+    # Terraform
+    (r"\b[Тт]еррафор[мн]\b", "Terraform"),
+
+    # ── File formats (batch-10) ──────────────────────────────────────────────
+    # Markdown
+    (r"\b[Мм]аркдаун\b", "Markdown"),
+    # .md extension — only in explicit extension-reference context
+    # «эмди» ends in и (U+0438); [Ии]? makes the trailing vowel optional.
+    (r"\b[Дд]от\s+[Ээ][Мм][Дд][Ии]?\b", ".md"),           # «дот эмди»
+    # MP3 — «пэ» uses э (U+044D), class must be [Ээ] not [Ее]
+    (r"\b[Ээ][Мм]\s+[Пп][Ээ]\s*3\b", "MP3"),              # «Эм пэ 3»
+    # WAV
+    (r"\b[Вв]ав\s+[Фф]айл\b", "WAV файл"),
+    # SSL — «эс эс эль»; э = U+044D, use [Ээ] and [Лл]
+    (r"\b[Ээ]с\s+[Ээ]с\s+[Ее]ль\b", "SSL"),
+
+    # ── Russian dev-slang / dictation patterns (batch-10) ───────────────────
+    # subagent — Russian phonetic variants
+    (r"\bсаб\s*агент\b", "subagent"),
+    (r"\bsub\s*агент\b", "subagent"),
+    # коммит — correct the single-«м» mishear
+    (r"\b[Кк]омит\b", "коммит"),
+    # rebase — phonetic variants
+    (r"\b[Рр]еббейс\b", "rebase"),
+    (r"\b[Рр]ибейз\b", "rebase"),
+    (r"\b[Рр]и[-\s][Бб]ейс\b", "rebase"),
+    # pull request — phonetic
+    (r"\b[Пп]улл?\s+[Рр]еквест\b", "pull request"),
+    (r"\b[Пп]ул[Рр]еквест\b", "pull request"),
+    (r"(?<!\w)П\.Р\.(?!\w)", "PR"),                        # «П.Р.» abbrev, no \b (dots break it)
+    # мерджить — normalise мёрджить → мерджить
+    (r"\b[Мм]ёрджить\b", "мерджить"),
+    # issues — phonetic
+    (r"\b[Ии]шьюс\b", "issues"),
+    # AppleScript
+    (r"\b[Ээ]пл\s*[Сс]крипт\b", "AppleScript"),
+    (r"\bapple\s*скрипт\b", "AppleScript"),
+    # osascript
+    (r"\b[Оо][Сс][Аа]\s*[Сс]крипт\b", "osascript"),
+    (r"\b[Оо]са\s*скрипт\b", "osascript"),
 ]
 BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(pat, re.IGNORECASE), repl) for pat, repl in _BRAND_REPLACEMENTS_RAW
