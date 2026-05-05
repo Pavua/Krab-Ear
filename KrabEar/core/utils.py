@@ -88,6 +88,9 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bКвент\b", "Qwen"),
     (r"\bквен\b", "Qwen"),
     (r"\bКвен\b", "Qwen"),
+    # Qwen — additional mishears (batch-8 2026-05-05)
+    (r"\bКьюэн\b", "Qwen"),
+    (r"\bкуэн\b", "Qwen"),
     # GigaAM mishear — 2026-05-05 session: added Хига/Джига/Higa/Jiga variants
     # (GigaAM doesn't recognise its own name; Whisper phonetically maps «Гига» → «Хига»/«Джига»)
     (r"\bГига[\s\-]?АМ\b", "GigaAM"),
@@ -139,10 +142,23 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     # AI/ML инструменты
     (r"\bЧат\s*Джи\s*Пи\s*[Тт]\b", "ChatGPT"),
     (r"\bДжи\s*Пи\s*[Тт]\b", "GPT"),
+    # GPT — additional mishears (batch-8 2026-05-05)
+    (r"\b[Гг]пт\b", "GPT"),
+    (r"\b[Жж]пт\b", "GPT"),
+    (r"\bджипити\b", "GPT"),
     (r"\bОпен\s*[Ээ]й\s*[Аа]й\b", "OpenAI"),
+    # OpenAI — additional mishears (batch-8 2026-05-05)
+    (r"\bОпен\s*[Аа]\s*[Ии]\b", "OpenAI"),        # «Опен А.И.» with spaces
+    (r"\bОпен\s*[Аа]\.\s*[Ии]\.", "OpenAI"),       # «Опен А.И.» (no \b after trailing dot)
+    (r"\bОпен\s*[Аа]й\b", "OpenAI"),              # «Опен ай»
+    (r"\bопенаи\b", "OpenAI"),                     # слитное строчное
     (r"\bМидж[оё]рни\b", "Midjourney"),
     (r"\bСтейбл\s*Диффь?южн\b", "Stable Diffusion"),
     (r"\bЛлама\b", "Llama"),
+    # Llama versioned mishears — only when followed by version number (e.g. «Лама 4»)
+    # «Лама» alone is a real Russian word (camel), so we require a digit after it.
+    (r"\b[ЯяYy]ama\s+(\d[\d.]*)\b", r"Llama \1"),
+    (r"\b[Лл]ама\s+(\d[\d.]*)\b", r"Llama \1"),
     (r"\bДжемини\b", "Gemini"),
     # Dev-инструменты
     (r"\bВи\s*Эс\s*Код\b", "VS Code"),
@@ -175,6 +191,27 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bЭлэм\s*Студио\b", "LM Studio"),
     # Krab Ear — extended: "Краб Ир" already above; add "КрабИр" variant (merged)
     # (already present as \bКрабИр\b above)
+    # AI/ML — batch-8 2026-05-05: Mistral, DeepSeek, Hugging Face, LM Studio variants,
+    # context-dependent Anthropic model family names (Opus/Sonnet/Haiku + version digit).
+    # Mistral — open model family; mishears «Митра», «митраль», «мистраль»
+    (r"\b[Мм]истраль\b", "Mistral"),
+    (r"\b[Мм]итраль\b", "Mistral"),
+    (r"\b[Мм]итра\b", "Mistral"),
+    # DeepSeek — Chinese AI lab; mishears «Дипсик», «дипсек»
+    (r"\b[Дд]ипсик\b", "DeepSeek"),
+    (r"\b[Дд]ипсек\b", "DeepSeek"),
+    # Hugging Face — ML platform; mishears «Хагин фейс», «хагинг фейс», «хаггинг фейс»
+    (r"\b[Хх]а[гг]+инг?\s+[Фф]ейс\b", "Hugging Face"),
+    # LM Studio — additional standalone mishear variants (batch-8)
+    # «Эл-эм студио», «лэм студио», «лм студио» (last one already covered by ЛМ Студио above)
+    (r"\bЭл[-\s]эм\s+[Сс]тудио\b", "LM Studio"),
+    (r"\b[Лл]эм\s+[Сс]тудио\b", "LM Studio"),
+    # Anthropic model family — context-dependent: only replace when followed by version number.
+    # «Опус» is a common Russian word (musical opus), «соннет» = sonnet (poem).
+    # We ONLY replace when the word is followed by a version like «4», «4.5», «3.5».
+    (r"\b[Оо]пус\s+(\d[\d.]*)\b", r"Opus \1"),
+    (r"\b[Сс]оннет\s+(\d[\d.]*)\b", r"Sonnet \1"),
+    (r"\b[Хх]айку\s+(\d[\d.]*)\b", r"Haiku \1"),
 ]
 BRAND_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     (re.compile(pat, re.IGNORECASE), repl) for pat, repl in _BRAND_REPLACEMENTS_RAW

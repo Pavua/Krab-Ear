@@ -64,6 +64,17 @@ def init_sentry(
 
     if settings and settings.get("privacy_mode_enabled"):
         logger.info("Sentry init skipped — privacy_mode_enabled=True")
+        if dsn:
+            # Записываем в privacy audit log что Sentry был заблокирован
+            try:
+                from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+                get_privacy_audit_logger().log_event(
+                    category="sentry",
+                    action="blocked",
+                    details={"reason": "privacy_mode_enabled"},
+                )
+            except Exception:  # noqa: BLE001
+                pass  # privacy audit никогда не должен ломать основной поток
         return False
 
     if not dsn:

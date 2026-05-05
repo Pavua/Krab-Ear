@@ -1,0 +1,341 @@
+"""Tests for ParakeetSTTAdapter (parakeet-mlx) — Phase D.2.1.
+
+All tests use mocks — parakeet-mlx is NOT required to be installed.
+Covers:
+  - availability detection (import success/failure)
+  - language support (EN-only)
+  - transcribe() result structure and mlx_lock wrapping
+  - model caching across calls
+  - graceful degradation when lib absent
+  - router factory inclusion/exclusion logic
+"""
+import sys
+import types
+import unittest
+import contextlib
+from unittest.mock import MagicMock, patch
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Path setup
+# ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_krabear = PROJECT_ROOT / "KrabEar"
+if str(_krabear) not in sys.path:
+    sys.path.insert(0, str(_krabear))
+
+from core.pipeline.stt_adapter import STTResult
+from core.pipeline.stt_parakeet import ParakeetSTTAdapter
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_fake_sentence(text="Hello world", start=0.0, end=1.5):
+    tok1 = MagicMock()
+    tok1.text = "Hello"
+    tok1.start = 0.0
+    tok1.end = 0.7
+    tok2 = MagicMock()
+    tok2.text = "world"
+    tok2.start = 0.8
+    tok2.end = 1.5
+    sent = MagicMock()
+    sent.text = text
+    sent.start = start
+    sent.end = end
+    sent.tokens = [tok1, tok2]
+    return sent
+
+
+def _make_fake_result(text="Hello world"):
+    result = MagicMock()
+    result.text = text
+    result.sentences = [_make_fake_sentence(text)]
+    return result
+
+
+def _make_fake_parakeet_module(result_text="Hello world"):
+    fake_module = types.ModuleType("parakeet_mlx")
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = _make_fake_result(result_text)
+    fake_module.from_pretrained = MagicMock(return_value=fake_model)
+    return fake_module, fake_model
+
+
+# ---------------------------------------------------------------------------
+# Availability tests
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXAvailability(unittest.TestCase):
+
+    def test_is_available_when_parakeet_installed(self):
+        fake_module, _ = _make_fake_parakeet_module()
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            adapter = ParakeetSTTAdapter()
+            self.assertTrue(adapter.is_available())
+
+    def test_is_available_when_parakeet_not_installed(self):
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=None):
+            adapter = ParakeetSTTAdapter()
+            self.assertFalse(adapter.is_available())
+
+    def test_init_does_not_raise_when_library_missing(self):
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=None):
+            try:
+                ParakeetSTTAdapter()
+            except Exception as exc:
+                self.fail(f"__init__ raised unexpectedly: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Language support
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXLanguage(unittest.TestCase):
+
+    def setUp(self):
+        self.adapter = ParakeetSTTAdapter()
+
+    def test_supports_en(self):
+        self.assertTrue(self.adapter.supports_language("en"))
+
+    def test_does_not_support_ru(self):
+        self.assertFalse(self.adapter.supports_language("ru"))
+
+    def test_does_not_support_es(self):
+        self.assertFalse(self.adapter.supports_language("es"))
+
+    def test_does_not_support_empty(self):
+        self.assertFalse(self.adapter.supports_language(""))
+
+    def test_does_not_support_zh(self):
+        self.assertFalse(self.adapter.supports_language("zh"))
+
+
+# ---------------------------------------------------------------------------
+# Model ID / display name
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXModelId(unittest.TestCase):
+
+    def test_default_model_id_contains_parakeet(self):
+        adapter = ParakeetSTTAdapter()
+        self.assertIn("parakeet", adapter.model_id)
+
+    def test_custom_model_id(self):
+        adapter = ParakeetSTTAdapter(model_path="mlx-community/parakeet-tdt-0.6b-v3")
+        self.assertEqual(adapter.model_id, "parakeet-mlx/parakeet-tdt-0.6b-v3")
+
+    def test_display_name_contains_model_slug(self):
+        adapter = ParakeetSTTAdapter(model_path="mlx-community/parakeet-tdt-0.6b-v2")
+        self.assertIn("parakeet-tdt-0.6b-v2", adapter.display_name)
+
+
+# ---------------------------------------------------------------------------
+# Transcribe — result structure
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXTranscribe(unittest.TestCase):
+
+    def _make_adapter(self, result_text="Hello world", model_path=None):
+        fake_module, fake_model = _make_fake_parakeet_module(result_text)
+        adapter = ParakeetSTTAdapter(
+            model_path=model_path or "mlx-community/parakeet-tdt-0.6b-v2"
+        )
+        return adapter, fake_module, fake_model
+
+    # ------------------------------------------------------------------
+
+    def test_transcribe_raises_import_error_when_lib_missing(self):
+        import numpy as np
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=None):
+            adapter = ParakeetSTTAdapter()
+            with self.assertRaises(ImportError):
+                adapter.transcribe(np.zeros(16000, dtype="float32"))
+
+    def test_transcribe_returns_stt_result(self):
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter("Test output")
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                result = adapter.transcribe(audio)
+
+        self.assertIsInstance(result, STTResult)
+        self.assertEqual(result.text, "Test output")
+        self.assertEqual(result.language, "en")
+        self.assertEqual(result.engine, "parakeet-mlx/parakeet-tdt-0.6b-v2")
+        self.assertGreater(result.word_count, 0)
+
+    def test_transcribe_calls_model_transcribe_once(self):
+        import numpy as np
+        adapter, fake_module, fake_model = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                adapter.transcribe(audio)
+
+        fake_model.transcribe.assert_called_once_with(audio)
+
+    def test_transcribe_result_has_segments_in_metadata(self):
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter("Hello world")
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                result = adapter.transcribe(audio)
+
+        self.assertIn("segments", result.metadata)
+        segments = result.metadata["segments"]
+        self.assertIsInstance(segments, list)
+        self.assertGreater(len(segments), 0)
+        seg = segments[0]
+        self.assertIn("text", seg)
+        self.assertIn("start", seg)
+        self.assertIn("end", seg)
+
+    def test_transcribe_under_mlx_lock(self):
+        """transcribe() wraps inference inside mlx_lock context manager."""
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        entered = []
+        exited = []
+
+        class TrackingLock:
+            def __enter__(self):
+                entered.append(True)
+                return self
+            def __exit__(self, *args):
+                exited.append(True)
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", TrackingLock, create=True):
+                adapter.transcribe(audio)
+
+        self.assertGreater(len(entered), 0, "mlx_lock was never entered")
+        self.assertEqual(len(entered), len(exited), "mlx_lock was entered but not exited")
+
+    def test_transcribe_raises_runtime_error_on_model_load_failure(self):
+        import numpy as np
+        fake_module = types.ModuleType("parakeet_mlx")
+        fake_module.from_pretrained = MagicMock(side_effect=RuntimeError("disk full"))
+
+        adapter = ParakeetSTTAdapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                with self.assertRaises(RuntimeError):
+                    adapter.transcribe(audio)
+
+    def test_model_cached_across_calls(self):
+        """from_pretrained called only once across multiple transcribe() calls."""
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                adapter.transcribe(audio)
+                adapter.transcribe(audio)
+
+        self.assertEqual(fake_module.from_pretrained.call_count, 1)
+
+    def test_language_field_always_en(self):
+        """STTResult.language is always 'en' regardless of kwargs."""
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", contextlib.nullcontext, create=True):
+                result = adapter.transcribe(audio, language="ru")  # ignored
+
+        self.assertEqual(result.language, "en")
+
+
+# ---------------------------------------------------------------------------
+# Warmup / unload lifecycle
+# ---------------------------------------------------------------------------
+
+class TestParakeetMLXLifecycle(unittest.TestCase):
+
+    def test_warmup_returns_false_when_lib_missing(self):
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=None):
+            adapter = ParakeetSTTAdapter()
+            self.assertFalse(adapter.warmup())
+
+    def test_warmup_returns_true_when_lib_present(self):
+        fake_module, _ = _make_fake_parakeet_module()
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            adapter = ParakeetSTTAdapter()
+            self.assertTrue(adapter.warmup())
+
+    def test_unload_clears_model(self):
+        fake_module, _ = _make_fake_parakeet_module()
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            adapter = ParakeetSTTAdapter()
+            adapter.warmup()
+            self.assertIsNotNone(adapter._model)
+            adapter.unload()
+            self.assertIsNone(adapter._model)
+
+    def test_unload_resets_load_failed_flag(self):
+        fake_module = types.ModuleType("parakeet_mlx")
+        fake_module.from_pretrained = MagicMock(side_effect=RuntimeError("boom"))
+        adapter = ParakeetSTTAdapter()
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            adapter.warmup()  # fails, sets _load_failed=True
+
+        self.assertTrue(adapter._load_failed)
+        adapter.unload()
+        self.assertFalse(adapter._load_failed)
+
+
+# ---------------------------------------------------------------------------
+# Router factory tests
+# ---------------------------------------------------------------------------
+
+class TestRouterFactoryParakeet(unittest.TestCase):
+
+    def _build_router(self, parakeet_enabled=True, parakeet_available=True):
+        from core.pipeline.stt_router_factory import build_router
+
+        fake_module = _make_fake_parakeet_module()[0] if parakeet_available else None
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch(
+                "core.pipeline.stt_router_factory.WhisperMLXAdapter.is_available",
+                return_value=False,
+            ):
+                router = build_router(settings_dict={
+                    "stt_parakeet_enabled": parakeet_enabled,
+                    "stt_gigaam_enabled": False,
+                })
+        return router
+
+    def test_factory_excludes_parakeet_when_disabled(self):
+        router = self._build_router(parakeet_enabled=False, parakeet_available=True)
+        names = [type(a).__name__ for a in router._adapters]
+        self.assertNotIn("ParakeetSTTAdapter", names)
+
+    def test_factory_includes_parakeet_when_enabled_and_available(self):
+        router = self._build_router(parakeet_enabled=True, parakeet_available=True)
+        names = [type(a).__name__ for a in router._adapters]
+        self.assertIn("ParakeetSTTAdapter", names)
+
+    def test_factory_excludes_parakeet_when_enabled_but_unavailable(self):
+        router = self._build_router(parakeet_enabled=True, parakeet_available=False)
+        names = [type(a).__name__ for a in router._adapters]
+        self.assertNotIn("ParakeetSTTAdapter", names)
+
+
+if __name__ == "__main__":
+    unittest.main()

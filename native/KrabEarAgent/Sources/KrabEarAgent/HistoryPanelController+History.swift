@@ -478,6 +478,94 @@ extension HistoryPanelController {
         }
     }
 
+    // MARK: - Apple Reminders (Phase D.4)
+
+    /// Отправляет выбранную запись истории в Apple Reminders через IPC create_apple_reminder.
+    @objc func onSendToReminders() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showInfoAlert(title: "Reminders", body: "Выберите запись для отправки.")
+            return
+        }
+        sendHistoryItemToReminders(items[selected])
+    }
+
+    func sendHistoryItemToReminders(_ item: HistoryItem) {
+        let title = String(item.text.prefix(60))
+        let body = item.text
+        let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipcClient.call(
+                method: "create_apple_reminder",
+                params: ["title": title, "body": body]
+            )
+            let result = response?["result"] as? [String: Any]
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let alert = NSAlert()
+                if let ok = result?["ok"] as? Bool, ok {
+                    alert.messageText = "Напоминание создано"
+                    alert.informativeText = "Открыть Reminders для просмотра."
+                } else {
+                    alert.messageText = "Ошибка отправки"
+                    alert.informativeText = result?["error"] as? String ?? "unknown"
+                }
+                alert.runModal()
+            }
+        }
+    }
+
+    // MARK: - Apple Calendar (Phase D.4)
+
+    /// Создаёт событие в Apple Calendar из выбранной записи истории через IPC create_calendar_event.
+    @objc func onCreateCalendarEvent() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showInfoAlert(title: "Календарь", body: "Выберите запись для создания события.")
+            return
+        }
+        createCalendarEventFromHistoryItem(items[selected])
+    }
+
+    func createCalendarEventFromHistoryItem(_ item: HistoryItem) {
+        let title = String(item.text.prefix(60))
+        let notes = item.text
+
+        // start_date = now + 1 hour, formatted as AppleScript-friendly string
+        let startDate = Date().addingTimeInterval(3600)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yyyy HH:mm:ss"
+        let startDateStr = formatter.string(from: startDate)
+
+        let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let params: [String: Any] = [
+                "title": title,
+                "notes": notes,
+                "start_date": startDateStr,
+                "duration_minutes": 30
+            ]
+            let response = try? ipcClient.call(method: "create_calendar_event", params: params)
+            let result = response?["result"] as? [String: Any]
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let alert = NSAlert()
+                if let ok = result?["ok"] as? Bool, ok {
+                    alert.messageText = "Событие создано"
+                    alert.informativeText = "Событие добавлено в Календарь."
+                } else {
+                    alert.messageText = "Ошибка создания события"
+                    alert.informativeText = result?["error"] as? String ?? "unknown"
+                }
+                alert.runModal()
+            }
+        }
+    }
+
     // MARK: - Load / Append
 
     func loadInitial() {
