@@ -7,6 +7,12 @@
 import AppKit
 import Foundation
 
+// MARK: - Privacy Audit associated key
+
+private enum PrivacyAuditAssocKeys {
+    nonisolated(unsafe) static var auditViewer: UInt8 = 0
+}
+
 extension HistoryPanelController {
 
     // MARK: - Settings change handlers
@@ -526,6 +532,11 @@ extension HistoryPanelController {
         fetchAndPopulateLLMModels(currentModel: currentModel)
         llmModelSelector.isEnabled = settings.llmRewriteEnabled
         glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
+        // Reload glossary search list with current filter query.
+        reloadGlossaryList(
+            glossary: settings.translationGlossary,
+            query: glossarySearchField.stringValue
+        )
 
         switch settings.hotkey {
         case "left_option":
@@ -1286,8 +1297,41 @@ extension HistoryPanelController {
         )
 
         card.contentStackView.addArrangedSubview(privacyRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+
+        // Кнопка «Просмотр audit log» — открывает PrivacyAuditViewerWindowController
+        let auditButton = ThemeSecondaryButton(
+            title: "Просмотр audit log",
+            target: self,
+            action: #selector(onShowPrivacyAuditLog)
+        )
+        auditButton.setAccessibilityLabel(
+            "Открыть журнал событий режима конфиденциальности: заблокированные Sentry-отчёты, принудительный offline-перевод."
+        )
+
+        let auditRow = makeSettingRow(
+            label: "Журнал событий",
+            description: "События режима приватности: Sentry blocked, translate forced offline.",
+            control: auditButton
+        )
+        card.contentStackView.addArrangedSubview(auditRow)
+
         section.contentStackView.addArrangedSubview(card)
         return section
+    }
+
+    // MARK: - Privacy Audit Viewer
+
+    @objc func onShowPrivacyAuditLog() {
+        let viewer = PrivacyAuditViewerWindowController(ipcClient: ipcClient)
+        // Держим сильную ссылку пока окно открыто
+        objc_setAssociatedObject(
+            self,
+            &PrivacyAuditAssocKeys.auditViewer,
+            viewer,
+            .OBJC_ASSOCIATION_RETAIN
+        )
+        viewer.showAndLoad()
     }
 
     @objc func onQuickPresetButtonClicked(_ sender: NSButton) {

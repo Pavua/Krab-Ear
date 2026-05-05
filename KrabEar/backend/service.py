@@ -145,7 +145,7 @@ import platform
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -1071,6 +1071,9 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- iMessage integration (Phase D.4) ---
+            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
+            "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._handle_call_session_get,  # получить сессию по id
@@ -1099,6 +1102,11 @@ class BackendService:
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
             "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
+            # --- Privacy audit log ---
+            "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
+            "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
+            # --- D.2.3: Scored STT routing decision ---
+            "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
         }
 
         handler = handlers.get(method)
@@ -2820,6 +2828,106 @@ class BackendService:
             replaced_count,
         )
         return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
+    # --- Privacy audit log handlers ---
+
+    def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние записи privacy audit log.
+
+        Параметры:
+            limit — максимальное число записей (default 100).
+
+        Возвращает:
+            entries     — список NDJSON-записей {ts, category, action, details}.
+            total_count — общее число записей в файле.
+        """
+        limit = int(params.get("limit", 100))
+        audit = get_privacy_audit_logger()
+        entries = audit.read_entries(limit=limit)
+        total = audit.total_count()
+        return {
+            "entries": entries,
+            "total_count": total,
+        }
+
+    def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет файл privacy audit log. Идемпотентен.
+
+        Возвращает:
+            ok — всегда True.
+        """
+        audit = get_privacy_audit_logger()
+        audit.clear()
+        return {"ok": True}
+
+    # --- D.2.3: Scored STT routing decision ---
+
+    def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает результат scored STT adapter selection для отладки.
+
+        Параметры:
+            language         — ISO 639-1 код языка (например «ru», «en», «zh»).
+            audio_duration_s — длительность аудио в секундах (float, опционально).
+
+        Возвращает:
+            selected_engine — имя выбранного адаптера или null.
+            scores          — dict {engine_name: score} для всех доступных адаптеров.
+            language        — нормализованный код языка.
+            audio_duration_s — длительность из params или null.
+        """
+        from core.stt_router import score_adapters, select_adapter_scored
+
+        language = str(params.get("language", "")).strip().lower() or "und"
+        raw_dur = params.get("audio_duration_s")
+        audio_duration_s: Optional[float] = float(raw_dur) if raw_dur is not None else None
+
+        # Собираем доступные адаптеры из AudioEngine (если есть)
+        # Используем duck-typed stubs на основе настроек — без реального импорта адаптеров.
+        adapters = self._build_virtual_adapters_for_routing()
+        scores = score_adapters(adapters, language, audio_duration_s)
+        best = select_adapter_scored(language, audio_duration_s, adapters)
+        selected_name: Optional[str] = getattr(best, "name", None) if best is not None else None
+
+        return {
+            "selected_engine": selected_name,
+            "scores": scores,
+            "language": language,
+            "audio_duration_s": audio_duration_s,
+        }
+
+    def _build_virtual_adapters_for_routing(self) -> "list[Any]":
+        """Создаёт список виртуальных адаптеров для scored selection.
+
+        Не загружает реальные модели — только описывает возможности каждого
+        адаптера на основе настроек. Используется в IPC для отладки routing.
+        """
+        from types import SimpleNamespace
+
+        def _make(name: str, languages: "set[str]", enabled: bool) -> "Any":
+            ns = SimpleNamespace(
+                name=name,
+                supported_languages=languages,
+            )
+            ns.is_available = lambda: enabled  # type: ignore[attr-defined]
+            return ns
+
+        adapters = []
+
+        # GigaAM — RU-only specialist
+        gigaam_enabled = getattr(settings, "STT_GIGAAM_ENABLED", False)
+        adapters.append(_make("gigaam", {"ru", "uk"}, bool(gigaam_enabled)))
+
+        # Parakeet — EN-only specialist
+        parakeet_enabled = getattr(settings, "PARAKEET_ENABLED", False)
+        adapters.append(_make("parakeet", {"en"}, bool(parakeet_enabled)))
+
+        # SenseVoice — ZH/JA/KO/YUE specialist + decent EN/RU
+        sensevoice_enabled = getattr(settings, "SENSEVOICE_ENABLED", False)
+        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en", "ru"}, bool(sensevoice_enabled)))
+
+        # Whisper-MLX — multilingual generalist (empty set = multilingual)
+        adapters.append(_make("whisper-mlx", set(), True))
+
+        return adapters
 
     def _generate_summary(self, text: str) -> str | None:
         """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
@@ -4782,6 +4890,84 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    # ── iMessage integration (Phase D.4) ────────────────────────────────────
+
+    def _handle_send_imessage(self, params: dict) -> dict:
+        """Send iMessage/SMS via Messages.app using osascript.
+
+        params:
+          recipient: str (required) — phone number, email, or contact name
+          body: str (required) — message text
+          service: str (optional, default "iMessage") — "iMessage" | "SMS"
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        recipient = params.get("recipient", "").strip()
+        if not recipient:
+            return {"ok": False, "error": "recipient is required"}
+
+        body = params.get("body", "").strip()
+        if not body:
+            return {"ok": False, "error": "body is required"}
+
+        service_name = params.get("service", "iMessage") or "iMessage"
+        if service_name not in ("iMessage", "SMS"):
+            service_name = "iMessage"
+
+        # Map service name to AppleScript service type constant
+        service_type = "iMessage" if service_name == "iMessage" else "SMS"
+
+        # Escape double quotes to prevent AppleScript injection
+        recipient_esc = recipient.replace('"', '\\"')
+        body_esc = body.replace('"', '\\"')
+
+        script = f'''tell application "Messages"
+    set targetService to 1st service whose service type = {service_type}
+    set targetBuddy to buddy "{recipient_esc}" of targetService
+    send "{body_esc}" to targetBuddy
+end tell'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+    def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список доступных чатов через main Krab userbot.
+
+        Параметры: нет.
+
+        Возвращает:
+          {chats: [{id, title, type}, ...]}
+
+        Ошибки:
+          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
+          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
+          - "circuit_open" — если circuit breaker разомкнут.
+        """
+        if not settings.TELEGRAM_BRIDGE_ENABLED:
+            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
+
+        try:
+            chats = self._telegram_bridge.get_chats()
+        except CircuitBreakerOpen as exc:
+            raise RuntimeError(f"circuit_open: {exc}") from exc
+        except Exception as exc:
+            msg = str(exc)
+            if "krab_unavailable" in msg or "krab_error" in msg:
+                raise RuntimeError(msg) from exc
+            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+
+        return {"chats": chats}
 
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
 

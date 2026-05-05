@@ -18,6 +18,7 @@ from typing import Any
 from .stt_router import STTRouter
 from .stt_gigaam_adapter import GigaAMSTTAdapter
 from .stt_parakeet import ParakeetSTTAdapter
+from .stt_sensevoice import SenseVoiceSTTAdapter
 from .stt_whisper_mlx_adapter import WhisperMLXAdapter
 
 logger = logging.getLogger("KrabEar.STT.RouterFactory")
@@ -77,6 +78,33 @@ def build_router(settings_dict: dict[str, Any] | None = None) -> STTRouter:
                 )
         except Exception as exc:
             logger.warning("RouterFactory: ParakeetSTTAdapter init failed: %s", exc)
+
+    # ----------------------------------------------------------------
+    # SenseVoice (East Asian multilingual — zh/yue/ja/ko/en, optional)
+    # Added BEFORE Whisper so Asian-language audio routes to the
+    # specialized adapter first (better CER/WER on zh/yue/ja/ko).
+    # Uses PyTorch + MPS (NOT MLX) — no mlx_lock required.
+    # ----------------------------------------------------------------
+    if cfg.get("stt_sensevoice_enabled", False):
+        try:
+            sensevoice = SenseVoiceSTTAdapter(
+                model_id_or_path=cfg.get("stt_sensevoice_model", None),
+                device=cfg.get("stt_sensevoice_device", "auto"),
+            )
+            if sensevoice.is_available():
+                adapters.append(sensevoice)
+                logger.debug(
+                    "RouterFactory: SenseVoice adapter added (model=%s, device=%s)",
+                    sensevoice._model_id_or_path,
+                    sensevoice._device_setting,
+                )
+            else:
+                logger.warning(
+                    "RouterFactory: SenseVoice enabled but funasr not installed; "
+                    "install with: pip install funasr"
+                )
+        except Exception as exc:
+            logger.warning("RouterFactory: SenseVoiceSTTAdapter init failed: %s", exc)
 
     # ----------------------------------------------------------------
     # Whisper MLX (multilingual, always attempted)

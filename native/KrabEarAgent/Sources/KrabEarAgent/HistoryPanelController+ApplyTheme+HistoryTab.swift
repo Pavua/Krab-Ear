@@ -123,6 +123,8 @@ extension HistoryPanelController {
         sendToRemindersButton.action = #selector(onSendToReminders)
         createCalendarEventButton.target = self
         createCalendarEventButton.action = #selector(onCreateCalendarEvent)
+        sendToImessageButton.target = self
+        sendToImessageButton.action = #selector(onSendToImessage)
         historyEnhancementsRow.addArrangedSubview(exportSrtButton)
         historyEnhancementsRow.addArrangedSubview(cleanupDaysSelector)
         historyEnhancementsRow.addArrangedSubview(cleanupHistoryButton)
@@ -131,6 +133,10 @@ extension HistoryPanelController {
         historyEnhancementsRow.addArrangedSubview(sendToAppleNotesButton)
         historyEnhancementsRow.addArrangedSubview(sendToRemindersButton)
         historyEnhancementsRow.addArrangedSubview(createCalendarEventButton)
+        historyEnhancementsRow.addArrangedSubview(sendToImessageButton)
+        sendToTelegramButton.target = self
+        sendToTelegramButton.action = #selector(onSendToTelegram)
+        historyEnhancementsRow.addArrangedSubview(sendToTelegramButton)
         historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
         advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
         advancedSection.contentStackView.addArrangedSubview(advancedCard)

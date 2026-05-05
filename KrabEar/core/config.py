@@ -356,6 +356,21 @@ class Settings(BaseSettings):
     # HuggingFace repo ID для MLX Parakeet модели.
     STT_PARAKEET_MODEL: str = "mlx-community/parakeet-tdt-0.6b-v2"
 
+    # --- SenseVoice adapter (East Asian multilingual — zh/yue/ja/ko/en) ---
+    # FunAudioLLM/SenseVoiceSmall via funasr package. PyTorch + MPS (NOT MLX).
+    # Install: pip install funasr
+    # HuggingFace: FunAudioLLM/SenseVoiceSmall (~250 MB)
+    # Opt-in: выключено по умолчанию. Включить для East Asian language transcription.
+    # Когда STT_SENSEVOICE_ENABLED=True И is_available() → добавляется в STTRouter
+    # ПЕРЕД Whisper (более высокий приоритет для zh/yue/ja/ko, acceptable для en).
+    # mlx_lock НЕ нужен — PyTorch runtime, не MLX.
+    STT_SENSEVOICE_ENABLED: bool = False
+    # HuggingFace repo ID или локальный путь к модели.
+    STT_SENSEVOICE_MODEL: str = "FunAudioLLM/SenseVoiceSmall"
+    # Устройство для инференса: "mps" (Apple Silicon GPU), "cpu", или "auto".
+    # "auto" выбирает MPS при наличии torch.backends.mps.is_available().
+    STT_SENSEVOICE_DEVICE: str = "auto"
+
     # --- Voice fingerprint matching ---
     # Включить сопоставление голосовых отпечатков между записями через pyannote/embedding.
     # По умолчанию выключено (opt-in); требует pyannote.audio.
@@ -485,6 +500,10 @@ class Settings(BaseSettings):
     # RU → STT_RU_PRIMARY_MODEL, EN → STT_EN_PRIMARY_MODEL, ES → STT_ES_PRIMARY_MODEL,
     # другие → STT_OTHER_PRIMARY_MODEL. Интеграция в engine.py — в follow-up PR.
     STT_LANGUAGE_ROUTING_ENABLED: bool = False
+    # --- Scored adapter selection (D.2.3) ---
+    # "auto_scored" = использовать score function (language match + speed + quality + duration penalty)
+    # "legacy"      = сохранить прежний порядок adapter chain из AudioEngine
+    STT_ROUTING: str = "auto_scored"
     # Модель по умолчанию для каждого языка. Текущий дефолт = whisper-large-v3 (generalist).
     STT_RU_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
     STT_EN_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
@@ -849,6 +868,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_gigaam_enabled": False,
     "stt_gigaam_mode": "rnnt",
     "stt_gigaam_device": "mps",
+    # --- SenseVoice adapter (East Asian multilingual) ---
+    "stt_sensevoice_enabled": False,
+    "stt_sensevoice_model": "FunAudioLLM/SenseVoiceSmall",
+    "stt_sensevoice_device": "auto",
     # --- STT hotwords (initial_prompt boost) ---
     "stt_hotwords": [],
     # --- STT speaker-aware initial_prompt hint ---
@@ -941,4 +964,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # No data leaves the machine (LM Studio at 127.0.0.1 is still allowed).
     # Default False: opt-in by user.
     "privacy_mode_enabled": False,
+    # --- Scored STT adapter selection (D.2.3) ---
+    # "auto_scored" = score function (language match + speed + quality + duration penalty).
+    # "legacy"      = прежний порядок adapter chain из AudioEngine.
+    "stt_routing": "auto_scored",
 }
