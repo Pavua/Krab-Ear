@@ -1279,9 +1279,15 @@ redirectRuntimeToBundleIfPresent()
 // Игнорируем сигнал; write() вернёт -1/EPIPE, что уже обрабатывает IPCError.writeFailed.
 signal(SIGPIPE, SIG_IGN)
 
-let options = LaunchOptions(arguments: CommandLine.arguments)
-let app = NSApplication.shared
-let delegate = AgentAppDelegate(options: options)
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+// MainActor.assumeIsolated: top-level main.swift runs on main thread synchronously,
+// но nominally nonisolated. AgentAppDelegate.init(options:) и NSApplication setup
+// помечены @MainActor в Foundation/AppKit (Swift 6 SDK). Без этой обёртки CI ловит:
+// "call to main actor-isolated initializer 'init(options:)' in synchronous nonisolated context".
+MainActor.assumeIsolated {
+    let options = LaunchOptions(arguments: CommandLine.arguments)
+    let app = NSApplication.shared
+    let delegate = AgentAppDelegate(options: options)
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    app.run()
+}
