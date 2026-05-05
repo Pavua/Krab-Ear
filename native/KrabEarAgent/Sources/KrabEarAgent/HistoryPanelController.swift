@@ -448,7 +448,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let sendToRemindersButton = ThemeSecondaryButton(title: "Reminders", target: nil, action: nil)
     let createCalendarEventButton = ThemeSecondaryButton(title: "В Календарь", target: nil, action: nil)
     let sendToImessageButton = ThemeSecondaryButton(title: "iMessage", target: nil, action: nil)
+    let sendToTelegramButton = ThemeSecondaryButton(title: "Отправить в Telegram", target: nil, action: nil)
     let historyEnhancementsRow = NSStackView()
+
+    // MARK: - Glossary search (GlossarySearch extension)
+    /// Search field placed above the glossary list in the Live Translation tab.
+    let glossarySearchField = NSSearchField()
+    /// Vertical stack that holds one row per glossary entry. Rebuilt by
+    /// reloadGlossaryList(glossary:query:) whenever the glossary or query changes.
+    let glossaryListStack = NSStackView()
 
     init(
         ipcClient: IPCClient,
@@ -1944,6 +1952,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
                        sendToAppleNotesButton, sendToRemindersButton, createCalendarEventButton,
                        sendToImessageButton] as [NSButton] {
+                       sendToTelegramButton] as [NSButton] {
             button.applyThemeSecondary()
         }
 
