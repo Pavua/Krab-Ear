@@ -6,6 +6,25 @@
 import AppKit
 import Foundation
 
+// MARK: - Shared STT engine name helper
+
+/// Converts raw engine identifier (from get_diagnostics stt.last_engine) to a human-readable name.
+/// Free function so it can be used both by AgentAppDelegate tooltip and HistoryPanelController+Settings.
+func humanReadableSTTEngineShared(_ raw: String?) -> String {
+    guard let raw, !raw.isEmpty else { return "—" }
+    if raw.hasPrefix("gigaam-") {
+        let mode = raw.replacingOccurrences(of: "gigaam-", with: "").uppercased()
+        return "GigaAM (\(mode))"
+    }
+    if raw.contains("whisper-large-v3-mlx") { return "Whisper Large v3 (MLX)" }
+    if raw.contains("russian") || raw.contains("antony66") { return "Whisper RU fine-tune" }
+    if raw.contains("turbo") { return "Whisper Turbo (MLX)" }
+    if raw.contains("whisper") { return "Whisper (MLX)" }
+    if raw == "remote" { return "Whisper Remote" }
+    if raw == "vad_skip" { return "VAD пропуск (тишина)" }
+    return raw
+}
+
 extension AgentAppDelegate {
 
     // MARK: - Status item & mode
@@ -88,6 +107,55 @@ extension AgentAppDelegate {
                 }
             })
             hotkeyManager?.start()
+        }
+    }
+
+    // MARK: - Dynamic tooltip
+
+    /// Build multi-line tooltip from live backend state.
+    /// Format:
+    ///   Krab Ear
+    ///   STT: GigaAM (RNNT)
+    ///   Last error: rewriter.timeout   (only if recent error exists)
+    func buildStatusBarTooltip() async -> String {
+        var lines: [String] = ["Krab Ear"]
+
+        // Fetch diagnostics for STT engine.
+        let diagResult = try? await ipcClient.callAsync(method: "get_diagnostics", params: [:])
+        if let result = diagResult?["result"] as? [String: Any],
+           let stt = result["stt"] as? [String: Any],
+           let engine = stt["last_engine"] as? String {
+            lines.append("STT: \(humanReadableSTTEngineShared(engine))")
+        }
+
+        // Fetch most recent error code (if any).
+        let errResult = try? await ipcClient.callAsync(
+            method: "list_recent_errors",
+            params: ["limit": 1]
+        )
+        if let errData = errResult?["result"] as? [String: Any],
+           let errList = errData["errors"] as? [[String: Any]],
+           let firstErr = errList.first,
+           let code = firstErr["code"] as? String,
+           !code.isEmpty {
+            lines.append("Last error: \(code)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Refresh tooltip every 10 s in a background Task.
+    /// Call once from completeStartupAfterBackendReady (after status item created).
+    func startTooltipRefresh() {
+        Task.detached { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let tip = await self.buildStatusBarTooltip()
+                await MainActor.run {
+                    self.statusItem?.button?.toolTip = tip
+                }
+                try? await Task.sleep(nanoseconds: 10_000_000_000)  // 10 s
+            }
         }
     }
 
