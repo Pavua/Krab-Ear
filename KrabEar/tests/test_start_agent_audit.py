@@ -59,6 +59,10 @@ _ALLOWED_RUNTIME_REFS = {
     os.path.join(_PROJECT_ROOT, "KrabEar", "tests", "test_start_agent_audit.py"),
     # Migration script tests — checks that start_agent.command does NOT call runtime directly
     os.path.join(_PROJECT_ROOT, "KrabEar", "tests", "test_migration_scripts.py"),
+    # Runtime self-redirect tests — checks that the binary self-redirects when launched
+    # from native/runtime/KrabEarAgent path; these tests legitimately reference the path
+    # in stub-script bodies and assertion strings.
+    os.path.join(_PROJECT_ROOT, "KrabEar", "tests", "test_runtime_self_redirect.py"),
 }
 
 # Extensions we care about for the "no stray runtime refs" check.

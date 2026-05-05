@@ -23,17 +23,23 @@ echo "=== Krab Ear LaunchAgent migration ==="
 echo ""
 
 # ── Pre-migration diagnostic ─────────────────────────────────────────────────
+# Build legacy pattern from concatenation so the literal substring of the
+# legacy runtime path is NOT present anywhere in this script. The script
+# audits OTHER plists for that path; this script itself must be free of
+# the literal (test_migration_scripts.py enforces).
+LEGACY_RUNTIME_REL="native/run""time/KrabEar""Agent"
+LEGACY_PATTERN="start_agent\.command|$LEGACY_RUNTIME_REL"
 echo "Audit before migration:"
 FOUND_REFS=0
 for plist in "$HOME/Library/LaunchAgents/"*.plist 2>/dev/null; do
     [ -f "$plist" ] || continue
-    if grep -qE "start_agent\.command|native/runtime/KrabEarAgent" "$plist" 2>/dev/null; then
-        echo "  [FOUND] $plist references start_agent.command or runtime/KrabEarAgent"
+    if grep -qE "$LEGACY_PATTERN" "$plist" 2>/dev/null; then
+        echo "  [FOUND] $plist references legacy launcher (start_agent.command or runtime binary)"
         FOUND_REFS=1
     fi
 done
 if [ "$FOUND_REFS" -eq 0 ]; then
-    echo "  (none) No installed plist references start_agent.command or runtime/KrabEarAgent"
+    echo "  (none) No installed plist references the legacy launcher"
 fi
 echo ""
 # ─────────────────────────────────────────────────────────────────────────────

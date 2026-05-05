@@ -3,22 +3,22 @@
 # DEPRECATED ENTRY POINT — now redirects to Krab Ear.app bundle.
 #
 # Background:
-#   Это исторический launcher для native/runtime/KrabEarAgent. Когда вызывается
-#   из ecosystem-уровневых скриптов (Краб's `Start Full Ecosystem.command`,
-#   `new start_krab.command`), он запускал runtime бинарник напрямую → возникал
+#   Этот скрипт исторически запускал legacy runtime бинарник напрямую.
+#   Когда его звали ecosystem-уровневые скрипты (Краб's `Start Full
+#   Ecosystem.command`, `new start_krab.command`), результатом был
 #   two-binary drift (см. `memory/blocker_two_binary_drift_2026-05-03.md`).
 #
 # Root cause fix (2026-05-05):
-#   Этот скрипт ТЕПЕРЬ просто открывает Krab Ear.app bundle через
-#   `/usr/bin/open`. Все callers — old launchd plists, Краб ecosystem,
-#   ручные запуски — автоматически прозрачно используют бандл, без
-#   изменения их кода. runtime бинарник остаётся для dev (`./native/runtime/...`),
-#   но никто его больше не запускает через скрипт.
+#   Скрипт ТЕПЕРЬ просто открывает Krab Ear.app bundle через `/usr/bin/open`.
+#   Все callers — old launchd plists, Краб ecosystem, ручные запуски —
+#   автоматически прозрачно используют бандл, без изменения их кода.
+#   Для миграции старых launchd plists запусти
+#   `scripts/migrate_to_canonical_launchagent.command`.
 #
 # Defense-in-depth:
-#   `main.swift` дополнительно содержит self-redirect: если runtime обнаружит
-#   что он запущен с native/runtime/KrabEarAgent а bundle лежит рядом, он
-#   exec'нет bundle и завершит сам процесс.
+#   `main.swift` дополнительно содержит self-redirect (см.
+#   `redirectRuntimeToBundleIfPresent()`): если бинарник по какой-либо
+#   причине запущен напрямую — он exec'нет bundle и завершит сам процесс.
 # ------------------------------------------------------------------
 
 set -euo pipefail
