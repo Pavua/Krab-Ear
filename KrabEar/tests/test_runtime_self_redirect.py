@@ -21,7 +21,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -284,7 +283,6 @@ exit 0
         """
         def is_runtime_path(exe_path: str) -> bool:
             """Python equivalent of the Swift path-check in redirectRuntimeToBundleIfPresent."""
-            import os
             parts = exe_path.replace("\\", "/").split("/")
             # Remove empty strings from leading slash
             parts = [p for p in parts if p]
@@ -326,8 +324,6 @@ exit 0
             root = os.path.dirname(os.path.dirname(os.path.dirname(exe)))
             return os.path.join(root, "Krab Ear.app", "Contents", "MacOS", "KrabEarAgent")
 
-        runtime = "/Users/pablito/Antigravity_AGENTS/Krab Ear/native/runtime/KrabEarAgent"
-        expected = "/Users/pablito/Antigravity_AGENTS/Krab Ear/Krab Ear.app/Contents/MacOS/KrabEarAgent"
 
         # Note: os.path.realpath may resolve symlinks on this machine, so we test
         # with a tempdir path that has no symlinks to control for that.

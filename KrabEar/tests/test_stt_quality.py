@@ -289,7 +289,6 @@ class EngineRepetitionLoopWireTests(unittest.TestCase):
 
     def _make_engine_with_mock_bus(self):
         """Return (engine, push_calls) where push_calls collects _push_error args."""
-        import types
         from core.engine import AudioEngine
 
         # Build engine without loading any models

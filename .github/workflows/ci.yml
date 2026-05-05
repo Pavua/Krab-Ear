@@ -48,10 +48,15 @@ jobs:
 
       - name: Lint (flake8)
         run: |
+          # Production code: strict.
+          # Tests: relaxed — F401/F541/F841/E203/E303/E306/E401/W391 ok in tests
+          # (mock imports, intentionally-unused locals for fixture chaining,
+          # f-strings as templated narratives in assert messages).
           flake8 KrabEar/ \
             --max-line-length=150 \
             --extend-ignore=E501 \
             --exclude=KrabEar/.venv,KrabEar/tests/__pycache__,.venv_krab_ear,KrabEar/_legacy_tkinter_archive_2026-02-11 \
+            --per-file-ignores='KrabEar/tests/*:F401,F541,F841,E203,E303,E306,E401,E402,W391' \
             --statistics
         continue-on-error: false
 

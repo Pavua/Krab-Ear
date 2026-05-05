@@ -240,7 +240,6 @@ class IpcReconnectRegistryTests(unittest.TestCase):
 
     def test_component_literal_includes_ipc(self) -> None:
         """Component Literal in error_bus.py must include 'ipc'."""
-        import typing
         from backend.error_bus import KrabError
         from backend.error_codes import ERROR_REGISTRY
         from datetime import datetime, timezone

@@ -9,7 +9,6 @@ These tests verify:
 """
 
 import os
-import sys
 import unittest
 
 # ── Project root resolution ──────────────────────────────────────────────────

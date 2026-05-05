@@ -16,8 +16,7 @@ from __future__ import annotations
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch, call
-from typing import List
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 

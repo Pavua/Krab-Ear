@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -137,7 +137,6 @@ class SttLoadFailCallSiteTests(unittest.TestCase):
     def test_no_push_on_regular_exception(self) -> None:
         """Regular exception (non-OOM) does not push stt.load_fail."""
         engine = _make_engine_stub()
-        model_name = "mlx-community/whisper-base-mlx"
 
         # Simulate non-OOM OSError (e.g. file not found)
         err = OSError("File not found")
@@ -241,7 +240,6 @@ class DiarizationPipelineFailCallSiteTests(unittest.TestCase):
         engine._diarization_pipeline = None
         engine._diarization_load_error = None
 
-        import numpy as np
         audio = "/tmp/fake_audio.wav"  # string path — _resolve_audio_path needs this
 
         with patch.object(engine, "_resolve_audio_path", return_value="/tmp/fake_audio.wav"):
