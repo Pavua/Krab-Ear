@@ -421,6 +421,9 @@ class BackendService:
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
 
+        # Кэш последнего использованного STT движка (заполняется в _handle_stop_recording).
+        self._last_stt_engine: str | None = None
+
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
         self._bulk_tasks: dict[str, dict] = {}  # task_id -> {reprocessor, status, result}
@@ -880,6 +883,8 @@ class BackendService:
             "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
             "get_error_stats": self._error_reporter.handle_get_error_stats,  # счётчики ошибок по компоненту/типу/окну
+            "send_diagnostics_to_sentry": self._handle_send_diagnostics_to_sentry,  # экспортирует ring-буфер ошибок в Sentry (breadcrumbs + capture_message)
+            "get_memory_stats": self._handle_get_memory_stats,  # RSS/VSZ для backend/agent/worker процессов (psutil)
             "detect_language": self._handle_detect_language,  # эвристическое определение языка текста
             "get_usage_stats": self._handle_get_usage_stats,
             "convert_audio": self._handle_convert_audio,  # конвертация аудио в WAV
@@ -1657,6 +1662,9 @@ class BackendService:
             ))
 
         tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
+        # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
+        if tp.get("engine"):
+            self._last_stt_engine = str(tp["engine"])
         confidence = tp.get("confidence", 0.0)
         add_breadcrumb(
             category="transcription",
@@ -2093,6 +2101,7 @@ class BackendService:
                 "current_model": self.transcriber.engine.current_model,
                 "diarization_enabled": settings.DIARIZATION_ENABLED,
                 "diarization_device": diarization_device,
+                "last_engine": self._last_stt_engine,
             },
             "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
             "history": {
@@ -2125,6 +2134,73 @@ class BackendService:
         """Очищает ring-буфер и dedupe-состояние ErrorBus. Возвращает количество удалённых записей."""
         n = self._error_bus.clear()
         return {"cleared": n}
+
+    def _handle_send_diagnostics_to_sentry(self, params: dict) -> dict:
+        """Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.
+
+        Позволяет отлаживать shipped-сборки одним кликом из вкладки «Диагностика».
+        Возвращает {"ok": True, "sent_count": N} или {"ok": False, "reason": "..."}.
+        """
+        if self._error_bus is None:
+            return {"ok": False, "reason": "error_bus_not_initialized"}
+        try:
+            import sentry_sdk
+        except ImportError:
+            return {"ok": False, "reason": "sentry_sdk_not_available"}
+
+        items = self._error_bus.list_recent(limit=200)
+        if not items:
+            return {"ok": False, "reason": "no_errors_to_send"}
+
+        # Последние 20 — в breadcrumbs, остальные попадают в extras capture_message.
+        for err in items[-20:]:
+            sentry_sdk.add_breadcrumb(
+                category=err.component,
+                message=err.code,
+                level=err.severity,
+                data=err.context,
+            )
+
+        sentry_sdk.capture_message(
+            f"Diagnostics export: {len(items)} errors over recent window",
+            level="info",
+            tags={"phase": "diagnostics_export"},
+            extras={"error_count": len(items), "first_code": items[0].code if items else None},
+        )
+        sentry_sdk.flush(timeout=2.0)
+        return {"ok": True, "sent_count": len(items)}
+
+    def _handle_get_memory_stats(self, params: dict) -> dict:
+        """Возвращает RSS/VSZ для backend, agent и worker процессов через psutil.
+
+        Ищет процессы по подстроке cmdline: KrabEarAgent, KrabEar/backend/service.py, gigaam_worker.
+        Возвращает {"ok": True, "processes": [...]} или {"ok": False, "reason": "..."}.
+        """
+        try:
+            import psutil
+        except ImportError:
+            return {"ok": False, "reason": "psutil_not_installed"}
+
+        matches: list[dict] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
+            try:
+                cmd = " ".join(proc.info["cmdline"] or [])
+                if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
+                    mem = proc.info["memory_info"]
+                    kind = "agent" if "KrabEarAgent" in cmd else (
+                        "worker" if "gigaam_worker" in cmd else "backend"
+                    )
+                    matches.append({
+                        "pid": proc.info["pid"],
+                        "name": proc.info["name"],
+                        "rss_mb": round(mem.rss / 1024 / 1024, 1),
+                        "vsz_mb": round(mem.vms / 1024 / 1024, 1),
+                        "kind": kind,
+                    })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        return {"ok": True, "processes": matches}
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
