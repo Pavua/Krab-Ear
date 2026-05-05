@@ -19,7 +19,6 @@ Run:
 
 from __future__ import annotations
 
-import gc
 import os
 import stat
 import sys

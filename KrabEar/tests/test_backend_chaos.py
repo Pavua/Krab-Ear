@@ -311,7 +311,6 @@ class TestIPCUnknownMethodChaos(unittest.TestCase):
     @chaos
     def test_ipc_unknown_method_returns_error(self):
         """100 unknown methods in a row — server stays responsive throughout."""
-        from unittest.mock import MagicMock, patch
 
         # We test BackendService.handle_request directly with unknown methods.
         # This avoids needing a running IPC socket for the chaos variant.
@@ -372,7 +371,7 @@ class TestIPCOversizedRequestHandled(unittest.TestCase):
                 # If it succeeded, verify it's readable back
                 page, _ = store.get_history_page(cursor=None, limit=10)
                 self.assertGreater(len(page), 0)
-            except (OSError, MemoryError) as exc:
+            except (OSError, MemoryError):
                 # Acceptable: disk-full or OOM raised cleanly
                 pass
             except Exception as exc:
@@ -594,7 +593,7 @@ class TestEventBusSubscriberExceptionIsolated(unittest.TestCase):
 
         # Simulate a crashing consumer: the queue received the item; consumer crashes
         def crashing_consumer(q):
-            event = q.get_nowait()
+            q.get_nowait()
             raise RuntimeError("consumer exploded intentionally")
 
         bus_crash = EventBus()
@@ -622,7 +621,7 @@ class TestEventBusSubscriberExceptionIsolated(unittest.TestCase):
         from backend.event_bus import _QUEUE_MAXSIZE
         bus = EventBus()
 
-        q_slow = bus.subscribe()
+        bus.subscribe()
         q_fast = bus.subscribe()
 
         # Fill the slow queue to capacity

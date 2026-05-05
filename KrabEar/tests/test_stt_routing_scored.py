@@ -16,7 +16,7 @@ import sys
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Project root on sys.path for standalone discovery
 _HERE = os.path.dirname(os.path.abspath(__file__))
