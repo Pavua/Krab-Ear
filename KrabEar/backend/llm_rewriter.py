@@ -266,6 +266,7 @@ class LLMRewriter:
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
+        """Build HTTP headers for LM Studio requests.
 
         Includes ``Authorization: Bearer <token>`` only when api_key is set.
         Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
@@ -944,3 +945,139 @@ class LLMRewriter:
         Вызывается при завершении backend'а для корректного очищения ресурсов.
         """
         self._session.close()
+
+
+# ---------------------------------------------------------------------------
+# Fallback chain
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FallbackRewriteResult:
+    """Результат RewriterFallbackChain.rewrite(). Всегда возвращается, никогда не raises."""
+
+    ok: bool
+    text: "str | None"
+    model_used: "str | None"
+    fallback_used: bool
+    fallback_reason: "str | None"
+    latency_ms: "Optional[int]"
+
+    def text_or_fallback(self, fallback: str) -> str:
+        if self.ok and self.text:
+            return self.text
+        return fallback
+
+
+class RewriterFallbackChain:
+    """Пробует primary model -> fallback 1 -> fallback 2 -> raw text."""
+
+    def __init__(self, primary_rewriter, fallback_models: list):
+        self._primary = primary_rewriter
+        self._fallback_models = list(fallback_models)
+        self._primary_model = primary_rewriter._model
+        self._fallback_breakers = {
+            m: CircuitBreaker(
+                fail_threshold=primary_rewriter._circuit._fail_threshold,
+                initial_reset_sec=primary_rewriter._circuit._initial_reset_sec,
+                max_reset_sec=primary_rewriter._circuit._max_reset_sec,
+            )
+            for m in self._fallback_models
+        }
+        self._lock = threading.Lock()
+
+    def rewrite(self, text: str) -> "FallbackRewriteResult":
+        """Пробует модели по очереди. Контракт: НИКОГДА не raises."""
+        with _profiler.start_span("rewriter_fallback_chain"):
+            return self._rewrite_impl(text)
+
+    def _rewrite_impl(self, text: str) -> "FallbackRewriteResult":
+        try:
+            primary_result = self._primary.rewrite(text)
+        except Exception as exc:
+            logger.error("RewriterFallbackChain: unexpected exception from primary: %s", exc)
+            primary_result = LLMRewriteResult(
+                ok=False, text=None, fallback_reason="unexpected_exception", latency_ms=None
+            )
+
+        if primary_result.ok:
+            return FallbackRewriteResult(
+                ok=True, text=primary_result.text, model_used=self._primary_model,
+                fallback_used=False, fallback_reason=None, latency_ms=primary_result.latency_ms,
+            )
+
+        for model in self._fallback_models:
+            breaker = self._fallback_breakers[model]
+            if not breaker.allow_request():
+                logger.debug("RewriterFallbackChain: skipping %s — breaker open", model)
+                continue
+            result = self._call_fallback(text, model, breaker)
+            if result.ok:
+                self._push_fallback_used_error(model)
+                return result
+
+        last_reason = primary_result.fallback_reason or "unknown"
+        return FallbackRewriteResult(
+            ok=False, text=None, model_used=None, fallback_used=False,
+            fallback_reason="all_models_failed:{}".format(last_reason), latency_ms=None,
+        )
+
+    def _call_fallback(self, text, model, breaker):
+        with self._lock:
+            original_model = self._primary._model
+            original_circuit = self._primary._circuit
+            self._primary._model = model
+            self._primary._circuit = breaker
+            try:
+                result = self._primary.rewrite(text)
+            except Exception as exc:
+                logger.error("RewriterFallbackChain: unexpected exception from fallback %s: %s", model, exc)
+                result = LLMRewriteResult(ok=False, text=None, fallback_reason="unexpected_exception", latency_ms=None)
+            finally:
+                self._primary._model = original_model
+                self._primary._circuit = original_circuit
+
+        if result.ok:
+            return FallbackRewriteResult(
+                ok=True, text=result.text, model_used=model, fallback_used=True,
+                fallback_reason=None, latency_ms=result.latency_ms,
+            )
+        return FallbackRewriteResult(
+            ok=False, text=None, model_used=model, fallback_used=True,
+            fallback_reason=result.fallback_reason, latency_ms=result.latency_ms,
+        )
+
+    def _push_fallback_used_error(self, model_used):
+        error_bus = getattr(self._primary, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("rewriter.fallback_used", {})
+            err = KrabError(
+                severity="info", component="rewriter", code="rewriter.fallback_used",
+                message_user=entry.get("user_msg_ru", "Основная модель сбоит — переключились на резервную"),
+                message_debug="fell back to model={}".format(model_used),
+                timestamp=datetime.now(timezone.utc),
+                context={"fallback_model": model_used, "primary_model": self._primary_model},
+                actionable=False, action_id=None,
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("RewriterFallbackChain._push_fallback_used_error failed")
+
+    def status(self) -> dict:
+        return {
+            "primary": self._primary.status(),
+            "fallback_models": self._fallback_models,
+            "fallback_breakers": {m: b.state for m, b in self._fallback_breakers.items()},
+        }
+
+    def set_primary_model(self, model: str) -> None:
+        self._primary_model = model
+        self._primary.set_model(model)
+
+    @property
+    def primary(self):
+        return self._primary

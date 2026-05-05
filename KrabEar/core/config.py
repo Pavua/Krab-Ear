@@ -996,6 +996,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Ordered list of fallback model names to try when the primary model's circuit
     # breaker is open or the call fails. Each model has its own independent breaker.
     # Empty list = degrade straight to raw text (legacy behaviour).
+    "llm_model": "qwen3-4b-abliterated",
+    # --- LLM rewriter fallback chain ---
+    # Ordered list of fallback model names tried when primary fails.
+    # Empty list = degrade straight to raw text.
     "rewriter_fallback_chain": [
         "qwen3-4b-instruct",
         "llama-3.2-3b-instruct",
