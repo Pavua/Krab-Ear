@@ -154,6 +154,31 @@ class ErrorBusPushTests(unittest.TestCase):
         # total emits = 2 (paste.ax_denied + stt.empty_text)
         self.assertEqual(event_bus.emit.call_count, 2)
 
+    def test_push_dedupe_with_canonical_error_registry_entry(self):
+        """Registry value may be the canonical ERROR_REGISTRY _Entry dict
+        (with ``dedupe_seconds``) rather than a flat float — both formats work.
+
+        Regression: KRAB-EAR-BACKEND-7/8 — push() raised TypeError when the
+        whole entry dict was compared to a numeric monotonic delta.
+        """
+        registry = {
+            "rewriter.timeout": {
+                "user_msg_ru": "...",
+                "actionable": True,
+                "action_id": "disable_rewriter",
+                "action_label": "Выключить rewriter",
+                "severity": "warn",
+                "dedupe_seconds": 60,
+            }
+        }
+        bus, event_bus = self._make_bus(registry=registry, default_dedupe_window_sec=5.0)
+
+        first = bus.push(_make_err(code="rewriter.timeout"))
+        second = bus.push(_make_err(code="rewriter.timeout"))
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(event_bus.emit.call_count, 1)
+
     def test_ring_buffer_caps_at_max(self):
         """Ring buffer must not grow beyond ring_buffer_size."""
         bus, _ = self._make_bus(ring_buffer_size=5, default_dedupe_window_sec=0.0)
