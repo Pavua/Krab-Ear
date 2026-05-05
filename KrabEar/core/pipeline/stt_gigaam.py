@@ -402,27 +402,40 @@ class GigaAMAdapter:
 # ---------------------------------------------------------------------------
 
 
-def detect_subprocess_oom(returncode: int, stderr: str) -> bool:
-    """Return True if subprocess exit indicates OOM/SIGABRT.
+def detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | None]:
+    """Return (is_oom, signal_name) for subprocess exit.
+
+    is_oom: True if returncode or stderr indicates OOM/fatal MLX crash.
+    signal_name: Human-readable signal name (e.g. 'SIGABRT', 'SIGKILL',
+                 'SIGSEGV', 'SIGBUS') OR 'stderr_oom_pattern' OR None.
 
     Heuristics:
     - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
     - returncode == -9 (SIGKILL) — kernel OOM killer
+    - returncode == -10 (SIGBUS) — memory alignment fault
+    - returncode == -11 (SIGSEGV) — MLX/Metal corruption segfault
     - stderr contains "out of memory" / "MallocStackLogging" / "OutOfMemoryError"
 
     Public so it can be imported by tests without instantiating any class.
     """
-    if returncode in (-6, -9):
-        return True
+    _SIGNAL_NAMES: dict[int, str] = {
+        -6: "SIGABRT",
+        -9: "SIGKILL",
+        -10: "SIGBUS",
+        -11: "SIGSEGV",
+    }
+    if returncode in _SIGNAL_NAMES:
+        return (True, _SIGNAL_NAMES[returncode])
     if stderr:
         low = stderr.lower()
-        return any(s in low for s in (
+        if any(s in low for s in (
             "out of memory",
             "outofmemoryerror",
             "metal out of memory",
             "mallocstacklogging",
-        ))
-    return False
+        )):
+            return (True, "stderr_oom_pattern")
+    return (False, None)
 
 
 class _GigaAMSubprocessSession:
@@ -619,7 +632,8 @@ class _GigaAMSubprocessSession:
                     stderr_text = self._proc.stderr.read() or ""
             except Exception:
                 pass
-            if detect_subprocess_oom(rc, stderr_text):
+            is_oom, _signal_name = detect_subprocess_oom(rc, stderr_text)
+            if is_oom:
                 cb = self.oom_callback
                 if callable(cb):
                     try:

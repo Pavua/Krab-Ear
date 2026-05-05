@@ -35,66 +35,113 @@ from core.pipeline.stt_gigaam import detect_subprocess_oom, _GigaAMSubprocessSes
 # ---------------------------------------------------------------------------
 
 class DetectSubprocessOomTests(unittest.TestCase):
-    """Unit tests for detect_subprocess_oom heuristic."""
+    """Unit tests for detect_subprocess_oom heuristic.
+
+    Function now returns tuple[bool, str | None] — (is_oom, signal_name).
+    """
 
     def test_returncode_minus_6_detected_as_oom(self) -> None:
-        """SIGABRT (-6) must be detected as OOM."""
-        self.assertTrue(detect_subprocess_oom(-6, ""))
+        """SIGABRT (-6) must be detected as OOM with signal name SIGABRT."""
+        is_oom, signal_name = detect_subprocess_oom(-6, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGABRT")
 
     def test_returncode_minus_9_detected_as_oom(self) -> None:
-        """SIGKILL (-9) must be detected as OOM."""
-        self.assertTrue(detect_subprocess_oom(-9, ""))
+        """SIGKILL (-9) must be detected as OOM with signal name SIGKILL."""
+        is_oom, signal_name = detect_subprocess_oom(-9, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGKILL")
 
-    def test_returncode_zero_not_oom(self) -> None:
-        """Clean exit (0) must not be detected as OOM."""
-        self.assertFalse(detect_subprocess_oom(0, ""))
+    def test_returncode_minus_11_detected_as_oom_with_sigsegv(self) -> None:
+        """SIGSEGV (-11) must be detected as OOM with signal name SIGSEGV."""
+        is_oom, signal_name = detect_subprocess_oom(-11, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGSEGV")
+
+    def test_returncode_minus_10_detected_as_oom_with_sigbus(self) -> None:
+        """SIGBUS (-10) must be detected as OOM with signal name SIGBUS."""
+        is_oom, signal_name = detect_subprocess_oom(-10, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGBUS")
+
+    def test_returncode_zero_returns_false_with_none(self) -> None:
+        """Clean exit (0) must return (False, None)."""
+        is_oom, signal_name = detect_subprocess_oom(0, "")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_returncode_1_not_oom(self) -> None:
         """Normal error exit (1) must not be detected as OOM."""
-        self.assertFalse(detect_subprocess_oom(1, ""))
+        is_oom, signal_name = detect_subprocess_oom(1, "")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_returncode_minus_15_not_oom(self) -> None:
         """SIGTERM (-15) is not OOM (graceful termination)."""
-        self.assertFalse(detect_subprocess_oom(-15, ""))
+        is_oom, signal_name = detect_subprocess_oom(-15, "")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_stderr_out_of_memory_detected(self) -> None:
         """stderr containing 'out of memory' must be detected as OOM."""
-        self.assertTrue(detect_subprocess_oom(1, "Python: out of memory\n"))
+        is_oom, signal_name = detect_subprocess_oom(1, "Python: out of memory\n")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_stderr_outofmemoryerror_detected(self) -> None:
         """OutOfMemoryError in stderr must be detected as OOM."""
-        self.assertTrue(detect_subprocess_oom(1, "OutOfMemoryError: torch.mps"))
+        is_oom, signal_name = detect_subprocess_oom(1, "OutOfMemoryError: torch.mps")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_stderr_metal_out_of_memory_detected(self) -> None:
         """Metal out of memory in stderr must be detected as OOM."""
-        self.assertTrue(detect_subprocess_oom(1, "Metal out of memory: allocation failed"))
+        is_oom, signal_name = detect_subprocess_oom(1, "Metal out of memory: allocation failed")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_stderr_mallocstacklogging_detected(self) -> None:
         """MallocStackLogging in stderr (macOS kernel OOM trace) must be detected."""
-        self.assertTrue(detect_subprocess_oom(1, "MallocStackLogging: recording stacks"))
+        is_oom, signal_name = detect_subprocess_oom(1, "MallocStackLogging: recording stacks")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
+
+    def test_stderr_oom_returns_true_with_stderr_oom_pattern(self) -> None:
+        """Any OOM stderr pattern must return (True, 'stderr_oom_pattern')."""
+        is_oom, signal_name = detect_subprocess_oom(1, "OUT OF MEMORY")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_stderr_case_insensitive(self) -> None:
         """Pattern matching must be case-insensitive."""
-        self.assertTrue(detect_subprocess_oom(1, "OUT OF MEMORY"))
-        self.assertTrue(detect_subprocess_oom(1, "Metal Out Of Memory"))
+        is_oom1, _ = detect_subprocess_oom(1, "OUT OF MEMORY")
+        is_oom2, _ = detect_subprocess_oom(1, "Metal Out Of Memory")
+        self.assertTrue(is_oom1)
+        self.assertTrue(is_oom2)
 
     def test_stderr_normal_exit_not_oom(self) -> None:
         """Normal stderr content must not trigger OOM detection."""
-        self.assertFalse(detect_subprocess_oom(0, "gigaam_worker: started\ngigaam_worker: exiting\n"))
+        is_oom, signal_name = detect_subprocess_oom(0, "gigaam_worker: started\ngigaam_worker: exiting\n")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_empty_stderr_no_oom_for_normal_exit(self) -> None:
         """Empty stderr with normal exit must not trigger OOM."""
-        self.assertFalse(detect_subprocess_oom(0, ""))
+        is_oom, signal_name = detect_subprocess_oom(0, "")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_none_like_empty_stderr_no_crash(self) -> None:
         """Empty string stderr does not crash the function."""
-        # Should return False for code 1 + empty stderr
-        result = detect_subprocess_oom(1, "")
-        self.assertFalse(result)
+        is_oom, signal_name = detect_subprocess_oom(1, "")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
     def test_returncode_minus_6_takes_priority_over_empty_stderr(self) -> None:
         """returncode -6 must trigger OOM even without OOM keywords in stderr."""
-        self.assertTrue(detect_subprocess_oom(-6, "gigaam_worker: started\n"))
+        is_oom, signal_name = detect_subprocess_oom(-6, "gigaam_worker: started\n")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGABRT")
 
 
 # ---------------------------------------------------------------------------
@@ -102,19 +149,27 @@ class DetectSubprocessOomTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class AudioEngineDetectOomStaticTests(unittest.TestCase):
-    """AudioEngine._detect_subprocess_oom must delegate to same logic."""
+    """AudioEngine._detect_subprocess_oom must delegate to same logic (returns tuple)."""
 
     def test_static_method_minus_6(self) -> None:
-        self.assertTrue(AudioEngine._detect_subprocess_oom(-6, ""))
+        is_oom, signal_name = AudioEngine._detect_subprocess_oom(-6, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGABRT")
 
     def test_static_method_minus_9(self) -> None:
-        self.assertTrue(AudioEngine._detect_subprocess_oom(-9, ""))
+        is_oom, signal_name = AudioEngine._detect_subprocess_oom(-9, "")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "SIGKILL")
 
     def test_static_method_stderr_pattern(self) -> None:
-        self.assertTrue(AudioEngine._detect_subprocess_oom(1, "out of memory: Metal"))
+        is_oom, signal_name = AudioEngine._detect_subprocess_oom(1, "out of memory: Metal")
+        self.assertTrue(is_oom)
+        self.assertEqual(signal_name, "stderr_oom_pattern")
 
     def test_static_method_normal_exit(self) -> None:
-        self.assertFalse(AudioEngine._detect_subprocess_oom(0, "clean exit"))
+        is_oom, signal_name = AudioEngine._detect_subprocess_oom(0, "clean exit")
+        self.assertFalse(is_oom)
+        self.assertIsNone(signal_name)
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +207,13 @@ class PushMlxOomForWorkerTests(unittest.TestCase):
         self.assertEqual(pushed.severity, "critical")
 
     def test_debug_message_contains_name_and_rc(self) -> None:
-        """message_debug must contain worker name and returncode."""
+        """message_debug must contain worker name, returncode, and signal name."""
         engine = _make_engine_stub()
         engine._push_mlx_oom_for_worker("gigaam_worker", -6, "stderr output")
         pushed = engine._error_bus.push.call_args[0][0]
         self.assertIn("gigaam_worker", pushed.message_debug)
         self.assertIn("-6", pushed.message_debug)
+        self.assertIn("SIGABRT", pushed.message_debug)
 
     def test_no_bus_does_not_raise(self) -> None:
         """_push_mlx_oom_for_worker must not raise when no _error_bus."""
