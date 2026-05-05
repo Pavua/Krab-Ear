@@ -810,6 +810,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # D.10a runtime toggle: юзер может включать/выключать LLM rewriter через
     # IPC update_settings без рестарта. Дефолт False — safety.
     "llm_rewrite_enabled": False,
+    # --- LM Studio Bearer token (LM Studio v0.3.x+ requires auth by default) ---
+    # Empty = no Authorization header (backward-compat with LM Studio < 0.3).
+    # Set via IPC: set_settings {"lm_studio_api_key": "lm-studio-..."}
+    # or env var: KRAB_EAR_LLM_API_KEY=lm-studio-...
+    "lm_studio_api_key": "",
     # Punctuation-only LLM pass: минимальный pass только для запятых/точек.
     # Opt-in: False по умолчанию (burn-in период). Word-set guard = безопасность.
     "stt_punctuation_llm_pass_enabled": False,

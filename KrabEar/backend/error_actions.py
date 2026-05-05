@@ -91,6 +91,22 @@ def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
     """
     settings_service.handle_set_settings({"llm_model": "qwen3-4b-abliterated"})
     return {"executed": True, "reason": None, "side_effect": "settings_updated"}
+def _open_lm_studio_settings(*, settings_service, **kwargs) -> dict:
+    """Return a hint to the Swift agent to navigate to LM Studio API key settings.
+
+    The Swift agent picks up side_effect='swift_focus_lm_studio_api_key' and
+    highlights the LM Studio API Key field in Settings tab.
+    As a convenience, also attempt to open LM Studio if it is installed.
+    """
+    try:
+        subprocess.run(["open", "-a", "LM Studio"], check=False)
+    except Exception:
+        pass
+    return {
+        "executed": True,
+        "reason": None,
+        "side_effect": "swift_focus_lm_studio_api_key",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +123,7 @@ ACTION_HANDLERS: dict[str, Callable] = {
     "kill_lm_studio_via_telegram": _kill_lm_studio_via_telegram,
     "open_log_file": _open_log_file,
     "switch_to_stable_rewriter": _switch_to_stable_rewriter,
+    "open_lm_studio_settings": _open_lm_studio_settings,
 }
 
 

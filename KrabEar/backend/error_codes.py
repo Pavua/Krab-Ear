@@ -232,4 +232,18 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 300,
     },
+
+    # LM Studio v0.3.x+ enforces Bearer token auth on /v1/* endpoints.
+    # Without a token, all requests get 401 → silently degrade to raw text.
+    "rewriter.unauthorized": {
+        "user_msg_ru": (
+            "LM Studio требует API token. "
+            "Открой Settings → LM Studio API Key, или отключи auth в LM Studio Server Settings."
+        ),
+        "actionable": True,
+        "action_id": "open_lm_studio_settings",
+        "action_label": "Открыть настройки LM Studio",
+        "severity": "error",
+        "dedupe_seconds": 60,
+    },
 }

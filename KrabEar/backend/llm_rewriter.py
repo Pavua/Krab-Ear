@@ -264,6 +264,25 @@ class LLMRewriter:
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
 
+    def _lm_studio_headers(self) -> dict:
+        """Build HTTP headers for LM Studio POST requests.
+
+        Includes ``Authorization: Bearer <token>`` only when api_key is set.
+        Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
+        that did not require authentication).
+        """
+        headers: dict = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    def _lm_studio_get_headers(self) -> dict:
+        """Build HTTP headers for GET requests (no Content-Type needed)."""
+        headers: dict = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
     def _push_error(self, code: str, message_debug: str, severity: str = "warn") -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
         error_bus = getattr(self, "_error_bus", None)
@@ -369,10 +388,7 @@ class LLMRewriter:
             # между thinking и ответом, что обрезало content до пустоты.
             "stop": ["Исправленный текст:", "Исходный текст:"],
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = self._lm_studio_headers()
 
         # 4. HTTP call with timing
         start = time.monotonic()
@@ -466,6 +482,23 @@ class LLMRewriter:
             latency_ms = int((time.monotonic() - start) * 1000)
             self._last_latency_ms = latency_ms
 
+        if response.status_code == 401:
+            self._circuit.record_failure()
+            self._last_error = "unauthorized"
+            logger.warning(
+                "LLM rewriter failure: kind=unauthorized model=%s base_url=%s "
+                "— LM Studio requires API token (v0.3+). Set LM_STUDIO_API_KEY in settings.",
+                self._model, self._base_url,
+            )
+            self._push_error(
+                "rewriter.unauthorized",
+                "HTTP 401: LM Studio requires Bearer token. Set lm_studio_api_key in settings "
+                "or disable authentication in LM Studio Server Settings.",
+                severity="error",
+            )
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="unauthorized", latency_ms=latency_ms
+            )
         if response.status_code != 200:
             self._circuit.record_failure()
             self._last_error = f"http_{response.status_code}"
@@ -608,10 +641,7 @@ class LLMRewriter:
             "max_tokens": self._estimate_max_tokens(cleaned_input),
             "stream": False,
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = self._lm_studio_headers()
 
         start = time.monotonic()
         try:
@@ -707,10 +737,7 @@ class LLMRewriter:
             "max_tokens": 512,
             "stream": False,
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = self._lm_studio_headers()
 
         start = time.monotonic()
         try:
@@ -801,10 +828,7 @@ class LLMRewriter:
                 "max_tokens": 1,
                 "stream": False,
             }
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._api_key}",
-            }
+            headers = self._lm_studio_headers()
             response = self._session.post(
                 f"{self._base_url}/chat/completions",
                 json=payload,
@@ -854,7 +878,7 @@ class LLMRewriter:
         try:
             response = self._session.get(
                 f"{self._base_url}/models",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._lm_studio_get_headers(),
                 timeout=5.0,  # short timeout — /models is fast metadata call
             )
             if response.status_code != 200:
@@ -897,7 +921,7 @@ class LLMRewriter:
         try:
             response = self._session.get(
                 f"{self._base_url}/models",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._lm_studio_get_headers(),
                 timeout=self._timeout,
             )
             return response.status_code == 200
