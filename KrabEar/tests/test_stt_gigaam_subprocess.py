@@ -36,6 +36,7 @@ class _FakePopen:
         # stdout_responses — список строк (по одной на каждый readline()).
         self._responses = list(stdout_responses)
         self._poll_value = poll_value
+        self.pid = 12345
         self.stdin = io.StringIO()
         self.stdin.close = self._close_stdin  # noqa: метод stub
         self._stdin_closed = False
