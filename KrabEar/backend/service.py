@@ -1016,6 +1016,8 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
+            # --- LM Studio model discovery ---
+            "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
         }
 
         handler = handlers.get(method)
@@ -2355,6 +2357,38 @@ class BackendService:
                 bullets = chunks[:max_points]
             summary = head
         return {"mode": mode, "summary": summary, "bullets": bullets}
+
+    def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список моделей доступных в LM Studio через /v1/models.
+
+        Используется GUI для динамического заполнения dropdown'а выбора LLM-модели.
+        При недоступности LM Studio возвращает пустой список с описанием ошибки.
+        Таймаут 3 секунды — не блокирует UI.
+        """
+        try:
+            import requests as _requests
+            cached = self._settings_svc.cached_settings()
+            base_url = str(cached.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
+            api_key = str(cached.get("llm_api_key", ""))
+            headers: dict[str, str] = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = _requests.get(
+                f"{base_url}/models",
+                headers=headers,
+                timeout=3,
+            )
+            if resp.status_code != 200:
+                return {"models": [], "error": f"http_{resp.status_code}"}
+            data = resp.json()
+            ids = [
+                item.get("id")
+                for item in data.get("data", [])
+                if item.get("id")
+            ]
+            return {"models": sorted(ids), "error": None}
+        except Exception as exc:
+            return {"models": [], "error": str(exc)}
 
     def _generate_summary(self, text: str) -> str | None:
         """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""

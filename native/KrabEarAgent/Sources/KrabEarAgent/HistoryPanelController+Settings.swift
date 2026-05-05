@@ -173,7 +173,86 @@ extension HistoryPanelController {
     @objc func onLlmModelChanged() {
         guard !isSyncingSettings else { return }
         guard let selectedModel = llmModelSelector.titleOfSelectedItem else { return }
+        // Skip separator items (they have no meaningful title content)
+        if selectedModel.trimmingCharacters(in: .whitespaces).isEmpty { return }
         applySettingsPatch(["llm_model": selectedModel])
+    }
+
+    // MARK: - LLM Model Dropdown Population
+
+    /// Проверенные / рекомендованные модели — всегда наверху dropdown.
+    /// Обновлять по результатам bench-сессий (см. комментарии в HistoryPanelController.swift).
+    private static let recommendedRewriterModels: [String] = [
+        "gemma-4-e4b-it-mlx",
+        "Qwen3-8B-MLX-4bit",
+        "huihui-qwen3-14b-abl-v2",
+        "qwen3.5-9b@6bit",
+        "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+        "aya-expanse-8b",
+        "Qwen3.5-27B-4bit",
+        "Aya-Expanse-32B-abliterated",
+        "qwen2.5-14b-uncensored-mlx",
+        "Hermes-3-Llama-8B",
+        "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+    ]
+
+    /// Заполняет dropdown llmModelSelector:
+    /// 1. Рекомендованные модели наверху.
+    /// 2. Разделитель.
+    /// 3. Дополнительные модели из LM Studio (не вошедшие в рекомендованные).
+    /// 4. Гарантирует наличие currentModel в списке (даже если пользовательская).
+    @MainActor
+    func populateLLMModelDropdown(currentModel: String, lmStudioModels: [String]) {
+        isSyncingSettings = true
+        defer { isSyncingSettings = false }
+
+        llmModelSelector.removeAllItems()
+
+        // 1. Recommended at top
+        llmModelSelector.addItems(withTitles: HistoryPanelController.recommendedRewriterModels)
+
+        // 2. Extras from LM Studio not already in recommended list
+        let extras = lmStudioModels.filter {
+            !HistoryPanelController.recommendedRewriterModels.contains($0)
+        }
+        if !extras.isEmpty {
+            let separator = NSMenuItem.separator()
+            llmModelSelector.menu?.addItem(separator)
+            llmModelSelector.addItems(withTitles: extras)
+        }
+
+        // 3. Ensure currentModel is always selectable (e.g. user-typed custom value)
+        let allTitles = llmModelSelector.itemTitles
+        if !currentModel.isEmpty && !allTitles.contains(currentModel) {
+            if extras.isEmpty {
+                // No extras section yet — add separator before custom model
+                let separator = NSMenuItem.separator()
+                llmModelSelector.menu?.addItem(separator)
+            }
+            llmModelSelector.addItem(withTitle: currentModel)
+        }
+
+        llmModelSelector.selectItem(withTitle: currentModel)
+    }
+
+    /// Асинхронно запрашивает список моделей из LM Studio через IPC list_llm_models,
+    /// затем заполняет dropdown на main thread. Graceful fallback если LM Studio недоступен.
+    func fetchAndPopulateLLMModels(currentModel: String) {
+        let ipc = ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let lmModels: [String]
+            do {
+                let resp = try ipc.call(method: "list_llm_models", params: [:])
+                let result = resp["result"] as? [String: Any]
+                lmModels = result?["models"] as? [String] ?? []
+            } catch {
+                lmModels = []
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.populateLLMModelDropdown(currentModel: currentModel, lmStudioModels: lmModels)
+            }
+        }
     }
 
     @objc func onOverlayOpacityChanged() {
@@ -425,9 +504,19 @@ extension HistoryPanelController {
         }
 
         llmRewriteButton.state = settings.llmRewriteEnabled ? .on : .off
-        if let idx = llmModelSelector.itemTitles.firstIndex(of: settings.llmModel) {
-            llmModelSelector.selectItem(at: idx)
+        // Ensure current model is always visible; fetch LM Studio models async to expand dropdown.
+        let currentModel = settings.llmModel
+        if llmModelSelector.itemTitles.contains(currentModel) {
+            llmModelSelector.selectItem(withTitle: currentModel)
+        } else if !currentModel.isEmpty {
+            // Model not in dropdown yet — add it immediately so the user sees it selected,
+            // async fetch will rebuild the full list shortly.
+            if !llmModelSelector.itemTitles.contains(currentModel) {
+                llmModelSelector.addItem(withTitle: currentModel)
+            }
+            llmModelSelector.selectItem(withTitle: currentModel)
         }
+        fetchAndPopulateLLMModels(currentModel: currentModel)
         llmModelSelector.isEnabled = settings.llmRewriteEnabled
         glossaryStatusLabel.stringValue = "Глоссарий: \(settings.translationGlossary.count)"
 
