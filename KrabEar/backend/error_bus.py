@@ -20,7 +20,7 @@ logger = logging.getLogger("KrabEar.Backend.ErrorBus")
 Severity = Literal["info", "warn", "error", "critical"]
 Component = Literal[
     "stt", "rewriter", "paste", "diarization",
-    "translation", "mlx", "history", "vocabulary", "hotkey",
+    "translation", "mlx", "history", "vocabulary", "hotkey", "ipc",
 ]
 
 
