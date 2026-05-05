@@ -476,6 +476,18 @@ class BackendService:
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
+        # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
+        if settings.STT_AUTO_SEED_HOTWORDS:
+            try:
+                from backend.default_hotwords import seed_hotwords as _seed_hotwords
+                _seeded_count = _seed_hotwords(self._settings_svc, only_if_empty=True)
+                if _seeded_count > 0:
+                    logger.info(
+                        "STT hotwords: авто-сид %d дефолтных брендов/терминов", _seeded_count
+                    )
+            except Exception:
+                logger.exception("STT hotwords: ошибка авто-сида")
+
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
         if not settings.LLM_ENABLED:
@@ -1107,6 +1119,8 @@ class BackendService:
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- Default STT hotwords seed ---
+            "seed_default_hotwords": self._handle_seed_default_hotwords,  # заполнить hotwords дефолтным списком брендов/терминов
         }
 
         handler = handlers.get(method)
@@ -5247,7 +5261,35 @@ end tell'''
         current: list[str] = s.get("stt_hotwords", [])
         if not isinstance(current, list):
             current = []
-        return {"hotwords": current, "enabled": True}
+        return {"hotwords": sorted(current), "enabled": True}
+
+    def _handle_seed_default_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Заполняет STT hotwords дефолтным списком брендов/терминов.
+
+        Параметры:
+          - category (str, optional): фильтр по категории
+            ("ai", "dev_tools", "languages", "formats", "infra", "apple", "common").
+            Отсутствие параметра → все категории.
+          - only_if_empty (bool, optional): по умолчанию True.
+            True = добавлять только если список полностью пуст.
+            False = мерж поверх существующего списка (без дублей).
+
+        Возвращает: {ok: bool, added_count: int, skipped: bool}
+        """
+        from backend.default_hotwords import seed_hotwords as _seed_hotwords
+
+        category: str | None = params.get("category") or None
+        only_if_empty: bool = bool(params.get("only_if_empty", True))
+
+        added = _seed_hotwords(
+            self._settings_svc,
+            category=category,
+            only_if_empty=only_if_empty,
+        )
+        skipped = added == 0 and only_if_empty and bool(
+            self._settings_svc.cached_settings().get("stt_hotwords", [])
+        )
+        return {"ok": True, "added_count": added, "skipped": skipped}
 
     # ── Auto-Glossary IPC handlers ───────────────────────────────────────────
 
