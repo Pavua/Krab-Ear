@@ -141,7 +141,10 @@ class ErrorBus:
         warn_window_sec: float = 30.0,
     ) -> None:
         self._event_bus = event_bus
-        self._registry: dict[str, float] = registry
+        # Registry value may be a scalar window (legacy) or an _Entry-shaped
+        # dict from backend.error_codes — both are accepted by
+        # ``_dedupe_window_for``.
+        self._registry: dict = registry
         self._sentry = sentry_client
         self._default_dedupe_window_sec = default_dedupe_window_sec
         self._ring: deque[KrabError] = deque(maxlen=ring_buffer_size)
@@ -198,8 +201,20 @@ class ErrorBus:
     # ------------------------------------------------------------------
 
     def _dedupe_window_for(self, code: str) -> float:
-        """Return the dedupe window (seconds) for *code*, falling back to default."""
-        return self._registry.get(code, self._default_dedupe_window_sec)
+        """Return the dedupe window (seconds) for *code*, falling back to default.
+
+        Accepts two registry shapes:
+        - Flat ``{code: seconds}`` (legacy / test fixtures).
+        - Canonical ``ERROR_REGISTRY`` from ``backend.error_codes`` where each
+          entry is a ``_Entry`` TypedDict containing ``dedupe_seconds``.
+        """
+        entry = self._registry.get(code)
+        if entry is None:
+            return self._default_dedupe_window_sec
+        if isinstance(entry, dict):
+            value = entry.get("dedupe_seconds", self._default_dedupe_window_sec)
+            return float(value)
+        return float(entry)
 
     def _route_to_sentry(self, err: KrabError) -> None:
         """Route error to Sentry according to severity tier.
