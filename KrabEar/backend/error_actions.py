@@ -82,8 +82,19 @@ def _open_log_file(*, settings_service, **kwargs) -> dict:
     return _open_url(log_path)
 
 
+def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
+    """Switch LLM rewriter model to the historically stable qwen3-4b-abliterated.
+
+    Triggered by the 'rewriter.channel_error' actionable toast — gemma-4-e4b-it-mlx
+    (vision-capable MLX) emits tool_calls JSON or triggers mlx_lm UnboundLocalError
+    mid-stream, causing LM Studio 'Channel Error' within 1 second of inference start.
+    """
+    settings_service.handle_set_settings({"llm_model": "qwen3-4b-abliterated"})
+    return {"executed": True, "reason": None, "side_effect": "settings_updated"}
+
+
 # ---------------------------------------------------------------------------
-# Dispatch table (8 entries)
+# Dispatch table (9 entries)
 # ---------------------------------------------------------------------------
 
 ACTION_HANDLERS: dict[str, Callable] = {
@@ -95,6 +106,7 @@ ACTION_HANDLERS: dict[str, Callable] = {
     "retry_history_save": _retry_history_save,
     "kill_lm_studio_via_telegram": _kill_lm_studio_via_telegram,
     "open_log_file": _open_log_file,
+    "switch_to_stable_rewriter": _switch_to_stable_rewriter,
 }
 
 

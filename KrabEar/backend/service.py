@@ -182,9 +182,16 @@ class BackendService:
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
-        # Fire background warmup if rewriter is enabled — reduces first-call latency
-        if self._llm_rewriter is not None:
-            threading.Thread(target=self._llm_rewriter.warmup, daemon=True).start()
+        # Fire background warmup if enabled in settings — pre-loads model before first dictation.
+        # Uses rewriter_warmup_timeout_sec setting (default 15 s) as the probe timeout.
+        _warmup_enabled = DEFAULT_SETTINGS.get("rewriter_warmup_on_startup", True)
+        _warmup_timeout = float(DEFAULT_SETTINGS.get("rewriter_warmup_timeout_sec", 15))
+        if self._llm_rewriter is not None and _warmup_enabled:
+            threading.Thread(
+                target=self._llm_rewriter.warmup_sync,
+                kwargs={"timeout_sec": _warmup_timeout},
+                daemon=True,
+            ).start()
         self._action_items_extractor = self._init_action_items_extractor()
 
         if transcriber is None:
@@ -203,6 +210,19 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+
+        # Best-effort STT warmup — pre-loads Whisper model in background before
+        # first dictation, eliminating the 1–3 s cold-start latency the user feels
+        # as "первая диктовка медленнее остальных".
+        # Opt-out: set stt_warmup_on_startup=False in settings.
+        _stt_warmup_enabled = DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
+        if _stt_warmup_enabled and hasattr(self.transcriber, "engine"):
+            threading.Thread(
+                target=self.transcriber.engine.warmup,
+                daemon=True,
+                name="stt-warmup",
+            ).start()
+            logger.info("STT startup warmup запущен в background thread")
 
         # Phase B.1 — error bus + active LLM probe
         from backend.error_bus import ErrorBus
@@ -892,6 +912,8 @@ class BackendService:
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
+            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
+            "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
             "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
@@ -2834,9 +2856,18 @@ class BackendService:
                 for item in data.get("data", [])
                 if item.get("id")
             ]
-            return {"models": sorted(ids), "error": None}
+            recommended_models = [
+                "qwen3-4b-abliterated",
+                "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+                "qwen3-8b-abliterated",
+            ]
+            return {
+                "models": sorted(ids),
+                "recommended_models": recommended_models,
+                "error": None,
+            }
         except Exception as exc:
-            return {"models": [], "error": str(exc)}
+            return {"models": [], "recommended_models": [], "error": str(exc)}
 
     def _handle_replace_word_in_last_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
         """Заменяет слово в последней (или указанной) записи истории без перезаписи.

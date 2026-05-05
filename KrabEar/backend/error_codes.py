@@ -109,6 +109,22 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "info",
         "dedupe_seconds": 600,
     },
+    "rewriter.channel_error": {
+        "user_msg_ru": "LM Studio: Channel Error — модель крашится при инференсе. Раскачка circuit breaker.",
+        "actionable": True,
+        "action_id": "switch_to_stable_rewriter",
+        "action_label": "Переключить на qwen3-4b-abliterated",
+        "severity": "warn",
+        "dedupe_seconds": 30,
+    },
+    "rewriter.fallback_used": {
+        "user_msg_ru": "Основная модель сбоит — переключились на резервную",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "info",
+        "dedupe_seconds": 300,
+    },
 
     # ── Layer: stt ───────────────────────────────────────────────
     "stt.load_fail": {
