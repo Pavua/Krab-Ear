@@ -136,3 +136,15 @@ class TestMainScript:
             )
             assert result.returncode == 2
             assert "CLAUDE.md not found" in result.stderr
+
+    def test_claude_md_zero_drift_after_refresh(self):
+        """CLAUDE.md must be drift-free after Phase B+C refresh (regression gate)."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"CLAUDE.md drift detected:\n{result.stderr}"
+        )

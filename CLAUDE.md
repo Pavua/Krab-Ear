@@ -41,14 +41,14 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
 - **`backend/settings_service.py`** — `SettingsService`: settings CRUD, profile presets, 5s TTL cache.
 - **`backend/recorder.py`** — `AudioRecorder`: thread-safe start/stop audio capture via `sounddevice`.
-- **`backend/state_store.py`** — `StateStore`: append-only NDJSON history with tombstone deletes, file-lock, and compaction. Settings stored as `settings.json`.
+- **`backend/state_store.py`** — `StateStore`: append-only NDJSON history with tombstone deletes, file-lock, and compaction. Settings stored as settings.json (runtime data file, not in repo).
 - **`backend/transcriber.py`** — Thin wrapper over `AudioEngine` for profile/vocabulary management.
 - **`backend/translator.py`** — Offline-first translator (RU↔ES, EN→RU, Auto, Bilingual modes) with in-memory cache.
 - **`backend/llm_rewriter.py`** — LLM post-processing via LM Studio (qwen3-4b-abliterated). CircuitBreaker + chatbot detection + length ratio guard.
 - **`backend/rest_server.py`** — Flask REST API (port 5005) for HTTP-based transcription and metrics. Separate from the IPC service.
 - **`backend/event_bus.py`** — In-process pub/sub EventBus with SSE streaming. Supports both untyped `emit(str, dict)` and typed `emit_typed(EventType, BaseModel)`.
 - **`backend/metrics_collector.py`** — Thread-safe sliding-window metrics (latency percentiles, confidence).
-- **`backend/obsidian_sync.py`** — `ObsidianSyncManager`: sync transcriptions to an Obsidian vault as .md files with YAML frontmatter; incremental (timestamp-based) and forced modes; state persisted in `obsidian_sync.json`.
+- **`backend/obsidian_sync.py`** — `ObsidianSyncManager`: sync transcriptions to an Obsidian vault as .md files with YAML frontmatter; incremental (timestamp-based) and forced modes; state persisted in obsidian_sync.json (runtime data file, not in repo).
 - **`backend/sentiment_trends.py`** — `SentimentTrendAnalyzer`: daily sentiment aggregation over history items using `EmotionDetector`; linear-regression mood trend (`improving`/`stable`/`declining`).
 - **`backend/collection_manager.py`** — `CollectionManager`: named collections of history items; CRUD + bulk operations.
 - **`backend/daily_digest.py`** — `DailyDigestGenerator`: daily summary digest of transcription activity.
@@ -179,6 +179,36 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`SingleInstanceGuard.swift`** — kills duplicate `KrabEarAgent` processes on launch; prevents double-paste and double-hotkey issues.
 - **`WakeWordListener.swift`** — openWakeWord adapter bridge (Swift↔Python); triggers recording on wake-word detection; hotkey remains primary fallback.
 - **`HotkeyDoubleTapDetector.swift`** — detects Right Option double-tap (300 ms window) to start Voice Assistant conversation.
+
+#### Phase A — Auto-heal (2026-05-02) Swift additions:
+- **`BackendSupervisor.swift`** — двухкольцевой supervisor; passive mode (launchd Variant B = `KeepAlive=true`) или active mode (standalone). Exp backoff restart 0/2/5/15s + circuit breaker (5 fails в 60s window → 5 min cooldown). Spec: `docs/superpowers/specs/2026-05-04-phase-c-roadmap-refinement-design.md` Phase A.
+- **`HealthMonitor.swift`** — actor с 3s ping `handle_ping` IPC; 2 fails подряд → SIGTERM Python backend → wait → SIGKILL → respawn. Phase B.1 расширит подпиской на `rewriter_recovered` события из active LLM probe.
+- **`BackendToast.swift`** — non-modal toast (severity-aware), используется для backend restart notifications в Phase A. Phase B.1 добавит `ErrorToastView` для UI ошибок (отдельный компонент).
+- **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
+
+#### Phase B — Loud Errors (2026-05-04+) Python additions:
+- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. 19 codes wired runtime.
+- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (19 codes: paste×2, rewriter×7, stt×3, diarization×2, translation×1, mlx×1, history×1, vocabulary×1, hotkey×1, ipc×1).
+- **`backend/error_actions.py`** — `ACTION_HANDLERS` dispatch + 8 action handlers (open_privacy_settings, disable_rewriter, etc.).
+- **`backend/llm_probe.py`** — `LLMHttpProbe` passive GET `/v1/models` health check (post-PR #364 F2 — was POST /v1/chat/completions which caused JIT churn).
+
+#### Phase B — Loud Errors Swift additions:
+- **`ErrorActionHandler.swift`** — KrabErrorPayload Codable + AnyCodable + ToastPresenting protocol + ErrorActionHandler class (handleErrorEvent + handleActionTap + side-effect dispatch).
+- **`ErrorToastView.swift`** — `ErrorToastPresenter` Liquid Glass NSPanel (severity-aware auto-dismiss: info=2s/warn=5s/error=10s/critical=manual). Queue. `ToastPanelFactory` protocol for test isolation.
+- **`main+Errors.swift`** — `setupErrorBus(toastPresenter:)` extension wires SSE error stream.
+
+#### Phase C — Root Cause (2026-05-04+) additions:
+- **`docs/audit/`** — codebase audits (mlx-call-sites, distributed-notifications, gigaam-worker-memory).
+- **`docs/measurements/`** — memory baseline CSVs (workflow in README).
+- **`scripts/memory_baseline.py`** — psutil-based RSS snapshot to CSV.
+- **`scripts/cleanup_worktree_shadows.command`** — drift prevention (lsregister -u worktree-shadow .app).
+- **`scripts/verify_claude_md.py`** — CLAUDE.md drift checker (CI integrated).
+- **`scripts/profile_gigaam_worker.command`** — opt-in memory profiling driver.
+
+#### Phase B/C IPC methods (additive):
+- `list_recent_errors`, `clear_recent_errors`, `handle_error_action`, `probe_llm_http`,
+- `report_paste_failure`, `report_hotkey_conflict`, `report_reconnect`,
+- `list_llm_models`, `handshake`.
 
 ### `.app` bundle (`Krab Ear.app/`):
 - Standard macOS app bundle (`com.antigravity.krab-ear`, LSUIElement=true, macOS 13+).
@@ -357,7 +387,7 @@ python scripts/check_performance_budget.py
 - **Call provider abstraction**: `CALL_PROVIDER` setting (`telnyx` | `twilio`) selects the active adapter at runtime. Both adapters (`TelnyxAdapter`, `TwilioAdapter`) implement the same interface. Credentials are per-provider settings: `telnyx_api_key` / `twilio_account_sid` + `twilio_auth_token`. Stub mode active when credentials absent.
 - **Single-instance guard**: `SingleInstanceGuard.swift` runs at app startup and kills any existing `KrabEarAgent` process (same bundle path). Prevents double-paste, double-hotkey, and IPC port conflicts after crash-restart.
 - **Selection translate flow (Phase 2A)**: Cmd+Shift+T → `SelectionTranslator.swift` → (A) AX API reads `kAXSelectedTextAttribute` → sends `translate_selection` IPC → writes back via `AXUIElementSetAttributeValue`; (B) fallback: save clipboard → Cmd+C → read clipboard → translate → Cmd+V → restore clipboard. Failure shows error HUD, never mutates text.
-- **Live subtitles flow (Phase 2B)**: `SystemAudioCapture.swift` (ScreenCaptureKit) taps system audio → base64-encodes 16 kHz PCM chunks → `live_subs_push_chunk` IPC → `LiveSubsService.py` accumulates ≥3 s → Whisper STT → translate → emits `live_subs.result` via EventBus → SSE stream → `LiveSubtitlesOverlay.swift` HUD panel. Requires Screen Recording permission.
+- **Live subtitles flow (Phase 2B)**: `SystemAudioCapture.swift` (ScreenCaptureKit) taps system audio → base64-encodes 16 kHz PCM chunks → `live_subs_push_chunk` IPC → `live_subs_service.py` accumulates ≥3 s → Whisper STT → translate → emits `live_subs.result` via EventBus → SSE stream → `LiveSubtitlesOverlay.swift` HUD panel. Requires Screen Recording permission.
 - **MLX thread-safety**: MLX (mlx_whisper, mlx.core) is NOT thread-safe — concurrent GPU access corrupts internal `__hash_table<MTL::Resource*>` causing SIGSEGV. ALL MLX inference must be serialized through `core.mlx_lock.mlx_lock()` (RLock — reentrant). Pattern:
   ```python
   from core.mlx_lock import mlx_lock
@@ -373,7 +403,7 @@ python scripts/check_performance_budget.py
 - **Sentry release tracking (PR #241)**: `SentryConfig.swift` reads `CFBundleVersion` and sets `sentry_sdk.set_tag("release", version)` at startup. Enables regression tracking per release in Sentry issues dashboard. Python side sets `release=` in `sentry_sdk.init()`.
 - **Stable codesign identity (PR #235)**: `scripts/create_local_signing_identity.command` creates a self-signed cert `Krab Ear Dev Local` in the system keychain. Sign binary with: `codesign -s "Krab Ear Dev Local" -f ...`. TCC grants persist across rebuilds because the identity hash stays constant. **Caveat**: for distribution (App Store / Notarization), replace with Apple Developer ID. See `docs/DEV_CODESIGN.md`.
 - **Distribution DMG (PR #229)**: `scripts/build_distribution_dmg.command` creates a signed `.dmg` for sharing. Requires `Krab Ear Dev Local` identity or Apple Developer ID. See `docs/DISTRIBUTION.md`.
-- **Analytics UI (PR #231 / #233)**: `HistoryPanelController+AnalyticsDashboard.swift` renders the analytics dashboard via `get_analytics_dashboard` IPC. Shows sentiment trend, quality trend, keyword cloud. Bug fixes in PR #233 (nil guard crash on empty history).
+- **Analytics UI (PR #231 / #233)**: `AnalyticsDashboardViewController.swift` renders the analytics dashboard via `get_analytics_dashboard` IPC. Shows sentiment trend, quality trend, keyword cloud. Bug fixes in PR #233 (nil guard crash on empty history).
 - **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, all 241 JSON-RPC handlers documented with params/response schema and examples (PR #243). Use as ground truth before implementing new IPC calls.
 - **User manual**: `docs/USER_MANUAL.md` — full end-user guide in Russian (PR #230). Start here for onboarding new users.
 - **NSStackView distribution fixes (PRs #228, #239, #240)**: Fixed NSStackView `distribution` property (`.fill` → `.fillEqually` / `.fillProportionally`) for correct layout in Settings + ConversationVC. Actor isolation warnings resolved in ConversationViewController (Swift 6 strict concurrency).
