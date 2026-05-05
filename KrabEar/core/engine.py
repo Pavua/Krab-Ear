@@ -429,36 +429,31 @@ class AudioEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _detect_subprocess_oom(returncode: int, stderr: str) -> bool:
-        """Return True if subprocess exit indicates OOM/SIGABRT.
+    def _detect_subprocess_oom(returncode: int, stderr: str) -> tuple[bool, str | None]:
+        """Return (is_oom, signal_name) for subprocess exit.
 
-        Heuristics:
-        - returncode == -6 (SIGABRT) — MLX often abort()'s on Metal OOM
-        - returncode == -9 (SIGKILL) — kernel OOM killer
-        - stderr contains "out of memory" / "MallocStackLogging" / "OutOfMemoryError"
+        is_oom: True if returncode or stderr indicates OOM/fatal MLX crash.
+        signal_name: Human-readable signal (e.g. 'SIGABRT', 'SIGKILL',
+                     'SIGSEGV', 'SIGBUS') OR 'stderr_oom_pattern' OR None.
+
+        Delegates to core.pipeline.stt_gigaam.detect_subprocess_oom.
         """
-        if returncode in (-6, -9):
-            return True
-        if stderr:
-            low = stderr.lower()
-            return any(s in low for s in (
-                "out of memory",
-                "outofmemoryerror",
-                "metal out of memory",
-                "mallocstacklogging",
-            ))
-        return False
+        from core.pipeline.stt_gigaam import detect_subprocess_oom
+        return detect_subprocess_oom(returncode, stderr)
 
     def _push_mlx_oom_for_worker(self, name: str, rc: int, stderr: str) -> None:
         """Push mlx.oom KrabError for a crashed worker subprocess.
 
         Called after _detect_subprocess_oom returns True. Never raises.
+        Includes signal_name in message_debug for Sentry grouping.
         """
         try:
+            from core.pipeline.stt_gigaam import detect_subprocess_oom
+            _is_oom, signal_name = detect_subprocess_oom(rc, stderr)
             stderr_tail = (stderr or "")[-200:]
             self._push_error(
                 "mlx.oom",
-                f"worker={name} returncode={rc} stderr_tail={stderr_tail!r}",
+                f"worker={name} returncode={rc} signal={signal_name} stderr_tail={stderr_tail!r}",
                 severity="critical",
             )
         except Exception:
@@ -2297,28 +2292,62 @@ class AudioEngine:
             raise TypeError(f"Неподдерживаемый тип audio_data для GigaAM: {type(audio_data)}")
 
         # GigaAM `transcribe()` имеет hard limit ~25 сек на одну операцию.
-        # Для длинных аудио используем `transcribe_longform()` (через pyannote VAD).
-        # Threshold 24s consvервативный (gigaam падает на ~26s+).
-        # Требует pyannote.audio + HF token; см. config.STT_GIGAAM_HF_TOKEN.
+        # Для длинных аудио поддерживаем два пути:
+        #   1. AudioChunker (предпочтительный): silence-based split без зависимостей.
+        #      Чанки 20s с 5s запасом до предела. Не требует pyannote / HF token.
+        #   2. transcribe_longform() (fallback): pyannote VAD — требует HF token
+        #      + принятие TOS на huggingface.co/pyannote/segmentation-3.0.
+        #      Используется только если AudioChunker недоступен.
+        # Threshold 24s консервативный (gigaam падает на ~26s+).
+        _GIGAAM_MAX_CHUNK_SEC = 20.0  # с 5s запасом до hard limit ~25s
         duration_sec = len(audio_data_np) / 16000.0
         use_longform = duration_sec > 24.0
         hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
 
         try:
             if use_longform:
-                logger.info(
-                    "GigaAM longform path: duration=%.1fs (> 24s), hf_token=%s",
-                    duration_sec,
-                    "set" if hf_token else "cached",
-                )
-                result = adapter.transcribe(audio_data_np, longform=True, hf_token=hf_token)
+                # Пробуем AudioChunker path — не требует pyannote/HF token.
+                try:
+                    from core.audio_chunker import AudioChunker
+                    chunker = AudioChunker()
+                    chunks = chunker.chunk(audio_data_np, sample_rate=16000,
+                                          max_chunk_sec=_GIGAAM_MAX_CHUNK_SEC)
+                    logger.info(
+                        "GigaAM chunker path: duration=%.1fs → %d chunks (max %.0fs each)",
+                        duration_sec, len(chunks), _GIGAAM_MAX_CHUNK_SEC,
+                    )
+                    chunk_results: list[dict] = []
+                    for ch in chunks:
+                        ch_result = adapter.transcribe(ch.audio, sample_rate=16000)
+                        chunk_results.append({
+                            "text": ch_result.get("text", "") if isinstance(ch_result, dict) else str(ch_result),
+                            "confidence": float(ch_result.get("confidence", 0.9)) if isinstance(ch_result, dict) else 0.9,
+                            "start_sec": ch.start_sec,
+                            "end_sec": ch.end_sec,
+                        })
+                    merged = AudioChunker.merge_results(chunk_results)
+                    result = {
+                        "text": merged["text"],
+                        "language": "ru",
+                        "confidence": merged["confidence"],
+                        "engine": "gigaam-rnnt-chunked",
+                    }
+                except Exception as chunker_exc:
+                    # AudioChunker failed — fallback на transcribe_longform() (pyannote path).
+                    logger.warning(
+                        "GigaAM AudioChunker failed (%.1fs): %s — пробуем longform",
+                        duration_sec, str(chunker_exc)[:200],
+                    )
+                    logger.info(
+                        "GigaAM longform path: duration=%.1fs (> 24s), hf_token=%s",
+                        duration_sec,
+                        "set" if hf_token else "cached",
+                    )
+                    result = adapter.transcribe(audio_data_np, longform=True, hf_token=hf_token)
             else:
                 result = adapter.transcribe(audio_data_np)
         except Exception as exc:
-            # Longform может упасть из-за pyannote gated repo (TOS not accepted)
-            # или missing HF token. Fallback на короткий transcribe не имеет смысла
-            # (тот же error на длинном audio). Возвращаем dict с error чтобы
-            # AudioEngine fallback chain переключился на whisper.
+            # Оба пути упали. Возвращаем error dict чтобы fallback chain переключился на Whisper.
             logger.warning(
                 "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
                 duration_sec, use_longform, str(exc)[:200],

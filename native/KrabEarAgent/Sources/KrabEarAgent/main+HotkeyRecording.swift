@@ -204,6 +204,8 @@ extension AgentAppDelegate {
                     translationStatus: translationStatus
                 )
                 handleTranscriptionResult(text: text, historyId: historyId)
+                // Обновляем индикатор STT движка после успешной транскрибации.
+                historyPanel?.fetchAndUpdateSTTEngineLabel()
             case "already_stopped":
                 // Идемпотентный stop: backend уже в idle, лишние уведомления пользователю не нужны.
                 logger.info("stop_recording: backend уже idle (already_stopped), синхронизирую состояние")

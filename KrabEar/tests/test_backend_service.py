@@ -93,12 +93,22 @@ class LoudUniformBackgroundRecorder(FakeRecorder):
         return data, 6.0
 
 
+class _FakeEngine:
+    """Минимальный stub AudioEngine для _handle_get_diagnostics."""
+    quality_profile: str = "balanced"
+    current_model: str = "fake-model"
+
+    def _resolve_diarization_device(self) -> str:
+        return "cpu"
+
+
 class FakeTranscriber:
     """Фейковый transcriber, генерирующий последовательные строки."""
 
     def __init__(self) -> None:
         self.counter = 0
         self.preview_counter = 0
+        self.engine = _FakeEngine()
 
     def transcribe(self, audio_data, quality_profile: str = "balanced", cleanup_profile: str = "soft",
                    domain: str = "casual", extra_vocabulary=None, lang_hint=None,
@@ -1327,6 +1337,66 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertTrue(stats["ok"])
         self.assertIn("active_count", stats["result"])
         self.assertIn("total_bytes", stats["result"])
+
+    def test_diagnostics_includes_stt_last_engine_field(self) -> None:
+        """get_diagnostics stt section должна содержать last_engine (None до первой транскрибации)."""
+        diag = self.request("get_diagnostics")
+        self.assertTrue(diag["ok"])
+        stt = diag["result"]["stt"]
+        self.assertIn("last_engine", stt, "stt section должна иметь last_engine поле")
+        # До первой записи — None (не было транскрибаций).
+        self.assertIsNone(stt["last_engine"])
+
+    def test_diagnostics_stt_last_engine_updates_after_stop_recording(self) -> None:
+        """После stop_recording last_engine должен обновиться если transcriber вернул engine поле."""
+
+        class EngineCapturingTranscriber(FakeTranscriber):
+            """FakeTranscriber, возвращающий словарь с engine полем."""
+            def transcribe(self, audio_data, quality_profile="balanced", cleanup_profile="soft",
+                           domain="casual", extra_vocabulary=None, lang_hint=None,
+                           history_context=None, stt_hotwords=None):
+                self.counter += 1
+                return {
+                    "text": f"тестовая строка #{self.counter}",
+                    "engine": "gigaam-rnnt",
+                    "confidence": 0.9,
+                }
+            # engine attribute требуется _handle_get_diagnostics
+
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend.state_store import StateStore
+            store = StateStore(Path(tmp) / "data")
+            svc = BackendService(
+                store=store,
+                recorder=FakeRecorder(),
+                transcriber=EngineCapturingTranscriber(),
+                translator=FakeTranslator(),
+            )
+
+            def req(method, params=None):
+                return svc.handle_request({"id": "t1", "method": method, "params": params or {}})
+
+            # До записи — None.
+            pre = req("get_diagnostics")
+            self.assertIsNone(pre["result"]["stt"]["last_engine"])
+
+            # Одна запись.
+            req("start_recording")
+            req("stop_recording", {"quality_profile": "balanced"})
+
+            # После — должен быть заполнен.
+            post = req("get_diagnostics")
+            self.assertEqual(post["result"]["stt"]["last_engine"], "gigaam-rnnt")
+
+    def test_diagnostics_stt_last_engine_stays_none_for_string_transcriber(self) -> None:
+        """Если transcriber вернул строку (без engine), last_engine остаётся None."""
+        # FakeTranscriber по умолчанию возвращает строку — engine не кэшируется.
+        self.request("start_recording")
+        self.request("stop_recording", {"quality_profile": "balanced"})
+        diag = self.request("get_diagnostics")
+        self.assertIsNone(diag["result"]["stt"]["last_engine"])
 
 
 class BackendServiceLLMInitializationTestCase(unittest.TestCase):

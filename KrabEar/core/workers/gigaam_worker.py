@@ -32,6 +32,7 @@ Memory profiling (opt-in, zero overhead when off):
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -91,6 +92,31 @@ def _log_tracemalloc_snapshot(request_count: int) -> None:
         for i, stat in enumerate(top, 1):
             sys.stderr.write(f"[tmalloc] #{i}: {stat}\n")
         sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _free_mps_pool() -> None:
+    """Release PyTorch MPS Metal buffer pool + run gc.collect.
+
+    H1 hypothesis fix (docs/audit/gigaam-worker-memory-2026-05-05.md):
+    PyTorch keeps a ~1 GB Metal buffer pool alive after warmup. Calling
+    torch.mps.empty_cache() returns those buffers to the OS allocator.
+    gc.collect() releases any pyannote/longform intermediate Python objects.
+
+    Both calls are wrapped in try/except — never raise even if torch.mps
+    API changes or is unavailable (e.g. CPU-only env, future PyTorch versions).
+    Safe to call on every cycle — idempotent, negligible overhead when empty.
+    """
+    try:
+        import torch  # type: ignore[import]
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+    try:
+        gc.collect()
     except Exception:
         pass
 
@@ -213,6 +239,11 @@ def _handle_transcribe(params: dict) -> dict:
     # Memory tracing (opt-in: KRAB_EAR_TRACE_GIGAAM_MEM=1).
     # Logs RSS after inference so we can track MPS/PyTorch buffer pool growth.
     _log_rss(label="after_transcribe")
+
+    # Free Metal buffer pool — H1 hypothesis fix.
+    # Called after every transcribe response (normal + longform). Idempotent.
+    # See docs/audit/gigaam-worker-memory-2026-05-05.md for motivation.
+    _free_mps_pool()
 
     # Имя движка соответствует тому что использует in-process адаптер
     # (core/pipeline/stt_gigaam.py — _engine_name).

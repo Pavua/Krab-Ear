@@ -215,5 +215,172 @@ class TestGigaAMWorkerHelpers(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestGigaAMMemoryHygiene(unittest.TestCase):
+    """Verify torch.mps.empty_cache + gc.collect hygiene after transcribe (Phase C C.1-fix)."""
+
+    def tearDown(self) -> None:
+        tracemalloc.stop()
+        sys.modules.pop("gigaam_worker", None)
+
+    # ------------------------------------------------------------------
+    # _free_mps_pool helpers
+    # ------------------------------------------------------------------
+
+    def test_free_mps_pool_calls_empty_cache(self) -> None:
+        """_free_mps_pool() must call torch.mps.empty_cache() when available."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        empty_cache_calls: list[int] = []
+
+        # Build a minimal fake torch.mps namespace
+        fake_mps = types.SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(1))
+        fake_torch = types.SimpleNamespace(mps=fake_mps)
+
+        # Patch sys.modules so `import torch` inside _free_mps_pool finds our stub
+        sys.modules["torch"] = fake_torch  # type: ignore[assignment]
+        try:
+            mod._free_mps_pool()
+        finally:
+            sys.modules.pop("torch", None)
+
+        self.assertEqual(
+            len(empty_cache_calls),
+            1,
+            "_free_mps_pool() must call torch.mps.empty_cache() exactly once",
+        )
+
+    def test_free_mps_pool_calls_gc_collect(self) -> None:
+        """_free_mps_pool() must call gc.collect() (via the gc module already imported)."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        import gc as _gc_real
+
+        collect_calls: list[int] = []
+        original_collect = _gc_real.collect
+
+        def _mock_collect(*args: object, **kwargs: object) -> int:
+            collect_calls.append(1)
+            return 0
+
+        _gc_real.collect = _mock_collect  # type: ignore[assignment]
+        # Also patch in the module's own gc reference (it imports gc at top-level)
+        original_mod_gc_collect = mod.gc.collect
+        mod.gc.collect = _mock_collect  # type: ignore[assignment]
+        try:
+            mod._free_mps_pool()
+        finally:
+            _gc_real.collect = original_collect
+            mod.gc.collect = original_mod_gc_collect
+
+        self.assertGreaterEqual(
+            len(collect_calls),
+            1,
+            "_free_mps_pool() must call gc.collect() at least once",
+        )
+
+    def test_empty_cache_called_after_transcribe(self) -> None:
+        """_handle_transcribe invokes _free_mps_pool (and thus empty_cache) once per response.
+
+        We verify by patching _free_mps_pool on the module and checking it's called
+        after a successful (mocked) transcribe. No real GigaAM model is loaded.
+        """
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        free_pool_calls: list[int] = []
+
+        original_free = mod._free_mps_pool
+
+        def _mock_free() -> None:
+            free_pool_calls.append(1)
+
+        mod._free_mps_pool = _mock_free
+
+        # Set up a minimal fake model
+        fake_model = types.SimpleNamespace(transcribe=lambda path: "привет мир")
+        mod._MODEL = fake_model
+        mod._MODE = "rnnt"
+
+        try:
+            import json
+            result = mod._process_request(json.dumps({"op": "transcribe", "audio_path": "/tmp/fake.wav"}))
+        finally:
+            mod._MODEL = None
+            mod._MODE = None
+            mod._free_mps_pool = original_free
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("ok"), f"Expected ok=True, got: {result}")
+        self.assertEqual(
+            len(free_pool_calls),
+            1,
+            "_free_mps_pool must be called once after transcribe response",
+        )
+
+    def test_gc_collect_called_after_transcribe(self) -> None:
+        """gc.collect() is invoked by _free_mps_pool after each successful transcribe."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        import gc as _gc_real
+
+        collect_calls: list[int] = []
+        original_collect = _gc_real.collect
+        original_mod_gc_collect = mod.gc.collect
+
+        def _mock_collect(*args: object, **kwargs: object) -> int:
+            collect_calls.append(1)
+            return 0
+
+        _gc_real.collect = _mock_collect  # type: ignore[assignment]
+        mod.gc.collect = _mock_collect  # type: ignore[assignment]
+
+        fake_model = types.SimpleNamespace(transcribe=lambda path: "тест")
+        mod._MODEL = fake_model
+        mod._MODE = "rnnt"
+
+        try:
+            import json
+            result = mod._process_request(json.dumps({"op": "transcribe", "audio_path": "/tmp/fake.wav"}))
+        finally:
+            mod._MODEL = None
+            mod._MODE = None
+            _gc_real.collect = original_collect
+            mod.gc.collect = original_mod_gc_collect
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("ok"), f"Expected ok=True, got: {result}")
+        self.assertGreaterEqual(
+            len(collect_calls),
+            1,
+            "gc.collect must be called at least once after transcribe response",
+        )
+
+    def test_free_mps_pool_no_raise_without_torch(self) -> None:
+        """_free_mps_pool() must never raise even when torch is absent."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        # Remove torch from sys.modules to simulate missing torch
+        saved_torch = sys.modules.pop("torch", None)
+        try:
+            # Must not raise
+            mod._free_mps_pool()
+        finally:
+            if saved_torch is not None:
+                sys.modules["torch"] = saved_torch
+
+    def test_free_mps_pool_no_raise_when_empty_cache_missing(self) -> None:
+        """_free_mps_pool() must not raise if torch.mps lacks empty_cache attribute."""
+        mod = _reload_worker_module({"KRAB_EAR_TRACE_GIGAAM_MEM": None})
+
+        # torch.mps without empty_cache
+        fake_mps = types.SimpleNamespace()  # no empty_cache attribute
+        fake_torch = types.SimpleNamespace(mps=fake_mps)
+
+        sys.modules["torch"] = fake_torch  # type: ignore[assignment]
+        try:
+            mod._free_mps_pool()  # must not raise
+        finally:
+            sys.modules.pop("torch", None)
+
+
 if __name__ == "__main__":
     unittest.main()

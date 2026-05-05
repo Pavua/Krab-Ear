@@ -76,6 +76,9 @@ final class DiagnosticsTabViewController: NSViewController {
     var activeSeverities: Set<String> = ["info", "warn", "error", "critical"]
     var activeComponent: String? = nil  // nil = "Все"
 
+    // Memory stats refresh timer
+    private var memoryRefreshTimer: Timer?
+
     // MARK: - UI Subviews
 
     private let tableView = NSTableView()
@@ -83,6 +86,9 @@ final class DiagnosticsTabViewController: NSViewController {
 
     private var severityChips: [String: NSButton] = [:]
     private var componentPopup: NSPopUpButton!
+
+    // Memory stats bar: "Backend: 730 MB | Agent: 150 MB | Workers: 1570 MB"
+    private let memoryStatsLabel = NSTextField(labelWithString: "Память: загрузка…")
 
     // MARK: - Init
 
@@ -128,7 +134,11 @@ final class DiagnosticsTabViewController: NSViewController {
         tableContainer.setContentHuggingPriority(.defaultLow, for: .vertical)
         tableContainer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
-        // --- Section 3: Footer ---
+        // --- Section 3: Memory stats bar ---
+        let memBar = buildMemoryBar()
+        outerStack.addArrangedSubview(memBar)
+
+        // --- Section 4: Footer ---
         let footer = buildFooter()
         outerStack.addArrangedSubview(footer)
 
@@ -142,6 +152,7 @@ final class DiagnosticsTabViewController: NSViewController {
             root.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.minHeight),
 
             filtersBar.heightAnchor.constraint(equalToConstant: Layout.headerHeight),
+            memBar.heightAnchor.constraint(equalToConstant: 28),
             footer.heightAnchor.constraint(equalToConstant: Layout.footerHeight),
         ])
     }
@@ -149,6 +160,20 @@ final class DiagnosticsTabViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         Task { await refresh() }
+        Task { await refreshMemoryStats() }
+        // Refresh memory stats every 5 seconds while tab is visible
+        memoryRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.refreshMemoryStats()
+            }
+        }
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        memoryRefreshTimer?.invalidate()
+        memoryRefreshTimer = nil
     }
 
     // MARK: - Filters Bar (Section 1)
@@ -322,7 +347,25 @@ final class DiagnosticsTabViewController: NSViewController {
         return card
     }
 
-    // MARK: - Footer (Section 3)
+    // MARK: - Memory Bar (Section 3)
+
+    private func buildMemoryBar() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = KrabEarTheme.Metrics.standard
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        memoryStatsLabel.font = KrabEarTheme.Typography.monospace
+        memoryStatsLabel.textColor = KrabEarTheme.Colors.textSecondary
+        memoryStatsLabel.translatesAutoresizingMaskIntoConstraints = false
+        memoryStatsLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(memoryStatsLabel)
+
+        return stack
+    }
+
+    // MARK: - Footer (Section 4)
 
     private func buildFooter() -> NSView {
         let stack = NSStackView()
@@ -343,6 +386,12 @@ final class DiagnosticsTabViewController: NSViewController {
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(spacer)
+
+        // Send to Sentry button
+        let sentryBtn = NSButton(title: "Отправить в Sentry", target: self, action: #selector(onSendToSentry))
+        sentryBtn.bezelStyle = .rounded
+        sentryBtn.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(sentryBtn)
 
         // Copy button (right)
         let copyBtn = NSButton(title: "Скопировать", target: self, action: #selector(onCopyErrors))
@@ -451,6 +500,85 @@ final class DiagnosticsTabViewController: NSViewController {
     @objc private func onOpenLog() {
         let logDir = ("~/Library/Logs/KrabEar" as NSString).expandingTildeInPath
         NSWorkspace.shared.open(URL(fileURLWithPath: logDir))
+    }
+
+    @objc private func onSendToSentry() {
+        Task { @MainActor in
+            do {
+                let response = try await ipcClient.callAsync(
+                    method: "send_diagnostics_to_sentry",
+                    params: [:],
+                    timeoutSec: IPCClient.quickTimeoutSec
+                )
+                guard let result = response["result"] as? [String: Any] else { return }
+                let ok = result["ok"] as? Bool ?? false
+                if ok {
+                    let count = result["sent_count"] as? Int ?? 0
+                    showAlert(title: "Sentry", message: "Отправлено \(count) ошибок в Sentry.")
+                } else {
+                    let reason = result["reason"] as? String ?? "unknown"
+                    showAlert(title: "Sentry — ошибка", message: "Не удалось отправить: \(reason)")
+                }
+            } catch {
+                logger.error("send_diagnostics_to_sentry failed: \(error.localizedDescription, privacy: .public)")
+                showAlert(title: "Sentry — ошибка", message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    func refreshMemoryStats() async {
+        do {
+            let response = try await ipcClient.callAsync(
+                method: "get_memory_stats",
+                params: [:],
+                timeoutSec: IPCClient.quickTimeoutSec
+            )
+            guard let result = response["result"] as? [String: Any],
+                  let ok = result["ok"] as? Bool, ok,
+                  let processes = result["processes"] as? [[String: Any]] else {
+                memoryStatsLabel.stringValue = "Память: нет данных"
+                return
+            }
+
+            if processes.isEmpty {
+                memoryStatsLabel.stringValue = "Память: процессы не найдены"
+                return
+            }
+
+            // Group by kind, sum RSS_MB
+            var kindTotals: [String: Double] = [:]
+            for proc in processes {
+                let kind = proc["kind"] as? String ?? "other"
+                let rss = proc["rss_mb"] as? Double ?? 0
+                kindTotals[kind, default: 0] += rss
+            }
+
+            var parts: [String] = []
+            let order = ["backend", "agent", "worker"]
+            let labels: [String: String] = ["backend": "Backend", "agent": "Agent", "worker": "Workers"]
+            for key in order {
+                if let total = kindTotals[key] {
+                    parts.append("\(labels[key] ?? key): \(Int(total)) MB")
+                }
+            }
+            memoryStatsLabel.stringValue = "Память: " + parts.joined(separator: " | ")
+        } catch {
+            logger.warning("get_memory_stats failed: \(error.localizedDescription, privacy: .public)")
+            memoryStatsLabel.stringValue = "Память: ошибка получения"
+        }
     }
 
     // MARK: - Action button tap

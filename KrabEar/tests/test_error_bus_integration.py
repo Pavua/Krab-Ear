@@ -170,6 +170,138 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         # latency_ms must be a number
         self.assertIsInstance(result["latency_ms"], (int, float))
 
+    # ------------------------------------------------------------------
+    # 5. send_diagnostics_to_sentry — no errors → ok=False, reason known
+    # ------------------------------------------------------------------
+
+    def test_send_diagnostics_to_sentry_empty_buffer(self) -> None:
+        """Empty ring buffer → ok=False, reason='no_errors_to_send' (or sentry unavailable)."""
+        resp = self._call("send_diagnostics_to_sentry")
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertIn("ok", result)
+        # With empty buffer the expected reason is no_errors_to_send;
+        # if sentry_sdk is not installed, reason is sentry_sdk_not_available — both ok.
+        self.assertFalse(result["ok"])
+        reason = result.get("reason", "")
+        self.assertIn(reason, ("no_errors_to_send", "sentry_sdk_not_available"),
+                      msg=f"Unexpected reason: {reason!r}")
+
+    def test_send_diagnostics_to_sentry_with_errors(self) -> None:
+        """With errors in ring buffer + mocked sentry_sdk → ok=True, sent_count>0."""
+        from unittest.mock import patch, MagicMock
+        from datetime import datetime, timezone
+        from backend.error_bus import KrabError
+
+        # Push a test error into the ring buffer
+        test_err = KrabError(
+            code="test_code",
+            severity="error",
+            component="stt",
+            message_user="тест ошибки",
+            message_debug="debug info",
+            timestamp=datetime.now(tz=timezone.utc),
+            context={},
+            actionable=False,
+            action_id=None,
+        )
+        self.service._error_bus.push(test_err)
+
+        fake_sdk = MagicMock()
+        fake_sdk.flush.return_value = None
+
+        with patch.dict("sys.modules", {"sentry_sdk": fake_sdk}):
+            resp = self._call("send_diagnostics_to_sentry")
+
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertIn("ok", result)
+        if result["ok"]:
+            # sentry_sdk available — check sent_count
+            self.assertIn("sent_count", result)
+            self.assertGreater(result["sent_count"], 0)
+            fake_sdk.capture_message.assert_called_once()
+            fake_sdk.flush.assert_called_once()
+        else:
+            # sentry_sdk was already imported and real — skip shape check
+            self.assertIn(result.get("reason", ""), (
+                "no_errors_to_send", "sentry_sdk_not_available",
+            ))
+
+    # ------------------------------------------------------------------
+    # 6. get_memory_stats — response shape valid
+    # ------------------------------------------------------------------
+
+    def test_get_memory_stats_psutil_available(self) -> None:
+        """get_memory_stats returns ok=True with processes list when psutil available."""
+        resp = self._call("get_memory_stats")
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertIn("ok", result)
+        if result["ok"]:
+            # Shape check: processes must be a list
+            self.assertIn("processes", result)
+            self.assertIsInstance(result["processes"], list)
+            # Each entry must have required fields (may be empty list if no matching procs)
+            for proc in result["processes"]:
+                self.assertIn("pid", proc)
+                self.assertIn("name", proc)
+                self.assertIn("rss_mb", proc)
+                self.assertIn("vsz_mb", proc)
+                self.assertIn("kind", proc)
+                self.assertIn(proc["kind"], ("agent", "backend", "worker"))
+                self.assertIsInstance(proc["rss_mb"], float)
+                self.assertIsInstance(proc["vsz_mb"], float)
+        else:
+            # psutil not installed — reason field expected
+            self.assertEqual(result.get("reason"), "psutil_not_installed")
+
+    def test_get_memory_stats_mocked_psutil(self) -> None:
+        """get_memory_stats correctly groups processes by kind with mocked psutil."""
+        from unittest.mock import patch, MagicMock
+
+        class _FakeMemInfo:
+            rss = 512 * 1024 * 1024  # 512 MB
+            vms = 1024 * 1024 * 1024  # 1024 MB
+
+        def _fake_process_iter(attrs):
+            procs = []
+            for name, cmd in [
+                ("KrabEarAgent", "/path/to/KrabEarAgent"),
+                ("python3", "/path/KrabEar/backend/service.py --data-dir /tmp"),
+                ("python3", "/path/gigaam_worker.py"),
+            ]:
+                p = MagicMock()
+                p.info = {
+                    "pid": 1234,
+                    "name": name,
+                    "cmdline": cmd.split(),
+                    "memory_info": _FakeMemInfo(),
+                }
+                procs.append(p)
+            return procs
+
+        fake_psutil = MagicMock()
+        fake_psutil.process_iter.side_effect = _fake_process_iter
+        fake_psutil.NoSuchProcess = Exception
+        fake_psutil.AccessDenied = Exception
+
+        with patch.dict("sys.modules", {"psutil": fake_psutil}):
+            resp = self._call("get_memory_stats")
+
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertTrue(result["ok"])
+        procs = result["processes"]
+        self.assertEqual(len(procs), 3)
+        kinds = {p["kind"] for p in procs}
+        self.assertIn("agent", kinds)
+        self.assertIn("backend", kinds)
+        self.assertIn("worker", kinds)
+        # All rss_mb should be 512.0
+        for p in procs:
+            self.assertAlmostEqual(p["rss_mb"], 512.0, places=0)
+
 
 if __name__ == "__main__":
     unittest.main()
