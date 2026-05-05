@@ -46,6 +46,7 @@ class TelegramBridge:
     """
 
     NOTIFY_PATH = "/api/notify"
+    CHATS_PATH = "/api/chats"
 
     def __init__(
         self,
@@ -128,6 +129,53 @@ class TelegramBridge:
             "sent_at": data.get("sent_at") or time.time(),
             "chat_title": data.get("chat_title") or str(chat_id),
         }
+
+    def get_chats(self) -> list[dict[str, Any]]:
+        """Получить список доступных чатов через main Krab userbot.
+
+        Возвращает
+        ----------
+        Список словарей с ключами ``id``, ``title``, ``type``.
+
+        Исключения
+        ----------
+        CircuitBreakerOpen
+            Если circuit breaker разомкнут.
+        requests.ConnectionError / requests.Timeout
+            Если main Krab недоступен.
+        RuntimeError
+            Если Krab ответил с HTTP-ошибкой.
+        """
+        self._check_circuit()
+
+        url = self._base_url + self.CHATS_PATH
+
+        try:
+            resp = requests.get(url, timeout=self._timeout_sec)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            self._record_failure()
+            logger.warning("TelegramBridge.get_chats: Krab недоступен: %s", exc)
+            raise
+
+        if not resp.ok:
+            self._record_failure()
+            detail = self._extract_detail(resp)
+            code = "krab_unavailable" if resp.status_code == 503 else "krab_error"
+            raise RuntimeError(f"{code}: {detail}")
+
+        self._record_success()
+        data = resp.json()
+        chats = data.get("chats") or []
+        result: list[dict[str, Any]] = []
+        for chat in chats:
+            result.append(
+                {
+                    "id": chat.get("id"),
+                    "title": chat.get("title") or str(chat.get("id", "")),
+                    "type": chat.get("type") or "unknown",
+                }
+            )
+        return result
 
     @property
     def is_circuit_open(self) -> bool:

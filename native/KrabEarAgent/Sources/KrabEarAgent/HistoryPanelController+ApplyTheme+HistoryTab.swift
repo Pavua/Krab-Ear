@@ -134,6 +134,9 @@ extension HistoryPanelController {
         historyEnhancementsRow.addArrangedSubview(sendToRemindersButton)
         historyEnhancementsRow.addArrangedSubview(createCalendarEventButton)
         historyEnhancementsRow.addArrangedSubview(sendToImessageButton)
+        sendToTelegramButton.target = self
+        sendToTelegramButton.action = #selector(onSendToTelegram)
+        historyEnhancementsRow.addArrangedSubview(sendToTelegramButton)
         historyEnhancementsRow.addArrangedSubview(NSView()) // Spacer
         advancedCard.contentStackView.addArrangedSubview(historyEnhancementsRow)
         advancedSection.contentStackView.addArrangedSubview(advancedCard)
