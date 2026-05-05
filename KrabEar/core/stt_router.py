@@ -18,6 +18,20 @@
        ru → STT_RU_PRIMARY_MODEL, en → STT_EN_PRIMARY_MODEL,
        es → STT_ES_PRIMARY_MODEL, * → STT_OTHER_PRIMARY_MODEL.
 
+Scored selection (D.2.3):
+    select_adapter_scored(language, audio_duration_s, adapters) → best adapter
+
+    Scoring per adapter:
+      - Match score:  exact language support = 100, multilingual fallback = 60, no support = 0
+      - Speed bonus:  gigaam/parakeet = +20, sensevoice = +10, whisper = +0
+      - Quality bonus: whisper-mlx = +15, gigaam = +10, parakeet = +10
+      - Duration penalty: gigaam AND duration > 30s → -50
+                          (longform path via AudioChunker is slower than whisper)
+
+    Controlled by `stt_routing` setting:
+      - "auto_scored"  → use scored selection (default)
+      - "legacy"       → preserve previous behaviour (adapter order from engine)
+
 Добавление новой модели (когда research завершится):
     1. Создай адаптер в core/pipeline/stt_<name>.py (по образцу stt_whisper.py).
     2. Зарегистрируй адаптер в adapter_factory.
@@ -29,11 +43,214 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import numpy as np
 
 logger = logging.getLogger("KrabEar.STTRouter")
+
+# ---------------------------------------------------------------------------
+# D.2.3 — Scored adapter selection
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class STTAdapterBase(Protocol):
+    """Минимальный протокол STT-адаптера для scored selection.
+
+    Адаптер обязан иметь:
+      - name: str  — идентификатор (например «gigaam», «parakeet», «whisper-mlx»)
+      - supported_languages: set[str]  — ISO 639-1 коды; пустое множество = multilingual
+      - is_available(): bool  — True если адаптер может быть запущен прямо сейчас
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def supported_languages(self) -> "set[str]": ...
+
+    def is_available(self) -> bool: ...
+
+
+# Языки, гарантированно поддерживаемые Whisper-MLX (multilingual ≥ 99 языков).
+# Используется как маркер «multilingual fallback» в score function.
+_WHISPER_MLX_MARKER = "whisper"
+_GIGAAM_ADAPTER_NAME = "gigaam"
+_PARAKEET_ADAPTER_NAME = "parakeet"
+_SENSEVOICE_ADAPTER_NAME = "sensevoice"
+
+# Адаптеры, получающие speed bonus
+_SPEED_BONUS_FAST: Dict[str, int] = {
+    _GIGAAM_ADAPTER_NAME: 20,
+    _PARAKEET_ADAPTER_NAME: 20,
+    _SENSEVOICE_ADAPTER_NAME: 10,
+}
+
+# Адаптеры, получающие quality bonus (per benchmark data)
+_QUALITY_BONUS: Dict[str, int] = {
+    _WHISPER_MLX_MARKER: 15,    # matches any adapter whose name contains "whisper"
+    _GIGAAM_ADAPTER_NAME: 10,
+    _PARAKEET_ADAPTER_NAME: 10,
+}
+
+# Threshold (секунды) для duration penalty на GigaAM (hard limit ~25s on single pass)
+_GIGAAM_DURATION_PENALTY_THRESHOLD_S = 30.0
+_GIGAAM_DURATION_PENALTY = -50
+
+
+def _adapter_speed_bonus(name: str) -> int:
+    """Возвращает speed bonus для адаптера по его имени."""
+    name_lower = name.lower()
+    for key, bonus in _SPEED_BONUS_FAST.items():
+        if key in name_lower:
+            return bonus
+    return 0
+
+
+def _adapter_quality_bonus(name: str) -> int:
+    """Возвращает quality bonus для адаптера по его имени."""
+    name_lower = name.lower()
+    # whisper-mlx bonus: любое имя содержащее "whisper"
+    if "whisper" in name_lower:
+        return _QUALITY_BONUS[_WHISPER_MLX_MARKER]
+    for key, bonus in _QUALITY_BONUS.items():
+        if key in name_lower and key != _WHISPER_MLX_MARKER:
+            if bonus > 0:
+                return bonus
+    return 0
+
+
+def score_adapter(
+    adapter: Any,
+    language: str,
+    audio_duration_s: Optional[float] = None,
+) -> int:
+    """Вычисляет score для одного адаптера.
+
+    Scoring rules:
+        Match:   exact language support = 100
+                 multilingual (no supported_languages restriction) = 60
+                 language not supported = 0
+        Speed:   gigaam/parakeet = +20, sensevoice = +10, other = +0
+        Quality: whisper-mlx = +15, gigaam = +10, parakeet = +10
+        Penalty: gigaam AND audio_duration_s > 30 → -50
+
+    Args:
+        adapter: объект с атрибутами .name (str) и .supported_languages (set[str])
+                 и методом .is_available() -> bool.
+        language: ISO 639-1 код языка (уже нормализованный, lowercase).
+        audio_duration_s: длительность аудио в секундах или None.
+
+    Returns:
+        Целочисленный score (может быть отрицательным после штрафа).
+        Адаптер с score 0 по «match» не выбирается (no language support).
+    """
+    name: str = getattr(adapter, "name", "")
+    supported: "set[str]" = getattr(adapter, "supported_languages", set())
+
+    # --- Match score ---
+    if len(supported) == 0:
+        # Multilingual: поддерживает всё
+        match_score = 60
+    elif language in supported:
+        match_score = 100
+    else:
+        # Язык явно не поддерживается → не выбираем
+        return 0
+
+    # --- Speed bonus ---
+    speed = _adapter_speed_bonus(name)
+
+    # --- Quality bonus ---
+    quality = _adapter_quality_bonus(name)
+
+    # --- Duration penalty (GigaAM hard limit) ---
+    name_lower = name.lower()
+    duration_penalty = 0
+    if _GIGAAM_ADAPTER_NAME in name_lower:
+        if audio_duration_s is not None and audio_duration_s > _GIGAAM_DURATION_PENALTY_THRESHOLD_S:
+            duration_penalty = _GIGAAM_DURATION_PENALTY
+
+    total = match_score + speed + quality + duration_penalty
+    return total
+
+
+def score_adapters(
+    adapters: List[Any],
+    language: str,
+    audio_duration_s: Optional[float] = None,
+) -> Dict[str, int]:
+    """Возвращает словарь {adapter.name: score} для всех адаптеров.
+
+    Недоступные адаптеры (is_available() → False) получают score 0.
+    """
+    scores: Dict[str, int] = {}
+    for adapter in adapters:
+        name = getattr(adapter, "name", repr(adapter))
+        try:
+            available = adapter.is_available() if hasattr(adapter, "is_available") else True
+        except Exception:
+            available = False
+        if not available:
+            scores[name] = 0
+            continue
+        scores[name] = score_adapter(adapter, language, audio_duration_s)
+    return scores
+
+
+def select_adapter_scored(
+    language: str,
+    audio_duration_s: Optional[float],
+    adapters: List[Any],
+) -> Optional[Any]:
+    """Выбирает лучший STT-адаптер по score function.
+
+    Backward-compat wrapper: сохраняем порядок — при равном score первый в списке.
+
+    Args:
+        language: ISO 639-1 код языка (lowercase), например «ru», «en», «zh».
+        audio_duration_s: длительность аудио в секундах или None.
+        adapters: список адаптеров с атрибутами .name, .supported_languages, .is_available().
+
+    Returns:
+        Адаптер с наибольшим score или None если список пуст / все score = 0.
+    """
+    if not adapters:
+        return None
+
+    lang = language.strip().lower() if language else "und"
+    scores = score_adapters(adapters, lang, audio_duration_s)
+
+    best_adapter = None
+    best_score = 0
+    for adapter in adapters:
+        name = getattr(adapter, "name", repr(adapter))
+        s = scores.get(name, 0)
+        if s > best_score:
+            best_score = s
+            best_adapter = adapter
+
+    if best_adapter is None:
+        logger.debug(
+            "select_adapter_scored: все score=0 для lang=%s dur=%.1f — нет подходящего адаптера",
+            lang,
+            audio_duration_s or 0.0,
+        )
+    else:
+        logger.info(
+            "select_adapter_scored: lang=%s dur=%s → %s (score=%d)",
+            lang,
+            f"{audio_duration_s:.1f}s" if audio_duration_s is not None else "None",
+            getattr(best_adapter, "name", "?"),
+            best_score,
+        )
+
+    return best_adapter
+
+
+# ---------------------------------------------------------------------------
+# Идентификатор GigaAM в fallback chain
+# ---------------------------------------------------------------------------
 
 # Идентификатор GigaAM в fallback chain
 _GIGAAM_MODEL_ID = "gigaam"

@@ -500,6 +500,10 @@ class Settings(BaseSettings):
     # RU → STT_RU_PRIMARY_MODEL, EN → STT_EN_PRIMARY_MODEL, ES → STT_ES_PRIMARY_MODEL,
     # другие → STT_OTHER_PRIMARY_MODEL. Интеграция в engine.py — в follow-up PR.
     STT_LANGUAGE_ROUTING_ENABLED: bool = False
+    # --- Scored adapter selection (D.2.3) ---
+    # "auto_scored" = использовать score function (language match + speed + quality + duration penalty)
+    # "legacy"      = сохранить прежний порядок adapter chain из AudioEngine
+    STT_ROUTING: str = "auto_scored"
     # Модель по умолчанию для каждого языка. Текущий дефолт = whisper-large-v3 (generalist).
     STT_RU_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
     STT_EN_PRIMARY_MODEL: str = "mlx-community/whisper-large-v3-mlx"
@@ -959,4 +963,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # No data leaves the machine (LM Studio at 127.0.0.1 is still allowed).
     # Default False: opt-in by user.
     "privacy_mode_enabled": False,
+    # --- Scored STT adapter selection (D.2.3) ---
+    # "auto_scored" = score function (language match + speed + quality + duration penalty).
+    # "legacy"      = прежний порядок adapter chain из AudioEngine.
+    "stt_routing": "auto_scored",
 }
