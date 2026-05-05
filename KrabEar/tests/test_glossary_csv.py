@@ -61,13 +61,19 @@ def _make_service_with_glossary(glossary: dict):
 
             csv_str = params.get("csv", "")
             mode = params.get("mode", "merge").lower()
+            on_conflict = params.get("on_conflict", "skip").lower()
+
             if mode not in ("merge", "replace"):
                 return {"ok": False, "error": f"invalid mode: {mode}"}
+            if on_conflict not in ("skip", "overwrite", "error"):
+                return {"ok": False, "error": f"invalid on_conflict: {on_conflict}"}
 
             settings = self._settings_svc.cached_settings()
             current: dict = dict(settings.get("translation_glossary", {}) or {})
             new_entries: dict = {} if mode == "replace" else dict(current)
             skipped = 0
+            conflicts: list = []
+            seen_in_csv: dict = {}
 
             try:
                 reader = csv.reader(io.StringIO(csv_str))
@@ -82,6 +88,32 @@ def _make_service_with_glossary(glossary: dict):
                     if not src or not tgt:
                         skipped += 1
                         continue
+                    if src == tgt:
+                        skipped += 1
+                        continue
+                    if src in seen_in_csv:
+                        skipped += 1
+                        continue
+                    seen_in_csv[src] = tgt
+
+                    if mode == "merge" and src in current and current[src] != tgt:
+                        conflicts.append({
+                            "source": src,
+                            "existing_target": current[src],
+                            "new_target": tgt,
+                        })
+                        if on_conflict == "error":
+                            return {
+                                "ok": False,
+                                "error": f"conflict on source '{src}': existing='{current[src]}' new='{tgt}'",
+                                "imported_count": 0,
+                                "skipped_count": skipped,
+                                "conflict_count": len(conflicts),
+                                "conflicts": conflicts,
+                            }
+                        elif on_conflict == "skip":
+                            continue
+
                     new_entries[src] = tgt
             except Exception as exc:
                 return {"ok": False, "error": f"parse error: {exc}"}
@@ -94,6 +126,8 @@ def _make_service_with_glossary(glossary: dict):
                 "ok": True,
                 "imported_count": max(imported, 0),
                 "skipped_count": skipped,
+                "conflict_count": len(conflicts),
+                "conflicts": conflicts,
                 "total": len(new_entries),
             }
 
@@ -215,6 +249,119 @@ class TestImportGlossaryCsv(unittest.TestCase):
         self.assertEqual(import_result["skipped_count"], 0)
         saved = svc_import._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
         self.assertEqual(saved, original)
+
+
+class TestImportGlossaryCsvV2(unittest.TestCase):
+    """New tests added in batch-10: whitespace trimming, source==target skip,
+    within-CSV deduplication, on_conflict modes, conflict reporting."""
+
+    def test_import_strips_whitespace(self):
+        """Leading/trailing whitespace in source and target must be stripped."""
+        svc = _make_service_with_glossary({})
+        csv_str = "source,target\n  hello  ,  привет  \n"
+        result = svc._handle_import_glossary_csv({"csv": csv_str, "mode": "replace"})
+        self.assertTrue(result["ok"])
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertIn("hello", saved)
+        self.assertEqual(saved["hello"], "привет")
+        self.assertNotIn("  hello  ", saved)
+
+    def test_import_skips_empty_rows(self):
+        """Rows with empty source or target are counted as skipped (existing test revalidation)."""
+        svc = _make_service_with_glossary({})
+        csv_str = "source,target\ngood,значение\n,пусто\nтоже пусто,\n"
+        result = svc._handle_import_glossary_csv({"csv": csv_str, "mode": "replace"})
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["skipped_count"], 2)
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertIn("good", saved)
+        self.assertNotIn("", saved)
+
+    def test_import_skips_source_equals_target(self):
+        """Rows where source equals target (no-op entries) are skipped."""
+        svc = _make_service_with_glossary({})
+        csv_str = "source,target\nhello,hello\nworld,мир\n"
+        result = svc._handle_import_glossary_csv({"csv": csv_str, "mode": "replace"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["total"], 1)
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertNotIn("hello", saved)
+        self.assertEqual(saved.get("world"), "мир")
+
+    def test_import_dedupes_within_csv(self):
+        """If the same source appears twice in the CSV, keep the first occurrence."""
+        svc = _make_service_with_glossary({})
+        csv_str = "source,target\nhello,привет\nhello,здравствуйте\nworld,мир\n"
+        result = svc._handle_import_glossary_csv({"csv": csv_str, "mode": "replace"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_count"], 1)
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertEqual(saved.get("hello"), "привет")
+        self.assertEqual(saved.get("world"), "мир")
+
+    def test_import_conflict_skip_keeps_existing(self):
+        """on_conflict=skip: existing entry is preserved when CSV has different target."""
+        svc = _make_service_with_glossary({"hello": "привет"})
+        csv_str = "source,target\nhello,здравствуйте\nworld,мир\n"
+        result = svc._handle_import_glossary_csv(
+            {"csv": csv_str, "mode": "merge", "on_conflict": "skip"}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["conflict_count"], 1)
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        # Existing value preserved
+        self.assertEqual(saved.get("hello"), "привет")
+        # New entry added
+        self.assertEqual(saved.get("world"), "мир")
+
+    def test_import_conflict_overwrite_replaces(self):
+        """on_conflict=overwrite: existing entry is replaced with CSV value."""
+        svc = _make_service_with_glossary({"hello": "привет"})
+        csv_str = "source,target\nhello,здравствуйте\n"
+        result = svc._handle_import_glossary_csv(
+            {"csv": csv_str, "mode": "merge", "on_conflict": "overwrite"}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["conflict_count"], 1)
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertEqual(saved.get("hello"), "здравствуйте")
+
+    def test_import_conflict_error_aborts(self):
+        """on_conflict=error: import returns ok=False on first conflict, nothing written."""
+        svc = _make_service_with_glossary({"hello": "привет"})
+        csv_str = "source,target\nhello,здравствуйте\nworld,мир\n"
+        result = svc._handle_import_glossary_csv(
+            {"csv": csv_str, "mode": "merge", "on_conflict": "error"}
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("conflict", result["error"])
+        self.assertEqual(result["conflict_count"], 1)
+        # Nothing should have been written to settings
+        svc._settings_svc.handle_set_settings.assert_not_called()
+
+    def test_import_conflicts_returned_in_response(self):
+        """conflicts list contains source/existing_target/new_target for each conflict."""
+        svc = _make_service_with_glossary({"a": "1", "b": "2"})
+        csv_str = "source,target\na,100\nb,200\nc,3\n"
+        result = svc._handle_import_glossary_csv(
+            {"csv": csv_str, "mode": "merge", "on_conflict": "skip"}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["conflict_count"], 2)
+        conflicts = result["conflicts"]
+        self.assertEqual(len(conflicts), 2)
+        sources_in_conflicts = {c["source"] for c in conflicts}
+        self.assertEqual(sources_in_conflicts, {"a", "b"})
+        for c in conflicts:
+            self.assertIn("existing_target", c)
+            self.assertIn("new_target", c)
+        # c is a new non-conflicting entry
+        saved = svc._settings_svc.handle_set_settings.call_args[0][0]["translation_glossary"]
+        self.assertEqual(saved.get("c"), "3")
+        # a and b kept original values (skip mode)
+        self.assertEqual(saved.get("a"), "1")
+        self.assertEqual(saved.get("b"), "2")
 
 
 if __name__ == "__main__":

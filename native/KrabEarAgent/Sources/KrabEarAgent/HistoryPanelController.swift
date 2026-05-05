@@ -2272,12 +2272,19 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         guard modeResp != .alertThirdButtonReturn else { return }
         let mode = modeResp == .alertFirstButtonReturn ? "merge" : "replace"
 
+        performGlossaryImport(csv: csv, mode: mode, onConflict: "skip")
+    }
+
+    /// Выполняет IPC-вызов import_glossary_csv и обрабатывает конфликты.
+    /// Если обнаружены конфликты, показывает NSAlert со списком (до 10) и
+    /// предлагает повторить импорт с on_conflict=overwrite.
+    private func performGlossaryImport(csv: String, mode: String, onConflict: String) {
         let ipc = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let result = (try? ipc.call(
                 method: "import_glossary_csv",
-                params: ["csv": csv, "mode": mode]
+                params: ["csv": csv, "mode": mode, "on_conflict": onConflict]
             ))?["result"] as? [String: Any]
             DispatchQueue.main.async {
                 if let err = result?["error"] as? String {
@@ -2287,10 +2294,44 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 let imported = result?["imported_count"] as? Int ?? 0
                 let skipped = result?["skipped_count"] as? Int ?? 0
                 let total = result?["total"] as? Int ?? 0
-                self.showInfoAlert(
-                    title: "Импорт глоссария",
-                    body: "Импортировано: \(imported), пропущено: \(skipped), итого в глоссарии: \(total)."
-                )
+                let conflictCount = result?["conflict_count"] as? Int ?? 0
+                let conflicts = result?["conflicts"] as? [[String: Any]] ?? []
+
+                if conflictCount > 0 && mode == "merge" {
+                    // Show conflict summary and offer to overwrite
+                    let shown = Array(conflicts.prefix(10))
+                    var lines = shown.map { c -> String in
+                        let src = c["source"] as? String ?? "?"
+                        let existing = c["existing_target"] as? String ?? "?"
+                        let new = c["new_target"] as? String ?? "?"
+                        return "• \(src): «\(existing)» → «\(new)»"
+                    }
+                    if conflictCount > 10 {
+                        lines.append("…ещё \(conflictCount - 10) конфликтов")
+                    }
+                    let conflictAlert = NSAlert()
+                    conflictAlert.messageText = "Конфликты глоссария (\(conflictCount))"
+                    conflictAlert.informativeText = "Найдены термины с другим переводом:\n"
+                        + lines.joined(separator: "\n")
+                        + "\n\nПерезаписать существующие записи?"
+                    conflictAlert.addButton(withTitle: "Перезаписать")
+                    conflictAlert.addButton(withTitle: "Сохранить существующие")
+                    let resp = conflictAlert.runModal()
+                    if resp == .alertFirstButtonReturn {
+                        self.performGlossaryImport(csv: csv, mode: mode, onConflict: "overwrite")
+                        return
+                    }
+                    // User chose to keep existing — show final summary
+                    self.showInfoAlert(
+                        title: "Импорт глоссария",
+                        body: "Импортировано: \(imported), конфликтов пропущено: \(conflictCount), пропущено строк: \(skipped), итого: \(total)."
+                    )
+                } else {
+                    self.showInfoAlert(
+                        title: "Импорт глоссария",
+                        body: "Импортировано: \(imported), пропущено: \(skipped), итого в глоссарии: \(total)."
+                    )
+                }
                 self.syncSettingsControls()
             }
         }
