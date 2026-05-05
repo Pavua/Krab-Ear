@@ -439,6 +439,45 @@ extension HistoryPanelController {
         NSWorkspace.shared.open(url)
     }
 
+    // MARK: - Apple Notes (Phase D.4)
+
+    /// Отправляет выбранную запись истории в Apple Notes через IPC create_apple_note.
+    @objc func onSendToAppleNotes() {
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < items.count else {
+            showInfoAlert(title: "Apple Notes", body: "Выберите запись для отправки.")
+            return
+        }
+        sendHistoryItemToAppleNotes(items[selected])
+    }
+
+    func sendHistoryItemToAppleNotes(_ item: HistoryItem) {
+        let title = String(item.text.prefix(50))
+        let body = item.text
+        let ipcClient = self.ipcClient
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipcClient.call(
+                method: "create_apple_note",
+                params: ["title": title, "body": body, "folder": "Krab Ear"]
+            )
+            let result = response?["result"] as? [String: Any]
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let alert = NSAlert()
+                if let ok = result?["ok"] as? Bool, ok {
+                    alert.messageText = "Заметка создана"
+                    alert.informativeText = "Открыть Apple Notes для просмотра."
+                } else {
+                    alert.messageText = "Ошибка отправки"
+                    alert.informativeText = result?["error"] as? String ?? "unknown"
+                }
+                alert.runModal()
+            }
+        }
+    }
+
     // MARK: - Load / Append
 
     func loadInitial() {
