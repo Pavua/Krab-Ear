@@ -245,6 +245,7 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "action_label": "Открыть настройки LM Studio",
         "severity": "error",
         "dedupe_seconds": 60,
+    },
     # ── Layer: rewriter fallback chain ───────────────────────────
     "rewriter.fallback_used": {
         "user_msg_ru": "Основная модель сбоит — переключились на резервную",

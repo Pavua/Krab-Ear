@@ -265,16 +265,11 @@ class LLMRewriter:
         self._session = requests.Session()
 
     def _lm_studio_headers(self) -> dict:
-        """Build HTTP headers for LM Studio POST requests.
-        """Build HTTP headers for LM Studio requests.
+        """Собирает HTTP-заголовки для POST-запросов к LM Studio.
 
-        Includes ``Authorization: Bearer <token>`` only when api_key is set.
-        Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
-        """Build HTTP headers for LM Studio requests.
-
-        Includes ``Authorization: Bearer <token>`` only when api_key is set.
-        Empty api_key: no Authorization header (backward-compat with LM Studio < 0.3
-        that did not require authentication).
+        Хлебная крошка: здесь важна обратная совместимость. Если API-ключ
+        пустой, не добавляем ``Authorization`` — старые версии LM Studio могли
+        работать без обязательной авторизации.
         """
         headers: dict = {"Content-Type": "application/json"}
         if self._api_key:
