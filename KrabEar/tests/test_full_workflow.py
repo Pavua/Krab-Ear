@@ -80,6 +80,14 @@ class FakeEngine:
     def _resolve_diarization_device(self) -> str:
         return "cpu"
 
+    def warmup(self) -> dict:
+        return {
+            "loaded": True,
+            "latency_ms": 0,
+            "model_name": self.current_model,
+            "error": None,
+        }
+
 
 class FakeTranscriber:
     """Returns deterministic transcript lines including the session keyword."""
