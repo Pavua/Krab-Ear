@@ -642,6 +642,7 @@ class AudioEngine:
         stt_hotwords: list[str] | None = None,
         silence_ranges: list[tuple[float, float]] | None = None,
         diarize: bool | None = None,
+        skip_vad_prefilter: bool = False,
     ) -> dict[str, Any]:
         """Основной метод распознавания речи. Поддерживает динамические промпты и доменные подсказки.
 
@@ -800,7 +801,15 @@ class AudioEngine:
 
             # VAD pre-filter: убираем длинные паузы ДО Whisper → меньше галлюцинаций.
             # Работает только с numpy-массивами (не с file path).
-            if settings.STT_VAD_PREFILTER_ENABLED and isinstance(audio_data, np.ndarray):
+            # skip_vad_prefilter=True — для путей где VAD-модель неэффективна
+            # (например live_subs захватывает system audio с YouTube — VAD model
+            # тренирована на mic input и speech_ratio=0.0 на компрессированном
+            # потоке → STT никогда не вызывается).
+            if (
+                settings.STT_VAD_PREFILTER_ENABLED
+                and not skip_vad_prefilter
+                and isinstance(audio_data, np.ndarray)
+            ):
                 vad_result = self._apply_vad_prefilter(audio_data)
                 if vad_result is None:
                     # Тишина или слишком мало речи — возвращаем пустой результат

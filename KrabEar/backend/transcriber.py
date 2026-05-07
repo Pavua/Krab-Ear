@@ -55,6 +55,7 @@ class Transcriber:
         stt_hotwords: list[str] | None = None,
         settings: dict | None = None,
         diarize: bool | None = None,
+        skip_vad_prefilter: bool = False,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -89,6 +90,7 @@ class Transcriber:
             history_context=history_context,
             stt_hotwords=stt_hotwords,
             diarize=diarize,
+            skip_vad_prefilter=skip_vad_prefilter,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

@@ -124,8 +124,13 @@ class LiveSubsService:
         audio = np.concatenate(self._buffer).astype(np.float32)
         self._reset()
 
-        # STT
-        stt_result = self._transcriber.transcribe(audio, quality_profile="balanced")
+        # STT (skip_vad_prefilter=True для live_subs: VAD-модель тренирована на
+        # mic input и speech_ratio=0.0 на компрессированном system-audio из YouTube
+        # → STT никогда не вызывается. Для live субтитров VAD контрпродуктивен —
+        # короткие чанки уже отфильтрованы на уровне Swift SystemAudioCapture.)
+        stt_result = self._transcriber.transcribe(
+            audio, quality_profile="balanced", skip_vad_prefilter=True
+        )
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")
 
