@@ -387,7 +387,8 @@ extension HistoryPanelController {
         if let w = window {
             alert.beginSheetModal(for: w, completionHandler: nil)
         } else {
-            alert.runModal()
+            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем.
+            NSLog("[KrabEar] showGlossaryToast bail (no window): %@", message)
         }
     }
 
@@ -401,7 +402,8 @@ extension HistoryPanelController {
         if let w = window {
             alert.beginSheetModal(for: w, completionHandler: nil)
         } else {
-            alert.runModal()
+            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем.
+            NSLog("[KrabEar] showGlossaryError bail (no window): %@", message)
         }
     }
 }

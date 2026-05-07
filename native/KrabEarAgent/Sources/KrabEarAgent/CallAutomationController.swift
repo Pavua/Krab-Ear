@@ -1053,7 +1053,9 @@ final class CallAutomationController: NSViewController {
         if let window = view.window {
             alert.beginSheetModal(for: window, completionHandler: nil)
         } else {
-            alert.runModal()
+            // Без окна runModal() блокирует main thread → AppHang (KRAB-EAR-AGENT-E).
+            // Call automation может выполняться в фоне, окно может быть не на переднем плане.
+            NSLog("[KrabEar] CallAutomation showError bail (no window): %@", msg)
         }
     }
 

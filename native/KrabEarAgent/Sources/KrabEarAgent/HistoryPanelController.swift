@@ -2354,11 +2354,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }
 
     func showInfoAlert(title: String, body: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = body
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        // Делегируем в showInfoSheet — безопасная версия без runModal().
+        // Если window == nil (окно закрыто/свёрнуто) — тихо логируем вместо
+        // вызова blocking runModal без window → AppHang (KRAB-EAR-AGENT-E).
+        showInfoSheet(window: self.window, title: title, body: body)
     }
 
     func windowWillClose(_ notification: Notification) {
