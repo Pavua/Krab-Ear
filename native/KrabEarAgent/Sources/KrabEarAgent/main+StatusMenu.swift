@@ -205,14 +205,14 @@ extension AgentAppDelegate {
 
         menu.addItem(.separator())
 
-        // Live субтитры (Cmd+Shift+L)
+        // Live субтитры (Cmd+Option+Shift+L — избегаем конфликт с Safari location bar Cmd+Shift+L)
         let liveSubsItem = NSMenuItem(
             title: systemAudioCapture.isCapturing ? "Остановить Live субтитры" : "Live субтитры (захват аудио)",
             action: #selector(onToggleLiveSubs),
             keyEquivalent: "l"
         )
         liveSubsItem.target = self
-        liveSubsItem.keyEquivalentModifierMask = [.command, .shift]
+        liveSubsItem.keyEquivalentModifierMask = [.command, .option, .shift]
         menu.addItem(liveSubsItem)
 
         menu.addItem(.separator())

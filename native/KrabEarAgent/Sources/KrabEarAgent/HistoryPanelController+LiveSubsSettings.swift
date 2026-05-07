@@ -41,7 +41,7 @@ extension HistoryPanelController {
         enableToggle.setButtonType(.switch)
         enableToggle.state = UserDefaults.standard.bool(forKey: UserDefaults.liveSubsEnabledKey) ? .on : .off
         enableToggle.tag = 8801
-        let enableRow = cdMakeRow(label: "Включить Live субтитры (Cmd+Shift+L)", control: enableToggle)
+        let enableRow = cdMakeRow(label: "Включить Live субтитры (Cmd+⌥+Shift+L)", control: enableToggle)
 
         card.contentStackView.addArrangedSubview(enableRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
