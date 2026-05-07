@@ -2900,10 +2900,26 @@ class BackendService:
                 for item in data.get("data", [])
                 if item.get("id")
             ]
+            # Рекомендованные модели — наверху dropdown (обновлено 2026-05-08)
             recommended_models = [
-                "qwen3-4b-abliterated",
+                # ⚡ Engine: fast postprocess (4–8B)
+                "gemma-4-e4b-it-mlx",
                 "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-                "qwen3-8b-abliterated",
+                "josiefied-qwen3-4b-abl",
+                "mlabonne_qwen3-8b-abliterated",
+                "qwen/qwen3-8b",
+                "aya-expanse-8b",
+                "liquid/lfm2.5-1.2b",
+                # 🧠 Brain: reasoning (14B+)
+                "huihui-qwen3-14b-abl-v2",
+                "qwen3.5-27b",
+                "qwen3.6-27b-ud-mlx",
+                "qwen/qwen3.6-27b",
+                "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+                "josiefied-qwen3-30b-a3b-abliterated-v2",
+                "seed-oss-36b-instruct-mlx",
+                "aya-expanse-32b-abliterated",
+                "allenai/olmo-3-32b-think",
             ]
             return {
                 "models": sorted(ids),

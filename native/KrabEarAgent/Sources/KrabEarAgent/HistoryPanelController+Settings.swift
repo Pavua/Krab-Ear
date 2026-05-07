@@ -194,18 +194,39 @@ extension HistoryPanelController {
 
     /// Проверенные / рекомендованные модели — всегда наверху dropdown.
     /// Обновлять по результатам bench-сессий (см. комментарии в HistoryPanelController.swift).
+    /// Обновлено 2026-05-08: актуальный список из LM Studio /v1/models.
     private static let recommendedRewriterModels: [String] = [
-        "gemma-4-e4b-it-mlx",
-        "Qwen3-8B-MLX-4bit",
+        // ⚡ Engine: быстрые 4–8B для постпроцессинга транскриптов
+        "gemma-4-e4b-it-mlx",                               // текущий default движок
+        "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx", // qwen3 4B hi-quality
+        "josiefied-qwen3-4b-abl",                           // qwen3 4B abliterated
+        "mlabonne_qwen3-8b-abliterated",                    // qwen3 8B abliterated
+        "qwen/qwen3-8b",                                    // qwen3 8B official
+        "aya-expanse-8b",                                   // aya 8B multilingual
+        "liquid/lfm2.5-1.2b",                               // supersmall 1.2B fallback
+        // 🧠 Brain: reasoning модели 14B+ (для VA conversation)
         "huihui-qwen3-14b-abl-v2",
-        "qwen3.5-9b@6bit",
+        "qwen3-14b-abliterated",
+        "qwen3.5-27b",
+        "qwen3.6-27b-ud-mlx",
+        "qwen/qwen3.6-27b",
         "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
-        "aya-expanse-8b",
-        "Qwen3.5-27B-4bit",
-        "Aya-Expanse-32B-abliterated",
-        "qwen2.5-14b-uncensored-mlx",
-        "Hermes-3-Llama-8B",
-        "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+        "josiefied-qwen3-30b-a3b-abliterated-v2",
+        "qwen3.5-35b-a3b-mlx-lm",
+        "seed-oss-36b-instruct-mlx",
+        "aya-expanse-32b-abliterated",
+        "allenai/olmo-3-32b-think",
+        "supergemma4-26b-uncensored-mlx-v2",
+        "gemma-4-26b-a4b-it-optiq",
+        // 👁 Vision
+        "microsoft_fara-7b",
+        "pixtral-12b",
+        "llama-3.2-11b-vision-instruct-abliterated",
+        "qwen3.5-9b-mlx-vlm",
+        // 🔧 Code
+        "qwen2.5-coder-7b-instruct-mlx",
+        "qwen/qwen3-coder-30b",
+        "mistralai/devstral-small-2-2512",
     ]
 
     /// Заполняет dropdown llmModelSelector:
@@ -1134,13 +1155,27 @@ extension HistoryPanelController {
             control: vaEngineSelector
         )
 
-        // 4. Brain (LLM) selector
+        // 4. Brain (LLM) selector — обновлено 2026-05-08
         vaBrainSelector.removeAllItems()
-        vaBrainSelector.addItems(withTitles: ["Авто", "qwen3-30b (точнее, 17 GB)", "qwen3-4b (быстрее, 4 GB)"])
+        vaBrainSelector.addItems(withTitles: [
+            "Авто",
+            // ⚡ Engine: быстрые (4–8B)
+            "gemma-4-e4b-it-mlx (4B, быстро)",
+            "huihui-qwen3-4b (4B, ru-оптим.)",
+            "josiefied-qwen3-4b (4B)",
+            "mlabonne_qwen3-8b (8B)",
+            // 🧠 Brain: reasoning (14B+)
+            "huihui-qwen3-14b (14B)",
+            "qwen3.5-27b (27B, точнее)",
+            "qwen3.6-27b (27B, ud-mlx)",
+            "qwen3-30b-huihui (30B, максимум)",
+            "seed-oss-36b (36B)",
+            "aya-expanse-32b (32B, multilingual)",
+        ])
         vaBrainSelector.setAccessibilityLabel("Выбор LLM-мозга для разговора с AI")
         let brainRow = makeSettingRow(
             label: "Мозг LLM",
-            description: "qwen3-30b — лучшее качество русского. qwen3-4b — быстро, меньше памяти.",
+            description: "⚡ 4–8B — быстро, меньше RAM. 🧠 14B+ — выше качество русского, reasoning.",
             control: vaBrainSelector
         )
 
@@ -1189,9 +1224,18 @@ extension HistoryPanelController {
     @objc func onVABrainSelectorChanged() {
         let idx = vaBrainSelector.indexOfSelectedItem
         let value: String
+        // Индексы соответствуют порядку в addItems вызове buildVoiceAssistantSection
         switch idx {
-        case 1: value = "qwen3-30b"
-        case 2: value = "qwen3-4b"
+        case 1:  value = "gemma-4-e4b-it-mlx"
+        case 2:  value = "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx"
+        case 3:  value = "josiefied-qwen3-4b-abl"
+        case 4:  value = "mlabonne_qwen3-8b-abliterated"
+        case 5:  value = "huihui-qwen3-14b-abl-v2"
+        case 6:  value = "qwen3.5-27b"
+        case 7:  value = "qwen3.6-27b-ud-mlx"
+        case 8:  value = "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx"
+        case 9:  value = "seed-oss-36b-instruct-mlx"
+        case 10: value = "aya-expanse-32b-abliterated"
         default: value = "auto"
         }
         UserDefaults.standard.set(value, forKey: "KrabEar_ConversationBrain")
@@ -1217,9 +1261,20 @@ extension HistoryPanelController {
 
         let brain = UserDefaults.standard.string(forKey: "KrabEar_ConversationBrain") ?? "auto"
         switch brain {
-        case "qwen3-30b": vaBrainSelector.selectItem(at: 1)
-        case "qwen3-4b":  vaBrainSelector.selectItem(at: 2)
-        default:          vaBrainSelector.selectItem(at: 0)
+        case "gemma-4-e4b-it-mlx":                                            vaBrainSelector.selectItem(at: 1)
+        case "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx":              vaBrainSelector.selectItem(at: 2)
+        case "josiefied-qwen3-4b-abl":                                        vaBrainSelector.selectItem(at: 3)
+        case "mlabonne_qwen3-8b-abliterated":                                 vaBrainSelector.selectItem(at: 4)
+        case "huihui-qwen3-14b-abl-v2":                                       vaBrainSelector.selectItem(at: 5)
+        case "qwen3.5-27b":                                                   vaBrainSelector.selectItem(at: 6)
+        case "qwen3.6-27b-ud-mlx":                                            vaBrainSelector.selectItem(at: 7)
+        case "huihui-qwen3-30b-a3b-instruct-2507-abliterated-dwq4-mlx",
+             "qwen3-30b":                                                     vaBrainSelector.selectItem(at: 8)
+        case "seed-oss-36b-instruct-mlx":                                     vaBrainSelector.selectItem(at: 9)
+        case "aya-expanse-32b-abliterated":                                   vaBrainSelector.selectItem(at: 10)
+        // legacy ids → auto
+        case "qwen3-4b": vaBrainSelector.selectItem(at: 2)
+        default:         vaBrainSelector.selectItem(at: 0)
         }
     }
 
