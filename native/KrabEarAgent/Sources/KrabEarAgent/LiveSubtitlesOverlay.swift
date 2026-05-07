@@ -8,8 +8,10 @@
  - Можно перетаскивать мышью → позиция сохраняется в UserDefaults
  - Подписывается на SSE `/v1/events?filter=live_subs.result` через URLSession
 
- Event payload (live_subs.result):
-   { "type": "live_subs.result", "data": { "original": "...", "translation": "..." } }
+ Event payload (live_subs.result) — сервер шлёт плоский data без вложенного "data":
+   event: live_subs.result
+   data: { "text": "...", "translation": "...", "start_ts": ..., "end_ts": ..., "language_detected": "..." }
+ Парсер поддерживает и "original" и "text" для обратной совместимости.
 
  Связи:
  - SystemAudioCapture: start/stop синхронизировано
@@ -49,6 +51,13 @@ final class LiveSubtitlesOverlay: NSObject {
     private var entries: [SubtitleEntry] = []
     private let maxEntries = 3
     private var fadeTimers: [UUID: Timer] = [:]
+
+    /// Текущий event type из SSE (из строки "event: ..."), чтобы фильтровать data-строки.
+    private var pendingSSEEventType: String? = nil
+
+    /// Таймер "нет результатов 30 сек" — подсказка пользователю.
+    private var noResultsTimer: Timer? = nil
+    private let noResultsTimeout: TimeInterval = 30.0
 
     // MARK: - UI
 
@@ -93,13 +102,16 @@ final class LiveSubtitlesOverlay: NSObject {
     func show() {
         panel.orderFront(nil)
         isVisible = true
+        showListeningIndicator()
         startSSE()
+        startNoResultsTimer()
     }
 
     func hide() {
         panel.orderOut(nil)
         isVisible = false
         stopSSE()
+        cancelNoResultsTimer()
         clearAll()
     }
 
@@ -198,6 +210,10 @@ final class LiveSubtitlesOverlay: NSObject {
 
     /// Добавляет новую строку субтитров, удаляет самые старые если > maxEntries.
     func addEntry(original: String, translation: String) {
+        // Убираем listening indicator / no-results hint при первом реальном результате
+        if entries.isEmpty {
+            cancelNoResultsTimer()
+        }
         let entry = SubtitleEntry(original: original, translation: translation, timestamp: Date())
         entries.append(entry)
 
@@ -233,7 +249,53 @@ final class LiveSubtitlesOverlay: NSObject {
         fadeTimers.values.forEach { $0.invalidate() }
         fadeTimers = [:]
         entries = []
+        pendingSSEEventType = nil
         rebuildSubtitleViews()
+    }
+
+    // MARK: - Listening indicator
+
+    /// Показывает placeholder "Слушаю..." до первого результата.
+    private func showListeningIndicator() {
+        // Удаляем старый контент
+        stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
+        let label = NSTextField(labelWithString: "🎙️ Слушаю...")
+        label.font = .systemFont(ofSize: 14, weight: .medium)
+        label.textColor = NSColor.white.withAlphaComponent(0.7)
+        label.alignment = .center
+        label.isBordered = false
+        label.drawsBackground = false
+        label.tag = 9901  // маркер — чтобы убрать при первом результате
+        stackView.addArrangedSubview(label)
+    }
+
+    /// Убирает listening indicator и показывает hint об источнике аудио.
+    private func showNoResultsHint() {
+        stackView.arrangedSubviews.forEach { stackView.removeArrangedSubview($0); $0.removeFromSuperview() }
+        let label = NSTextField(labelWithString: "🔇 Не распознано речи\n(проверь Privacy → Screen Recording\nили выбери другой источник аудио)")
+        label.font = .systemFont(ofSize: 12, weight: .regular)
+        label.textColor = NSColor.white.withAlphaComponent(0.6)
+        label.alignment = .center
+        label.maximumNumberOfLines = 3
+        label.isBordered = false
+        label.drawsBackground = false
+        stackView.addArrangedSubview(label)
+    }
+
+    /// Старт таймера 30 сек — если нет результатов, показать hint.
+    private func startNoResultsTimer() {
+        cancelNoResultsTimer()
+        noResultsTimer = Timer.scheduledTimer(withTimeInterval: noResultsTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.isVisible, self.entries.isEmpty else { return }
+                self.showNoResultsHint()
+            }
+        }
+    }
+
+    private func cancelNoResultsTimer() {
+        noResultsTimer?.invalidate()
+        noResultsTimer = nil
     }
 
     // MARK: - Rebuild UI
@@ -308,17 +370,35 @@ final class LiveSubtitlesOverlay: NSObject {
     // MARK: - SSE Line Parsing
 
     private func handleSSELine(_ line: String) {
-        if line.hasPrefix("data: ") {
+        if line.hasPrefix("event: ") {
+            // Трекаем тип события — фильтруем только live_subs.result
+            pendingSSEEventType = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+        } else if line.hasPrefix("data: ") {
+            // Фильтр: игнорируем чужие event types
+            guard pendingSSEEventType == "live_subs.result" else {
+                pendingSSEEventType = nil
+                return
+            }
+            pendingSSEEventType = nil
             let json = String(line.dropFirst(6))
             parseSSEData(json)
+        } else if line.isEmpty {
+            // Пустая строка — разделитель SSE-блоков, сбрасываем буферный тип
+            pendingSSEEventType = nil
         }
     }
 
     private func parseSSEData(_ json: String) {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        // Поддерживаем оба формата:
+        // 1. {type, data: {original/text, translation}} — конверт
+        // 2. {original/text, translation} — плоский (сервер шлёт data-only без вложенного "data")
         let eventData = obj["data"] as? [String: Any] ?? obj
-        let original = (eventData["original"] as? String) ?? ""
+        // "original" — историческое поле; "text" — поле LiveSubsResult из Python-бэкенда
+        let original = (eventData["original"] as? String)
+            ?? (eventData["text"] as? String)
+            ?? ""
         let translation = (eventData["translation"] as? String)
             ?? (eventData["translated"] as? String)
             ?? ""

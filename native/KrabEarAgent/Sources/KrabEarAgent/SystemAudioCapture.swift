@@ -1,7 +1,7 @@
 /*
  SystemAudioCapture — захват системного аудио через ScreenCaptureKit (SCStream).
 
- Горячая клавиша: Cmd+Shift+L (зарегистрирована в main+StatusMenu.swift).
+ Горячая клавиша: Cmd+Option+Shift+L (зарегистрирована в main+StatusMenu.swift).
  Поток:
    1. SCStreamOutput.stream(_:didOutputSampleBuffer:of:) → extractPCM()
    2. PCM буферизуется в ringBuffer (~1 с при 16 kHz)
