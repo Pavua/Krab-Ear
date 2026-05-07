@@ -124,6 +124,23 @@ class LiveSubsService:
         audio = np.concatenate(self._buffer).astype(np.float32)
         self._reset()
 
+        # Ресемплинг: Swift/SCStream отдаёт нативную частоту (обычно 48 kHz),
+        # Whisper ожидает строго 16 kHz. Без ресемплинга Whisper воспринимает
+        # audio pitch-shifted (×3 медленнее) → text="" → confidence=0.00.
+        _WHISPER_SR = 16000
+        if sample_rate != _WHISPER_SR and sample_rate > 0:
+            try:
+                from scipy.signal import resample_poly  # type: ignore[import]
+                from math import gcd
+                _g = gcd(sample_rate, _WHISPER_SR)
+                audio = resample_poly(audio, _WHISPER_SR // _g, sample_rate // _g).astype(np.float32)
+                logger.debug(
+                    "LiveSubsService: resampled %d Hz → %d Hz (%d → %d samples)",
+                    sample_rate, _WHISPER_SR, len(audio) * sample_rate // _WHISPER_SR, len(audio),
+                )
+            except Exception:
+                logger.exception("LiveSubsService: ресемплинг не удался, STT получит raw %d Hz", sample_rate)
+
         # STT (skip_vad_prefilter=True для live_subs: VAD-модель тренирована на
         # mic input и speech_ratio=0.0 на компрессированном system-audio из YouTube
         # → STT никогда не вызывается. Для live субтитров VAD контрпродуктивен —
@@ -156,12 +173,18 @@ class LiveSubsService:
             language_detected=language_detected,
         )
         event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
-        logger.debug(
-            "LiveSubsService: flush text=%r lang=%s translation=%r",
-            text,
-            language_detected,
-            translation,
-        )
+        if text:
+            logger.info(
+                "LiveSubsService: flush OK text=%r lang=%s translation=%r",
+                text,
+                language_detected,
+                translation,
+            )
+        else:
+            logger.info(
+                "LiveSubsService: flush EMPTY (Whisper вернул пустой текст, lang=%s)",
+                language_detected,
+            )
 
         return {
             "text": text,
