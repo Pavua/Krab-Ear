@@ -580,50 +580,54 @@ extension HistoryPanelController {
     }
 
     func sendHistoryItemToImessage(_ item: HistoryItem) {
-        // Prompt user for recipient
-        let alert = NSAlert()
-        alert.messageText = "Отправить через iMessage"
-        alert.informativeText = "Введите номер телефона, email или имя контакта:"
-        alert.addButton(withTitle: "Отправить")
-        alert.addButton(withTitle: "Отмена")
+        // Используем async Task чтобы не блокировать main thread через runModal()
+        // (AppHang risk — KRAB-EAR-AGENT-E). showInputSheet возвращает nil при
+        // отсутствии окна, вместо вызова blocking runModal без window.
+        let capturedItem = item
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let recipient = await showInputSheet(
+                window: self.window,
+                title: "Отправить через iMessage",
+                message: "Введите номер телефона, email или имя контакта:",
+                placeholder: "+7 999 123-45-67 или email",
+                confirmTitle: "Отправить"
+            ) else { return }
 
-        let recipientField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        recipientField.placeholderString = "+7 999 123-45-67 или email"
-        alert.accessoryView = recipientField
-        alert.window.initialFirstResponder = recipientField
+            let trimmed = recipient.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else {
+                showInfoSheet(window: self.window, title: "iMessage", body: "Получатель не указан.")
+                return
+            }
 
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
+            let body = capturedItem.text
+            let ipcClient = self.ipcClient
 
-        let recipient = recipientField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !recipient.isEmpty else {
-            showInfoAlert(title: "iMessage", body: "Получатель не указан.")
-            return
-        }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let params: [String: Any] = [
+                    "recipient": trimmed,
+                    "body": body,
+                    "service": "iMessage"
+                ]
+                let ipcResponse = try? ipcClient.call(method: "send_imessage", params: params)
+                let result = ipcResponse?["result"] as? [String: Any]
 
-        let body = item.text
-        let ipcClient = self.ipcClient
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let params: [String: Any] = [
-                "recipient": recipient,
-                "body": body,
-                "service": "iMessage"
-            ]
-            let ipcResponse = try? ipcClient.call(method: "send_imessage", params: params)
-            let result = ipcResponse?["result"] as? [String: Any]
-
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let resultAlert = NSAlert()
-                if let ok = result?["ok"] as? Bool, ok {
-                    resultAlert.messageText = "Сообщение отправлено"
-                    resultAlert.informativeText = "iMessage отправлен получателю \(recipient)."
-                } else {
-                    resultAlert.messageText = "Ошибка отправки"
-                    resultAlert.informativeText = result?["error"] as? String ?? "unknown"
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let ok = result?["ok"] as? Bool, ok {
+                        showInfoSheet(
+                            window: self.window,
+                            title: "Сообщение отправлено",
+                            body: "iMessage отправлен получателю \(trimmed)."
+                        )
+                    } else {
+                        showInfoSheet(
+                            window: self.window,
+                            title: "Ошибка отправки",
+                            body: result?["error"] as? String ?? "unknown"
+                        )
+                    }
                 }
-                resultAlert.runModal()
             }
         }
     }
