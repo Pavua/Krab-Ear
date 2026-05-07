@@ -312,6 +312,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             logger.info("Bookmark hotkey активирован (Cmd+Shift+B)")
         }
 
+        startLiveSubsHotkeyMonitor()
+        logger.info("Live Subs hotkey активирован (Cmd+Option+Shift+L)")
+
         startQuickReplaceHotkeyMonitor()
         logger.info("Quick Replace hotkey активирован (Cmd+Shift+R)")
 
