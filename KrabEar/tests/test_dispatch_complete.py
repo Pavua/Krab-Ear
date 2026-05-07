@@ -63,6 +63,14 @@ class _FakeEngine:
     def _resolve_diarization_device(self) -> str:
         return "cpu"
 
+    def warmup(self) -> dict:
+        return {
+            "loaded": True,
+            "latency_ms": 0,
+            "model_name": self.current_model,
+            "error": None,
+        }
+
 
 class _FakeTranscriber:
     def __init__(self):
