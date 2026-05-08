@@ -262,17 +262,58 @@ class ObsidianSyncManager:
 
         return f"transcript_{ts_part}_{safe_suffix}.md"
 
+    @staticmethod
+    def _format_duration(seconds: float | None) -> str:
+        """Форматирует длительность как `5 мин 23 сек` / `1 ч 5 мин`."""
+        if seconds is None or seconds <= 0:
+            return ""
+        total = int(round(float(seconds)))
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        if h > 0:
+            return f"{h} ч {m} мин"
+        if m > 0:
+            return f"{m} мин {s} сек"
+        return f"{s} сек"
+
+    @staticmethod
+    def _format_hhmmss(seconds: float) -> str:
+        """Форматирует секунды как `MM:SS` или `HH:MM:SS`."""
+        total = int(seconds or 0)
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
     def _build_md_content(self, item: Any) -> str:
-        """Построить Obsidian-совместимый .md контент для записи."""
+        """Построить Obsidian-совместимый .md контент для записи.
+
+        Расширенный формат: YAML frontmatter с audio_path/duration/language/
+        speakers/confidence + body с ссылкой на запись, summary и
+        диаризованным транскриптом. Edge cases — graceful: отсутствующие
+        поля не рендерятся (без `None`/`Не указано`).
+        """
         ts = self._get_item_attr(item, "ts", "")
         text = self._get_item_attr(item, "text", "")
+        cleaned_text = self._get_item_attr(item, "cleaned_text", "")
         translated_text = self._get_item_attr(item, "translated_text", "")
         translation_mode = self._get_item_attr(item, "translation_mode", "off")
         source_lang = self._get_item_attr(item, "source_lang", "")
         target_lang = self._get_item_attr(item, "target_lang", "")
         tags = self._get_item_attr(item, "tags", []) or []
         diarization = self._get_item_attr(item, "diarization", None)
+        speaker_turns_field = self._get_item_attr(item, "speaker_turns", None)
         confidence = self._get_item_attr(item, "confidence", None)
+        audio_path = self._get_item_attr(item, "audio_path", "") or ""
+        audio_duration_sec = self._get_item_attr(item, "audio_duration_sec", None)
+        # `summary` — опциональный (может появиться позже в HistoryItem).
+        # `reasoning` от Voxtral содержит summary/Q&A — используем как fallback.
+        summary = self._get_item_attr(item, "summary", "") or self._get_item_attr(
+            item, "reasoning", ""
+        ) or ""
         item_id = self._get_item_attr(item, "id", "")
 
         # Форматируем дату
@@ -280,77 +321,147 @@ class ObsidianSyncManager:
             dt = datetime.fromisoformat(str(ts))
             date_str = dt.strftime("%Y-%m-%d")
             datetime_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            iso_created = dt.isoformat()
         except (ValueError, TypeError):
             date_str = str(ts)[:10] if ts else ""
             datetime_str = str(ts) if ts else ""
+            iso_created = str(ts) if ts else ""
 
-        # Нормализуем теги для YAML
-        yaml_tags = ["krab-ear", "transcript"]
+        # Нормализуем теги для YAML — добавляем `call`
+        yaml_tags = ["krab-ear", "transcript", "call"]
         for t in tags:
             clean = re.sub(r"[#\s]+", "-", str(t)).strip("-")
-            if clean:
+            if clean and clean not in yaml_tags:
                 yaml_tags.append(clean)
 
-        # Строим frontmatter
+        # Определяем язык: source_lang при переводе, иначе target_lang
+        language = source_lang or target_lang or ""
+
+        # Собираем имена спикеров (unique, в порядке появления)
+        speaker_names: list[str] = []
+        diar_turns: list[dict] = []
+        if isinstance(diarization, dict) and diarization.get("speaker_turns"):
+            diar_turns = list(diarization.get("speaker_turns") or [])
+        elif isinstance(speaker_turns_field, list) and speaker_turns_field:
+            diar_turns = list(speaker_turns_field)
+        for turn in diar_turns:
+            if not isinstance(turn, dict):
+                continue
+            sp = str(turn.get("speaker", "")).strip()
+            if sp and sp not in speaker_names:
+                speaker_names.append(sp)
+
+        # ---- YAML frontmatter ----
         lines: list[str] = ["---"]
-        lines.append(f"title: Транскрипция {date_str}")
-        lines.append(f"date: {datetime_str}")
-        lines.append(f"id: {item_id}")
+        title_str = f"Транскрипт {datetime_str}" if datetime_str else "Транскрипт"
+        lines.append(f"title: {title_str}")
+        if iso_created:
+            lines.append(f"created: {iso_created}")
+        if date_str:
+            lines.append(f"date: {date_str}")
+        if item_id:
+            lines.append(f"id: {item_id}")
         lines.append("tags:")
         for tag in yaml_tags:
             lines.append(f"  - {tag}")
-        if source_lang:
+        if audio_path:
+            lines.append(f"audio_path: {audio_path}")
+        if audio_duration_sec is not None:
+            try:
+                lines.append(f"audio_duration_sec: {float(audio_duration_sec):.3f}")
+            except (TypeError, ValueError):
+                pass
+        if language:
+            lines.append(f"language: {language}")
+        if source_lang and source_lang != language:
             lines.append(f"source_lang: {source_lang}")
-        if target_lang:
+        if target_lang and target_lang != language:
             lines.append(f"target_lang: {target_lang}")
+        if speaker_names:
+            lines.append("speakers:")
+            for sp in speaker_names:
+                # Sanitize пробелы/двоеточия для YAML scalar
+                safe_sp = re.sub(r"[:\n]+", "_", sp).strip()
+                lines.append(f"  - {safe_sp}")
         if confidence is not None:
-            lines.append(f"confidence: {confidence:.3f}")
+            try:
+                lines.append(f"confidence: {float(confidence):.3f}")
+            except (TypeError, ValueError):
+                pass
         lines.append("source: krab-ear")
         lines.append("---")
         lines.append("")
 
-        # Заголовок документа
-        lines.append(f"# Транскрипция {datetime_str}")
+        # ---- Заголовок ----
+        lines.append(f"# 🎙️ {title_str}")
         lines.append("")
 
-        # Секция транскрипции
-        lines.append("## Улучшенная транскрибация")
-        lines.append("")
+        # ---- Ссылка на аудио ----
+        if audio_path:
+            # `file://` URI с абсолютным путём; пробелы Obsidian обрабатывает корректно
+            uri = audio_path
+            if not uri.startswith("file://"):
+                uri = "file://" + uri if uri.startswith("/") else "file:///" + uri
+            lines.append(f"[🔊 Открыть запись]({uri})  ")
+            lines.append("")
 
-        if diarization and isinstance(diarization, dict) and diarization.get("enabled"):
-            speaker_turns = diarization.get("speaker_turns", [])
-            if speaker_turns:
-                for turn in speaker_turns:
-                    speaker = turn.get("speaker", "Спикер")
-                    turn_text = turn.get("text", "")
-                    start = turn.get("start", 0.0)
-                    # Форматируем время как HH:MM:SS
-                    h = int(start // 3600)
-                    m = int((start % 3600) // 60)
-                    s = int(start % 60)
-                    timestamp = f"{h:02d}:{m:02d}:{s:02d}"
-                    lines.append(f"**[{speaker} ({timestamp})]** {turn_text}")
-                    lines.append("")
-            else:
-                lines.append(f"[Спикер (00:00:00)] {text}")
+        # ---- Метаданные одной строкой ----
+        meta_parts: list[str] = []
+        dur_str = self._format_duration(audio_duration_sec)
+        if dur_str:
+            meta_parts.append(f"**Длительность**: {dur_str}")
+        if language:
+            meta_parts.append(f"**Язык**: {language}")
+        if confidence is not None:
+            try:
+                pct = int(round(float(confidence) * 100))
+                meta_parts.append(f"**Уверенность**: {pct}%")
+            except (TypeError, ValueError):
+                pass
+        if meta_parts:
+            lines.append(" | ".join(meta_parts))
+            lines.append("")
+
+        # ---- Summary (только если есть) ----
+        summary_text = str(summary).strip()
+        if summary_text:
+            lines.append("## 📝 Summary")
+            lines.append("")
+            lines.append(summary_text)
+            lines.append("")
+
+        # ---- Транскрипт ----
+        body_text = (cleaned_text or text or "").strip()
+        if diar_turns:
+            lines.append("## 🎙️ Транскрипт")
+            lines.append("")
+            for turn in diar_turns:
+                if not isinstance(turn, dict):
+                    continue
+                speaker = str(turn.get("speaker", "Speaker")).strip() or "Speaker"
+                turn_text = str(turn.get("text", "")).strip()
+                start_val = turn.get("start", 0.0) or 0.0
+                try:
+                    timestamp = self._format_hhmmss(float(start_val))
+                except (TypeError, ValueError):
+                    timestamp = "00:00"
+                if turn_text:
+                    lines.append(f"**{speaker} ({timestamp})**: {turn_text}")
+                else:
+                    lines.append(f"**{speaker} ({timestamp})**")
                 lines.append("")
-        else:
-            # Без диаризации — стандартный формат
-            lines.append(f"[Спикер (00:00:00)] {text}")
+        elif body_text:
+            lines.append("## 🎙️ Транскрипт")
+            lines.append("")
+            lines.append(body_text)
             lines.append("")
 
-        # Секция перевода (если есть)
+        # ---- Перевод (если есть) ----
         if translated_text and translation_mode != "off":
-            lines.append("## Перевод")
+            lines.append("## 🌐 Перевод")
             lines.append("")
-            lines.append(translated_text)
+            lines.append(str(translated_text).strip())
             lines.append("")
-
-        # Краткое содержание — placeholder
-        lines.append("## Краткое содержание (Summary)")
-        lines.append("")
-        lines.append("*Авто-резюме не сгенерировано.*")
-        lines.append("")
 
         return "\n".join(lines)
 

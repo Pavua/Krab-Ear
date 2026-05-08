@@ -1854,6 +1854,44 @@ class BackendService:
             except Exception:
                 logger.exception("Не удалось автосохранить транскрибацию в .md")
 
+        # Wave (08.05.2026): auto-sync в Obsidian vault если configured.
+        # User-flow: транскрипт → summary → диаризация → запись в vault как
+        # одна заметка с YAML frontmatter + audio hyperlink + summary + transcript.
+        # Defense-in-depth: ошибки swallow'аются, на pipeline не влияют.
+        try:
+            _obsidian_state = getattr(self._obsidian_sync, "get_sync_status", None)
+            if _obsidian_state is not None:
+                _state = self._obsidian_sync.get_sync_status()
+                if _state.get("vault_path"):
+                    _full_item = {
+                        "id": item.id,
+                        "ts": item.ts,
+                        "text": display_text,
+                        "cleaned_text": display_text,
+                        "audio_path": getattr(item, "audio_path", None) or tp.get("audio_path"),
+                        "audio_duration_sec": duration_sec,
+                        "confidence": tp.get("confidence"),
+                        "language": tp.get("language") or "ru",
+                        "summary": result_payload.get("summary") or getattr(item, "summary", None),
+                        "translated_text": translated_text,
+                        "translation_mode": translation_status,
+                        "source_lang": tp.get("source_lang"),
+                        "target_lang": tp.get("target_lang"),
+                        "diarization": diarization_data,
+                        "speaker_turns": (diarization_data or {}).get("speaker_turns") if isinstance(diarization_data, dict) else None,
+                        "tags": ["call"],
+                    }
+                    _sync_result = self._obsidian_sync.sync([_full_item], force=True)
+                    if _sync_result.synced_count:
+                        logger.info(
+                            "obsidian_auto_sync: synced %d, vault=%s",
+                            _sync_result.synced_count,
+                            _state.get("vault_path"),
+                        )
+                        result_payload["obsidian_synced"] = True
+        except Exception:
+            logger.exception("Не удалось auto-sync в Obsidian vault")
+
         _ai_s = self._cached_settings()
         if self._coerce_bool(_ai_s.get("action_items_auto_extract", False), default=False):
             _ai_min = float(_ai_s.get("action_items_min_duration_sec", 60.0))
@@ -3085,14 +3123,64 @@ class BackendService:
 
         return adapters
 
-    def _generate_summary(self, text: str) -> str | None:
-        """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
+    # Спец-промпт для итогов звонков / многоспикерных записей / длинных монологов.
+    # Используется когда detected ≥2 спикера или len(text) > 1500 символов.
+    _CALL_SUMMARY_PROMPT = (
+        "Ты — ассистент по итогам звонков. Сформируй краткий протокол на русском:\n"
+        "\n"
+        "1. **Тема** — одно предложение.\n"
+        "2. **Участники** — кто говорил (Speaker A, B, ...) + 2-3 слова о роли по репликам.\n"
+        "3. **Ключевые точки** — 3-6 буллетов сути обсуждённого.\n"
+        "4. **Решения / договорённости** — буллеты или \"не зафиксировано\".\n"
+        "5. **Следующие шаги** — кто/что/когда (если упомянуто).\n"
+        "\n"
+        "Без приветствий и метакомментариев. Только структурированный протокол."
+    )
+    _CALL_SUMMARY_TEXT_THRESHOLD = 1500
+
+    def _generate_summary(
+        self,
+        text: str,
+        speaker_turns: list | None = None,
+    ) -> str | None:
+        """Генерирует краткое LLM-summary для длинного текста.
+
+        Использует специальный call-protocol prompt если:
+        - в speaker_turns ≥2 уникальных спикера (звонок/встреча), ИЛИ
+        - len(text) > 1500 символов (длинная диктовка/монолог).
+
+        Возвращает None если LLM недоступен.
+        """
         if self._llm_rewriter is None:
             return None
+        # Решаем, какой prompt применить
+        use_call_prompt = False
+        if speaker_turns:
+            try:
+                unique_speakers = {s.get("speaker") for s in speaker_turns if isinstance(s, dict)}
+                unique_speakers.discard(None)
+                if len(unique_speakers) >= 2:
+                    use_call_prompt = True
+            except Exception:
+                # speaker_turns malformed — игнорируем, fallback на длину текста
+                pass
+        if not use_call_prompt and len(text) > self._CALL_SUMMARY_TEXT_THRESHOLD:
+            use_call_prompt = True
+
         try:
-            result = self._llm_rewriter.summarize(text, max_sentences=3)
+            if use_call_prompt:
+                result = self._llm_rewriter.summarize(
+                    text, system_prompt=self._CALL_SUMMARY_PROMPT
+                )
+                logger.debug("LLM summary: используется call-protocol prompt")
+            else:
+                result = self._llm_rewriter.summarize(text, max_sentences=3)
             if result.ok and result.text:
-                logger.info("LLM summary сгенерировано (%d мс)", result.latency_ms or 0)
+                logger.info(
+                    "LLM summary сгенерировано (%d мс, mode=%s)",
+                    result.latency_ms or 0,
+                    "call" if use_call_prompt else "generic",
+                )
                 return result.text
             logger.debug("LLM summary не удалось: %s", result.fallback_reason)
             return None
@@ -3495,7 +3583,17 @@ class BackendService:
                 # Auto-summary для длинных транскрипций (>500 символов)
                 summary: str | None = None
                 if len(final_text) > 500:
-                    summary = self._generate_summary(final_text)
+                    # Передаём speaker_turns — для звонков с ≥2 спикерами
+                    # _generate_summary автоматически переключится на call-protocol prompt.
+                    _summary_speaker_turns = (
+                        transcribe_payload.get("speaker_turns")
+                        if isinstance(transcribe_payload, dict)
+                        and isinstance(transcribe_payload.get("speaker_turns"), list)
+                        else None
+                    )
+                    summary = self._generate_summary(
+                        final_text, speaker_turns=_summary_speaker_turns
+                    )
 
                 # Save transcript to file
                 try:
@@ -3531,6 +3629,43 @@ class BackendService:
                             f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
                 except Exception as exc:
                     logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
+
+                # Wave (08.05.2026): auto-sync в Obsidian vault если configured.
+                # Pipeline для batch import (звонки, диктофон) — каждый импорт
+                # = отдельная заметка с YAML frontmatter + audio link + summary +
+                # transcript с диаризацией (если есть). Defense-in-depth: errors
+                # swallow'аются.
+                try:
+                    _state = self._obsidian_sync.get_sync_status()
+                    if _state.get("vault_path"):
+                        _diar = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
+                        _full_item = {
+                            "id": history_item.id,
+                            "ts": getattr(history_item, "ts", None) or time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "text": display_text,
+                            "cleaned_text": display_text,
+                            "audio_path": audio_path,
+                            "audio_duration_sec": audio_duration_sec,
+                            "confidence": transcribe_payload.get("confidence") if isinstance(transcribe_payload, dict) else None,
+                            "language": detected_lang,
+                            "summary": summary,
+                            "translated_text": translated_text,
+                            "translation_mode": translation.mode,
+                            "source_lang": translation.source_lang,
+                            "target_lang": translation.target_lang,
+                            "diarization": _diar,
+                            "speaker_turns": (_diar or {}).get("speaker_turns") if isinstance(_diar, dict) else None,
+                            "tags": ["call"],
+                        }
+                        _sync_result = self._obsidian_sync.sync([_full_item], force=True)
+                        if _sync_result.synced_count:
+                            logger.info(
+                                "obsidian_auto_sync_batch: synced %d (id=%s)",
+                                _sync_result.synced_count,
+                                history_item.id[:12],
+                            )
+                except Exception:
+                    logger.exception("obsidian_auto_sync_batch failed")
 
                 item_result: dict[str, Any] = {
                     "path": audio_path,

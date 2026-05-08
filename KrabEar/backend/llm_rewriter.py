@@ -707,10 +707,21 @@ class LLMRewriter:
         )
         return result_text
 
-    def summarize(self, text: str, max_sentences: int = 3) -> LLMRewriteResult:
+    def summarize(
+        self,
+        text: str,
+        max_sentences: int = 3,
+        system_prompt: str | None = None,
+    ) -> LLMRewriteResult:
         """Генерирует краткое summary текста через LLM.
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
+
+        Args:
+            text: исходный текст транскрипта.
+            max_sentences: количество предложений в дефолтном generic-промпте.
+            system_prompt: опциональный кастомный system prompt (например, call protocol).
+                Если задан, max_sentences игнорируется.
         """
         cleaned_input = (text or "").strip()
         if not cleaned_input:
@@ -723,10 +734,12 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
 
-        system_prompt = (
-            f"Сделай краткое summary ({max_sentences} предложения) этого разговора/диктовки. "
-            "Верни ТОЛЬКО summary. Без пояснений. Без кавычек. Без префиксов."
-        )
+        is_custom_prompt = system_prompt is not None
+        if system_prompt is None:
+            system_prompt = (
+                f"Сделай краткое summary ({max_sentences} предложения) этого разговора/диктовки. "
+                "Верни ТОЛЬКО summary. Без пояснений. Без кавычек. Без префиксов."
+            )
         payload = {
             "model": self._model,
             "messages": [
@@ -734,7 +747,8 @@ class LLMRewriter:
                 {"role": "user", "content": cleaned_input},
             ],
             "temperature": 0.3,
-            "max_tokens": 512,
+            # Кастомный system_prompt (call protocol) — структурированный, нужно больше токенов
+            "max_tokens": 1024 if is_custom_prompt else 512,
             "stream": False,
         }
         headers = self._lm_studio_headers()
