@@ -629,6 +629,65 @@ class AudioEngine:
             logger.warning("[STT] denoising error, skipping: %s", exc)
         return audio
 
+    def _maybe_smart_silence_skip(self, audio_data: Any) -> Any:
+        """Применяет SmartSilenceSkipper к batch-аудио (не realtime/preview).
+
+        Активируется когда: settings.SMART_SILENCE_SKIP_ENABLED ИЛИ файл >300с
+        (защита от Metal OOM на 30+ часовых записях). Загружает file path в
+        numpy при необходимости. Минимальная длительность для применения — 60с.
+        Ошибки swallow'аются: возвращаем оригинал.
+        """
+        try:
+            target_sr = 16000
+            duration_sec: float | None = None
+            audio_np: np.ndarray | None = None
+
+            if isinstance(audio_data, np.ndarray):
+                audio_np = audio_data
+                duration_sec = len(audio_np) / target_sr
+            elif isinstance(audio_data, (str, Path)) and os.path.exists(str(audio_data)):
+                try:
+                    import soundfile as _sf_skip
+                    duration_sec = _sf_skip.info(str(audio_data)).duration
+                except Exception:
+                    return audio_data
+            else:
+                return audio_data
+
+            if duration_sec is None or duration_sec < 60.0:
+                return audio_data
+
+            # Активируем skip: либо глобальный флаг, либо файл >5 мин (Metal OOM guard)
+            force_for_long = duration_sec > 300.0
+            if not (settings.SMART_SILENCE_SKIP_ENABLED or force_for_long):
+                return audio_data
+
+            # Lazy-load numpy если был file path
+            if audio_np is None:
+                try:
+                    import soundfile as _sf_skip
+                    audio_np, file_sr = _sf_skip.read(str(audio_data), dtype="float32", always_2d=False)
+                    target_sr = int(file_sr)
+                except Exception as exc:
+                    logger.warning("smart_silence_skip: не удалось загрузить файл: %s", exc)
+                    return audio_data
+
+            from core.smart_silence_skipper import SmartSilenceSkipper
+            result = SmartSilenceSkipper().process(audio_np, target_sr)
+            if result.time_saved_sec > 0:
+                logger.info(
+                    "smart_silence_skip: %.1fs → %.1fs (saved %.1fs / %.1f%%, reason=%s)",
+                    result.original_duration_sec,
+                    result.processed_duration_sec,
+                    result.time_saved_sec,
+                    result.time_saved_pct,
+                    "force_long" if force_for_long and not settings.SMART_SILENCE_SKIP_ENABLED else "config",
+                )
+            return result.processed_audio
+        except Exception as exc:
+            logger.warning("smart_silence_skip: пропускаем (ошибка): %s", exc)
+            return audio_data
+
     def transcribe(
         self,
         audio_data: Any,
@@ -771,6 +830,14 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
+            # 2.3.5 Smart silence skip (batch import only): удаляет внутренние
+            # длинные паузы ДО передачи в Whisper. Сильно уменьшает GPU peak
+            # на длинных записях (звонки, лекции) и предотвращает Metal OOM.
+            # Активируется если включён глобальный флаг ИЛИ файл длиннее 5 мин
+            # (защита от Metal-крэшей на 30+ часовых записях).
+            if not is_preview:
+                audio_data = self._maybe_smart_silence_skip(audio_data)
+
             # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
             # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
             # 2.4 Silence ranges pre-processing (от RealtimeSilenceFilter).
@@ -1386,6 +1453,15 @@ class AudioEngine:
                 "error": f"unsupported audio_data type {type(audio_data).__name__}",
                 "status": "error",
             }
+
+        # Smart silence skip ДО chunking: уменьшает количество чанков и GPU peak.
+        # Защищает от Metal OOM на длинных записях (>5 мин) даже если флаг выключен.
+        try:
+            _maybe = self._maybe_smart_silence_skip(audio_array)
+            if isinstance(_maybe, np.ndarray):
+                audio_array = _maybe
+        except Exception:
+            pass
 
         # --- Разбивка на чанки ---
         chunk_samples = int(chunk_sec * effective_sr)
