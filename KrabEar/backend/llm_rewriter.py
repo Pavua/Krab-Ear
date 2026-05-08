@@ -249,7 +249,7 @@ class LLMRewriter:
         circuit_fail_threshold: int = 3,
         circuit_initial_reset_sec: int = 60,
         circuit_max_reset_sec: int = 600,
-        idle_keepalive_enabled: bool = True,
+        idle_keepalive_enabled: bool = False,  # default OFF: модель естественно выгружается через LM Studio TTL чтобы не держать RAM. Включается через settings.LLM_IDLE_KEEPALIVE_ENABLED.
         idle_keepalive_sec: int = 1500,  # 25 min — LM Studio default idle TTL = 30 min
     ):
         self._base_url = base_url.rstrip("/")
