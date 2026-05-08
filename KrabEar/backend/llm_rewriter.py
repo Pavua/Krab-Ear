@@ -249,6 +249,8 @@ class LLMRewriter:
         circuit_fail_threshold: int = 3,
         circuit_initial_reset_sec: int = 60,
         circuit_max_reset_sec: int = 600,
+        idle_keepalive_enabled: bool = True,
+        idle_keepalive_sec: int = 1500,  # 25 min — LM Studio default idle TTL = 30 min
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -263,6 +265,43 @@ class LLMRewriter:
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
+        # Idle keepalive — пингуем модель раз в 25 минут чтобы LM Studio не выгружал её
+        # из памяти по idle TTL (30 min default). Cold reload на gemma-4-e4b-it-mlx ~20-30s,
+        # триггерит intermittent timeouts. Daemon thread, проглатывает ошибки.
+        self._idle_keepalive_sec = idle_keepalive_sec
+        self._idle_keepalive_enabled = idle_keepalive_enabled
+        self._shutdown_event = threading.Event()
+        if idle_keepalive_enabled:
+            self._idle_keepalive_thread: Optional[threading.Thread] = threading.Thread(
+                target=self._idle_keepalive_loop,
+                name="LLMRewriter-IdleKeepalive",
+                daemon=True,
+            )
+            self._idle_keepalive_thread.start()
+        else:
+            self._idle_keepalive_thread = None
+
+    def _idle_keepalive_loop(self) -> None:
+        """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
+        предотвратить выгрузку модели из памяти LM Studio по idle TTL.
+
+        Использует _shutdown_event.wait() — корректно завершается при close().
+        Ошибки warmup_probe проглатываются (они уже логируются внутри).
+        """
+        logger.info(
+            "LLM idle keepalive started: interval=%ds model=%s",
+            self._idle_keepalive_sec, self._model,
+        )
+        while not self._shutdown_event.wait(self._idle_keepalive_sec):
+            try:
+                result = self.warmup_probe(timeout_sec=60.0)
+                logger.info(
+                    "LLM idle keepalive ping: ok=%s latency_ms=%s model=%s",
+                    result.get("ok"), result.get("latency_ms"), self._model,
+                )
+            except Exception as exc:  # never raise from keepalive
+                logger.warning("LLM idle keepalive failed: %s", exc)
+        logger.info("LLM idle keepalive stopped")
 
     def _lm_studio_headers(self) -> dict:
         """Собирает HTTP-заголовки для POST-запросов к LM Studio.
@@ -384,9 +423,16 @@ class LLMRewriter:
             "temperature": 0.0,
             "max_tokens": self._estimate_max_tokens(cleaned_input),
             "stream": False,
+            "tool_choice": "none",  # gemma-4 spontaneously emits tool tokens; explicitly disable
             # Убран "\n\n" из stop — qwen3.5 с reasoning mode ставит \n\n
             # между thinking и ответом, что обрезало content до пустоты.
-            "stop": ["Исправленный текст:", "Исходный текст:"],
+            "stop": [
+                "Исправленный текст:",
+                "Исходный текст:",
+                "<tool_call>",
+                "<|tool_call|>",
+                "[TOOL_CALLS]",
+            ],
         }
         headers = self._lm_studio_headers()
 
@@ -411,24 +457,62 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="timeout", latency_ms=None
             )
         except (requests.ConnectionError, requests.RequestException) as exc:
-            self._circuit.record_failure()
             exc_str = str(exc)
-            self._last_error = f"connection_error: {exc_str}"
-            logger.warning(
-                "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
-                self._model, self._base_url, int((time.monotonic() - start) * 1000),
-                type(exc).__name__,
-            )
+            # Channel errors в LM Studio = transient mlx-engine pipe glitch, recover'ятся.
+            # Mirror 503-retry pattern: 5s sleep + одна повторная попытка перед record_failure.
             if "channel error" in exc_str.lower():
-                self._push_error(
-                    "rewriter.channel_error",
-                    f"{type(exc).__name__}: {exc_str[:500]}",
+                logger.warning(
+                    "LLM rewriter: channel_error from LM Studio (transient mlx-engine glitch), "
+                    "waiting 5s before retry model=%s base_url=%s exc=%s",
+                    self._model, self._base_url, type(exc).__name__,
                 )
+                time.sleep(5.0)
+                start = time.monotonic()
+                try:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                except requests.Timeout:
+                    self._circuit.record_failure()
+                    self._last_error = "timeout"
+                    logger.warning(
+                        "LLM rewriter failure: kind=timeout (channel_error retry) model=%s base_url=%s",
+                        self._model, self._base_url,
+                    )
+                    self._push_error("rewriter.timeout", f"timeout after {self._timeout}s (channel_error retry)")
+                    return LLMRewriteResult(
+                        ok=False, text=None, fallback_reason="timeout", latency_ms=None
+                    )
+                except (requests.ConnectionError, requests.RequestException) as exc2:
+                    self._circuit.record_failure()
+                    exc2_str = str(exc2)
+                    self._last_error = f"connection_error: {exc2_str}"
+                    logger.warning(
+                        "LLM rewriter failure: kind=connection_error (channel_error retry exhausted) model=%s base_url=%s exc=%s",
+                        self._model, self._base_url, type(exc2).__name__,
+                    )
+                    self._push_error(
+                        "rewriter.channel_error",
+                        f"{type(exc2).__name__}: {exc2_str[:500]} (after retry)",
+                    )
+                    return LLMRewriteResult(
+                        ok=False, text=None, fallback_reason="connection_error", latency_ms=None
+                    )
             else:
+                self._circuit.record_failure()
+                self._last_error = f"connection_error: {exc_str}"
+                logger.warning(
+                    "LLM rewriter failure: kind=connection_error model=%s base_url=%s elapsed_ms=%s exc=%s",
+                    self._model, self._base_url, int((time.monotonic() - start) * 1000),
+                    type(exc).__name__,
+                )
                 self._push_error("rewriter.connection_error", f"{type(exc).__name__}: {exc_str}")
-            return LLMRewriteResult(
-                ok=False, text=None, fallback_reason="connection_error", latency_ms=None
-            )
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="connection_error", latency_ms=None
+                )
 
         latency_ms = int((time.monotonic() - start) * 1000)
         self._last_latency_ms = latency_ms
@@ -527,11 +611,13 @@ class LLMRewriter:
             message = data["choices"][0]["message"]
             content = message.get("content") if isinstance(message, dict) else message["content"]
             # 6a. tool_calls_emitted guard — gemma-4 / tool-capable models leak tool_calls
+            # NOTE: tool_calls leak — это model output format issue, не infra failure.
+            # НЕ count как circuit-breaker failure (3 leak подряд → 60s cooldown слишком aggressive).
+            # Логируем warning, но возвращаем fallback_reason без record_failure.
             if not content and isinstance(message, dict) and message.get("tool_calls"):
-                self._circuit.record_failure()
                 self._last_error = "tool_calls_emitted"
                 logger.warning(
-                    "LLM emitted tool_calls instead of content model=%s base_url=%s",
+                    "LLM emitted tool_calls instead of content model=%s base_url=%s (not counted as circuit failure)",
                     self._model, self._base_url,
                 )
                 self._push_error(
@@ -640,6 +726,14 @@ class LLMRewriter:
             "temperature": 0.0,
             "max_tokens": self._estimate_max_tokens(cleaned_input),
             "stream": False,
+            "tool_choice": "none",  # gemma-4 spontaneously emits tool tokens; explicitly disable
+            "stop": [
+                "Исправленный текст:",
+                "Исходный текст:",
+                "<tool_call>",
+                "<|tool_call|>",
+                "[TOOL_CALLS]",
+            ],
         }
         headers = self._lm_studio_headers()
 
@@ -750,6 +844,14 @@ class LLMRewriter:
             # Кастомный system_prompt (call protocol) — структурированный, нужно больше токенов
             "max_tokens": 1024 if is_custom_prompt else 512,
             "stream": False,
+            "tool_choice": "none",  # gemma-4 spontaneously emits tool tokens; explicitly disable
+            "stop": [
+                "Исправленный текст:",
+                "Исходный текст:",
+                "<tool_call>",
+                "<|tool_call|>",
+                "[TOOL_CALLS]",
+            ],
         }
         headers = self._lm_studio_headers()
 
@@ -841,6 +943,14 @@ class LLMRewriter:
                 "messages": [{"role": "user", "content": "."}],
                 "max_tokens": 1,
                 "stream": False,
+                "tool_choice": "none",  # gemma-4 spontaneously emits tool tokens; explicitly disable
+                "stop": [
+                    "Исправленный текст:",
+                    "Исходный текст:",
+                    "<tool_call>",
+                    "<|tool_call|>",
+                    "[TOOL_CALLS]",
+                ],
             }
             headers = self._lm_studio_headers()
             response = self._session.post(
@@ -956,7 +1066,12 @@ class LLMRewriter:
         """Закрывает HTTP session и освобождает connection pool.
 
         Вызывается при завершении backend'а для корректного очищения ресурсов.
+        Также сигналит keepalive-треду на остановку.
         """
+        try:
+            self._shutdown_event.set()
+        except Exception:
+            pass
         self._session.close()
 
 
