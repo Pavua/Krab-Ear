@@ -534,6 +534,7 @@ class BackendService:
                 circuit_fail_threshold=settings.LLM_CIRCUIT_FAIL_THRESHOLD,
                 circuit_initial_reset_sec=settings.LLM_CIRCUIT_INITIAL_RESET_SEC,
                 circuit_max_reset_sec=settings.LLM_CIRCUIT_MAX_RESET_SEC,
+                idle_keepalive_enabled=getattr(settings, "LLM_IDLE_KEEPALIVE_ENABLED", False),
             )
             if rewriter.ping():
                 logger.info(
