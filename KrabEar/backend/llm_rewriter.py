@@ -266,11 +266,6 @@ class LLMRewriter:
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
-        """Build HTTP headers for LM Studio requests.
-
-        Includes ``Authorization: Bearer <token>`` only when api_key is set.
-        Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
-        """Build HTTP headers for LM Studio requests.
 
         Includes ``Authorization: Bearer <token>`` only when api_key is set.
         Empty api_key: no Authorization header (backward-compat with LM Studio < 0.3
