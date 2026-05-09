@@ -7,6 +7,24 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+
+# Module-level helper: автоматически patch'ит platform.system → "Darwin" в setUp
+# для тестов которые мокают subprocess.run. Без этого CalendarLinker.find_active_event
+# делает early-return на Linux (CI) ДО вызова subprocess.run → ассерты падают.
+class _DarwinPatchedTestCase(unittest.TestCase):
+    """Базовый класс для тестов CalendarLinker которые мокают subprocess.run.
+
+    Активирует platform.system → "Darwin" patcher на всё время теста,
+    чтобы early-return на не-macOS CI не съедал mock'и subprocess.run.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._darwin_patcher = patch("backend.calendar_link.platform.system", return_value="Darwin")
+        self._darwin_patcher.start()
+        self.addCleanup(self._darwin_patcher.stop)
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -59,7 +77,7 @@ class TestParseOsascriptOutput(unittest.TestCase):
         self.assertEqual(len(events), 0)
 
 
-class TestFindActiveEventFound(unittest.TestCase):
+class TestFindActiveEventFound(_DarwinPatchedTestCase):
     def test_returns_event_dict(self):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -85,7 +103,7 @@ class TestFindActiveEventNotFound(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestFindActiveEventMultiple(unittest.TestCase):
+class TestFindActiveEventMultiple(_DarwinPatchedTestCase):
     def test_picks_earliest_start(self):
         epoch_a = SAMPLE_EPOCH_START
         epoch_b = SAMPLE_EPOCH_START + 600
@@ -123,7 +141,7 @@ class TestFindActiveEventPermissionDenied(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestCalendarLinkCacheHit(unittest.TestCase):
+class TestCalendarLinkCacheHit(_DarwinPatchedTestCase):
     def test_second_call_uses_cache(self):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -138,7 +156,7 @@ class TestCalendarLinkCacheHit(unittest.TestCase):
         self.assertEqual(r1, r2)
 
 
-class TestCalendarLinkCacheExpiry(unittest.TestCase):
+class TestCalendarLinkCacheExpiry(_DarwinPatchedTestCase):
     def test_expired_cache_calls_again(self):
         mock_proc = MagicMock()
         mock_proc.returncode = 0

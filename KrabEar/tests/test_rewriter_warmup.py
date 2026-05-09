@@ -339,9 +339,11 @@ class TestDefaultSettingsContainWarmup(unittest.TestCase):
         self.assertIs(DEFAULT_SETTINGS["rewriter_warmup_on_startup"], True)
 
     def test_default_settings_has_warmup_timeout_sec(self):
+        # Default bumped 15 → 60 in commit f6aa087 для vision multimodal cold-load
+        # (gemma-4-E4B vision MLX cold load 20-30s обычно, под нагрузкой 30-60s).
         from core.config import DEFAULT_SETTINGS
         self.assertIn("rewriter_warmup_timeout_sec", DEFAULT_SETTINGS)
-        self.assertEqual(DEFAULT_SETTINGS["rewriter_warmup_timeout_sec"], 15)
+        self.assertEqual(DEFAULT_SETTINGS["rewriter_warmup_timeout_sec"], 60)
 
 
 class TestWarmupSyncWrapper(unittest.TestCase):
