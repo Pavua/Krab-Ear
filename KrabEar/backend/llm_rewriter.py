@@ -833,7 +833,7 @@ class LLMRewriter:
         """Отправляет минимальный probe в LLM endpoint для прогрева модели в памяти.
 
         Использует тот же _session и headers что и rewrite().
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
+        При успехе reset'ит circuit breaker (см. warmup_probe docstring).
         Возвращает True если HTTP 200, False при любой ошибке.
         Проглатывает все exceptions.
 
@@ -847,7 +847,10 @@ class LLMRewriter:
         """Отправляет минимальный probe и возвращает структурированный результат.
 
         Используется IPC-методом warmup_rewriter для возврата латентности и ошибки.
-        НЕ трогает circuit breaker.
+        Reset'ит circuit breaker при успехе (semantically a successful probe):
+        warmup success означает LM Studio доступен и модель загружена — эквивалент
+        HALF_OPEN→CLOSED перехода. Без этого user видит "Load Model OK" но следующий
+        реальный rewrite всё равно блокируется открытым circuit'ом (confusing UX).
 
         Returns:
             dict с ключами: ok (bool), latency_ms (int), error (str | None).
@@ -872,6 +875,18 @@ class LLMRewriter:
             ok = response.status_code == 200
             error: Optional[str] = None if ok else f"http_{response.status_code}"
             logger.info("LLM warmup: ok=%s elapsed_ms=%d", ok, elapsed_ms)
+            # 2026-05-09 fix: warmup success implies LM Studio is reachable + model loaded.
+            # Reset circuit breaker — otherwise next user-facing rewrite blocks despite
+            # warmup OK, which is confusing UX (user "loaded model" but still no LLM).
+            if ok and self._circuit.state != "closed":
+                logger.info(
+                    "warmup_probe success → resetting circuit breaker (was %s)",
+                    self._circuit.state,
+                )
+                self._circuit.record_success()  # HALF_OPEN → CLOSED if applicable
+                # Force CLOSED if still OPEN (record_success only transitions from HALF_OPEN)
+                if self._circuit.state == "open":
+                    self._circuit._transition_to(CircuitState.CLOSED)
             return {"ok": ok, "latency_ms": elapsed_ms, "error": error}
         except requests.Timeout:
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -944,6 +959,23 @@ class LLMRewriter:
         )
         # warm up new model in background; user-facing call still works because circuit is CLOSED
         threading.Thread(target=self.warmup, daemon=True).start()
+
+    def set_api_key(self, api_key: str) -> None:
+        """Обновляет Bearer-токен для LM Studio без перезапуска backend.
+
+        Сбрасывает circuit breaker — предыдущие 401 ошибки, накопленные при
+        неверном/отсутствующем ключе, больше не блокируют запросы.
+        """
+        if self._api_key == api_key:
+            return
+        self._api_key = api_key
+        self._last_error = None
+        self._circuit = CircuitBreaker(
+            fail_threshold=self._circuit._fail_threshold,
+            initial_reset_sec=self._circuit._initial_reset_sec,
+            max_reset_sec=self._circuit._max_reset_sec,
+        )
+        _log.info("LLMRewriter: API key updated, circuit breaker reset")
 
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.

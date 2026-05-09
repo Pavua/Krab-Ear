@@ -210,6 +210,14 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+        # Hot-propagate api_key changes to the running LLMRewriter without restart.
+        _rewriter_ref = self._llm_rewriter
+        if _rewriter_ref is not None:
+            def _on_settings_saved(old: dict, new: dict) -> None:
+                new_key = str(new.get("lm_studio_api_key", ""))
+                if new_key != str(old.get("lm_studio_api_key", "")):
+                    _rewriter_ref.set_api_key(new_key)
+            self._settings_svc.register_after_save_hook(_on_settings_saved)
 
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels

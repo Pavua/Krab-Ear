@@ -7,7 +7,8 @@
 - warmup_sync() — синхронный wrapper для threading
 - Настройка rewriter_warmup_on_startup=False отключает автостарт
 - warmup_probe() возвращает latency_ms
-- Circuit breaker НЕ трогается при warmup failure
+- Circuit breaker НЕ трогается при warmup failure (failures не открывают circuit)
+- При warmup SUCCESS — circuit reset'ится (OPEN→CLOSED), иначе confusing UX
 - IPC метод warmup_rewriter возвращает правильную структуру
 """
 
@@ -214,10 +215,11 @@ class TestWarmupReturnsLatencyMs(unittest.TestCase):
             self.assertGreaterEqual(result["latency_ms"], 0)
 
 
-class TestWarmupCircuitBreakerNotTouched(unittest.TestCase):
-    """warmup_probe() НЕ должен трогать circuit breaker."""
+class TestWarmupCircuitBreakerBehavior(unittest.TestCase):
+    """Поведение circuit breaker при warmup_probe()."""
 
     def test_warmup_failure_does_not_open_circuit(self):
+        """Failures при warmup НЕ открывают circuit — warmup не user-facing."""
         import requests as req
         rewriter = _make_rewriter(circuit_fail_threshold=1)
         initial_state = rewriter._circuit.state
@@ -230,19 +232,83 @@ class TestWarmupCircuitBreakerNotTouched(unittest.TestCase):
         self.assertEqual(rewriter._circuit.state, "closed")
         self.assertEqual(rewriter._circuit.state, initial_state)
 
-    def test_warmup_success_does_not_affect_circuit(self):
+    def test_warmup_success_resets_open_circuit(self):
+        """2026-05-09 fix: warmup success когда circuit OPEN → circuit закрывается.
+
+        Scenario: LM Studio token mismatch → circuit OPEN; user fixes token → warmup OK
+        → circuit должен закрыться, иначе следующий rewrite всё равно блокируется.
+        """
         rewriter = _make_rewriter()
         mock_response = MagicMock()
         mock_response.status_code = 200
 
-        # Открываем circuit вручную
+        # Принудительно открываем circuit (симулируем накопленные failures)
         rewriter._circuit._state = CircuitState.OPEN
         rewriter._circuit._opened_at = time.monotonic()
 
         with patch.object(rewriter._session, "post", return_value=mock_response):
+            result = rewriter.warmup_probe()
+
+        self.assertTrue(result["ok"])
+        # Circuit должен закрыться после успешного warmup
+        self.assertEqual(rewriter._circuit.state, "closed")
+
+    def test_warmup_success_resets_half_open_circuit(self):
+        """warmup success когда circuit HALF_OPEN → circuit закрывается (HALF_OPEN→CLOSED)."""
+        rewriter = _make_rewriter()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        rewriter._circuit._state = CircuitState.HALF_OPEN
+        rewriter._circuit._opened_at = time.monotonic()
+
+        with patch.object(rewriter._session, "post", return_value=mock_response):
+            result = rewriter.warmup_probe()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(rewriter._circuit.state, "closed")
+
+    def test_warmup_success_leaves_closed_circuit_closed(self):
+        """warmup success когда circuit CLOSED → circuit остаётся CLOSED (no-op)."""
+        rewriter = _make_rewriter()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        self.assertEqual(rewriter._circuit.state, "closed")
+
+        with patch.object(rewriter._session, "post", return_value=mock_response):
             rewriter.warmup_probe()
 
-        # Circuit должен остаться открытым (warmup не закрывает его)
+        self.assertEqual(rewriter._circuit.state, "closed")
+
+    def test_warmup_failure_does_not_close_open_circuit(self):
+        """warmup failure при OPEN circuit → circuit остаётся OPEN."""
+        import requests as req
+        rewriter = _make_rewriter()
+
+        rewriter._circuit._state = CircuitState.OPEN
+        rewriter._circuit._opened_at = time.monotonic()
+
+        with patch.object(rewriter._session, "post", side_effect=req.exceptions.ConnectionError("refused")):
+            result = rewriter.warmup_probe()
+
+        self.assertFalse(result["ok"])
+        # Failure не закрывает circuit
+        self.assertEqual(rewriter._circuit.state, "open")
+
+    def test_warmup_non_200_does_not_reset_circuit(self):
+        """HTTP 503 при warmup не закрывает OPEN circuit (ok=False)."""
+        rewriter = _make_rewriter()
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+
+        rewriter._circuit._state = CircuitState.OPEN
+        rewriter._circuit._opened_at = time.monotonic()
+
+        with patch.object(rewriter._session, "post", return_value=mock_response):
+            result = rewriter.warmup_probe()
+
+        self.assertFalse(result["ok"])
         self.assertEqual(rewriter._circuit.state, "open")
 
 
