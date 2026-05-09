@@ -269,6 +269,43 @@ class LLMRewriter:
         # on the first concurrent request and cannot handle parallel POSTs during cold load
         # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
         self._post_lock = threading.Lock()
+        # Idle keepalive — пингуем модель раз в 25 минут чтобы LM Studio не выгружал её
+        # из памяти по idle TTL (30 min default). Cold reload на gemma-4-e4b-it-mlx ~20-30s,
+        # триггерит intermittent timeouts. Daemon thread, проглатывает ошибки.
+        self._idle_keepalive_sec = idle_keepalive_sec
+        self._idle_keepalive_enabled = idle_keepalive_enabled
+        self._shutdown_event = threading.Event()
+        if idle_keepalive_enabled:
+            self._idle_keepalive_thread: Optional[threading.Thread] = threading.Thread(
+                target=self._idle_keepalive_loop,
+                name="LLMRewriter-IdleKeepalive",
+                daemon=True,
+            )
+            self._idle_keepalive_thread.start()
+        else:
+            self._idle_keepalive_thread = None
+
+    def _idle_keepalive_loop(self) -> None:
+        """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
+        предотвратить выгрузку модели из памяти LM Studio по idle TTL.
+
+        Использует _shutdown_event.wait() — корректно завершается при close().
+        Ошибки warmup_probe проглатываются (они уже логируются внутри).
+        """
+        logger.info(
+            "LLM idle keepalive started: interval=%ds model=%s",
+            self._idle_keepalive_sec, self._model,
+        )
+        while not self._shutdown_event.wait(self._idle_keepalive_sec):
+            try:
+                result = self.warmup_probe(timeout_sec=60.0)
+                logger.info(
+                    "LLM idle keepalive ping: ok=%s latency_ms=%s model=%s",
+                    result.get("ok"), result.get("latency_ms"), self._model,
+                )
+            except Exception as exc:  # never raise from keepalive
+                logger.warning("LLM idle keepalive failed: %s", exc)
+        logger.info("LLM idle keepalive stopped")
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
@@ -1019,7 +1056,12 @@ class LLMRewriter:
         """Закрывает HTTP session и освобождает connection pool.
 
         Вызывается при завершении backend'а для корректного очищения ресурсов.
+        Также сигналит keepalive-треду на остановку.
         """
+        try:
+            self._shutdown_event.set()
+        except Exception:
+            pass
         self._session.close()
 
 
