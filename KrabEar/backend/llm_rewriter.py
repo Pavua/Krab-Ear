@@ -386,7 +386,14 @@ class LLMRewriter:
             "stream": False,
             # Убран "\n\n" из stop — qwen3.5 с reasoning mode ставит \n\n
             # между thinking и ответом, что обрезало content до пустоты.
-            "stop": ["Исправленный текст:", "Исходный текст:"],
+            "stop": [
+                "Исправленный текст:",
+                "Исходный текст:",
+                "<end_of_turn>",
+                "<start_of_turn>",
+                "</s>",
+            ],
+            "tool_choice": "none",
         }
         headers = self._lm_studio_headers()
 
@@ -481,6 +488,32 @@ class LLMRewriter:
                 )
             latency_ms = int((time.monotonic() - start) * 1000)
             self._last_latency_ms = latency_ms
+
+        # 5a. mlx_lm 0.31.3 bundled bug: HTTP 500 with UnboundLocalError on 'token'
+        if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
+            logger.warning(
+                "LM Studio mlx_lm token UnboundLocalError detected, retrying once "
+                "model=%s base_url=%s",
+                self._model, self._base_url,
+            )
+            start = time.monotonic()
+            try:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
+                latency_ms = int((time.monotonic() - start) * 1000)
+                self._last_latency_ms = latency_ms
+            except (requests.Timeout, requests.ConnectionError, requests.RequestException):
+                pass
+            if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
+                self._push_error(
+                    "rewriter.mlx_token_bug",
+                    "mlx_lm UnboundLocalError 'token' persists after retry",
+                    severity="warn",
+                )
 
         if response.status_code == 401:
             self._circuit.record_failure()

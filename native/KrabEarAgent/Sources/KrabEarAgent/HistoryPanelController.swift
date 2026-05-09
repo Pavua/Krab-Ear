@@ -505,6 +505,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         if let monitor = keyboardMonitor {
             NSEvent.removeMonitor(monitor)
         }
+        globalStatusBar.stop()
     }
 
     func showPanel() {

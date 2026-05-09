@@ -942,14 +942,20 @@ def events_stream():
     Opens a long-lived GET connection that emits newline-delimited SSE frames.
     A keepalive comment (`: ping`) is emitted ~every 15 seconds when idle.
 
+    Query params:
+        filter — optional comma-separated list of event types to receive.
+                 Example: ``?filter=stt.final,live_subs.result``
+                 When omitted, all events are delivered (backwards-compatible).
+
     Event types:
 
         event: stt.final  →  {history_id, text, confidence, duration_sec, language}
 
         event: stt.failed →  {reason, duration_sec}
     """
+    event_filter = request.args.get("filter")
     return Response(
-        stream_with_context(sse_stream(event_bus)),
+        stream_with_context(sse_stream(event_bus, event_filter=event_filter)),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
