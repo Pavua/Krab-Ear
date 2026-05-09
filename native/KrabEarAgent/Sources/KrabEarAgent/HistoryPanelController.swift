@@ -2112,14 +2112,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     @objc private func onOpenHistoryTabFromDictation() {
         // Если история есть, но текущие фильтры её скрывают, сразу сбрасываем фильтры.
-        if items.isEmpty,
-           let stats = fetchHistoryStats(),
-           stats.activeCount > 0,
-           hasActiveHistoryFiltersOrQuery() {
-            onClearFilters()
-        }
+        // Stats fetch is async — switch tab immediately, reset filters after stats arrive.
         mainTabView.selectTabViewItem(withIdentifier: PanelTab.history.rawValue)
         window?.makeFirstResponder(searchField)
+        if items.isEmpty, hasActiveHistoryFiltersOrQuery() {
+            fetchHistoryStatsAsync { [weak self] stats in
+                guard let self = self, let stats = stats, stats.activeCount > 0 else { return }
+                self.onClearFilters()
+            }
+        }
     }
 
     @objc private func onRestartFromPanel() {

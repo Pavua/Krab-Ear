@@ -645,7 +645,10 @@ extension HistoryPanelController {
             vStack.spacing = KrabEarTheme.Metrics.tight
             vStack.addArrangedSubview(hStack)
             vStack.addArrangedSubview(descLabel)
-            hStack.widthAnchor.constraint(equalTo: vStack.widthAnchor).isActive = true
+            // No explicit widthAnchor constraint needed: NSStackView with .leading
+            // alignment already stretches arranged subviews to match the stack's
+            // width. An explicit hStack↔vStack constraint activated before vStack
+            // is parented causes "no common ancestor" NSGenericException (KRAB-EAR-AGENT-2).
             return vStack
         }
         return hStack

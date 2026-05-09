@@ -215,13 +215,17 @@ extension AgentAppDelegate {
                 notify(title: "Krab Ear", body: "Аудио пустое, попробуйте ещё раз")
             case "empty_text":
                 logger.warn("stop_recording вернул empty_text")
-                if !recoverFromPreviewFallback(reason: "Финальная транскрибация пустая") {
-                    notify(title: "Krab Ear", body: "Речь не распознана")
+                recoverFromPreviewFallback(reason: "Финальная транскрибация пустая") { recovered in
+                    if !recovered {
+                        self.notify(title: "Krab Ear", body: "Речь не распознана")
+                    }
                 }
             default:
                 logger.warn("stop_recording вернул неожиданный статус: \(status)")
-                if !recoverFromPreviewFallback(reason: "Неожиданный статус stop: \(status)") {
-                    notify(title: "Krab Ear", body: "Неожиданный статус: \(status)")
+                recoverFromPreviewFallback(reason: "Неожиданный статус stop: \(status)") { recovered in
+                    if !recovered {
+                        self.notify(title: "Krab Ear", body: "Неожиданный статус: \(status)")
+                    }
                 }
             }
         } catch {
@@ -231,11 +235,14 @@ extension AgentAppDelegate {
                 _ = syncRecordingStateWithBackend()
                 return
             }
-            if !recoverFromPreviewFallback(reason: "Ошибка stop_recording: \(error.localizedDescription)") {
-                notify(
-                    title: "Krab Ear",
-                    body: "Не удалось завершить запись: \(error.localizedDescription)"
-                )
+            let errorDescription = error.localizedDescription
+            recoverFromPreviewFallback(reason: "Ошибка stop_recording: \(errorDescription)") { recovered in
+                if !recovered {
+                    self.notify(
+                        title: "Krab Ear",
+                        body: "Не удалось завершить запись: \(errorDescription)"
+                    )
+                }
             }
         }
     }

@@ -345,25 +345,34 @@ final class SelectionTranslator {
         if config.targetLang != "auto" {
             params["target_lang"] = config.targetLang
         }
+
+        // Capture locals for use inside Task.detached (avoids Sendable complaints on self)
+        nonisolated(unsafe) let paramsCopy = params
+        let client = ipcClient
+
+        let response: [String: Any]?
         do {
-            let response = try ipcClient.call(method: "translate_selection", params: params)
-            guard let result = response["result"] as? [String: Any] else {
-                showErrorHUD(reason: "Backend вернул пустой ответ")
-                return nil
-            }
-            let translated = result["translated_text"] as? String
-                ?? result["text"] as? String
-                ?? ""
-            if translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                showErrorHUD(reason: "Перевод пустой")
-                return nil
-            }
-            return translated
+            response = try await Task.detached(priority: .userInitiated) {
+                try client.call(method: "translate_selection", params: paramsCopy)
+            }.value
         } catch {
             logger.error("SelectionTranslator IPC error: \(error.localizedDescription)")
-            showErrorHUD(reason: error.localizedDescription)
+            await MainActor.run { self.showErrorHUD(reason: "Ошибка IPC: \(error.localizedDescription)") }
             return nil
         }
+
+        guard let result = response?["result"] as? [String: Any] else {
+            await MainActor.run { self.showErrorHUD(reason: "Backend вернул пустой ответ") }
+            return nil
+        }
+        let translated = result["translated_text"] as? String
+            ?? result["text"] as? String
+            ?? ""
+        if translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            showErrorHUD(reason: "Перевод пустой")
+            return nil
+        }
+        return translated
     }
 
     // MARK: - HUD
