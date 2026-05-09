@@ -303,6 +303,17 @@ class LLMRewriter:
                 pass
         return self._fallback_timeout
 
+    @_timeout.setter
+    def _timeout(self, value: float) -> None:
+        """Setter для совместимости с tests, которые assign'ят `_timeout = X`.
+
+        Записывается в `_fallback_timeout` (init-time fallback). Если provider
+        задан — он всё равно read'ится первым, но если вернёт invalid — этот
+        новый fallback используется. Без setter @property raises AttributeError
+        на assignment, ломая legacy test setups.
+        """
+        self._fallback_timeout = float(value)
+
     def _idle_keepalive_loop(self) -> None:
         """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
         предотвратить выгрузку модели из памяти LM Studio по idle TTL.
