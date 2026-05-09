@@ -679,15 +679,20 @@ public final class RealtimeOverlayController: NSObject {
         let total = topRowH + vuMeterH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
-        // Anchor top edge: при росте высоты origin.y уменьшается на дельту, чтобы
-        // top edge (origin.y + height) оставался константой. Иначе panel растёт
-        // ВВЕРХ от bottom-left origin (NSWindow coordinate system y↑) и визуально
-        // top edge смещается, создавая ощущение "drift".
-        var frame = panel.frame
-        let oldHeight = frame.size.height
-        frame.origin.y += (oldHeight - height)  // если height grow → dy<0 → origin.y down
-        frame.size.height = height
-        panel.setFrame(frame, display: true)
+        // Anchor top-left explicitly via Apple's setFrameTopLeftPoint API.
+        // 1) Save top-left BEFORE resize.
+        // 2) Resize via setContentSize (preserves bottom-left per Apple docs).
+        // 3) Re-anchor top-left explicitly. Belt-and-suspenders against any
+        //    subtle AppKit reordering (display:true paint race, hidden auto-layout
+        //    in contentView, etc).
+        // Unfixed since 2026-05-09: simple `frame.origin.y += dy` math was
+        // algebraically correct but visually still drifted accumulatively.
+        let oldFrame = panel.frame
+        let topLeft = NSPoint(x: oldFrame.minX, y: oldFrame.maxY)
+        if abs(oldFrame.size.height - height) > 0.5 {
+            panel.setContentSize(NSSize(width: oldFrame.size.width, height: height))
+            panel.setFrameTopLeftPoint(topLeft)
+        }
 
         borderLayer.frame = effectView.bounds
     }
