@@ -3853,6 +3853,16 @@ class BackendService:
 
     def _start_preview_worker(self, quality_profile: str) -> None:
         self._stop_preview_worker()
+        # Defensive guard: если используемый Transcriber не имеет метода
+        # transcribe_preview (например, _FakeTranscriber в тестах) — НЕ запускаем
+        # preview thread. Иначе цикл будет ловить AttributeError каждые ~1.5с
+        # и спамить логи (на CI приводило к 10-min job timeout).
+        if not callable(getattr(self.transcriber, "transcribe_preview", None)):
+            logger.info(
+                "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
+                type(self.transcriber).__name__,
+            )
+            return
         self._preview_stop_event.clear()
         self._preview_thread = threading.Thread(
             target=self._preview_loop,
