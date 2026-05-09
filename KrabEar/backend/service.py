@@ -526,14 +526,19 @@ class BackendService:
 
         try:
             from backend.llm_rewriter import LLMRewriter
+            _default_timeout = float(settings.LLM_TIMEOUT_SEC)
             rewriter = LLMRewriter(
                 base_url=settings.LLM_BASE_URL,
                 api_key=settings.LLM_API_KEY,
                 model=settings.LLM_MODEL,
-                timeout_sec=settings.LLM_TIMEOUT_SEC,
+                timeout_sec=_default_timeout,
                 circuit_fail_threshold=settings.LLM_CIRCUIT_FAIL_THRESHOLD,
                 circuit_initial_reset_sec=settings.LLM_CIRCUIT_INITIAL_RESET_SEC,
                 circuit_max_reset_sec=settings.LLM_CIRCUIT_MAX_RESET_SEC,
+                idle_keepalive_enabled=getattr(settings, "LLM_IDLE_KEEPALIVE_ENABLED", False),
+                runtime_timeout_provider=lambda: self._get_runtime_setting(
+                    "llm_timeout_sec", _default_timeout
+                ),
             )
             if rewriter.ping():
                 logger.info(

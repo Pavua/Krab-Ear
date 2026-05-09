@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import requests
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 # Profiler singleton — защищаемся от ImportError чтобы llm_rewriter оставался standalone.
 try:
@@ -249,11 +249,15 @@ class LLMRewriter:
         circuit_fail_threshold: int = 3,
         circuit_initial_reset_sec: int = 60,
         circuit_max_reset_sec: int = 600,
+        idle_keepalive_enabled: bool = False,  # default OFF: модель естественно выгружается через LM Studio TTL чтобы не держать RAM. Включается через settings.LLM_IDLE_KEEPALIVE_ENABLED.
+        idle_keepalive_sec: int = 1500,  # 25 min — LM Studio default idle TTL = 30 min
+        runtime_timeout_provider: Optional[Callable[[], float]] = None,  # если задан — читается перед каждым HTTP-запросом вместо fallback timeout
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
-        self._timeout = timeout_sec
+        self._fallback_timeout = timeout_sec  # статический fallback (init-time value)
+        self._runtime_timeout_provider = runtime_timeout_provider
         self._circuit = CircuitBreaker(
             fail_threshold=circuit_fail_threshold,
             initial_reset_sec=circuit_initial_reset_sec,
@@ -267,6 +271,70 @@ class LLMRewriter:
         # on the first concurrent request and cannot handle parallel POSTs during cold load
         # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
         self._post_lock = threading.Lock()
+        # Idle keepalive — пингуем модель раз в 25 минут чтобы LM Studio не выгружал её
+        # из памяти по idle TTL (30 min default). Cold reload на gemma-4-e4b-it-mlx ~20-30s,
+        # триггерит intermittent timeouts. Daemon thread, проглатывает ошибки.
+        self._idle_keepalive_sec = idle_keepalive_sec
+        self._idle_keepalive_enabled = idle_keepalive_enabled
+        self._shutdown_event = threading.Event()
+        if idle_keepalive_enabled:
+            self._idle_keepalive_thread: Optional[threading.Thread] = threading.Thread(
+                target=self._idle_keepalive_loop,
+                name="LLMRewriter-IdleKeepalive",
+                daemon=True,
+            )
+            self._idle_keepalive_thread.start()
+        else:
+            self._idle_keepalive_thread = None
+
+    @property
+    def _timeout(self) -> float:
+        """Effective timeout — читается из runtime provider при каждом вызове.
+
+        Если provider задан и вернул корректное значение > 0 — используем его.
+        Иначе fallback к значению, переданному при __init__.
+        """
+        if self._runtime_timeout_provider is not None:
+            try:
+                val = float(self._runtime_timeout_provider())
+                if val > 0:
+                    return val
+            except Exception:
+                pass
+        return self._fallback_timeout
+
+    @_timeout.setter
+    def _timeout(self, value: float) -> None:
+        """Setter для совместимости с tests, которые assign'ят `_timeout = X`.
+
+        Записывается в `_fallback_timeout` (init-time fallback). Если provider
+        задан — он всё равно read'ится первым, но если вернёт invalid — этот
+        новый fallback используется. Без setter @property raises AttributeError
+        на assignment, ломая legacy test setups.
+        """
+        self._fallback_timeout = float(value)
+
+    def _idle_keepalive_loop(self) -> None:
+        """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
+        предотвратить выгрузку модели из памяти LM Studio по idle TTL.
+
+        Использует _shutdown_event.wait() — корректно завершается при close().
+        Ошибки warmup_probe проглатываются (они уже логируются внутри).
+        """
+        logger.info(
+            "LLM idle keepalive started: interval=%ds model=%s",
+            self._idle_keepalive_sec, self._model,
+        )
+        while not self._shutdown_event.wait(self._idle_keepalive_sec):
+            try:
+                result = self.warmup_probe(timeout_sec=60.0)
+                logger.info(
+                    "LLM idle keepalive ping: ok=%s latency_ms=%s model=%s",
+                    result.get("ok"), result.get("latency_ms"), self._model,
+                )
+            except Exception as exc:  # never raise from keepalive
+                logger.warning("LLM idle keepalive failed: %s", exc)
+        logger.info("LLM idle keepalive stopped")
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
@@ -1017,7 +1085,12 @@ class LLMRewriter:
         """Закрывает HTTP session и освобождает connection pool.
 
         Вызывается при завершении backend'а для корректного очищения ресурсов.
+        Также сигналит keepalive-треду на остановку.
         """
+        try:
+            self._shutdown_event.set()
+        except Exception:
+            pass
         self._session.close()
 
 

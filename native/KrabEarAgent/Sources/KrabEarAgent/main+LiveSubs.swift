@@ -1,13 +1,13 @@
 /*
  main+LiveSubs — интеграция SystemAudioCapture + LiveSubtitlesOverlay в AgentAppDelegate.
 
- Горячая клавиша Cmd+Shift+L: toggle захвата системного аудио.
+ Горячая клавиша Cmd+Option+Shift+L: toggle захвата системного аудио (Cmd+Shift+L конфликтует с Safari).
  При старте захвата — показывает HUD.
  При остановке — скрывает HUD и отправляет live_subs_stop бэкенду.
 
  Связи:
  - AgentAppDelegate: хранит systemAudioCapture и liveSubsOverlay
- - main+StatusMenu.swift: регистрирует Cmd+Shift+L пункт меню
+ - main+StatusMenu.swift: регистрирует Cmd+Option+Shift+L пункт меню
 */
 
 import AppKit
@@ -43,7 +43,7 @@ extension AgentAppDelegate {
 
     // MARK: - Toggle
 
-    /// Вызывается из Cmd+Shift+L меню и из Settings toggle.
+    /// Вызывается из Cmd+Option+Shift+L меню и из Settings toggle.
     func toggleLiveSubsCaptureFromMenu() {
         if systemAudioCapture.isCapturing {
             stopLiveSubsCapture()
@@ -58,7 +58,7 @@ extension AgentAppDelegate {
         systemAudioCapture.start()
         liveSubsOverlay.show()
         logger.info("Live Subs: захват системного аудио запущен")
-        notify(title: "Krab Ear", body: "Live субтитры включены (Cmd+Shift+L для остановки)")
+        notify(title: "Krab Ear", body: "Live субтитры включены (Cmd+Option+Shift+L для остановки)")
     }
 
     @objc func onToggleLiveSubs() {
