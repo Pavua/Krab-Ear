@@ -49,12 +49,13 @@ class ObsidianSyncManager:
     - Персистентность состояния в {data_dir}/obsidian_sync.json
     """
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(self, data_dir: Path | None = None, event_bus=None) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir is not None else None
         self._vault_path: Path | None = None
         self._folder: str = _DEFAULT_FOLDER
         self._last_sync_ts: str | None = None
         self._lock = threading.Lock()
+        self._event_bus = event_bus
 
         if self._data_dir is not None:
             self._state_path = self._data_dir / _SYNC_STATE_FILE
@@ -125,11 +126,23 @@ class ObsidianSyncManager:
             folder = self._folder
             last_sync_ts = self._last_sync_ts
 
+        import time as _time
+
         result = SyncResult()
         target_dir = vault_path / folder
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        for item in items:
+        if self._event_bus is not None:
+            self._event_bus.emit("app.status", {
+                "op": "obsidian_sync",
+                "stage": "started",
+                "total_files": len(items),
+                "progress": 0.0,
+                "ts": _time.time(),
+            })
+
+        _total = len(items)
+        for i, item in enumerate(items):
             try:
                 item_ts = self._get_item_ts(item)
                 self._get_item_attr(item, "id", "")
@@ -138,6 +151,15 @@ class ObsidianSyncManager:
                 if not force and last_sync_ts is not None:
                     if item_ts <= last_sync_ts:
                         result.skipped_count += 1
+                        if self._event_bus is not None:
+                            self._event_bus.emit("app.status", {
+                                "op": "obsidian_sync",
+                                "stage": "syncing",
+                                "file_index": i + 1,
+                                "total_files": _total,
+                                "progress": (i + 1) / _total if _total else 1.0,
+                                "ts": _time.time(),
+                            })
                         continue
 
                 md_filename = self._make_filename(item)
@@ -158,11 +180,29 @@ class ObsidianSyncManager:
                 logger.error("Ошибка синхронизации записи %s: %s", item_repr, exc)
                 result.errors.append(f"{item_repr}: {exc}")
 
+            if self._event_bus is not None:
+                self._event_bus.emit("app.status", {
+                    "op": "obsidian_sync",
+                    "stage": "syncing",
+                    "file_index": i + 1,
+                    "total_files": _total,
+                    "progress": (i + 1) / _total if _total else 1.0,
+                    "ts": _time.time(),
+                })
+
         # Обновляем timestamp последней синхронизации
         now_ts = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self._last_sync_ts = now_ts
             self._save_state()
+
+        if self._event_bus is not None:
+            self._event_bus.emit("app.status", {
+                "op": "idle",
+                "stage": "",
+                "progress": 1.0,
+                "ts": _time.time(),
+            })
 
         logger.info(
             "Obsidian sync завершён: synced=%d skipped=%d errors=%d",

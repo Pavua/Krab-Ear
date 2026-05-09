@@ -406,6 +406,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var historyImportSection: CollapsibleSectionView?
     // MARK: - Tab selector
     var tabSelector: NSSegmentedControl!
+    // MARK: - Global status bar (visible on all tabs)
+    /// Liquid Glass pill above tabSelector — отображает текущую long-running операцию
+    /// backend (transcribe job / Obsidian sync). Подписан на SSE `app.status`.
+    let globalStatusBar = GlobalStatusBar()
     // MARK: - Keyboard shortcut monitor
     /// Keyboard event monitor (private use, но `internal` access нужен для
     /// HistoryPanelController+KeyboardShortcuts.swift extension которое set'ит
@@ -568,16 +572,27 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tabSelector.controlSize = .regular
         self.tabSelector = tabSelector
 
+        windowContentView.addSubview(globalStatusBar)
         windowContentView.addSubview(tabSelector)
         windowContentView.addSubview(mainTabView)
         NSLayoutConstraint.activate([
-            tabSelector.topAnchor.constraint(equalTo: windowContentView.topAnchor, constant: 8),
+            // Global status bar — над tabSelector, видим со всех вкладок.
+            globalStatusBar.topAnchor.constraint(equalTo: windowContentView.topAnchor, constant: 4),
+            globalStatusBar.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor, constant: 8),
+            globalStatusBar.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor, constant: -8),
+            // tabSelector — теперь под globalStatusBar (раньше topAnchor шёл к windowContentView).
+            tabSelector.topAnchor.constraint(equalTo: globalStatusBar.bottomAnchor, constant: 4),
             tabSelector.centerXAnchor.constraint(equalTo: windowContentView.centerXAnchor),
             mainTabView.topAnchor.constraint(equalTo: tabSelector.bottomAnchor, constant: 8),
             mainTabView.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor, constant: 8),
             mainTabView.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor, constant: -8),
             mainTabView.bottomAnchor.constraint(equalTo: windowContentView.bottomAnchor, constant: -8),
         ])
+        // Запускаем подписку на SSE — сразу, не ждём показа панели. Если backend
+        // ещё не поднят, SSESessionDelegate проигнорирует ошибку connect, heartbeat
+        // оставит pill скрытым. При следующем live-event подключение реактивируется
+        // (URLSession сам делает retry для long-poll dataTask).
+        globalStatusBar.start()
 
         // Configure new history stack views
         for stack in [primaryActionsRow, secondaryActionsRow, statusRow] {

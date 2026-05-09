@@ -394,7 +394,7 @@ class BackendService:
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
-        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir)
+        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
@@ -3598,12 +3598,40 @@ class BackendService:
         # Копия параметров (params mutable — защищаемся от побочных мутаций).
         job_params = dict(params)
 
+        def _emit_status(
+            op: str,
+            stage: str = "",
+            progress: float | None = None,
+            current_file: str | None = None,
+            file_index: int | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "op": op,
+                "stage": stage,
+                "total_files": total_files,
+                "ts": time.time(),
+            }
+            if progress is not None:
+                payload["progress"] = progress
+            if current_file is not None:
+                payload["current_file"] = current_file
+            if file_index is not None:
+                payload["file_index"] = file_index
+            event_bus.emit("app.status", payload)
+
         def _on_file_start(index: int, audio_path: str) -> None:
             self._job_tracker.update(
                 job_id,
                 status="running",
                 current_file=Path(audio_path).name,
                 current_stage="idle",
+                file_index=index + 1,
+            )
+            _emit_status(
+                "transcribe_job",
+                stage="idle",
+                progress=index / total_files if total_files else 0.0,
+                current_file=Path(audio_path).name,
                 file_index=index + 1,
             )
 
@@ -3625,9 +3653,23 @@ class BackendService:
                 errors=new_errors,
                 processed=len(new_items),
             )
+            _emit_status(
+                "transcribe_job",
+                stage="idle",
+                progress=(index + 1) / total_files if total_files else 1.0,
+                file_index=index + 1,
+            )
 
         def _progress_callback(stage: str) -> None:
             self._job_tracker.update(job_id, current_stage=str(stage))
+            state = self._job_tracker.get(job_id) or {}
+            fi = state.get("file_index") or 0
+            _emit_status(
+                "transcribe_job",
+                stage=str(stage),
+                progress=max(0, fi - 1) / total_files if total_files else 0.0,
+                file_index=fi,
+            )
 
         def _cancel_check() -> bool:
             state = self._job_tracker.get(job_id)
@@ -3636,6 +3678,7 @@ class BackendService:
         def _worker() -> None:
             try:
                 self._job_tracker.update(job_id, status="running")
+                _emit_status("transcribe_job", stage="started", progress=0.0)
                 result = self._transcribe_paths_core(
                     job_params,
                     progress_callback=_progress_callback,
@@ -3646,6 +3689,7 @@ class BackendService:
                 # Финальное состояние: cancelled | done.
                 state = self._job_tracker.get(job_id) or {}
                 if state.get("cancel_requested"):
+                    _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.update(
                         job_id,
                         status="cancelled",
@@ -3656,6 +3700,7 @@ class BackendService:
                         finished_at=time.monotonic(),
                     )
                 else:
+                    _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.mark_done(
                         job_id,
                         items=list(result.get("items") or []),
@@ -3663,6 +3708,7 @@ class BackendService:
                     )
             except Exception as exc:
                 logger.exception("Async transcribe job %s упал", job_id)
+                _emit_status("idle", stage="", progress=1.0)
                 self._job_tracker.mark_failed(job_id, str(exc))
 
         thread = threading.Thread(
