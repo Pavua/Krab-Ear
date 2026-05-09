@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -7,7 +8,10 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "memory_baseline.py"
 
+_psutil_available = importlib.util.find_spec("psutil") is not None
 
+
+@unittest.skipUnless(_psutil_available, "psutil not installed")
 class MemoryBaselineScriptTests(unittest.TestCase):
     def test_script_runs_with_once_flag(self):
         if not SCRIPT.exists():
@@ -51,8 +55,10 @@ class MemoryBaselineScriptTests(unittest.TestCase):
             "worker_rss_mb_total", "history_total_items", "llm_circuit",
         }
         self.assertEqual(set(snap.keys()), expected_keys)
-        # Values are numeric or string — no exceptions
-        self.assertIsInstance(snap["agent_rss_mb"], float)
+        # Values are numeric or string — no exceptions.
+        # NB: agent_rss_mb fallback default = 0 (int) когда KrabEarAgent не запущен —
+        # на CI или после reboot. Принимаем (int, float).
+        self.assertIsInstance(snap["agent_rss_mb"], (int, float))
         self.assertIsInstance(snap["timestamp"], str)
 
 

@@ -158,6 +158,7 @@ class TestAllDefaultSettingsHaveDefaults(unittest.TestCase):
             "recap_email_to",
             "smtp_host",
             "smtp_user",
+            "lm_studio_api_key",
         }
         empty_strings = [
             k

@@ -55,5 +55,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "hotkey.conflict",
             # Added 2026-05-04 Phase C.2 — IPC reconnect telemetry
             "ipc.reconnect",
+            # rewriter provider/channel failure modes
+            "rewriter.fallback_used",
+            "rewriter.channel_error",
+            "rewriter.unauthorized",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

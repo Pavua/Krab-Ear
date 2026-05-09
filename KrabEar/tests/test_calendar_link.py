@@ -148,7 +148,11 @@ class TestCalendarLinkCacheExpiry(unittest.TestCase):
             linker = CalendarLinker(cache_minutes=5)
             at_time = datetime(2024, 4, 25, 10, 0)
             linker.find_active_event(at_time=at_time)
-            linker._cache_at_time = 0.0
+            # Simulate cache expiry. NB: time.monotonic() can be small после fresh
+            # boot (~50s uptime), поэтому `0.0` может НЕ превысить cache_ttl_sec=300
+            # и дать ложный cache hit. Используем большое отрицательное смещение —
+            # гарантированный expiry независимо от uptime.
+            linker._cache_at_time = -1e9
             linker.find_active_event(at_time=at_time)
         self.assertEqual(mock_run.call_count, 2)
 
