@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "qwen3-4b-abliterated"
-    LLM_TIMEOUT_SEC: float = 5.0
+    LLM_TIMEOUT_SEC: float = 120.0  # was 5.0 → bumped per fix/sentry-backend-syntax-2026-05-06: cold-load gemma-4-E4B vision multimodal MLX ~20-60s on M-series; under load can spike to 60-120s. Production setting в settings.json уже 120 — здесь default для fresh installs.
     LLM_CIRCUIT_FAIL_THRESHOLD: int = 3
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
@@ -1009,9 +1009,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # загрузилась в память ДО первой диктовки. Устраняет «первая диктовка ждёт».
     # True по умолчанию: LM Studio lazy-loads модель, warmup делает это заранее.
     "rewriter_warmup_on_startup": True,
-    # Таймаут warmup-пробы в секундах. Загрузка gemma-4/qwen3 с SSD ~10-20 сек.
-    # 15 сек — достаточно для холодного старта без блокировки UI.
-    "rewriter_warmup_timeout_sec": 15,
+    # Таймаут warmup-пробы в секундах. Загрузка gemma-4 vision multimodal MLX
+    # с SSD: ~20-30 сек обычно, под нагрузкой может быть 30-60 сек.
+    # Bumped 15 → 60 per fix/sentry-backend-syntax-2026-05-06: 15s слишком жёсткий
+    # для vision multimodal cold-load → ложные timeouts на старте.
+    "rewriter_warmup_timeout_sec": 60,
     # --- STT startup warmup ---
     # Предварительная загрузка Whisper-модели при старте бэкенда в background thread.
     # Исключает задержку 1–3 с на первой диктовке (cold-start model load).
