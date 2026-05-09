@@ -268,11 +268,11 @@ public final class RealtimeOverlayController: NSObject {
         }
         if panel.isVisible {
             adjustHeight()
-            // M2: Don't reposition to cursor after user has dragged the overlay.
-            // If user has a saved (dragged) position, keep it; otherwise follow cursor.
-            if !hasSavedPosition() {
-                positionNearCursor()
-            }
+            // 2026-05-09 fix: НЕ перепозиционируем overlay на каждый update tick.
+            // Раньше positionNearCursor() здесь следил за курсором — что приводило к
+            // тому, что overlay уезжал к углу экрана при движении мыши во время
+            // диктовки (user complaint). Initial position установлен в show() one-shot.
+            // Если хочется reposition — user может drag (saved position).
         }
     }
 
@@ -679,7 +679,13 @@ public final class RealtimeOverlayController: NSObject {
         let total = topRowH + vuMeterH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
+        // Anchor top edge: при росте высоты origin.y уменьшается на дельту, чтобы
+        // top edge (origin.y + height) оставался константой. Иначе panel растёт
+        // ВВЕРХ от bottom-left origin (NSWindow coordinate system y↑) и визуально
+        // top edge смещается, создавая ощущение "drift".
         var frame = panel.frame
+        let oldHeight = frame.size.height
+        frame.origin.y += (oldHeight - height)  // если height grow → dy<0 → origin.y down
         frame.size.height = height
         panel.setFrame(frame, display: true)
 
