@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import requests
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 # Profiler singleton — защищаемся от ImportError чтобы llm_rewriter оставался standalone.
 try:
@@ -251,11 +251,13 @@ class LLMRewriter:
         circuit_max_reset_sec: int = 600,
         idle_keepalive_enabled: bool = False,  # default OFF: модель естественно выгружается через LM Studio TTL чтобы не держать RAM. Включается через settings.LLM_IDLE_KEEPALIVE_ENABLED.
         idle_keepalive_sec: int = 1500,  # 25 min — LM Studio default idle TTL = 30 min
+        runtime_timeout_provider: Optional[Callable[[], float]] = None,  # если задан — читается перед каждым HTTP-запросом вместо fallback timeout
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
-        self._timeout = timeout_sec
+        self._fallback_timeout = timeout_sec  # статический fallback (init-time value)
+        self._runtime_timeout_provider = runtime_timeout_provider
         self._circuit = CircuitBreaker(
             fail_threshold=circuit_fail_threshold,
             initial_reset_sec=circuit_initial_reset_sec,
@@ -284,6 +286,22 @@ class LLMRewriter:
             self._idle_keepalive_thread.start()
         else:
             self._idle_keepalive_thread = None
+
+    @property
+    def _timeout(self) -> float:
+        """Effective timeout — читается из runtime provider при каждом вызове.
+
+        Если provider задан и вернул корректное значение > 0 — используем его.
+        Иначе fallback к значению, переданному при __init__.
+        """
+        if self._runtime_timeout_provider is not None:
+            try:
+                val = float(self._runtime_timeout_provider())
+                if val > 0:
+                    return val
+            except Exception:
+                pass
+        return self._fallback_timeout
 
     def _idle_keepalive_loop(self) -> None:
         """Фоновый loop: каждые idle_keepalive_sec вызывает warmup_probe чтобы
