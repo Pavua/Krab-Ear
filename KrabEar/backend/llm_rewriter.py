@@ -975,7 +975,7 @@ class LLMRewriter:
             initial_reset_sec=self._circuit._initial_reset_sec,
             max_reset_sec=self._circuit._max_reset_sec,
         )
-        _log.info("LLMRewriter: API key updated, circuit breaker reset")
+        logger.info("LLMRewriter: API key updated, circuit breaker reset")
 
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.
