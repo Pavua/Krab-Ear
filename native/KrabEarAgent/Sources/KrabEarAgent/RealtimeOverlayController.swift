@@ -268,11 +268,11 @@ public final class RealtimeOverlayController: NSObject {
         }
         if panel.isVisible {
             adjustHeight()
-            // M2: Don't reposition to cursor after user has dragged the overlay.
-            // If user has a saved (dragged) position, keep it; otherwise follow cursor.
-            if !hasSavedPosition() {
-                positionNearCursor()
-            }
+            // 2026-05-09 fix: НЕ перепозиционируем overlay на каждый update tick.
+            // Раньше positionNearCursor() здесь следил за курсором — что приводило к
+            // тому, что overlay уезжал к углу экрана при движении мыши во время
+            // диктовки (user complaint). Initial position установлен в show() one-shot.
+            // Если хочется reposition — user может drag (saved position).
         }
     }
 
@@ -679,9 +679,22 @@ public final class RealtimeOverlayController: NSObject {
         let total = topRowH + vuMeterH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
-        var frame = panel.frame
-        frame.size.height = height
-        panel.setFrame(frame, display: true)
+        // 2026-05-09 FINAL FIX: instead of trying to resize panel anchored at top
+        // (multiple attempts didn't fix accumulative drift — likely AppKit/Auto-Layout
+        // hidden interaction), use FIXED panel height = maxHeight на весь жизнь overlay.
+        // Текст растёт ВНУТРИ panel благодаря primaryLabel.topAnchor + bottomAnchor
+        // (lessThanOrEqualTo) constraints. Short text не wastes space — panel становится
+        // фиксированная статичная HUD-карточка с предсказуемым layout. Никакого drift.
+        let oldFrame = panel.frame
+        let fixedHeight = maxHeight
+        if abs(oldFrame.size.height - fixedHeight) > 0.5 {
+            // Once: enlarge panel to fixed height anchored at top-left.
+            let topLeft = NSPoint(x: oldFrame.minX, y: oldFrame.maxY)
+            panel.setContentSize(NSSize(width: oldFrame.size.width, height: fixedHeight))
+            panel.setFrameTopLeftPoint(topLeft)
+        }
+        // height parameter ignored — panel always at maxHeight.
+        _ = height
 
         borderLayer.frame = effectView.bounds
     }

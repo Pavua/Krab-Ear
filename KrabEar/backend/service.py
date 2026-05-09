@@ -210,13 +210,24 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+        # Hot-propagate api_key changes to the running LLMRewriter without restart.
+        _rewriter_ref = self._llm_rewriter
+        if _rewriter_ref is not None:
+            def _on_settings_saved(old: dict, new: dict) -> None:
+                new_key = str(new.get("lm_studio_api_key", ""))
+                if new_key != str(old.get("lm_studio_api_key", "")):
+                    _rewriter_ref.set_api_key(new_key)
+            self._settings_svc.register_after_save_hook(_on_settings_saved)
 
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
         # Opt-out: set stt_warmup_on_startup=False in settings.
         _stt_warmup_enabled = DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
-        if _stt_warmup_enabled and hasattr(self.transcriber, "engine"):
+        if (_stt_warmup_enabled
+                and hasattr(self.transcriber, "engine")
+                and hasattr(self.transcriber.engine, "warmup")
+                and callable(getattr(self.transcriber.engine, "warmup"))):
             threading.Thread(
                 target=self.transcriber.engine.warmup,
                 daemon=True,
@@ -394,7 +405,7 @@ class BackendService:
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
-        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir)
+        self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
@@ -954,7 +965,6 @@ class BackendService:
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
-            "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
@@ -3598,12 +3608,40 @@ class BackendService:
         # Копия параметров (params mutable — защищаемся от побочных мутаций).
         job_params = dict(params)
 
+        def _emit_status(
+            op: str,
+            stage: str = "",
+            progress: float | None = None,
+            current_file: str | None = None,
+            file_index: int | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "op": op,
+                "stage": stage,
+                "total_files": total_files,
+                "ts": time.time(),
+            }
+            if progress is not None:
+                payload["progress"] = progress
+            if current_file is not None:
+                payload["current_file"] = current_file
+            if file_index is not None:
+                payload["file_index"] = file_index
+            event_bus.emit("app.status", payload)
+
         def _on_file_start(index: int, audio_path: str) -> None:
             self._job_tracker.update(
                 job_id,
                 status="running",
                 current_file=Path(audio_path).name,
                 current_stage="idle",
+                file_index=index + 1,
+            )
+            _emit_status(
+                "transcribe_job",
+                stage="idle",
+                progress=index / total_files if total_files else 0.0,
+                current_file=Path(audio_path).name,
                 file_index=index + 1,
             )
 
@@ -3625,9 +3663,23 @@ class BackendService:
                 errors=new_errors,
                 processed=len(new_items),
             )
+            _emit_status(
+                "transcribe_job",
+                stage="idle",
+                progress=(index + 1) / total_files if total_files else 1.0,
+                file_index=index + 1,
+            )
 
         def _progress_callback(stage: str) -> None:
             self._job_tracker.update(job_id, current_stage=str(stage))
+            state = self._job_tracker.get(job_id) or {}
+            fi = state.get("file_index") or 0
+            _emit_status(
+                "transcribe_job",
+                stage=str(stage),
+                progress=max(0, fi - 1) / total_files if total_files else 0.0,
+                file_index=fi,
+            )
 
         def _cancel_check() -> bool:
             state = self._job_tracker.get(job_id)
@@ -3636,6 +3688,7 @@ class BackendService:
         def _worker() -> None:
             try:
                 self._job_tracker.update(job_id, status="running")
+                _emit_status("transcribe_job", stage="started", progress=0.0)
                 result = self._transcribe_paths_core(
                     job_params,
                     progress_callback=_progress_callback,
@@ -3646,6 +3699,7 @@ class BackendService:
                 # Финальное состояние: cancelled | done.
                 state = self._job_tracker.get(job_id) or {}
                 if state.get("cancel_requested"):
+                    _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.update(
                         job_id,
                         status="cancelled",
@@ -3656,6 +3710,7 @@ class BackendService:
                         finished_at=time.monotonic(),
                     )
                 else:
+                    _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.mark_done(
                         job_id,
                         items=list(result.get("items") or []),
@@ -3663,6 +3718,7 @@ class BackendService:
                     )
             except Exception as exc:
                 logger.exception("Async transcribe job %s упал", job_id)
+                _emit_status("idle", stage="", progress=1.0)
                 self._job_tracker.mark_failed(job_id, str(exc))
 
         thread = threading.Thread(
@@ -3805,6 +3861,16 @@ class BackendService:
 
     def _start_preview_worker(self, quality_profile: str) -> None:
         self._stop_preview_worker()
+        # Defensive guard: если используемый Transcriber не имеет метода
+        # transcribe_preview (например, _FakeTranscriber в тестах) — НЕ запускаем
+        # preview thread. Иначе цикл будет ловить AttributeError каждые ~1.5с
+        # и спамить логи (на CI приводило к 10-min job timeout).
+        if not callable(getattr(self.transcriber, "transcribe_preview", None)):
+            logger.info(
+                "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
+                type(self.transcriber).__name__,
+            )
+            return
         self._preview_stop_event.clear()
         self._preview_thread = threading.Thread(
             target=self._preview_loop,
@@ -4477,25 +4543,6 @@ class BackendService:
             speaker_manager=self._speaker_manager,
         )
 
-    def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последние записи privacy audit log.
-
-        Параметры:
-            limit — максимальное число записей (default 100).
-
-        Возвращает:
-            entries     — список NDJSON-записей {ts, category, action, details}.
-            total_count — общее число записей в файле.
-        """
-        limit = int(params.get("limit", 100))
-        audit = get_privacy_audit_logger()
-        entries = audit.read_entries(limit=limit)
-        total = audit.total_count()
-        return {
-            "entries": entries,
-            "total_count": total,
-        }
-
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
         days = int(params.get("days", 7))
@@ -5081,6 +5128,7 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
     def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных чатов через main Krab userbot.
 

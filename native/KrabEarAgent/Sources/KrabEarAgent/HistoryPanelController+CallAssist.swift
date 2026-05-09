@@ -686,33 +686,47 @@ extension HistoryPanelController {
     }
 
     func refreshCallAssistState(silentOnError: Bool = true) {
-        guard
-            let response = try? ipcClient.call(method: "get_call_assist_state", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            if !silentOnError {
-                callAssistStatusLabel.stringValue = "Call Assist: backend недоступен"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            guard
+                let response = try? ipcClient.call(method: "get_call_assist_state", params: [:]),
+                let result = response["result"] as? [String: Any]
+            else {
+                if !silentOnError {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.callAssistStatusLabel.stringValue = "Call Assist: backend недоступен"
+                    }
+                }
+                return
             }
-            return
+            DispatchQueue.main.async { [weak self] in
+                self?.applyCallAssistState(result)
+            }
         }
-        applyCallAssistState(result)
     }
 
     func refreshCaptureSourceHint() {
-        guard
-            let response = try? ipcClient.call(method: "list_audio_inputs", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            captureSourceSelector.toolTip = "Список входных устройств недоступен."
-            return
-        }
-        let count = (result["count"] as? Int) ?? 0
-        let items = (result["items"] as? [[String: Any]]) ?? []
-        let defaultName = items.first(where: { ($0["is_default"] as? Bool) == true })?["name"] as? String
-        if let defaultName, !defaultName.isEmpty {
-            captureSourceSelector.toolTip = "Доступно входов: \(count). По умолчанию: \(defaultName)"
-        } else {
-            captureSourceSelector.toolTip = "Доступно входов: \(count)"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            guard
+                let response = try? ipcClient.call(method: "list_audio_inputs", params: [:]),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.captureSourceSelector.toolTip = "Список входных устройств недоступен."
+                }
+                return
+            }
+            let count = (result["count"] as? Int) ?? 0
+            let items = (result["items"] as? [[String: Any]]) ?? []
+            let defaultName = items.first(where: { ($0["is_default"] as? Bool) == true })?["name"] as? String
+            DispatchQueue.main.async { [weak self] in
+                if let defaultName, !defaultName.isEmpty {
+                    self?.captureSourceSelector.toolTip = "Доступно входов: \(count). По умолчанию: \(defaultName)"
+                } else {
+                    self?.captureSourceSelector.toolTip = "Доступно входов: \(count)"
+                }
+            }
         }
     }
 }

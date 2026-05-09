@@ -91,6 +91,8 @@ def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
     """
     settings_service.handle_set_settings({"llm_model": "qwen3-4b-abliterated"})
     return {"executed": True, "reason": None, "side_effect": "settings_updated"}
+
+
 def _open_lm_studio_settings(*, settings_service, **kwargs) -> dict:
     """Return a hint to the Swift agent to navigate to LM Studio API key settings.
 

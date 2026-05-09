@@ -72,6 +72,14 @@ class SettingsService:
         self._cache_ttl: float = 5.0
         self._validator = SettingsValidator()
         self._backup = backup if backup is not None else SettingsBackup()
+        # Hooks called with (old_settings, new_settings) after a successful save.
+        # BackendService registers a hook to propagate hot-reloaded values to
+        # live collaborators (e.g. LLMRewriter.set_api_key).
+        self._after_save_hooks: list[Any] = []
+
+    def register_after_save_hook(self, hook: Any) -> None:
+        """Register a callable(old_settings, new_settings) fired after each set_settings save."""
+        self._after_save_hooks.append(hook)
 
     # ------------------------------------------------------------------
     # Кэш
@@ -283,6 +291,12 @@ class SettingsService:
                 _log.info("set_settings: hot-reloaded %d pydantic fields", updated)
         except Exception as exc:  # noqa: BLE001
             _log.warning("set_settings: hot-reload failed: %s", exc)
+        # Notify registered hooks (e.g. propagate api_key to live LLMRewriter).
+        for hook in self._after_save_hooks:
+            try:
+                hook(old_settings, settings)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("set_settings: after_save_hook failed: %s", exc)
         return result
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:

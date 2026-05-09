@@ -89,12 +89,21 @@ class EventBus:
             return len(self._subscribers)
 
 
-def sse_stream(bus: EventBus) -> Iterator[str]:
+def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
     """Генератор Server-Sent Events для одного HTTP-клиента.
 
     Подписывается на шину, конвертирует события в SSE-формат и отписывается
     при разрыве соединения.
+
+    Args:
+        bus: шина событий для подписки.
+        event_filter: опциональный фильтр — строка с типами событий через запятую
+            (например ``"stt.final,live_subs.result"``). Если ``None`` — все события.
     """
+    allowed: set[str] | None = None
+    if event_filter is not None:
+        allowed = {t.strip() for t in event_filter.split(",") if t.strip()}
+
     q = bus.subscribe()
     try:
         while True:
@@ -108,6 +117,9 @@ def sse_stream(bus: EventBus) -> Iterator[str]:
             if event is None:
                 # Сигнал завершения от сервера
                 break
+
+            if allowed is not None and event["type"] not in allowed:
+                continue
 
             yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
     finally:

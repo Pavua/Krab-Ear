@@ -291,6 +291,21 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
         }
+        // 2026-05-09: Pre-flight Accessibility check. CGEventTap silently fails
+        // (returns nil) если AX permission not granted → hotkey monitor не работает,
+        // user не понимает что произошло. Explicitly ask via AXIsProcessTrustedWithOptions
+        // когда permission missing — macOS shows стандартный системный prompt
+        // с кнопкой "Open System Settings", сразу выбирая правильный path.
+        let axTrusted = AXIsProcessTrusted()
+        logger.info("Accessibility AX trusted at startup: \(axTrusted)")
+        if !axTrusted {
+            logger.warn("Accessibility permission missing — prompting user via AXIsProcessTrustedWithOptions")
+            let options: NSDictionary = ["AXTrustedCheckOptionPrompt": true]
+            _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+            // System dialog появится; user должен grant и потом restart agent.
+            // Hotkey reg ниже всё равно попытается, но silent fail если still no perm.
+        }
+
         hotkeyManager?.start()
         logger.info("Глобальный hotkey активирован (mode=\(settings.hotkeyMode))")
 

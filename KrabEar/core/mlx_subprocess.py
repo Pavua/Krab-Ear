@@ -180,33 +180,59 @@ def get_watchdog() -> MLXWatchdog:
 # Sentry helper
 # ---------------------------------------------------------------------------
 
+_SENTRY_REPORT_THRESHOLDS = frozenset({1, 5, 25, 125, 625})
+
+
+def _should_report_to_sentry(crash_count: int) -> bool:
+    """Throttle: report only at exponential thresholds (1, 5, 25, 125, 625).
+
+    First crash always reported; subsequent crashes sampled to avoid Sentry spam.
+    Backend remains alive after timeout (watchdog signals fallback), so this is
+    effectively a warning-level metric, not a crash event.
+    """
+    return crash_count in _SENTRY_REPORT_THRESHOLDS
+
+
 def _notify_sentry_timeout(
     model_name: str,
     elapsed_sec: float,
     crash_count: int,
 ) -> None:
-    """Отправить событие таймаута в Sentry (no-op если Sentry не инициализирован)."""
+    """Отправить событие таймаута в Sentry (no-op если Sentry не инициализирован).
+
+    Severity = warning (не error): watchdog корректно отработал, fallback signaled,
+    backend жив. Throttled через _should_report_to_sentry чтобы не флудить Sentry.
+    """
     try:
         from backend.observability import (  # noqa: PLC0415
             is_sentry_initialized,
             add_breadcrumb,
-            capture_exception,
         )
         if not is_sentry_initialized():
             return
+        # Breadcrumb всегда — попадает в следующий crash event как контекст
         add_breadcrumb(
             category="mlx",
             message="MLX inference timeout — Metal GPU may be stuck",
-            level="error",
+            level="warning",
             data={
                 "model": model_name,
                 "elapsed_sec": round(elapsed_sec, 2),
                 "crash_count": crash_count,
             },
         )
-        capture_exception(
-            MLXTimeoutError(timeout_sec=elapsed_sec, model_name=model_name),
-            component="mlx_watchdog",
-        )
+        # Issue только на exponential thresholds — иначе флудит Sentry
+        if not _should_report_to_sentry(crash_count):
+            return
+        import sentry_sdk  # noqa: PLC0415
+
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag("component", "mlx_watchdog")
+            scope.set_tag("mlx_model", model_name)
+            scope.set_level("warning")
+            sentry_sdk.capture_message(
+                f"MLXWatchdog: timeout after {elapsed_sec:.1f}s "
+                f"(model={model_name}, total_crashes={crash_count})"
+            )
     except Exception:  # noqa: BLE001
         pass  # telemetry никогда не должна ломать основной поток

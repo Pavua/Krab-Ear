@@ -74,8 +74,19 @@ class RealtimePartialTranscriber:
         """Запустить поток частичной транскрибации.
 
         Idempotent: если поток уже запущен — ничего не делает.
+
+        Defensive guard: если transcriber не имеет метода transcribe_preview
+        (например, _FakeTranscriber в тестах), thread не запускается. Иначе
+        worker loop ловит AttributeError бесконечно и спамит логи (на CI это
+        приводит к 10-min job timeout).
         """
         if self.is_running:
+            return
+        if not callable(getattr(self._transcriber, "transcribe_preview", None)):
+            logger.info(
+                "RealtimePartialTranscriber отключён: transcriber %s не имеет метода transcribe_preview",
+                type(self._transcriber).__name__,
+            )
             return
         self._session_id = session_id
         self._sample_rate = sample_rate

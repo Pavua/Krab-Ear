@@ -708,27 +708,6 @@ extension HistoryPanelController {
         }
     }
 
-    /// Sync wrapper deprecated — оставлен для recoverHistoryIfFiltersHideAllRows
-    /// (control-flow caller). Все hot-path UI callers переведены на appendPageAsync.
-    /// Удалить при следующей итерации после verify recovery работает async.
-    func appendPage(method: String, params: [String: Any]) {
-        guard let response = try? ipcClient.call(method: method, params: params),
-              let result = response["result"] as? [String: Any],
-              let rawItems = result["items"] as? [[String: Any]] else {
-            return
-        }
-        let mapped = rawItems.compactMap(HistoryItem.init(payload:))
-        items.append(contentsOf: mapped)
-        nextCursor = result["next_cursor"] as? String
-        loadMoreButton.isEnabled = (nextCursor != nil)
-        loadAllButton.isEnabled = (nextCursor != nil)
-        updateLoadMoreButtonCaption()
-        updateHistoryStatusLabel()
-        updateDictationHistoryPreview()
-        tableView.reloadData()
-        updateHistoryPreviewCard()
-        jumpToLatestButton.isEnabled = !items.isEmpty
-    }
 
     // MARK: - Filter helpers
 
@@ -758,29 +737,38 @@ extension HistoryPanelController {
         guard hadActiveFilters else { return }
         guard items.isEmpty else { return }
         guard !isRecoveringHistoryFromFilters else { return }
-        guard let stats = fetchHistoryStats(), stats.activeCount > 0 else { return }
 
         // UX-страховка: если записи есть, но пользователь их "скрыл" фильтрами,
         // автоматически показываем последние элементы вместо пустой таблицы.
-        isRecoveringHistoryFromFilters = true
-        defer { isRecoveringHistoryFromFilters = false }
+        fetchHistoryStatsAsync { [weak self] stats in
+            guard let self = self else { return }
+            guard let stats = stats, stats.activeCount > 0 else { return }
+            guard !self.isRecoveringHistoryFromFilters else { return }
 
-        currentQuery = ""
-        searchField.stringValue = ""
-        historyPasteStatusFilter.selectItem(at: 0)
-        historyTranslationModeFilter.selectItem(at: 0)
-        historyTranslationStatusFilter.selectItem(at: 0)
-        historyFromDateField.stringValue = ""
-        historyToDateField.stringValue = ""
+            self.isRecoveringHistoryFromFilters = true
 
-        items = []
-        nextCursor = nil
-        tableView.reloadData()
-        appendPage(method: "get_history_page", params: buildHistoryQueryParams(cursor: NSNull(), limit: limit))
-        if !items.isEmpty {
-            historyStatusLabel.stringValue = "Фильтры скрывали записи. Показаны последние \(items.count)."
+            self.currentQuery = ""
+            self.searchField.stringValue = ""
+            self.historyPasteStatusFilter.selectItem(at: 0)
+            self.historyTranslationModeFilter.selectItem(at: 0)
+            self.historyTranslationStatusFilter.selectItem(at: 0)
+            self.historyFromDateField.stringValue = ""
+            self.historyToDateField.stringValue = ""
+
+            self.items = []
+            self.nextCursor = nil
+            self.tableView.reloadData()
+
+            let params = self.buildHistoryQueryParams(cursor: NSNull(), limit: limit)
+            self.appendPageAsync(method: "get_history_page", params: params) { [weak self] _ in
+                guard let self = self else { return }
+                self.isRecoveringHistoryFromFilters = false
+                if !self.items.isEmpty {
+                    self.historyStatusLabel.stringValue = "Фильтры скрывали записи. Показаны последние \(self.items.count)."
+                }
+                self.updateDictationHistoryPreview()
+            }
         }
-        updateDictationHistoryPreview()
     }
 
     // MARK: - Focus mode / Text density
@@ -901,30 +889,36 @@ extension HistoryPanelController {
     }
 
     func updateDictationHistoryPreview() {
-        let stats = fetchHistoryStats()
-        let activeCount = stats?.activeCount ?? 0
+        // Snapshot UI-state values on main before going async.
+        let currentItems = items
+        let hasFilters = hasActiveHistoryFiltersOrQuery()
 
-        if items.isEmpty {
-            dictationHistoryOpenButton.isEnabled = activeCount > 0
-            if activeCount > 0 {
-                let suffix = hasActiveHistoryFiltersOrQuery() ? " (фильтры/поиск активны)" : ""
-                dictationHistoryHintLabel.stringValue = "В истории есть \(activeCount) записей\(suffix)."
-                dictationHistoryPreviewView.string = "Записи есть, но текущая выборка пустая. Нажмите «Открыть историю»."
-            } else {
-                dictationHistoryHintLabel.stringValue = "История пока пустая. После первой транскрибации записи появятся здесь."
-                dictationHistoryPreviewView.string = "Пока нет записей для предпросмотра."
+        fetchHistoryStatsAsync { [weak self] stats in
+            guard let self = self else { return }
+            let activeCount = stats?.activeCount ?? 0
+
+            if currentItems.isEmpty {
+                self.dictationHistoryOpenButton.isEnabled = activeCount > 0
+                if activeCount > 0 {
+                    let suffix = hasFilters ? " (фильтры/поиск активны)" : ""
+                    self.dictationHistoryHintLabel.stringValue = "В истории есть \(activeCount) записей\(suffix)."
+                    self.dictationHistoryPreviewView.string = "Записи есть, но текущая выборка пустая. Нажмите «Открыть историю»."
+                } else {
+                    self.dictationHistoryHintLabel.stringValue = "История пока пустая. После первой транскрибации записи появятся здесь."
+                    self.dictationHistoryPreviewView.string = "Пока нет записей для предпросмотра."
+                }
+                return
             }
-            return
-        }
 
-        dictationHistoryOpenButton.isEnabled = true
-        dictationHistoryHintLabel.stringValue = "Показаны последние \(min(items.count, 5)) из \(max(activeCount, items.count)) записей."
-        let lines = items.prefix(5).enumerated().map { index, item -> String in
-            let raw = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let shortText = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
-            return "\(index + 1). [\(item.ts)] \(shortText)"
+            self.dictationHistoryOpenButton.isEnabled = true
+            self.dictationHistoryHintLabel.stringValue = "Показаны последние \(min(currentItems.count, 5)) из \(max(activeCount, currentItems.count)) записей."
+            let lines = currentItems.prefix(5).enumerated().map { index, item -> String in
+                let raw = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let shortText = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
+                return "\(index + 1). [\(item.ts)] \(shortText)"
+            }
+            self.dictationHistoryPreviewView.string = lines.joined(separator: "\n")
         }
-        dictationHistoryPreviewView.string = lines.joined(separator: "\n")
     }
 
     func updateHistoryPreviewCard() {
@@ -946,17 +940,24 @@ extension HistoryPanelController {
 
     // MARK: - Stats / Overview
 
-    func fetchHistoryStats() -> (activeCount: Int, totalBytes: Int)? {
-        guard
-            let response = try? ipcClient.call(method: "get_history_stats", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            return nil
+    /// Async variant — dispatches IPC on background, calls completion on main.
+    /// Replaces the old sync `fetchHistoryStats()` which blocked the main thread.
+    func fetchHistoryStatsAsync(completion: @escaping ((activeCount: Int, totalBytes: Int)?) -> Void) {
+        let ipcClient = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard
+                let response = try? ipcClient.call(method: "get_history_stats", params: [:]),
+                let result = response["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let stats = (
+                activeCount: (result["active_count"] as? Int) ?? 0,
+                totalBytes: (result["total_bytes"] as? Int) ?? 0
+            )
+            DispatchQueue.main.async { completion(stats) }
         }
-        return (
-            activeCount: (result["active_count"] as? Int) ?? 0,
-            totalBytes: (result["total_bytes"] as? Int) ?? 0
-        )
     }
 
     // buildHistoryOverviewLabel() удалена в этом PR — заменена inline IPC fetch +

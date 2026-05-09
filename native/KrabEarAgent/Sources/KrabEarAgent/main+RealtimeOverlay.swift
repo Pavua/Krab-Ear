@@ -200,39 +200,50 @@ extension AgentAppDelegate {
         return String(format: "%02d:%02d", minutes, secs)
     }
 
-    func recoverFromPreviewFallback(reason: String) -> Bool {
+    func recoverFromPreviewFallback(reason: String, completion: @escaping (Bool) -> Void) {
         logger.warn("Запуск fallback из realtime preview: \(reason)")
-        guard
-            let stateResponse = try? ipcClient.call(method: "get_recording_state", params: [:]),
-            let state = stateResponse["result"] as? [String: Any]
-        else {
-            return false
-        }
+        let client = self.ipcClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            guard
+                let stateResponse = try? client.call(method: "get_recording_state", params: [:]),
+                let state = stateResponse["result"] as? [String: Any]
+            else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
 
-        let rawPreviewText = ((state["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let previewText = sanitizePreviewFallbackText(rawPreviewText)
-        guard previewText.count >= 8 else {
-            logger.warn("Fallback отменён: previewText слишком короткий")
-            return false
-        }
+            let rawPreviewText = ((state["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let previewText = self.sanitizePreviewFallbackText(rawPreviewText)
+            guard previewText.count >= 8 else {
+                self.logger.warn("Fallback отменён: previewText слишком короткий")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
 
-        var historyId: String?
-        if let addResponse = try? ipcClient.call(
-            method: "add_history_item",
-            params: [
-                "text": previewText,
-                "paste_status": "failed",
-            ]
-        ), let result = addResponse["result"] as? [String: Any] {
-            historyId = result["id"] as? String
-        }
+            var historyId: String?
+            if let addResponse = try? client.call(
+                method: "add_history_item",
+                params: [
+                    "text": previewText,
+                    "paste_status": "failed",
+                ]
+            ), let result = addResponse["result"] as? [String: Any] {
+                historyId = result["id"] as? String
+            }
 
-        handleTranscriptionResult(text: previewText, historyId: historyId)
-        notify(
-            title: "Krab Ear",
-            body: "Использован fallback realtime-текста: \(reason)"
-        )
-        return true
+            DispatchQueue.main.async {
+                self.handleTranscriptionResult(text: previewText, historyId: historyId)
+                self.notify(
+                    title: "Krab Ear",
+                    body: "Использован fallback realtime-текста: \(reason)"
+                )
+                completion(true)
+            }
+        }
     }
 
     func sanitizePreviewFallbackText(_ text: String) -> String {

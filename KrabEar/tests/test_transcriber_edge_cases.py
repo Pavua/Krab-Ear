@@ -58,6 +58,8 @@ class FakeAudioEngine:
         history_context: list[Any] | None = None,
         stt_hotwords: list[str] | None = None,
         progress_callback: Any = None,
+        silence_ranges: list[Any] | None = None,
+        diarize: bool | None = None,
     ) -> dict[str, Any]:
         record = {
             "audio_data": audio_data,

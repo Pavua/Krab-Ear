@@ -43,7 +43,7 @@ Scored selection (D.2.3):
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -52,6 +52,7 @@ logger = logging.getLogger("KrabEar.STTRouter")
 # ---------------------------------------------------------------------------
 # D.2.3 — Scored adapter selection
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class STTAdapterBase(Protocol):

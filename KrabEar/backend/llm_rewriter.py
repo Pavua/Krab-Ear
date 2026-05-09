@@ -263,14 +263,13 @@ class LLMRewriter:
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
+        # Serialise ALL POST /v1/chat/completions calls — LM Studio JIT-loads the model
+        # on the first concurrent request and cannot handle parallel POSTs during cold load
+        # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
+        self._post_lock = threading.Lock()
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
-        """Build HTTP headers for LM Studio requests.
-
-        Includes ``Authorization: Bearer <token>`` only when api_key is set.
-        Empty api_key → no Authorization header (backward-compat with LM Studio < 0.3
-        """Build HTTP headers for LM Studio requests.
 
         Includes ``Authorization: Bearer <token>`` only when api_key is set.
         Empty api_key: no Authorization header (backward-compat with LM Studio < 0.3
@@ -391,19 +390,27 @@ class LLMRewriter:
             "stream": False,
             # Убран "\n\n" из stop — qwen3.5 с reasoning mode ставит \n\n
             # между thinking и ответом, что обрезало content до пустоты.
-            "stop": ["Исправленный текст:", "Исходный текст:"],
+            "stop": [
+                "Исправленный текст:",
+                "Исходный текст:",
+                "<end_of_turn>",
+                "<start_of_turn>",
+                "</s>",
+            ],
+            "tool_choice": "none",
         }
         headers = self._lm_studio_headers()
 
-        # 4. HTTP call with timing
+        # 4. HTTP call with timing — serialised via _post_lock (LM Studio JIT-load safety)
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"
@@ -448,12 +455,13 @@ class LLMRewriter:
             time.sleep(10)
             start = time.monotonic()
             try:
-                response = self._session.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._timeout,
-                )
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
             except requests.Timeout:
                 self._circuit.record_failure()
                 self._last_error = "timeout"
@@ -486,6 +494,33 @@ class LLMRewriter:
                 )
             latency_ms = int((time.monotonic() - start) * 1000)
             self._last_latency_ms = latency_ms
+
+        # 5a. mlx_lm 0.31.3 bundled bug: HTTP 500 with UnboundLocalError on 'token'
+        if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
+            logger.warning(
+                "LM Studio mlx_lm token UnboundLocalError detected, retrying once "
+                "model=%s base_url=%s",
+                self._model, self._base_url,
+            )
+            start = time.monotonic()
+            try:
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                latency_ms = int((time.monotonic() - start) * 1000)
+                self._last_latency_ms = latency_ms
+            except (requests.Timeout, requests.ConnectionError, requests.RequestException):
+                pass
+            if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
+                self._push_error(
+                    "rewriter.mlx_token_bug",
+                    "mlx_lm UnboundLocalError 'token' persists after retry",
+                    severity="warn",
+                )
 
         if response.status_code == 401:
             self._circuit.record_failure()
@@ -650,12 +685,13 @@ class LLMRewriter:
 
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             logger.debug("fix_punctuation_only: timeout")
@@ -746,12 +782,13 @@ class LLMRewriter:
 
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout * 2,  # summary может быть длиннее
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout * 2,  # summary может быть длиннее
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"
@@ -805,7 +842,7 @@ class LLMRewriter:
         """Отправляет минимальный probe в LLM endpoint для прогрева модели в памяти.
 
         Использует тот же _session и headers что и rewrite().
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
+        При успехе reset'ит circuit breaker (см. warmup_probe docstring).
         Возвращает True если HTTP 200, False при любой ошибке.
         Проглатывает все exceptions.
 
@@ -819,7 +856,10 @@ class LLMRewriter:
         """Отправляет минимальный probe и возвращает структурированный результат.
 
         Используется IPC-методом warmup_rewriter для возврата латентности и ошибки.
-        НЕ трогает circuit breaker.
+        Reset'ит circuit breaker при успехе (semantically a successful probe):
+        warmup success означает LM Studio доступен и модель загружена — эквивалент
+        HALF_OPEN→CLOSED перехода. Без этого user видит "Load Model OK" но следующий
+        реальный rewrite всё равно блокируется открытым circuit'ом (confusing UX).
 
         Returns:
             dict с ключами: ok (bool), latency_ms (int), error (str | None).
@@ -834,16 +874,29 @@ class LLMRewriter:
                 "stream": False,
             }
             headers = self._lm_studio_headers()
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=effective_timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=effective_timeout,
+                )
             elapsed_ms = int((time.monotonic() - start) * 1000)
             ok = response.status_code == 200
             error: Optional[str] = None if ok else f"http_{response.status_code}"
             logger.info("LLM warmup: ok=%s elapsed_ms=%d", ok, elapsed_ms)
+            # 2026-05-09 fix: warmup success implies LM Studio is reachable + model loaded.
+            # Reset circuit breaker — otherwise next user-facing rewrite blocks despite
+            # warmup OK, which is confusing UX (user "loaded model" but still no LLM).
+            if ok and self._circuit.state != "closed":
+                logger.info(
+                    "warmup_probe success → resetting circuit breaker (was %s)",
+                    self._circuit.state,
+                )
+                self._circuit.record_success()  # HALF_OPEN → CLOSED if applicable
+                # Force CLOSED if still OPEN (record_success only transitions from HALF_OPEN)
+                if self._circuit.state == "open":
+                    self._circuit._transition_to(CircuitState.CLOSED)
             return {"ok": ok, "latency_ms": elapsed_ms, "error": error}
         except requests.Timeout:
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -916,6 +969,23 @@ class LLMRewriter:
         )
         # warm up new model in background; user-facing call still works because circuit is CLOSED
         threading.Thread(target=self.warmup, daemon=True).start()
+
+    def set_api_key(self, api_key: str) -> None:
+        """Обновляет Bearer-токен для LM Studio без перезапуска backend.
+
+        Сбрасывает circuit breaker — предыдущие 401 ошибки, накопленные при
+        неверном/отсутствующем ключе, больше не блокируют запросы.
+        """
+        if self._api_key == api_key:
+            return
+        self._api_key = api_key
+        self._last_error = None
+        self._circuit = CircuitBreaker(
+            fail_threshold=self._circuit._fail_threshold,
+            initial_reset_sec=self._circuit._initial_reset_sec,
+            max_reset_sec=self._circuit._max_reset_sec,
+        )
+        logger.info("LLMRewriter: API key updated, circuit breaker reset")
 
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.

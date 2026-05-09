@@ -423,7 +423,7 @@ class HttpAuthErrorsTestCase(unittest.TestCase):
         self.rw._session.post = MagicMock(return_value=_err_resp(401))
         result = self.rw.rewrite("тест авторизации один два три")
         self.assertFalse(result.ok)
-        self.assertEqual(result.fallback_reason, "http_401")
+        self.assertEqual(result.fallback_reason, "unauthorized")
         self.assertIsNotNone(result.latency_ms)
 
     def test_http_403_returns_correct_reason(self):

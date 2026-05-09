@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
@@ -154,6 +155,9 @@ class ActionItemsExtractor:
         )
         self._session = requests.Session()
         self._last_error: Optional[str] = None
+        # Serialise POST /v1/chat/completions — LM Studio cannot handle concurrent POSTs
+        # during JIT cold load (returns 200 with error body + Channel Errors).
+        self._post_lock = threading.Lock()
 
     def extract(self, transcript: str, language: str = "ru") -> ActionItemsResult:
         """Извлекает задачи, решения и вопросы из транскрипта.
@@ -198,12 +202,13 @@ class ActionItemsExtractor:
 
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"

@@ -55,11 +55,17 @@ let defaultPgrepRunner: @Sendable ([String]) -> String = { arguments in
     task.standardError = Pipe() // silence stderr
     do {
         try task.run()
-        task.waitUntilExit()
     } catch {
         return ""
     }
-    return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    // ВАЖНО (cherry-picked from sister branch 761bd5b): сначала drain pipe,
+    // потом waitUntilExit. Иначе при output > pipe buffer (~16KB) pgrep блокируется
+    // на write, waitUntilExit висит forever → main thread зависает в
+    // applicationDidFinishLaunching → menu bar иконка не появляется,
+    // hotkey monitor не регистрируется. Diagnosis 2026-05-09 22:56 session.
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    return String(data: data, encoding: .utf8) ?? ""
 }
 
 // MARK: - Orphan runtime binary cleanup (Phase C C.6.2)
@@ -120,11 +126,15 @@ let defaultPsRunner: @Sendable ([String]) -> String = { arguments in
     task.standardError = Pipe() // silence stderr
     do {
         try task.run()
-        task.waitUntilExit()
     } catch {
         return ""
     }
-    return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    // ВАЖНО (cherry-picked from sister branch 761bd5b): drain pipe BEFORE waitUntilExit.
+    // Same reason as defaultPgrepRunner above. ps output for "axo pid,command" может
+    // легко превысить 16KB pipe buffer, тогда ps блокируется на write→main hangs.
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    return String(data: data, encoding: .utf8) ?? ""
 }
 
 // MARK: - Worktree shadow cleanup (Phase C C.6)

@@ -80,6 +80,15 @@
     <!-- Remove this override when v3-turbo is re-downloaded and verified complete.   -->
     <key>KRAB_EAR_MODEL_BALANCED</key>
     <string>mlx-community/whisper-large-v3-mlx</string>
+
+    <!-- 2026-05-09 fix: LLM rewriter request timeout. Старый plist имел 5.0
+         (откуда возникло — неизвестно, возможно legacy install). При длинных
+         диктовках (>200 chars) gemma-4-E4B vision multimodal MLX отвечает 5-15s
+         в "thinking" фазе → 5s timeout убивал rewrite → user видит raw STT с
+         "0Х" вместо "Их" (digit hallucinations не fixed). 120s безопасно для
+         cold load под нагрузкой. -->
+    <key>KRAB_EAR_LLM_TIMEOUT_SEC</key>
+    <string>120.0</string>
   </dict>
 
   <key>StandardOutPath</key>
