@@ -263,6 +263,10 @@ class LLMRewriter:
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
         self._session = requests.Session()
+        # Serialise ALL POST /v1/chat/completions calls — LM Studio JIT-loads the model
+        # on the first concurrent request and cannot handle parallel POSTs during cold load
+        # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
+        self._post_lock = threading.Lock()
 
     def _lm_studio_headers(self) -> dict:
         """Build HTTP headers for LM Studio POST requests.
@@ -397,15 +401,16 @@ class LLMRewriter:
         }
         headers = self._lm_studio_headers()
 
-        # 4. HTTP call with timing
+        # 4. HTTP call with timing — serialised via _post_lock (LM Studio JIT-load safety)
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"
@@ -450,12 +455,13 @@ class LLMRewriter:
             time.sleep(10)
             start = time.monotonic()
             try:
-                response = self._session.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._timeout,
-                )
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
             except requests.Timeout:
                 self._circuit.record_failure()
                 self._last_error = "timeout"
@@ -498,12 +504,13 @@ class LLMRewriter:
             )
             start = time.monotonic()
             try:
-                response = self._session.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._timeout,
-                )
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
                 latency_ms = int((time.monotonic() - start) * 1000)
                 self._last_latency_ms = latency_ms
             except (requests.Timeout, requests.ConnectionError, requests.RequestException):
@@ -678,12 +685,13 @@ class LLMRewriter:
 
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             logger.debug("fix_punctuation_only: timeout")
@@ -774,12 +782,13 @@ class LLMRewriter:
 
         start = time.monotonic()
         try:
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=self._timeout * 2,  # summary может быть длиннее
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout * 2,  # summary может быть длиннее
+                )
         except requests.Timeout:
             self._circuit.record_failure()
             self._last_error = "timeout"
@@ -865,12 +874,13 @@ class LLMRewriter:
                 "stream": False,
             }
             headers = self._lm_studio_headers()
-            response = self._session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=effective_timeout,
-            )
+            with self._post_lock:
+                response = self._session.post(
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=effective_timeout,
+                )
             elapsed_ms = int((time.monotonic() - start) * 1000)
             ok = response.status_code == 200
             error: Optional[str] = None if ok else f"http_{response.status_code}"

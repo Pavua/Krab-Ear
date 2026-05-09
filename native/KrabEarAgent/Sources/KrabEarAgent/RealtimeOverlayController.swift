@@ -679,20 +679,22 @@ public final class RealtimeOverlayController: NSObject {
         let total = topRowH + vuMeterH + stageLabelH + padding + textH
         let height = clamp(value: total, min: minHeight, max: maxHeight)
 
-        // Anchor top-left explicitly via Apple's setFrameTopLeftPoint API.
-        // 1) Save top-left BEFORE resize.
-        // 2) Resize via setContentSize (preserves bottom-left per Apple docs).
-        // 3) Re-anchor top-left explicitly. Belt-and-suspenders against any
-        //    subtle AppKit reordering (display:true paint race, hidden auto-layout
-        //    in contentView, etc).
-        // Unfixed since 2026-05-09: simple `frame.origin.y += dy` math was
-        // algebraically correct but visually still drifted accumulatively.
+        // 2026-05-09 FINAL FIX: instead of trying to resize panel anchored at top
+        // (multiple attempts didn't fix accumulative drift — likely AppKit/Auto-Layout
+        // hidden interaction), use FIXED panel height = maxHeight на весь жизнь overlay.
+        // Текст растёт ВНУТРИ panel благодаря primaryLabel.topAnchor + bottomAnchor
+        // (lessThanOrEqualTo) constraints. Short text не wastes space — panel становится
+        // фиксированная статичная HUD-карточка с предсказуемым layout. Никакого drift.
         let oldFrame = panel.frame
-        let topLeft = NSPoint(x: oldFrame.minX, y: oldFrame.maxY)
-        if abs(oldFrame.size.height - height) > 0.5 {
-            panel.setContentSize(NSSize(width: oldFrame.size.width, height: height))
+        let fixedHeight = maxHeight
+        if abs(oldFrame.size.height - fixedHeight) > 0.5 {
+            // Once: enlarge panel to fixed height anchored at top-left.
+            let topLeft = NSPoint(x: oldFrame.minX, y: oldFrame.maxY)
+            panel.setContentSize(NSSize(width: oldFrame.size.width, height: fixedHeight))
             panel.setFrameTopLeftPoint(topLeft)
         }
+        // height parameter ignored — panel always at maxHeight.
+        _ = height
 
         borderLayer.frame = effectView.bounds
     }
