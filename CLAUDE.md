@@ -415,17 +415,51 @@ python scripts/check_performance_budget.py
 
 ## Working guidelines for Claude sessions
 
+### 🔴 HARD RULES (Wave 41 learnings — never violate)
+
+1. **НИКОГДА `tccutil reset <service> <bundle>` в живой сессии.**
+   `tccutil reset` — это `rm` без подтверждения. Стирает user'ские TCC grants (Accessibility,
+   Mic, etc). На Wave 41 я использовал 3 раза подряд как "verification check" — каждый раз
+   стирая свежие Accessibility entries → hotkey monitor не регистрировался. Для verification:
+   spreaducation readonly через menu bar AX count, или попросить user open System Settings.
+
+2. **Pipe drain BEFORE `task.waitUntilExit()` в Swift Process+Pipe.**
+   Если subprocess output > 16KB pipe buffer, child blocks на `write`, parent ждёт `waitUntilExit`
+   → mutual deadlock. На Wave 41 этот баг скрылся 3+ часа в `SingleInstanceGuard.swift` —
+   main thread hung в `applicationDidFinishLaunching`, hotkey не реrgistr'нулся.
+   Pattern:
+   ```swift
+   try task.run()
+   let data = pipe.fileHandleForReading.readDataToEndOfFile()  // drain FIRST
+   task.waitUntilExit()                                         // then wait
+   ```
+
+3. **Pydantic-settings env vars OVERRIDE `set_settings` IPC.**
+   `settings.LLM_TIMEOUT_SEC` (BaseSettings) читает `KRAB_EAR_LLM_TIMEOUT_SEC` env первым.
+   Plist установил env=5.0, user's `set_settings({"llm_timeout_sec": 120})` через IPC
+   игнорировался → rewriter timeout=5s на длинных rewrite → user видел raw STT с галлюцинациями.
+   Решение либо: убрать env из plist, либо runtime callback (см. `LLMRewriter` + `5d53399`
+   `runtime_timeout_provider`).
+
 ### Sub-agent model selection (cost-conscious)
 
 Используй Agent tool с явным `model` параметром — **default opus сжигает quota** (user установил правило 2026-04-17 после 5h quota hit).
 
+**Обновлено 2026-05-10 (Wave 41 close)** — user reported: Sonnet ~27% quota used, **щедрая квота**.
+Все остальные модели (Opus, Haiku) ~82% used. Strategy shift:
+
 | Model | Use for | % of tasks |
 |-------|---------|------------|
-| `haiku` | Research, docs, diagnostics, simple edits, memory updates, file reads, grep | ~80% |
-| `sonnet` | Implementation PRs, Gemini apply, rebase с conflict resolution, tests, medium refactors | ~18% |
-| `opus` | Критический debugging (cascading compiler errors), architectural decisions, когда Sonnet уже failed | ~2% |
+| `sonnet` | **Default для всех sub-agent calls** — implementation, research, inventory, CI checks | **~90%** |
+| `haiku` | **Risky** — prompt-too-long happens из-за раздутости system reminders. Только для очень коротких read-only tasks <500 chars prompt. При failure → fallback на sonnet | ~5% |
+| `opus` | Только critical architectural decisions / cascading compiler errors | ~5% |
 
-Параллелизм > глубина: **многих Haiku параллельно** лучше чем одного Opus linear (5-10× throughput при comparable cost).
+**Параллелизм 5-10+ sonnet sub-agents одновременно** = OK для file-isolated tasks. Verify NO file
+overlap before launch. Conflict-prone files (`service.py`, `HistoryPanelController.swift`) — sequential через ONE sub-agent.
+
+**Quota policy на Wave 42+**: while sonnet stays generous, **грузи по максимуму** (5-10 parallel
+agents для большой batch work — Batch F закрыл 28 test fails за ~3 минуты wall-clock через 8 sonnet
+agents). Watch для prompt-too-long errors с haiku — иммuneдиately retry on sonnet.
 
 ### Gemini 3.1 Pro для дизайна (strict rule)
 
