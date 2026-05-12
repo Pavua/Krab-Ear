@@ -1050,5 +1050,29 @@ def create_app():
 
 
 if __name__ == "__main__":
-    # Запуск сервера на локальном интерфейсе
+    # Запуск сервера на локальном интерфейсе.
+    #
+    # Wave 58 follow-up (Wave 47 B2 HIGH-1 partial closure): bind explicitly
+    # to 127.0.0.1 — REMOTE attackers cannot reach this server. Any local
+    # process (any user on this machine) CAN hit it without auth if neither
+    # REST_API_AUTH_ENABLED nor REST_API_KEY is set.
+    #
+    # Defense in depth: emit a warning at startup so operator knows the
+    # security posture. Full fix (require auth by default) would break
+    # existing localhost clients — defer to opt-in migration wave.
+    _auth_mode = (
+        "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
+        else "legacy-key" if settings.REST_API_KEY
+        else "DISABLED"
+    )
+    if _auth_mode == "DISABLED":
+        logger.warning(
+            "REST server starting on 127.0.0.1:5005 with NO auth "
+            "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
+            "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
+            "REST_API_KEY in settings.json. Localhost-only bind prevents "
+            "remote attack."
+        )
+    else:
+        logger.info("REST server starting on 127.0.0.1:5005 with auth=%s", _auth_mode)
     app.run(host="127.0.0.1", port=5005)
