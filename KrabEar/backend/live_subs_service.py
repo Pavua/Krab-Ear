@@ -175,10 +175,11 @@ class LiveSubsService:
         event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
         if text:
             logger.info(
-                "LiveSubsService: flush OK text=%r lang=%s translation=%r",
-                text,
+                "LiveSubsService: flush OK text_len=%d preview=%r lang=%s translation_len=%d",
+                len(text),
+                text[:30],
                 language_detected,
-                translation,
+                len(translation) if translation else 0,
             )
         else:
             logger.info(

@@ -251,3 +251,149 @@ class TestSTTEdgeCases(unittest.TestCase):
         result = stage.process(ctx)
         # Raw result preserved
         self.assertEqual(result.confidence, -0.5)
+
+
+class TestSTTStageCoverage(unittest.TestCase):
+    """Extra tests targeting previously uncovered branches in stage_stt.py."""
+
+    # ------------------------------------------------------------------
+    # cacheable class attribute
+    # ------------------------------------------------------------------
+    def test_cacheable_attribute_is_true(self):
+        """STTStage.cacheable должен быть True (используется PipelineExecutor)."""
+        from core.pipeline.stages.stt import STTStage
+        self.assertTrue(STTStage.cacheable)
+        engine = FakeEngine()
+        stage = STTStage(engine)
+        self.assertTrue(stage.cacheable)
+
+    # ------------------------------------------------------------------
+    # text fallback: result has 'text' but NOT 'raw_text'
+    # ------------------------------------------------------------------
+    def test_text_key_used_when_raw_text_missing(self):
+        """Если движок возвращает 'text' без 'raw_text' — используем 'text'."""
+        result = _ok_result()
+        del result["raw_text"]  # нет raw_text → должен взять 'text'
+        result["text"] = "Текст из text поля"
+        engine = FakeEngine(result=result)
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        self.assertEqual(ctx.raw_text, "Текст из text поля")
+        self.assertFalse(ctx.errors)
+
+    # ------------------------------------------------------------------
+    # raw_text empty string vs text fallback
+    # ------------------------------------------------------------------
+    def test_empty_raw_text_falls_back_to_text(self):
+        """raw_text='' (falsy) должен упасть на 'text'."""
+        result = _ok_result(raw_text="", text="Резервный текст")
+        engine = FakeEngine(result=result)
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        self.assertEqual(ctx.raw_text, "Резервный текст")
+
+    # ------------------------------------------------------------------
+    # extra_vocabulary: non-empty list forwarded; empty list → None
+    # ------------------------------------------------------------------
+    def test_extra_vocabulary_nonempty_forwarded(self):
+        """Непустой extra_vocabulary пробрасывается в kwargs движка."""
+        engine = FakeEngine()
+        stage = STTStage(engine)
+        ctx = _make_ctx(extra_vocabulary=["краб", "ухо"])
+        stage.process(ctx)
+        kwargs = engine.calls[0][1]
+        self.assertEqual(kwargs["extra_vocabulary"], ["краб", "ухо"])
+
+    def test_extra_vocabulary_empty_list_sends_none(self):
+        """Пустой extra_vocabulary конвертируется в None при вызове движка."""
+        engine = FakeEngine()
+        stage = STTStage(engine)
+        ctx = _make_ctx(extra_vocabulary=[])
+        stage.process(ctx)
+        kwargs = engine.calls[0][1]
+        self.assertIsNone(kwargs["extra_vocabulary"])
+
+    # ------------------------------------------------------------------
+    # status == 'skipped' is NOT treated as error (passes through)
+    # ------------------------------------------------------------------
+    def test_skipped_status_not_treated_as_error(self):
+        """status='skipped' не является ошибкой — текст берётся из поля text/raw_text."""
+        result = {
+            "status": "skipped",
+            "raw_text": "Тишина",
+            "text": "Тишина",
+            "language": "ru",
+            "model": "mlx-whisper-balanced",
+            "confidence": 0.1,
+            "segments": [],
+        }
+        engine = FakeEngine(result=result)
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        # 'skipped' != 'error' → no errors appended
+        self.assertFalse(ctx.errors)
+        self.assertEqual(ctx.raw_text, "Тишина")
+
+    # ------------------------------------------------------------------
+    # error key without status key
+    # ------------------------------------------------------------------
+    def test_error_key_alone_triggers_error_path(self):
+        """Результат с ключом 'error' (без status) также должен добавить ошибку."""
+        result = {"error": "движок не загружен"}
+        engine = FakeEngine(result=result)
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        self.assertTrue(ctx.errors)
+        self.assertIn("движок не загружен", ctx.errors[0])
+
+    # ------------------------------------------------------------------
+    # status == 'error' с пустым полем error → берём status как msg
+    # ------------------------------------------------------------------
+    def test_status_error_no_error_key_uses_status_as_msg(self):
+        """status='error' без поля 'error' — сообщение = значение status."""
+        result = {"status": "error"}  # нет поля 'error'
+        engine = FakeEngine(result=result)
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        self.assertTrue(ctx.errors)
+        self.assertIn("error", ctx.errors[0])
+
+    # ------------------------------------------------------------------
+    # process debug log line covered (long successful transcript)
+    # ------------------------------------------------------------------
+    def test_long_transcript_completes_without_error(self):
+        """Длинный текст (>1000 символов) логируется без ошибок — debug-ветка."""
+        long_text = "Слово " * 200  # 1200 символов
+        engine = FakeEngine(result=_ok_result(raw_text=long_text, confidence=0.88))
+        stage = STTStage(engine)
+        ctx = _make_ctx()
+        ctx = stage.process(ctx)
+        self.assertEqual(len(ctx.raw_text), len(long_text))
+        self.assertFalse(ctx.errors)
+        self.assertAlmostEqual(ctx.confidence, 0.88)
+
+    # ------------------------------------------------------------------
+    # lang_hint=None vs explicit value
+    # ------------------------------------------------------------------
+    def test_lang_hint_none_forwarded(self):
+        """lang_hint=None явно пробрасывается в движок."""
+        engine = FakeEngine()
+        stage = STTStage(engine)
+        ctx = _make_ctx()  # lang_hint defaults to None
+        stage.process(ctx)
+        kwargs = engine.calls[0][1]
+        self.assertIsNone(kwargs["lang_hint"])
+
+    def test_lang_hint_explicit_forwarded(self):
+        """lang_hint='es' пробрасывается в движок корректно."""
+        engine = FakeEngine()
+        stage = STTStage(engine)
+        ctx = _make_ctx(lang_hint="es")
+        stage.process(ctx)
+        kwargs = engine.calls[0][1]
+        self.assertEqual(kwargs["lang_hint"], "es")
