@@ -226,7 +226,10 @@ class BackendService:
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
         # Opt-out: set stt_warmup_on_startup=False in settings.
-        _stt_warmup_enabled = DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
+        # Wave 58 follow-up: read runtime setting (same fix pattern as rewriter warmup
+        # above on line 187 — DEFAULT_SETTINGS is static, runtime override in settings.json
+        # was previously ignored).
+        _stt_warmup_enabled = bool(self._get_runtime_setting("stt_warmup_on_startup", False))
         if (_stt_warmup_enabled
                 and hasattr(self.transcriber, "engine")
                 and hasattr(self.transcriber.engine, "warmup")
