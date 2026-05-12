@@ -183,9 +183,12 @@ class BackendService:
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
         # Fire background warmup if enabled in settings — pre-loads model before first dictation.
-        # Uses rewriter_warmup_timeout_sec setting (default 15 s) as the probe timeout.
-        _warmup_enabled = DEFAULT_SETTINGS.get("rewriter_warmup_on_startup", True)
-        _warmup_timeout = float(DEFAULT_SETTINGS.get("rewriter_warmup_timeout_sec", 15))
+        # Wave 58: read RUNTIME settings (settings.json) instead of static DEFAULT_SETTINGS so
+        # user-overridden values (e.g. rewriter_warmup_timeout_sec=60 in production) actually
+        # apply. Previously hardcoded 15s default caused chronic warmup-timeout warnings on
+        # cold LM Studio loads (gemma-4-26b takes 20-60s cold).
+        _warmup_enabled = bool(self._get_runtime_setting("rewriter_warmup_on_startup", True))
+        _warmup_timeout = float(self._get_runtime_setting("rewriter_warmup_timeout_sec", 60))
         if self._llm_rewriter is not None and _warmup_enabled:
             threading.Thread(
                 target=self._llm_rewriter.warmup_sync,

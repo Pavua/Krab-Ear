@@ -144,6 +144,115 @@ class TestLLMRewriteStageProcess(unittest.TestCase):
         self.assertFalse(stage.should_run(ctx))
 
 
+class TestLLMRewriteNoCircuitAttr(unittest.TestCase):
+    """Rewriter without _circuit attribute — should_run must still work."""
+
+    def test_should_run_true_when_rewriter_has_no_circuit_attr(self):
+        """getattr(rewriter, '_circuit', None) returns None → skip circuit check → True."""
+        rewriter = MagicMock(spec=["rewrite"])  # only rewrite, no _circuit
+        rewriter.rewrite.return_value = LLMRewriteResult(
+            ok=True, text="ok", fallback_reason=None, latency_ms=10
+        )
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = PipelineContext(audio_input=None)
+        ctx.cleaned_text = "текст"
+        # circuit is None → condition `circuit is not None` is False → no block
+        self.assertTrue(stage.should_run(ctx))
+
+    def test_process_succeeds_when_rewriter_has_no_circuit_attr(self):
+        """process() works even without _circuit — no AttributeError."""
+        rewriter = MagicMock(spec=["rewrite"])  # only rewrite, no _circuit
+        rewriter.rewrite.return_value = LLMRewriteResult(
+            ok=True, text="результат", fallback_reason=None, latency_ms=20
+        )
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="входной текст")
+        result = stage.process(ctx)
+        self.assertTrue(result.llm_applied)
+        self.assertEqual(result.rewritten_text, "результат")
+
+
+class TestLLMRewriteLatencyEdge(unittest.TestCase):
+    """Edge cases for latency_ms handling in process()."""
+
+    def test_process_ok_with_latency_none(self):
+        """When result.latency_ms is None, logger uses 'or 0' — no crash."""
+        rewriter = _mock_rewriter(ok=True, text="текст", latency=None)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="входной")
+        result = stage.process(ctx)
+        self.assertTrue(result.llm_applied)
+        self.assertIsNone(result.llm_latency_ms)
+
+    def test_process_ok_result_text_empty_string_falls_back_to_input(self):
+        """result.ok=True but result.text='' → 'or text_in' selects text_in."""
+        rewriter = _mock_rewriter(ok=True, text="", latency=5)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx(cleaned_text="оригинал")
+        result = stage.process(ctx)
+        # result.text="" is falsy → text_in="оригинал" selected
+        self.assertEqual(result.rewritten_text, "оригинал")
+        self.assertTrue(result.llm_applied)
+
+
+class TestLLMRewriteSettingsKey(unittest.TestCase):
+    """Verify the exact key queried from settings."""
+
+    def test_settings_get_called_with_llm_rewrite_enabled(self):
+        """should_run passes 'llm_rewrite_enabled' as the settings key."""
+        rewriter = _mock_rewriter()
+        calls = []
+        def capturing_settings(key, default=None):
+            calls.append(key)
+            return True
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=capturing_settings)
+        ctx = _make_ctx()
+        stage.should_run(ctx)
+        self.assertIn("llm_rewrite_enabled", calls)
+
+    def test_circuit_state_unknown_value_does_not_block(self):
+        """circuit.state != 'open' (e.g. 'degraded') → should_run returns True."""
+        rewriter = _mock_rewriter()
+        rewriter._circuit.state = "degraded"  # some non-standard state
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        ctx = _make_ctx()
+        # Only "open" blocks; any other string allows
+        self.assertTrue(stage.should_run(ctx))
+
+
+class TestLLMRewriteIntegrationWithExecutor(unittest.TestCase):
+    """LLMRewriteStage wired inside PipelineExecutor."""
+
+    def test_llm_stage_runs_in_executor_pipeline(self):
+        """Executor runs LLMRewriteStage and sets final_text to rewritten text."""
+        from core.pipeline.executor import PipelineExecutor
+
+        rewriter = _mock_rewriter(ok=True, text="финальный текст", latency=30)
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: True)
+        executor = PipelineExecutor([stage])
+        ctx = PipelineContext(audio_input=None)
+        ctx.cleaned_text = "исходный текст"
+        result = executor.run(ctx)
+        self.assertTrue(result.llm_applied)
+        self.assertEqual(result.rewritten_text, "финальный текст")
+        # Executor's final_text override: rewritten_text takes priority
+        self.assertEqual(result.final_text, "финальный текст")
+
+    def test_llm_stage_skipped_in_executor_when_disabled(self):
+        """When should_run returns False, executor records skipped metric."""
+        from core.pipeline.executor import PipelineExecutor
+
+        rewriter = _mock_rewriter()
+        stage = LLMRewriteStage(rewriter=rewriter, settings_get=lambda k, d=None: False)
+        executor = PipelineExecutor([stage])
+        ctx = PipelineContext(audio_input=None)
+        ctx.cleaned_text = "текст"
+        result = executor.run(ctx)
+        self.assertEqual(len(result.stage_metrics), 1)
+        self.assertTrue(result.stage_metrics[0].skipped)
+        self.assertFalse(result.llm_applied)
+
+
 if __name__ == "__main__":
     unittest.main()
 
