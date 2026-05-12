@@ -69,6 +69,16 @@ _ALLOWED_RUNTIME_REFS = {
     # Makefile: `make release` and `make sign` targets cp the binary to native/runtime/
     # as part of two-binary sync workflow (same reason as above).
     os.path.join(_PROJECT_ROOT, "Makefile"),
+    # Wave 50: ensure_agent_running.command — checks both bundle AND runtime paths
+    # for agent processes (recovery script also matches `pgrep -f` on the runtime path).
+    os.path.join(_PROJECT_ROOT, "scripts", "ensure_agent_running.command"),
+    # Wave 50: error_codes.py — `agent.binary_drift` entry's `user_msg_ru` text
+    # mentions the runtime path so user understands what 'drift' means in toast.
+    os.path.join(_PROJECT_ROOT, "KrabEar", "backend", "error_codes.py"),
+    # Wave 55 A1: service.py — `_check_binary_drift_on_startup()` dwarfdumps both
+    # Krab Ear.app bundle binary AND native/runtime/KrabEarAgent to detect drift,
+    # then pushes `agent.binary_drift` error code via error_bus.
+    os.path.join(_PROJECT_ROOT, "KrabEar", "backend", "service.py"),
 }
 
 # Extensions we care about for the "no stray runtime refs" check.
