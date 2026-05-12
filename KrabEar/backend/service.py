@@ -274,6 +274,13 @@ class BackendService:
             if _settings_dict.get("llm_probe_enabled", True):
                 self._llm_probe.start()
 
+        # Startup binary-drift self-check (Option B).
+        # Compares dwarfdump UUIDs of bundle vs runtime KrabEarAgent binaries.
+        # Fires agent.binary_drift on the error_bus when they diverge.
+        # Opt-out via setting binary_drift_check_on_startup=False.
+        if self._settings_svc.cached_settings().get("binary_drift_check_on_startup", True):
+            self._check_binary_drift_on_startup()
+
         self._system_monitor = SystemMonitor()
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
@@ -924,6 +931,7 @@ class BackendService:
             "report_hotkey_conflict": self._handle_report_hotkey_conflict,  # Swift→backend hotkey conflict (chord taken by another app)
             "handshake": self._handle_handshake,  # Swift→backend handshake on connect: version + capabilities exchange
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
+            "report_binary_drift": self._handle_report_binary_drift,  # external watcher→backend binary drift alert (bundle vs runtime UUID mismatch)
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
@@ -2524,6 +2532,97 @@ class BackendService:
             action_id=None,
         )
         self._error_bus.push(err)
+        return {"ok": True}
+
+    # ── Binary drift helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _dwarfdump_uuid(path: Path) -> str | None:
+        """Return the first UUID reported by dwarfdump for *path*, or None on error."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["dwarfdump", "--uuid", str(path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                # Example line: "UUID: AABBCC... (arm64) /path/to/binary"
+                parts = line.split()
+                if parts and parts[0] == "UUID:":
+                    return parts[1]
+        except Exception:
+            pass
+        return None
+
+    def _push_binary_drift_error(self, bundle_uuid: str | None, runtime_uuid: str | None) -> None:
+        from backend.error_bus import KrabError
+        from backend.error_codes import ERROR_REGISTRY
+        from datetime import datetime, timezone
+        entry = ERROR_REGISTRY["agent.binary_drift"]
+        err = KrabError(
+            severity=entry["severity"],
+            component="agent",
+            code="agent.binary_drift",
+            message_user=entry["user_msg_ru"],
+            message_debug=(
+                f"binary drift detected: bundle_uuid={bundle_uuid} runtime_uuid={runtime_uuid}"
+            ),
+            timestamp=datetime.now(timezone.utc),
+            context={"bundle_uuid": bundle_uuid, "runtime_uuid": runtime_uuid},
+            actionable=entry["actionable"],
+            action_id=entry["action_id"],
+        )
+        self._error_bus.push(err)
+
+    def _check_binary_drift_on_startup(self) -> None:
+        """Startup Option-B drift check.
+
+        Compares dwarfdump UUIDs of the two KrabEarAgent binaries:
+          - bundle:  <PROJECT_ROOT>/Krab Ear.app/Contents/MacOS/KrabEarAgent
+          - runtime: <PROJECT_ROOT>/native/runtime/KrabEarAgent
+
+        Silently skips if either path is absent or dwarfdump is unavailable.
+        """
+        bundle_bin = PROJECT_ROOT / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+        runtime_bin = PROJECT_ROOT / "native" / "runtime" / "KrabEarAgent"
+        if not bundle_bin.exists() or not runtime_bin.exists():
+            logger.debug(
+                "binary_drift_check skipped: one or both paths absent "
+                "(bundle=%s exists=%s, runtime=%s exists=%s)",
+                bundle_bin, bundle_bin.exists(), runtime_bin, runtime_bin.exists(),
+            )
+            return
+        bundle_uuid = self._dwarfdump_uuid(bundle_bin)
+        runtime_uuid = self._dwarfdump_uuid(runtime_bin)
+        if bundle_uuid is None or runtime_uuid is None:
+            logger.debug(
+                "binary_drift_check skipped: dwarfdump unavailable or returned no UUID "
+                "(bundle_uuid=%s, runtime_uuid=%s)", bundle_uuid, runtime_uuid,
+            )
+            return
+        if bundle_uuid != runtime_uuid:
+            logger.warning(
+                "binary_drift detected at startup: bundle=%s runtime=%s",
+                bundle_uuid, runtime_uuid,
+            )
+            self._push_binary_drift_error(bundle_uuid, runtime_uuid)
+        else:
+            logger.debug("binary_drift_check OK: UUIDs match (%s)", bundle_uuid)
+
+    def _handle_report_binary_drift(self, params: dict) -> dict:
+        """External watcher→backend binary drift alert (Option A — IPC path).
+
+        Called by the daily scheduled routine `krab-ear-two-binary-drift-watch`
+        (or any other watcher) when it detects that bundle and runtime binaries
+        have diverged UUIDs.
+
+        Params:
+            bundle_uuid  (str, optional): UUID of the bundle binary
+            runtime_uuid (str, optional): UUID of the runtime binary
+        """
+        bundle_uuid = params.get("bundle_uuid") or None
+        runtime_uuid = params.get("runtime_uuid") or None
+        self._push_binary_drift_error(bundle_uuid, runtime_uuid)
         return {"ok": True}
 
     def _handle_probe_llm_http(self, params: dict) -> dict:

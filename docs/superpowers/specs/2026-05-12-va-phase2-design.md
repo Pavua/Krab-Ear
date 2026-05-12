@@ -271,3 +271,50 @@ Phase 2 considered done when all of the following pass:
 1. **R21 bench**: test supergemma-mm with image input on 5 representative screenshots (code, UI, document, chart, photo). Measure per-turn latency and output quality to establish realistic vision-mode latency expectations.
 2. **LM Studio dual-slot feasibility test**: load both `gemma-4-26b-a4b-it-optiq` (baseline) and `supergemma4-26b-abliterated-multimodal-mlx` simultaneously in LM Studio on 36GB hardware. Measure actual RAM usage and whether swap causes Metal GPU pressure.
 3. **Silero VAD barge-in prototype**: standalone Python script: play audio via sounddevice while simultaneously running `core/vad.py` on microphone input. Measure false-positive rate in quiet + ambient noise environments. Determines feasibility of Phase 2.4 before committing PR.
+
+---
+
+## 12. Phase 2A Status — 2026-05-13
+
+**Skeleton created. Not yet wired to IPC or Swift UI.**
+
+### Files created
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `KrabEar/backend/va_multimodal.py` | ~230 | `MultimodalVAClient` + `VAMultimodalResult` skeleton |
+| `KrabEar/tests/test_va_multimodal.py` | ~220 | 13 test stubs, all `@unittest.skip` until Wave 56+ integration |
+
+### Class surface area (`MultimodalVAClient`)
+
+```python
+class MultimodalVAClient:
+    def __init__(self, base_url, api_key="", vision_model=_DEFAULT_VISION_MODEL, timeout_sec=60.0)
+    def send_with_image(self, text, image_path, conversation_history=None, system_prompt=None) -> VAMultimodalResult
+    @staticmethod _encode_image(image_path) -> tuple[str, str]        # base64, mime_type
+    @staticmethod _build_messages(text, image_b64, mime_type, ...) -> list[dict]
+```
+
+### Test suites (all skipped)
+
+- `TestVAMultimodalResultContract` — 3 tests: `text_or_fallback` contract
+- `TestImageEncoding` — 4 tests: PNG encode, JPEG mime, size guard, missing file
+- `TestBuildMessages` — 4 tests: vision content shape, data URI format, history ordering, custom system prompt
+- `TestSendWithImageHTTPLayer` — 5 tests: success path, connection error, missing file, timeout, model name in payload
+
+### What is NOT done (Wave 56+ scope)
+
+1. **IPC dispatch**: `va_send_with_image` / `conversation_inject_image` methods not added to `service.py` handler table — kept out intentionally to avoid premature API exposure before OQ-1 product decision.
+2. **Swift ConversationViewController+Vision.swift**: FSEvents watcher + "📎 Фото прикреплено" badge — separate PR (spec §4 PR 2A.2).
+3. **OQ-1 decision required**: dual-model routing vs. single supergemma-mm (see §5). Skeleton assumes dual routing (vision_model param is separate from baseline).
+4. **Config registration**: `va_vision_enabled` / `va_vision_model` settings not yet in `DEFAULT_SETTINGS` — add when wiring IPC.
+5. **Session context store** (`conversation/session_context.py` in Voice Gateway): image injection state per session — VG-side work, separate repo.
+
+### Next steps for Wave 56+
+
+1. Get OQ-1 product decision (single vs dual model strategy).
+2. Add `va_vision_enabled: bool = False` and `va_vision_model: str` to `DEFAULT_SETTINGS` in `core/config.py`.
+3. Wire `va_send_with_image` IPC method in `service.py` → delegates to `MultimodalVAClient`.
+4. Implement `ConversationViewController+Vision.swift` (PR 2A.2).
+5. Run R21 bench (listed above in §11) to validate actual vision-turn latency on hardware.
+6. Remove `@unittest.skip` decorators and run full test suite.

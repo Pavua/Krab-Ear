@@ -447,5 +447,384 @@ class TestPipelineContextEdgeCases(unittest.TestCase):
         self.assertEqual(ctx2.extra_vocabulary, [])
 
 
+# ---------------------------------------------------------------------------
+# Stub stage helpers used by executor integration tests
+# ---------------------------------------------------------------------------
+
+class _StubStage:
+    """Minimal stage that sets raw_text and is always cacheable."""
+
+    name = "stt"
+    cacheable = True
+
+    def __init__(self, text="hello", should_run=True, raise_exc=False):
+        self._text = text
+        self._should_run = should_run
+        self._raise_exc = raise_exc
+
+    def should_run(self, ctx):
+        return self._should_run
+
+    def process(self, ctx):
+        if self._raise_exc:
+            raise RuntimeError("stage boom")
+        ctx.raw_text = self._text
+        ctx.model_used = "stub_model"
+        ctx.confidence = 0.9
+        ctx.language_detected = "ru"
+        ctx.segments = [{"start": 0.0, "end": 1.0, "text": self._text}]
+        return ctx
+
+
+class _SideEffectStage:
+    """Appends a marker to ctx.errors to simulate error reporting."""
+
+    name = "text_cleanup"
+    cacheable = False
+
+    def should_run(self, ctx):
+        return True
+
+    def process(self, ctx):
+        ctx.errors.append("text_cleanup: normalizer skipped empty")
+        return ctx
+
+
+# ---------------------------------------------------------------------------
+# PipelineExecutor.run() with real stages
+# ---------------------------------------------------------------------------
+
+class TestExecutorRunWithStages(unittest.TestCase):
+    """Cover executor.run() with stages (skipped, executed, exception)."""
+
+    def test_stage_executed_sets_raw_text(self):
+        stage = _StubStage(text="Привет мир")
+        executor = PipelineExecutor([stage])
+        ctx = PipelineContext(audio_input=None)
+        result = executor.run(ctx)
+        self.assertEqual(result.raw_text, "Привет мир")
+
+    def test_stage_metrics_recorded(self):
+        stage = _StubStage(text="test")
+        executor = PipelineExecutor([stage])
+        ctx = PipelineContext(audio_input=None)
+        result = executor.run(ctx)
+        self.assertEqual(len(result.stage_metrics), 1)
+        self.assertEqual(result.stage_metrics[0].stage, "stt")
+        self.assertIsNone(result.stage_metrics[0].error)
+
+    def test_skipped_stage_records_skipped_metric(self):
+        stage = _StubStage(should_run=False)
+        executor = PipelineExecutor([stage])
+        ctx = PipelineContext(audio_input=None)
+        result = executor.run(ctx)
+        self.assertEqual(len(result.stage_metrics), 1)
+        metric = result.stage_metrics[0]
+        self.assertTrue(metric.skipped)
+        self.assertEqual(metric.duration_ms, 0)
+        # Stage was skipped — raw_text should remain empty
+        self.assertEqual(result.raw_text, "")
+
+    def test_exception_in_stage_recorded_and_continues(self):
+        """A stage that raises must record the error but not abort the run."""
+        failing = _StubStage(raise_exc=True)
+        # Second stage runs after the first fails
+        ok_stage = _SideEffectStage()
+        executor = PipelineExecutor([failing, ok_stage])
+        ctx = PipelineContext(audio_input=None)
+        result = executor.run(ctx)
+        # Error from failing stage is captured
+        self.assertTrue(any("stt_exception" in e for e in result.errors))
+        # Second stage ran (it appended to errors with its prefix)
+        self.assertTrue(any("text_cleanup:" in e for e in result.errors))
+        # Metrics from both stages
+        self.assertEqual(len(result.stage_metrics), 2)
+        self.assertIsNotNone(result.stage_metrics[0].error)
+
+    def test_multiple_stages_final_text_chain(self):
+        """final_text should reflect full processing chain."""
+        class _CleanupStage:
+            name = "text_cleanup"
+            cacheable = False
+            def should_run(self, ctx): return True
+            def process(self, ctx):
+                ctx.cleaned_text = ctx.raw_text.strip().capitalize()
+                return ctx
+
+        executor = PipelineExecutor([_StubStage(text="  hi  "), _CleanupStage()])
+        result = executor.run(PipelineContext(audio_input=None))
+        # cleaned_text takes priority over raw_text when rewritten_text is empty
+        self.assertEqual(result.final_text, "Hi")
+
+    def test_empty_stages_list_run_returns_ctx(self):
+        executor = PipelineExecutor([])
+        ctx = PipelineContext(audio_input=None)
+        ctx.raw_text = "original"
+        result = executor.run(ctx)
+        self.assertEqual(result.raw_text, "original")
+
+    def test_exception_metric_has_error_message(self):
+        stage = _StubStage(raise_exc=True)
+        executor = PipelineExecutor([stage])
+        result = executor.run(PipelineContext(audio_input=None))
+        metric = result.stage_metrics[0]
+        self.assertIsNotNone(metric.error)
+        self.assertIn("boom", metric.error)
+
+
+# ---------------------------------------------------------------------------
+# PipelineExecutor._cleanup (temp file removal)
+# ---------------------------------------------------------------------------
+
+class TestExecutorCleanup(unittest.TestCase):
+    """_cleanup removes ctx._temp_path if set."""
+
+    def test_temp_path_deleted_after_run(self):
+        import tempfile
+        # Create a real temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            tmp = f.name
+
+        ctx = PipelineContext(audio_input=None)
+        ctx._temp_path = tmp
+        executor = PipelineExecutor([])
+        executor.run(ctx)
+        # _cleanup should have removed the file
+        self.assertFalse(os.path.exists(tmp), "Temp file should be deleted by _cleanup")
+        self.assertIsNone(ctx._temp_path)
+
+    def test_cleanup_tolerates_missing_file(self):
+        ctx = PipelineContext(audio_input=None)
+        ctx._temp_path = "/nonexistent/path/file_xyz.wav"
+        executor = PipelineExecutor([])
+        # Must NOT raise even if file is already gone
+        try:
+            executor.run(ctx)
+        except OSError:
+            self.fail("_cleanup should not propagate OSError for missing temp file")
+
+    def test_cleanup_no_temp_path_is_noop(self):
+        ctx = PipelineContext(audio_input=None)
+        self.assertIsNone(ctx._temp_path)
+        executor = PipelineExecutor([])
+        executor.run(ctx)  # Must not raise
+
+
+# ---------------------------------------------------------------------------
+# PipelineExecutor with StageCache integration
+# ---------------------------------------------------------------------------
+
+class TestExecutorWithCache(unittest.TestCase):
+    """Cover cache hit / cache save paths in executor.run()."""
+
+    def test_cache_miss_executes_stage_and_saves(self):
+        from core.pipeline.stage_cache import StageCache
+        cache = StageCache()
+        stage = _StubStage(text="cached result")
+        executor = PipelineExecutor([stage], cache=cache)
+        ctx = PipelineContext(audio_input=b"fake_audio_bytes")
+        result = executor.run(ctx)
+        self.assertEqual(result.raw_text, "cached result")
+        # Cache should now have an entry for 'stt'
+        stats = cache.get_stats()
+        self.assertEqual(stats["misses"], 1)
+        self.assertEqual(stats["total_entries"], 1)
+
+    def test_cache_hit_skips_stage_execution(self):
+        from core.pipeline.stage_cache import StageCache
+        cache = StageCache()
+        audio = b"deterministic_bytes"
+        audio_hash = StageCache.compute_hash(audio)
+
+        # Pre-populate cache with a known result
+        cached_data = {
+            "raw_text": "from cache",
+            "language_detected": "es",
+            "model_used": "cached_model",
+            "confidence": 0.99,
+            "segments": [],
+        }
+        cache.put("stt", audio_hash, cached_data)
+
+        class _NeverRunStage(_StubStage):
+            def process(self, ctx):
+                raise AssertionError("process() must not be called on cache hit")
+
+        stage = _NeverRunStage()
+        executor = PipelineExecutor([stage], cache=cache)
+        ctx = PipelineContext(audio_input=audio)
+        result = executor.run(ctx)
+
+        self.assertEqual(result.raw_text, "from cache")
+        self.assertEqual(result.language_detected, "es")
+        self.assertEqual(result.model_used, "cached_model")
+        stats = cache.get_stats()
+        self.assertEqual(stats["hits"], 1)
+
+    def test_stage_with_error_not_cached(self):
+        """If a stage appends an error, its result must NOT be saved to cache."""
+        from core.pipeline.stage_cache import StageCache
+
+        class _ErrorStage:
+            name = "stt"
+            cacheable = True
+            def should_run(self, ctx): return True
+            def process(self, ctx):
+                ctx.raw_text = "partial"
+                ctx.errors.append("stt: model failed")
+                return ctx
+
+        cache = StageCache()
+        executor = PipelineExecutor([_ErrorStage()], cache=cache)
+        ctx = PipelineContext(audio_input=b"audio")
+        executor.run(ctx)
+        stats = cache.get_stats()
+        # Nothing should be saved
+        self.assertEqual(stats["total_entries"], 0)
+
+    def test_no_cache_still_runs_normally(self):
+        """executor without cache must run stages as before."""
+        stage = _StubStage(text="no cache")
+        executor = PipelineExecutor([stage])
+        result = executor.run(PipelineContext(audio_input=b"bytes"))
+        self.assertEqual(result.raw_text, "no cache")
+
+
+# ---------------------------------------------------------------------------
+# StageCache unit tests
+# ---------------------------------------------------------------------------
+
+class TestStageCacheComputeHash(unittest.TestCase):
+    """StageCache.compute_hash() for all input types."""
+
+    def test_bytes_input(self):
+        h = StageCache.compute_hash(b"hello")
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)  # SHA-256 hex
+
+    def test_str_input(self):
+        h = StageCache.compute_hash("hello")
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+
+    def test_dict_input(self):
+        h = StageCache.compute_hash({"key": "value"})
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+
+    def test_list_input(self):
+        h = StageCache.compute_hash([1, 2, 3])
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+
+    def test_deterministic_for_same_bytes(self):
+        h1 = StageCache.compute_hash(b"audio_data")
+        h2 = StageCache.compute_hash(b"audio_data")
+        self.assertEqual(h1, h2)
+
+    def test_different_inputs_different_hashes(self):
+        h1 = StageCache.compute_hash(b"audio_a")
+        h2 = StageCache.compute_hash(b"audio_b")
+        self.assertNotEqual(h1, h2)
+
+    def test_fallback_for_int(self):
+        # int is not bytes/str/dict/list — hits repr() fallback
+        h = StageCache.compute_hash(42)
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+
+
+# Import StageCache at module level for the hash tests above
+from core.pipeline.stage_cache import StageCache  # noqa: E402
+
+
+class TestStageCacheGetPut(unittest.TestCase):
+    """StageCache.get() / .put() behaviour."""
+
+    def _new_cache(self):
+        return StageCache(max_entries=5)
+
+    def test_get_on_empty_cache_returns_none(self):
+        cache = self._new_cache()
+        self.assertIsNone(cache.get("stt", "somehash"))
+
+    def test_put_then_get_returns_result(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "hello"})
+        result = cache.get("stt", "h1")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["raw_text"], "hello")
+
+    def test_get_wrong_stage_returns_none(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "hi"})
+        self.assertIsNone(cache.get("text_cleanup", "h1"))
+
+    def test_lru_eviction_when_full(self):
+        cache = StageCache(max_entries=3)
+        cache.put("stt", "h1", {"v": 1})
+        cache.put("stt", "h2", {"v": 2})
+        cache.put("stt", "h3", {"v": 3})
+        # Adding 4th should evict h1 (LRU)
+        cache.put("stt", "h4", {"v": 4})
+        self.assertIsNone(cache.get("stt", "h1"), "h1 should have been evicted")
+        self.assertIsNotNone(cache.get("stt", "h4"))
+
+    def test_invalidate_single_stage(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "x"})
+        cache.put("text_cleanup", "h2", {"cleaned_text": "y"})
+        cache.invalidate("stt")
+        self.assertIsNone(cache.get("stt", "h1"))
+        self.assertIsNotNone(cache.get("text_cleanup", "h2"))
+
+    def test_invalidate_all_stages(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "x"})
+        cache.put("text_cleanup", "h2", {"cleaned_text": "y"})
+        cache.invalidate()
+        self.assertIsNone(cache.get("stt", "h1"))
+        self.assertIsNone(cache.get("text_cleanup", "h2"))
+
+    def test_get_stats_hit_rate(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "x"})
+        cache.get("stt", "h1")   # hit
+        cache.get("stt", "miss")  # miss
+        stats = cache.get_stats()
+        self.assertEqual(stats["hits"], 1)
+        self.assertEqual(stats["misses"], 1)
+        self.assertAlmostEqual(stats["hit_rate"], 0.5)
+        self.assertEqual(stats["total_entries"], 1)
+
+    def test_reset_stats(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "x"})
+        cache.get("stt", "h1")
+        cache.reset_stats()
+        stats = cache.get_stats()
+        self.assertEqual(stats["hits"], 0)
+        self.assertEqual(stats["misses"], 0)
+
+    def test_put_updates_existing_entry(self):
+        cache = self._new_cache()
+        cache.put("stt", "h1", {"raw_text": "old"})
+        cache.put("stt", "h1", {"raw_text": "new"})
+        result = cache.get("stt", "h1")
+        self.assertEqual(result["raw_text"], "new")
+
+    def test_expired_entry_returns_none(self):
+        import time
+        cache = self._new_cache()
+        # Put with TTL=0 → instantly expired
+        cache.put("stt", "h1", {"raw_text": "x"}, ttl_sec=0)
+        time.sleep(0.01)  # ensure monotonic advances
+        result = cache.get("stt", "h1")
+        self.assertIsNone(result, "Expired entry must return None")
+        # Miss should be counted
+        stats = cache.get_stats()
+        self.assertGreater(stats["misses"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
