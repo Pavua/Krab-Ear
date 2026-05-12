@@ -63,6 +63,12 @@ _ALLOWED_RUNTIME_REFS = {
     # from native/runtime/KrabEarAgent path; these tests legitimately reference the path
     # in stub-script bodies and assertion strings.
     os.path.join(_PROJECT_ROOT, "KrabEar", "tests", "test_runtime_self_redirect.py"),
+    # Wave 43: build_and_deploy.command — syncs new build to both Krab Ear.app AND
+    # native/runtime/KrabEarAgent (legacy path kept in lockstep to prevent two-binary drift).
+    os.path.join(_PROJECT_ROOT, "scripts", "build_and_deploy.command"),
+    # Makefile: `make release` and `make sign` targets cp the binary to native/runtime/
+    # as part of two-binary sync workflow (same reason as above).
+    os.path.join(_PROJECT_ROOT, "Makefile"),
 }
 
 # Extensions we care about for the "no stray runtime refs" check.
