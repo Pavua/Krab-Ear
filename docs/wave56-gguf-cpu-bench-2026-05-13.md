@@ -63,3 +63,61 @@ impact. User's диктовка flow uninterrupted.
 ⚠️ Architectural insight from Wave 55 A2 still valid — Metal contention IS
 the root cause of 9500ms regression. The fix path is the right shape, just
 wrong model size. Wave 57 with smaller GGUF should validate the approach.
+
+---
+
+## Wave 57 — saiga_gemma3_12b GGUF CPU (also disqualified)
+
+**Tested** smaller candidate per Wave 56 conclusion: 12B Russian-tuned, 7.30 GB
+disk. Hypothesis: smaller model + Russian-native → maybe acceptable latency.
+
+| Metric | Result |
+|---|---|
+| Cold load | 31.36s (6.80 GiB RAM) |
+| Run 1 (dictation_note) | **90s timeout, empty body** |
+| Run 2 (tech_short) | 71938ms, output OK ("Используем MLX Whisper для транскрипции, но есть проблема: когда два потока обращаются одновременно.") |
+| Run 3 (meeting) | 73995ms, output mostly OK (small "мы будем обсуждать" hallucination) |
+| Token gen rate | ~0.4 t/s (26 out tokens / 72s ≈ 0.36 t/s) |
+| Quality on warm | Acceptable — Russian preserved, brand "MLX Whisper" correct |
+| Memory pressure | Stable — swap went DOWN 11 → 10.6 GB |
+
+**Why so slow on CPU**: LM Studio's llama.cpp runtime on macOS uses conservative
+thread count by default. Real M4 Max has 14-16 CPU cores capable of ~10-15 t/s
+with `-t 12 --batch-size` tuning, but `lms load` doesn't expose those flags.
+Even tuned, GGUF на CPU vs MLX Metal: ~5-10× slower under best conditions.
+
+**Combined Wave 56+57 verdict**: `--gpu off` strategy DOES free Metal allocator
+(architectural insight valid), but **CPU LLM inference speed на macOS llama.cpp
+is fundamentally insufficient** for 12B+ Russian rewrite models. 4× slower
+than current production baseline под contention.
+
+## Final recommendation: keep Metal architecture
+
+The 9500ms regression under STT+LLM concurrent load is **inherent trade-off**
+of unified memory architecture sharing Metal allocator. Cures:
+
+### Within budget (no hardware change):
+
+1. **Pre-warm LM Studio** before STT call — eliminate cold-load gap. Wave 43
+   warmup_sync already does this. Verify production runs warmup.
+2. **Smaller MLX model** for rewriter — supergemma-mm 4-bit is faster (R22
+   showed 6.3s warm). MLX Metal contention persists but per-call cost lower.
+3. **Accept current**: 9500ms under contention is real-world reality. UX
+   mitigations (progress indicator, async paste, etc.) могут maskировать
+   latency без architectural change.
+
+### Out of budget (hardware/cloud change):
+
+1. **Apple M4 Ultra (Mac Studio)** — 192 GB unified, much higher Metal
+   bandwidth, contention less impactful.
+2. **Discrete GPU** — would isolate STT (Metal) from LLM (CUDA), но Apple
+   doesn't support eGPU on Apple Silicon Macs (M-series).
+3. **Cloud LLM** — fast, но privacy-first Krab Ear design conflicts с this.
+
+## Status post-test
+
+✅ Restored — `gemma-4-26b-a4b-it-optiq` IDLE Metal, 3745ms warm smoke test
+(excellent — better than 6964ms previous, system tension lower now).
+
+⚠️ **Don't repeat** these tests on M4 Max — proven unviable. Document closes
+LM Studio backend research thread for now. Re-open if hardware changes.
