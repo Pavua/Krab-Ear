@@ -970,7 +970,9 @@ class BackendService:
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
-            "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
+            "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
+            "get_calendar_link": self._handle_get_calendar_link,  # Wave 54: registered orphan handler
+            "search_by_calendar_event": self._handle_search_by_calendar_event,  # Wave 54: registered orphan handler
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
