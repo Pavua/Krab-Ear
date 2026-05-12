@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -63,6 +63,12 @@ app: sign
 verify: test build
 	codesign -v "Krab Ear.app"
 	@echo "✓ All checks passed"
+
+# Remove stale Swift .build caches from old worktrees (dry-run by default).
+# Use ARGS=--apply to actually delete, ARGS="--apply --days 14" to tune age threshold.
+clean-worktree-builds:
+	@chmod +x scripts/cleanup_worktree_builds.command
+	scripts/cleanup_worktree_builds.command $(ARGS)
 
 # Full release cycle: build + sign both binaries + dSYM upload to Sentry.
 # Вызывает scripts/build_and_deploy.command — idempotent, one-click.
