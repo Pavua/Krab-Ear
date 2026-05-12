@@ -9,6 +9,8 @@ Wave 56+ снимет @unittest.skip когда:
 Не запускать real LLM calls в CI — тесты используют mocks/stubs.
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import unittest
