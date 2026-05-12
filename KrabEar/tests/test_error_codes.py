@@ -59,5 +59,13 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "rewriter.fallback_used",
             "rewriter.channel_error",
             "rewriter.unauthorized",
+            # Added 2026-05-12 Wave 50 — routine review findings:
+            # warmup chronic / MLX timeout / GigaAM padding / pyannote gated
+            # / two-binary drift
+            "rewriter.warmup_failed",
+            "stt.mlx_timeout",
+            "stt.padding_mismatch",
+            "diarization.vad_gated",
+            "agent.binary_drift",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
