@@ -183,7 +183,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/search_history.py`** — `SearchHistoryManager`: persist and recall recent IPC search queries for autocomplete.
 - **`backend/semantic_search.py`** — `SemanticSearcher`: sentence-embedding index (`multilingual-e5-base`) for semantic similarity search over transcription history.
 - **`backend/session_tracker.py`** — `SessionTracker`: per-recording session metadata (start/end, device, mode) written alongside history items.
-- **`backend/settings_backup.py`** — `SettingsBackup`: rolling backup of `settings.json` before each write, with sensitive-field redaction.
+- **`backend/settings_backup.py`** — `SettingsBackup`: rolling backup of settings.json before each write, with sensitive-field redaction.
 - **`backend/settings_validator.py`** — `SettingsValidator`: validate settings dict against allowed enum values and migrate older schema versions to `2.0`.
 - **`backend/shutdown_handler.py`** — `GracefulShutdownHandler`: coordinate orderly backend shutdown (flush stores, cancel jobs, write a runtime shutdown info file).
 - **`backend/stats_report.py`** — `StatsReportGenerator`: generate a comprehensive Markdown statistics report (top words, durations, language breakdown) from history.
@@ -415,7 +415,7 @@ python scripts/check_performance_budget.py
 - **Transcript files**: imported audio generates .md files in `~/Library/Application Support/KrabEar/transcripts/`.
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
-- **Runtime vs static settings reads (Wave 58 lesson)**: ВСЕ startup-time reads of user-overridable settings MUST use `self._get_runtime_setting(key, default)` (lines 593-601 в `service.py`), NOT `DEFAULT_SETTINGS.get(key, default)`. The latter reads the static dict imported at module load, ignoring `settings.json` runtime overrides — caused chronic warmup-timeout warnings (Wave 58 fix: rewriter_warmup line 187 + stt_warmup line 229). Legit fallback usages of `DEFAULT_SETTINGS` are nested: `cached_settings.get(key, DEFAULT_SETTINGS.get(key, hardcoded))` — runtime first, static as ultimate fallback.
+- **Runtime vs static settings reads (Wave 58 lesson)**: ВСЕ startup-time reads of user-overridable settings MUST use `self._get_runtime_setting(key, default)` (lines 593-601 в `service.py`), NOT `DEFAULT_SETTINGS.get(key, default)`. The latter reads the static dict imported at module load, ignoring settings.json runtime overrides — caused chronic warmup-timeout warnings (Wave 58 fix: rewriter_warmup line 187 + stt_warmup line 229). Legit fallback usages of `DEFAULT_SETTINGS` are nested: `cached_settings.get(key, DEFAULT_SETTINGS.get(key, hardcoded))` — runtime first, static as ultimate fallback.
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
