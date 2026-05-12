@@ -38,3 +38,68 @@ class ActionDispatcherTests(unittest.TestCase):
         for action_id in ACTION_HANDLERS:
             with self.subTest(action_id=action_id):
                 self.assertTrue(callable(ACTION_HANDLERS[action_id]))
+
+
+class CrossReferenceInvariantTests(unittest.TestCase):
+    """Wave 51 — guards the contract between ERROR_REGISTRY (codes) and
+    ACTION_HANDLERS (dispatch table). Catches drift early.
+    """
+
+    def test_every_actionable_code_has_handler(self):
+        """Every action_id referenced in ERROR_REGISTRY must exist in
+        ACTION_HANDLERS — otherwise clicking the toast yields
+        `unknown action_id`."""
+        from backend.error_codes import ERROR_REGISTRY
+
+        referenced = {
+            entry["action_id"]
+            for entry in ERROR_REGISTRY.values()
+            if entry.get("action_id")
+        }
+        registered = set(ACTION_HANDLERS.keys())
+        missing = referenced - registered
+        self.assertSetEqual(
+            missing,
+            set(),
+            f"Action IDs referenced in ERROR_REGISTRY but missing from "
+            f"ACTION_HANDLERS: {missing}. Add handler in error_actions.py.",
+        )
+
+    def test_no_orphan_handlers(self):
+        """Every handler in ACTION_HANDLERS must be referenced by at least
+        one ERROR_REGISTRY entry — otherwise it's dead code."""
+        from backend.error_codes import ERROR_REGISTRY
+
+        referenced = {
+            entry["action_id"]
+            for entry in ERROR_REGISTRY.values()
+            if entry.get("action_id")
+        }
+        registered = set(ACTION_HANDLERS.keys())
+        orphans = registered - referenced
+        self.assertSetEqual(
+            orphans,
+            set(),
+            f"Handlers in ACTION_HANDLERS but no code references them: "
+            f"{orphans}. Either delete the handler or add a matching "
+            f"ERROR_REGISTRY entry.",
+        )
+
+    def test_actionable_codes_have_non_empty_metadata(self):
+        """Every actionable=True code in ERROR_REGISTRY must have a
+        non-empty action_id AND non-empty action_label — otherwise
+        the toast button renders blank."""
+        from backend.error_codes import ERROR_REGISTRY
+
+        bad = []
+        for code, entry in ERROR_REGISTRY.items():
+            if entry.get("actionable"):
+                if not entry.get("action_id"):
+                    bad.append(f"{code}: actionable=True but action_id empty")
+                if not entry.get("action_label"):
+                    bad.append(f"{code}: actionable=True but action_label empty")
+        self.assertEqual(
+            bad,
+            [],
+            "Actionable codes missing UI metadata:\n  " + "\n  ".join(bad),
+        )
