@@ -115,6 +115,35 @@ def _open_lm_studio_settings(*, settings_service, **kwargs) -> dict:
 # Dispatch table (9 entries)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Wave 50 handlers — for new actionable codes (diarization.vad_gated,
+# agent.binary_drift). Both open external resource (HF page / Terminal).
+# ---------------------------------------------------------------------------
+
+def _open_pyannote_hf_page(*, settings_service, **kwargs) -> dict:
+    """Open the gated pyannote VAD model page on Hugging Face so user can
+    accept terms. Memory: blocker_pyannote_gated_2026-04-26.md."""
+    return _open_url("https://huggingface.co/pyannote/voice-activity-detection")
+
+
+def _open_terminal_make_release(*, settings_service, **kwargs) -> dict:
+    """Open Terminal at the repo root so user can run `make release` to
+    sync the two-binary drift. Cannot run `make release` directly —
+    requires interactive codesign + dSYM upload may prompt for keychain."""
+    import os
+    repo = os.path.expanduser("~/Antigravity_AGENTS/Krab Ear")
+    try:
+        # `open -a Terminal "<path>"` opens a new Terminal window at that cwd
+        subprocess.run(["open", "-a", "Terminal", repo], check=True)
+        return {
+            "executed": True,
+            "reason": None,
+            "side_effect": f"opened_terminal_at:{repo}",
+        }
+    except subprocess.CalledProcessError as exc:
+        return {"executed": False, "reason": f"open_failed: {exc}", "side_effect": None}
+
+
 ACTION_HANDLERS: dict[str, Callable] = {
     "open_privacy_settings": _open_privacy_settings,
     "open_hf_token_setting": _open_hf_token_setting,
@@ -126,6 +155,10 @@ ACTION_HANDLERS: dict[str, Callable] = {
     "open_log_file": _open_log_file,
     "switch_to_stable_rewriter": _switch_to_stable_rewriter,
     "open_lm_studio_settings": _open_lm_studio_settings,
+    # Wave 50 — wire-in for new actionable codes (diarization.vad_gated,
+    # agent.binary_drift).
+    "open_pyannote_hf_page": _open_pyannote_hf_page,
+    "open_terminal_make_release": _open_terminal_make_release,
 }
 
 
