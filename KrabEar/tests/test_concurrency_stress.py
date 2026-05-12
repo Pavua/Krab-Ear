@@ -14,6 +14,7 @@ from backend.auto_backup import AutoBackupManager
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
 
+import os
 import sys
 import tempfile
 import threading
