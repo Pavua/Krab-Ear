@@ -74,14 +74,6 @@ def _kill_lm_studio_via_telegram(*, settings_service, **kwargs) -> dict:
     return {"executed": False, "reason": "feature_disabled", "side_effect": None}
 
 
-def _open_log_file(*, settings_service, **kwargs) -> dict:
-    import os
-    log_path = os.path.expanduser(
-        "~/Library/Application Support/KrabEar/backend.log"
-    )
-    return _open_url(log_path)
-
-
 def _switch_to_stable_rewriter(*, settings_service, **kwargs) -> dict:
     """Switch LLM rewriter model to the historically stable qwen3-4b-abliterated.
 
@@ -152,7 +144,6 @@ ACTION_HANDLERS: dict[str, Callable] = {
     "switch_to_balanced_profile": _switch_to_balanced_profile,
     "retry_history_save": _retry_history_save,
     "kill_lm_studio_via_telegram": _kill_lm_studio_via_telegram,
-    "open_log_file": _open_log_file,
     "switch_to_stable_rewriter": _switch_to_stable_rewriter,
     "open_lm_studio_settings": _open_lm_studio_settings,
     # Wave 50 — wire-in for new actionable codes (diarization.vad_gated,
