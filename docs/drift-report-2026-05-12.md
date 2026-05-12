@@ -162,3 +162,43 @@ Add descriptions for the 36 unlisted backend modules. Most impactful:
 ---
 
 *Audit methodology: grep-based extraction of dispatch table (`"method_name": self.|lambda` pattern), cross-referenced against `### \`method\`` headers in docs. All counts verified with `comm` diff. 3 method params spot-checked against source.*
+
+---
+
+## Closures (Wave 45-52)
+
+Items from this report that were addressed in subsequent waves:
+
+### ✅ CLAUDE.md Priority 1 — `live_subs_push_chunk` rename + counts
+**Commit:** `f40dacf` (Wave 45 A6)
+- Fixed `live_subs_push_chunk` → `live_subs_ingest` in 2 places
+- Method count: 241 → 349 (with note that 271 still undocumented)
+- Error code count: 19 → 24 (further bumped to 29 in Wave 50)
+
+### ✅ Priority 2 — Phase 2B/3/B/W IPC backfill (partial — 24 of ~29)
+**Commit:** `741b291` (Wave 46-47)
+- Created `docs/IPC_API_REFERENCE_BACKFILL_2026-05.md` (597 lines)
+- Documented 24 methods (call_session × 8, live_subs × 2, error_bus × 7, wake_word + selection_translate × 7)
+- Note: live_subs had only 2 dispatch methods (not 5 as originally projected)
+
+### ✅ Wave 50 — JsonFormatter docs match реальности
+**Commit:** `5764864`
+- Removed stale "JsonFormatter does NOT merge extra={} fields" warning — the warning predated commit that actually shipped the merge (now in service.py:6168-6186)
+- Live smoke-test verified extra={} merging works
+
+### ✅ Wave 50 — Phase B error coverage extended
+**Commits:** `fc15cd7` (codes 24→29) + `809f10d` (handlers 10→12) + `2c962fd` (invariant tests) + `12b4f1f` (orphan removal 12→11)
+- Added 5 codes from routine findings: `rewriter.warmup_failed`, `stt.mlx_timeout`, `stt.padding_mismatch`, `diarization.vad_gated`, `agent.binary_drift`
+- Added 2 handlers + invariant tests that catch future drift
+
+### ✅ Wave 52 — `rewriter_fallback_chain` model drift
+**Commit:** `f55e516`
+- Default fallback `qwen3-4b-instruct` + `llama-3.2-3b-instruct` were both ABSENT from current LM Studio inventories (silent failure if primary model failed)
+- Switched to `huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx` + `qwen/qwen3-8b` (present in 84-model inventory)
+
+### Open — Priority 3 backend inventory
+**Status:** still pending — 36 backend modules unlisted in CLAUDE.md service inventory. Long-tail documentation work; would benefit from a structured "list every `KrabEar/backend/*.py` module + 1-sentence purpose" pass. Estimated 2-3 hours of mechanical work.
+
+### Open — Remaining ~245 undocumented IPC methods
+**Status:** still pending — IPC_API_REFERENCE.md covers 78, backfill added 24, real total 349 → ~247 still undocumented. Long-tail per-method work; suggest extracting from `KrabEar/backend/service.py` dispatch table via script in Wave 53+.
+
