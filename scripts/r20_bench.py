@@ -25,7 +25,34 @@ from typing import Optional
 # Config
 # ---------------------------------------------------------------------------
 LM_STUDIO_URL = "http://localhost:1234/v1"
-LM_STUDIO_TOKEN = "sk-lm-lkyUVqAw:ggACZoBqiaBpfwqPEvlK"
+
+
+def _load_lm_studio_token() -> str:
+    """Read LM Studio token from environment or shared `.env` file.
+
+    Never hardcode the token here — Wave 47 security audit (CRIT-1) flagged
+    a leaked token in this file.
+    """
+    import os
+    import re
+    from pathlib import Path
+
+    env_val = os.environ.get("LM_STUDIO_TOKEN", "").strip()
+    if env_val:
+        return env_val
+
+    env_file = Path.home() / "Antigravity_AGENTS" / "Краб" / ".env"
+    if env_file.exists():
+        match = re.search(r"sk-lm-[A-Za-z0-9:_-]+", env_file.read_text())
+        if match:
+            return match.group(0)
+
+    raise RuntimeError(
+        "LM_STUDIO_TOKEN not found. Set env var or add to Krab/.env"
+    )
+
+
+LM_STUDIO_TOKEN = _load_lm_studio_token()
 TIMEOUT_SEC = 600          # generous — 31B-bf16 cold-load can take >2 min
 WARMUP_RUNS = 1
 TIMED_RUNS = 2             # 2 timed runs (save time vs R19's 3)
