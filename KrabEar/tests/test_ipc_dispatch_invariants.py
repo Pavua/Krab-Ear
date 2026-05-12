@@ -405,11 +405,12 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         self.assertIsNotNone(match, "Cannot parse 'get_recording_insights' dispatch entry")
         actual_handler = match.group(1)
 
-        # This assertion documents the current aliasing; update if intentionally changed
+        # Wave 54 fix: dispatch now correctly resolves to _handle_get_recording_insights
+        # (was wrongly aliased to _handle_get_recording_stats — silent semantic bug).
         self.assertEqual(
-            actual_handler, "_handle_get_recording_stats",
+            actual_handler, "_handle_get_recording_insights",
             f"'get_recording_insights' now points to {actual_handler!r}; "
-            f"update this test if the change is intentional"
+            f"expected '_handle_get_recording_insights' (Wave 54 alias fix)"
         )
 
 
