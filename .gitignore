@@ -61,3 +61,6 @@ poc_diarization/
 .env
 .env.*
 KrabEar/.env
+
+# Test bundle fixtures — created during local Swift builds
+native/_tmp_bundle_test/
