@@ -26,9 +26,8 @@ import fcntl
 import logging
 import os
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Optional
+, Optional
 
 logger = logging.getLogger("KrabEar.Core.MLXInterLock")
 
