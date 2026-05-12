@@ -1026,13 +1026,15 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func showFatalAndTerminate(title: String, body: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = body
-        alert.addButton(withTitle: "Закрыть")
-        alert.runModal()
+        // AGENT-H fix: NSAlert.runModal() blocks main thread → Sentry ANR ≥2 s.
+        // Use BackendToast (non-modal, floating panel) so main thread stays free,
+        // then terminate after 3 s — enough time for user to read the message.
+        logger.error("FATAL: \(title) — \(body)")
+        BackendToast.shared.show("FATAL: \(title)\n\(body)", duration: 3.0)
         SentryConfig.recordTerminate(callsite: "showFatalAndTerminate")
-        NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            NSApp.terminate(nil)
+        }
     }
 
     func openQuickStart() {
