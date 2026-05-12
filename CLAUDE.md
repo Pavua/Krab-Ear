@@ -185,7 +185,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/session_tracker.py`** — `SessionTracker`: per-recording session metadata (start/end, device, mode) written alongside history items.
 - **`backend/settings_backup.py`** — `SettingsBackup`: rolling backup of `settings.json` before each write, with sensitive-field redaction.
 - **`backend/settings_validator.py`** — `SettingsValidator`: validate settings dict against allowed enum values and migrate older schema versions to `2.0`.
-- **`backend/shutdown_handler.py`** — `GracefulShutdownHandler`: coordinate orderly backend shutdown (flush stores, cancel jobs, write `shutdown_info.json`).
+- **`backend/shutdown_handler.py`** — `GracefulShutdownHandler`: coordinate orderly backend shutdown (flush stores, cancel jobs, write a runtime shutdown info file).
 - **`backend/stats_report.py`** — `StatsReportGenerator`: generate a comprehensive Markdown statistics report (top words, durations, language breakdown) from history.
 - **`backend/timeline_export.py`** — `TimelineExporter`: export recording timeline as SVG, JSON, or iCalendar (`.ics`) file.
 - **`backend/transcript_writer.py`** — `TranscriptWriter`: write each transcription to a timestamped Obsidian-compatible Markdown file in the transcripts directory.
