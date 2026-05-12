@@ -64,3 +64,9 @@ KrabEar/.env
 
 # Test bundle fixtures — created during local Swift builds
 native/_tmp_bundle_test/
+
+# Wave 47 security audit (step 3): bench result outputs may contain
+# user voice transcripts and other sensitive content. Keep local only.
+docs/llm-bench-results-*.md
+docs/llm-bench-results-*.json
+/tmp/r*_bench.log
