@@ -191,7 +191,7 @@ class TestBuildMessages(unittest.TestCase):
 class TestSendWithImageHTTPLayer(unittest.TestCase):
     """MultimodalVAClient.send_with_image — HTTP mock tests."""
 
-    def _make_client(self) -> "MultimodalVAClient":
+    def _make_client(self):
         from backend.va_multimodal import MultimodalVAClient
         return MultimodalVAClient(
             base_url="http://localhost:1234",
