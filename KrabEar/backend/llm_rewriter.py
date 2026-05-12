@@ -980,16 +980,66 @@ class LLMRewriter:
             )
             return {"ok": False, "latency_ms": elapsed_ms, "error": type(exc).__name__}
 
-    def warmup_sync(self, timeout_sec: Optional[float] = None) -> None:
-        """Синхронный wrapper для запуска warmup в daemon-треде.
+    def warmup_sync(
+        self,
+        timeout_sec: Optional[float] = None,
+        retry_delays: Optional[list] = None,
+    ) -> None:
+        """Синхронный wrapper для запуска warmup в daemon-треде с exponential backoff retry.
 
         Вызывается через threading.Thread(target=...) при старте backend'а.
-        Результат логируется, исключения проглатываются.
+        Если warmup не удался (LM Studio ещё не готов) — ждёт и повторяет попытку
+        согласно retry_delays перед тем как окончательно сдаться.
+        LLMHttpProbe продолжает периодическую проверку каждые 30 сек после этого.
+
+        Результат логируется. Все исключения проглатываются.
 
         Args:
-            timeout_sec: таймаут warmup-пробы. Если None — используется self._timeout.
+            timeout_sec: таймаут одной warmup-пробы. None → self._timeout.
+            retry_delays: список задержек в секундах между попытками.
+                          По умолчанию [5, 10, 20, 30, 60] — 5 попыток суммарно
+                          около 2 мин 5 сек. Покрывает типичный boot LM Studio
+                          (20-60 с после логина).
         """
-        self.warmup(timeout_sec=timeout_sec)
+        if retry_delays is None:
+            retry_delays = [5, 10, 20, 30, 60]
+
+        attempt = 1
+        max_attempts = len(retry_delays) + 1
+
+        result = self.warmup(timeout_sec=timeout_sec)
+        if result:
+            logger.info(
+                "LLM warmup succeeded on attempt %d/%d model=%s",
+                attempt, max_attempts, self._model,
+            )
+            return
+
+        for delay in retry_delays:
+            attempt += 1
+            logger.info(
+                "LLM warmup attempt %d/%d failed, retrying in %ds (LM Studio may still be starting) model=%s",
+                attempt - 1, max_attempts, delay, self._model,
+            )
+            # Use shutdown_event.wait so the loop exits cleanly if backend shuts down
+            if self._shutdown_event.wait(timeout=delay):
+                logger.debug("LLM warmup_sync: shutdown requested, stopping retry loop")
+                return
+            result = self.warmup(timeout_sec=timeout_sec)
+            if result:
+                logger.info(
+                    "LLM warmup succeeded on attempt %d/%d model=%s",
+                    attempt, max_attempts, self._model,
+                )
+                return
+
+        logger.warning(
+            "LLM warmup did not succeed after %d attempts (%.0f s total). "
+            "LLMHttpProbe will retry every 30 s and recover automatically when LM Studio is ready. model=%s",
+            max_attempts,
+            sum(retry_delays),
+            self._model,
+        )
 
     def passive_health_check(self) -> tuple[bool, bool]:
         """Passive health check via GET /v1/models. Does NOT trigger JIT reload.

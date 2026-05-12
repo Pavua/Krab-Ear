@@ -64,6 +64,9 @@ verify: test build
 	codesign -v "Krab Ear.app"
 	@echo "✓ All checks passed"
 
-# Full release cycle
-release: verify app
-	@echo "✓ Release ready"
+# Full release cycle: build + sign both binaries + dSYM upload to Sentry.
+# Вызывает scripts/build_and_deploy.command — idempotent, one-click.
+# Для пропуска Sentry upload: make release ARGS=--no-sentry
+release:
+	@chmod +x scripts/build_and_deploy.command
+	scripts/build_and_deploy.command $(ARGS)

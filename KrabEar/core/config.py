@@ -566,9 +566,11 @@ class Settings(BaseSettings):
     # False = watchdog полностью выключен (behavior до этого PR).
     MLX_CRASH_RECOVERY_ENABLED: bool = True
     # Таймаут одного mlx_whisper.transcribe() вызова (секунды).
-    # 60s: стандартная диктовка (< 60 s аудио) должна завершаться быстрее.
+    # 120s: bumped с 60s (2026-05-12) — whisper-large-v3-mlx cold-load занимает
+    # до 90s на M4 Max при первом запуске после boot; 60s давал false-positive
+    # MLXTimeoutError (BACKEND-E, BACKEND-F в Sentry, тренд May 8-9).
     # Для длинных файлов (> 5 мин) увеличьте до 300–600s.
-    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 60.0
+    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 120.0
     # --- Auto-Glossary: автоматический глоссарий из истории (core/auto_glossary.py) ---
     # При AUTO_GLOSSARY_ENABLED=True: перед каждой транскрибацией AutoGlossaryBuilder
     # извлекает top-N часто встречающихся имён и терминов из истории за последние
@@ -923,8 +925,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Включить watchdog-таймаут для mlx_whisper.transcribe().
     # При зависании GPU → MLXTimeoutError → fallback на другой STT адаптер.
     "mlx_crash_recovery_enabled": True,
-    # Таймаут одного MLX inference (секунды).
-    "mlx_transcribe_timeout_sec": 60.0,
+    # Таймаут одного MLX inference (секунды). Bumped 60→120 (2026-05-12, cold-load false-positives).
+    "mlx_transcribe_timeout_sec": 120.0,
     # --- Auto-Glossary: автоматический глоссарий из истории ---
     "auto_glossary_enabled": True,
     "auto_glossary_window_days": 7,
