@@ -268,7 +268,7 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
             rss = 512 * 1024 * 1024  # 512 MB
             vms = 1024 * 1024 * 1024  # 1024 MB
 
-        def _fake_process_iter(attrs):
+        def _fake_process_iter(*args, **kwargs):
             procs = []
             for name, cmd in [
                 ("KrabEarAgent", "/path/to/KrabEarAgent"),
@@ -276,12 +276,10 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
                 ("python3", "/path/gigaam_worker.py"),
             ]:
                 p = MagicMock()
-                p.info = {
-                    "pid": 1234,
-                    "name": name,
-                    "cmdline": cmd.split(),
-                    "memory_info": _FakeMemInfo(),
-                }
+                p.pid = 1234
+                p.name.return_value = name
+                p.cmdline.return_value = cmd.split()
+                p.memory_info.return_value = _FakeMemInfo()
                 procs.append(p)
             return procs
 
@@ -289,6 +287,7 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         fake_psutil.process_iter.side_effect = _fake_process_iter
         fake_psutil.NoSuchProcess = Exception
         fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
 
         with patch.dict("sys.modules", {"psutil": fake_psutil}):
             resp = self._call("get_memory_stats")
