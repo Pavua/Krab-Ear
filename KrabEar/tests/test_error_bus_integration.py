@@ -268,27 +268,26 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
             rss = 512 * 1024 * 1024  # 512 MB
             vms = 1024 * 1024 * 1024  # 1024 MB
 
-        def _fake_process_iter(attrs):
-            procs = []
-            for name, cmd in [
-                ("KrabEarAgent", "/path/to/KrabEarAgent"),
-                ("python3", "/path/KrabEar/backend/service.py --data-dir /tmp"),
-                ("python3", "/path/gigaam_worker.py"),
-            ]:
-                p = MagicMock()
-                p.info = {
-                    "pid": 1234,
-                    "name": name,
-                    "cmdline": cmd.split(),
-                    "memory_info": _FakeMemInfo(),
-                }
-                procs.append(p)
-            return procs
+        def _make_proc(pid: int, name: str, cmd: str):
+            p = MagicMock()
+            p.pid = pid
+            p.name.return_value = name
+            p.cmdline.return_value = cmd.split()
+            p.memory_info.return_value = _FakeMemInfo()
+            return p
+
+        def _fake_process_iter(*args, **kwargs):
+            return [
+                _make_proc(1234, "KrabEarAgent", "/path/to/KrabEarAgent"),
+                _make_proc(1235, "python3", "/path/KrabEar/backend/service.py --data-dir /tmp"),
+                _make_proc(1236, "python3", "/path/gigaam_worker.py"),
+            ]
 
         fake_psutil = MagicMock()
         fake_psutil.process_iter.side_effect = _fake_process_iter
         fake_psutil.NoSuchProcess = Exception
         fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
 
         with patch.dict("sys.modules", {"psutil": fake_psutil}):
             resp = self._call("get_memory_stats")
@@ -305,6 +304,55 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         # All rss_mb should be 512.0
         for p in procs:
             self.assertAlmostEqual(p["rss_mb"], 512.0, places=0)
+
+    def test_get_memory_stats_swallows_proc_cmdline_systemerror(self) -> None:
+        """Regression for KRAB-EAR-BACKEND-H.
+
+        On macOS psutil.process_iter can raise SystemError/PermissionError when
+        proc_cmdline() hits an inaccessible system process (e.g. mdworker_shared).
+        The iteration must keep going and matching processes must still be returned.
+        """
+        from unittest.mock import patch, MagicMock
+
+        class _FakeMemInfo:
+            rss = 256 * 1024 * 1024
+            vms = 512 * 1024 * 1024
+
+        bad_proc = MagicMock()
+        bad_proc.pid = 9999
+        bad_proc.name.return_value = "mdworker_shared"
+        bad_proc.cmdline.side_effect = SystemError(
+            "<built-in function proc_cmdline> returned a result with an exception set"
+        )
+
+        denied_proc = MagicMock()
+        denied_proc.pid = 9998
+        denied_proc.name.return_value = "kernel_task"
+        denied_proc.cmdline.side_effect = PermissionError(13, "denied")
+
+        good_proc = MagicMock()
+        good_proc.pid = 4242
+        good_proc.name.return_value = "KrabEarAgent"
+        good_proc.cmdline.return_value = ["/path/to/KrabEarAgent"]
+        good_proc.memory_info.return_value = _FakeMemInfo()
+
+        fake_psutil = MagicMock()
+        fake_psutil.process_iter.return_value = [bad_proc, denied_proc, good_proc]
+        fake_psutil.NoSuchProcess = Exception
+        fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
+
+        with patch.dict("sys.modules", {"psutil": fake_psutil}):
+            resp = self._call("get_memory_stats")
+
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertTrue(result["ok"])
+        procs = result["processes"]
+        # bad procs swallowed, good agent surfaced
+        self.assertEqual(len(procs), 1)
+        self.assertEqual(procs[0]["kind"], "agent")
+        self.assertEqual(procs[0]["pid"], 4242)
 
 
 # ---------------------------------------------------------------------------
