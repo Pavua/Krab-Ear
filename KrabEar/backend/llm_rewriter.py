@@ -1052,8 +1052,14 @@ class LLMRewriter:
         explicit cold-start triggers.
         """
         try:
+            # LM Studio exposes the models list at /api/v1/models (not /v1/models).
+            # Derive the base host from _base_url (strip /v1 suffix if present) so
+            # the probe URL is correct regardless of how LLM_BASE_URL is configured.
+            import re as _re
+            _host = _re.sub(r"/v\d+$", "", self._base_url.rstrip("/"))
+            _url = f"{_host}/api/v1/models"
             response = self._session.get(
-                f"{self._base_url}/models",
+                _url,
                 headers=self._lm_studio_get_headers(),
                 timeout=5.0,  # short timeout — /models is fast metadata call
             )
