@@ -740,6 +740,47 @@ class LLMRewriterWarmupTestCase(unittest.TestCase):
         r.set_model("model-b")
         self.assertEqual(r._circuit.state, "closed")
 
+    def test_warmup_sync_succeeds_on_first_attempt(self):
+        """warmup_sync returns immediately when first probe succeeds."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(200))
+        # Use empty retry_delays so test does not sleep
+        r.warmup_sync(timeout_sec=5.0, retry_delays=[])
+        # Should have called post exactly once (one warmup probe)
+        self.assertEqual(r._session.post.call_count, 1)
+
+    def test_warmup_sync_retries_on_failure_then_succeeds(self):
+        """warmup_sync retries with backoff; succeeds on 3rd attempt."""
+        r = self._make_rewriter()
+        # Fail twice, succeed on third
+        fail_resp = self._mock_resp(500)
+        ok_resp = self._mock_resp(200)
+        r._session.post = MagicMock(side_effect=[fail_resp, fail_resp, ok_resp])
+        # Delays of 0 so test does not actually sleep
+        r.warmup_sync(timeout_sec=5.0, retry_delays=[0, 0, 0])
+        self.assertEqual(r._session.post.call_count, 3)
+
+    def test_warmup_sync_gives_up_after_all_retries(self):
+        """warmup_sync logs final warning after exhausting all retry delays."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(500))
+        # 1 initial + 2 retries = 3 attempts total
+        with self.assertLogs("KrabEar.Backend.LLMRewriter", level="WARNING") as cm:
+            r.warmup_sync(timeout_sec=5.0, retry_delays=[0, 0])
+        self.assertEqual(r._session.post.call_count, 3)
+        self.assertTrue(
+            any("did not succeed after" in line for line in cm.output),
+            f"Expected 'did not succeed after' in logs; got: {cm.output}",
+        )
+
+    def test_warmup_sync_circuit_not_affected_by_retries(self):
+        """Circuit breaker must stay CLOSED after warmup_sync retries fail."""
+        r = self._make_rewriter()
+        r._session.post = MagicMock(return_value=self._mock_resp(500))
+        # 6 total attempts — more than circuit fail_threshold=3
+        r.warmup_sync(timeout_sec=5.0, retry_delays=[0, 0, 0, 0, 0])
+        self.assertEqual(r._circuit.state, "closed")
+
 
 class LLMRewriterLoudFailuresTestCase(unittest.TestCase):
     """Tests that timeout/connection/non-200 paths log a warning."""

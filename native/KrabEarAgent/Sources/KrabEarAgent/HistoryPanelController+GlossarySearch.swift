@@ -20,6 +20,7 @@
 
 import AppKit
 import Foundation
+import ObjectiveC
 
 // MARK: - UserDefaults key
 
@@ -189,8 +190,15 @@ extension HistoryPanelController: NSSearchFieldDelegate {
         deleteBtn.font = KrabEarTheme.Typography.caption
         deleteBtn.contentTintColor = KrabEarTheme.Colors.textDisabled
         deleteBtn.toolTip = "Удалить «\(source)» из глоссария"
-        // Capture source for the action closure.
-        deleteBtn.target = GlossaryDeleteTarget(source: source, controller: self)
+        // GlossaryDeleteTarget must be retained explicitly: NSButton.target is a
+        // weak reference in AppKit, so assigning without a strong owner would
+        // immediately nil the target (Swift warning: "weak reference will always
+        // be nil").  Associated-object storage on the button itself keeps the
+        // target alive for exactly the lifetime of the button row.
+        let deleteTarget = GlossaryDeleteTarget(source: source, controller: self)
+        objc_setAssociatedObject(deleteBtn, &GlossaryDeleteTarget.associatedKey,
+                                 deleteTarget, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        deleteBtn.target = deleteTarget
         deleteBtn.action = #selector(GlossaryDeleteTarget.deleteEntry)
 
         let row = NSStackView()
@@ -214,6 +222,9 @@ extension HistoryPanelController: NSSearchFieldDelegate {
 /// на каждую строку.
 @MainActor
 private final class GlossaryDeleteTarget: NSObject {
+    // Key for objc_setAssociatedObject — unique address used as UnsafeRawPointer.
+    nonisolated(unsafe) static var associatedKey: UInt8 = 0
+
     let source: String
     weak var controller: HistoryPanelController?
 

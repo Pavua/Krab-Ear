@@ -242,11 +242,23 @@ class GigaAMAdapter:
         """In-process путь: загружает модель в текущий процесс, вызывает .transcribe."""
         model = self._get_model()
         if longform and hasattr(model, "transcribe_longform"):
+            _prev_hf: dict[str, str | None] = {}
             if hf_token:
-                # Прямое присваивание (не setdefault) — explicit token имеет приоритет.
-                os.environ["HF_TOKEN"] = hf_token
-                os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
-            segments = model.transcribe_longform(audio_path)
+                # SEC MED-1: set token only for the duration of the call, then restore.
+                # Avoids the token persisting in the main-process env and leaking into
+                # subsequently-spawned child processes (visible via /proc/<pid>/environ).
+                for _k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+                    _prev_hf[_k] = os.environ.get(_k)
+                    os.environ[_k] = hf_token
+            try:
+                segments = model.transcribe_longform(audio_path)
+            finally:
+                # Restore original values (None → remove entirely).
+                for _k, _v in _prev_hf.items():
+                    if _v is None:
+                        os.environ.pop(_k, None)
+                    else:
+                        os.environ[_k] = _v
             text = "\n\n".join(
                 (seg.get("transcription") or "").strip()
                 for seg in (segments or [])

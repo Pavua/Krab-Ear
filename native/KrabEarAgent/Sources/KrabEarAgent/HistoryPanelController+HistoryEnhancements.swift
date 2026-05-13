@@ -265,8 +265,8 @@ extension HistoryPanelController {
         let itemText = item.text
         let itemID = item.id
 
-        nonisolated(unsafe) let ipcClient = self.ipcClient
-        nonisolated(unsafe) let notificationService = self.notificationService
+        let ipcClient = self.ipcClient
+        let notificationService = self.notificationService
 
         // 1. Загрузить список чатов на background thread
         DispatchQueue.global(qos: .userInitiated).async {

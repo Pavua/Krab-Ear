@@ -566,9 +566,11 @@ class Settings(BaseSettings):
     # False = watchdog полностью выключен (behavior до этого PR).
     MLX_CRASH_RECOVERY_ENABLED: bool = True
     # Таймаут одного mlx_whisper.transcribe() вызова (секунды).
-    # 60s: стандартная диктовка (< 60 s аудио) должна завершаться быстрее.
+    # 120s: bumped с 60s (2026-05-12) — whisper-large-v3-mlx cold-load занимает
+    # до 90s на M4 Max при первом запуске после boot; 60s давал false-positive
+    # MLXTimeoutError (BACKEND-E, BACKEND-F в Sentry, тренд May 8-9).
     # Для длинных файлов (> 5 мин) увеличьте до 300–600s.
-    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 60.0
+    MLX_TRANSCRIBE_TIMEOUT_SEC: float = 120.0
     # --- Auto-Glossary: автоматический глоссарий из истории (core/auto_glossary.py) ---
     # При AUTO_GLOSSARY_ENABLED=True: перед каждой транскрибацией AutoGlossaryBuilder
     # извлекает top-N часто встречающихся имён и терминов из истории за последние
@@ -923,8 +925,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Включить watchdog-таймаут для mlx_whisper.transcribe().
     # При зависании GPU → MLXTimeoutError → fallback на другой STT адаптер.
     "mlx_crash_recovery_enabled": True,
-    # Таймаут одного MLX inference (секунды).
-    "mlx_transcribe_timeout_sec": 60.0,
+    # Таймаут одного MLX inference (секунды). Bumped 60→120 (2026-05-12, cold-load false-positives).
+    "mlx_transcribe_timeout_sec": 120.0,
     # --- Auto-Glossary: автоматический глоссарий из истории ---
     "auto_glossary_enabled": True,
     "auto_glossary_window_days": 7,
@@ -1000,9 +1002,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- LLM rewriter fallback chain ---
     # Ordered list of fallback model names tried when primary fails.
     # Empty list = degrade straight to raw text.
+    #
+    # Wave 52 (2026-05-12): Previous defaults `qwen3-4b-instruct` +
+    # `llama-3.2-3b-instruct` were not present in current LM Studio
+    # inventories (user has 84+ models, neither matched). Switched to
+    # closest abliterated MLX variants that ARE typically present in
+    # Krab Ear users' LM Studio (per R19/R22 inventory snapshots).
+    #
+    # If a fallback model is missing from your LM Studio, LM Studio
+    # returns HTTP 404 → backend emits `rewriter.connection_error`
+    # code → eventually degrades to raw text. Override this list in
+    # `~/Library/Application Support/KrabEar/settings.json` if your
+    # inventory differs.
     "rewriter_fallback_chain": [
-        "qwen3-4b-instruct",
-        "llama-3.2-3b-instruct",
+        "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
+        "qwen/qwen3-8b",
     ],
     # --- LLM rewriter startup warmup probe ---
     # Отправляет минимальный inference запрос при старте backend'а, чтобы модель

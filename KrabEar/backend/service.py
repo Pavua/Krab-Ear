@@ -183,9 +183,12 @@ class BackendService:
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
         # Fire background warmup if enabled in settings — pre-loads model before first dictation.
-        # Uses rewriter_warmup_timeout_sec setting (default 15 s) as the probe timeout.
-        _warmup_enabled = DEFAULT_SETTINGS.get("rewriter_warmup_on_startup", True)
-        _warmup_timeout = float(DEFAULT_SETTINGS.get("rewriter_warmup_timeout_sec", 15))
+        # Wave 58: read RUNTIME settings (settings.json) instead of static DEFAULT_SETTINGS so
+        # user-overridden values (e.g. rewriter_warmup_timeout_sec=60 in production) actually
+        # apply. Previously hardcoded 15s default caused chronic warmup-timeout warnings on
+        # cold LM Studio loads (gemma-4-26b takes 20-60s cold).
+        _warmup_enabled = bool(self._get_runtime_setting("rewriter_warmup_on_startup", True))
+        _warmup_timeout = float(self._get_runtime_setting("rewriter_warmup_timeout_sec", 60))
         if self._llm_rewriter is not None and _warmup_enabled:
             threading.Thread(
                 target=self._llm_rewriter.warmup_sync,
@@ -223,7 +226,10 @@ class BackendService:
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
         # Opt-out: set stt_warmup_on_startup=False in settings.
-        _stt_warmup_enabled = DEFAULT_SETTINGS.get("stt_warmup_on_startup", True)
+        # Wave 58 follow-up: read runtime setting (same fix pattern as rewriter warmup
+        # above on line 187 — DEFAULT_SETTINGS is static, runtime override in settings.json
+        # was previously ignored).
+        _stt_warmup_enabled = bool(self._get_runtime_setting("stt_warmup_on_startup", False))
         if (_stt_warmup_enabled
                 and hasattr(self.transcriber, "engine")
                 and hasattr(self.transcriber.engine, "warmup")
@@ -273,6 +279,13 @@ class BackendService:
             )
             if _settings_dict.get("llm_probe_enabled", True):
                 self._llm_probe.start()
+
+        # Startup binary-drift self-check (Option B).
+        # Compares dwarfdump UUIDs of bundle vs runtime KrabEarAgent binaries.
+        # Fires agent.binary_drift on the error_bus when they diverge.
+        # Opt-out via setting binary_drift_check_on_startup=False.
+        if self._settings_svc.cached_settings().get("binary_drift_check_on_startup", True):
+            self._check_binary_drift_on_startup()
 
         self._system_monitor = SystemMonitor()
         self._preview_lock = threading.Lock()
@@ -924,6 +937,7 @@ class BackendService:
             "report_hotkey_conflict": self._handle_report_hotkey_conflict,  # Swift→backend hotkey conflict (chord taken by another app)
             "handshake": self._handle_handshake,  # Swift→backend handshake on connect: version + capabilities exchange
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
+            "report_binary_drift": self._handle_report_binary_drift,  # external watcher→backend binary drift alert (bundle vs runtime UUID mismatch)
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
@@ -970,7 +984,9 @@ class BackendService:
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
-            "get_recording_insights": self._handle_get_recording_stats,  # эвристические инсайты по записям
+            "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
+            "get_calendar_link": self._handle_get_calendar_link,  # Wave 54: registered orphan handler
+            "search_by_calendar_event": self._handle_search_by_calendar_event,  # Wave 54: registered orphan handler
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -2527,6 +2543,97 @@ class BackendService:
             action_id=None,
         )
         self._error_bus.push(err)
+        return {"ok": True}
+
+    # ── Binary drift helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _dwarfdump_uuid(path: Path) -> str | None:
+        """Return the first UUID reported by dwarfdump for *path*, or None on error."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["dwarfdump", "--uuid", str(path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                # Example line: "UUID: AABBCC... (arm64) /path/to/binary"
+                parts = line.split()
+                if parts and parts[0] == "UUID:":
+                    return parts[1]
+        except Exception:
+            pass
+        return None
+
+    def _push_binary_drift_error(self, bundle_uuid: str | None, runtime_uuid: str | None) -> None:
+        from backend.error_bus import KrabError
+        from backend.error_codes import ERROR_REGISTRY
+        from datetime import datetime, timezone
+        entry = ERROR_REGISTRY["agent.binary_drift"]
+        err = KrabError(
+            severity=entry["severity"],
+            component="agent",
+            code="agent.binary_drift",
+            message_user=entry["user_msg_ru"],
+            message_debug=(
+                f"binary drift detected: bundle_uuid={bundle_uuid} runtime_uuid={runtime_uuid}"
+            ),
+            timestamp=datetime.now(timezone.utc),
+            context={"bundle_uuid": bundle_uuid, "runtime_uuid": runtime_uuid},
+            actionable=entry["actionable"],
+            action_id=entry["action_id"],
+        )
+        self._error_bus.push(err)
+
+    def _check_binary_drift_on_startup(self) -> None:
+        """Startup Option-B drift check.
+
+        Compares dwarfdump UUIDs of the two KrabEarAgent binaries:
+          - bundle:  <PROJECT_ROOT>/Krab Ear.app/Contents/MacOS/KrabEarAgent
+          - runtime: <PROJECT_ROOT>/native/runtime/KrabEarAgent
+
+        Silently skips if either path is absent or dwarfdump is unavailable.
+        """
+        bundle_bin = PROJECT_ROOT / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+        runtime_bin = PROJECT_ROOT / "native" / "runtime" / "KrabEarAgent"
+        if not bundle_bin.exists() or not runtime_bin.exists():
+            logger.debug(
+                "binary_drift_check skipped: one or both paths absent "
+                "(bundle=%s exists=%s, runtime=%s exists=%s)",
+                bundle_bin, bundle_bin.exists(), runtime_bin, runtime_bin.exists(),
+            )
+            return
+        bundle_uuid = self._dwarfdump_uuid(bundle_bin)
+        runtime_uuid = self._dwarfdump_uuid(runtime_bin)
+        if bundle_uuid is None or runtime_uuid is None:
+            logger.debug(
+                "binary_drift_check skipped: dwarfdump unavailable or returned no UUID "
+                "(bundle_uuid=%s, runtime_uuid=%s)", bundle_uuid, runtime_uuid,
+            )
+            return
+        if bundle_uuid != runtime_uuid:
+            logger.warning(
+                "binary_drift detected at startup: bundle=%s runtime=%s",
+                bundle_uuid, runtime_uuid,
+            )
+            self._push_binary_drift_error(bundle_uuid, runtime_uuid)
+        else:
+            logger.debug("binary_drift_check OK: UUIDs match (%s)", bundle_uuid)
+
+    def _handle_report_binary_drift(self, params: dict) -> dict:
+        """External watcher→backend binary drift alert (Option A — IPC path).
+
+        Called by the daily scheduled routine `krab-ear-two-binary-drift-watch`
+        (or any other watcher) when it detects that bundle and runtime binaries
+        have diverged UUIDs.
+
+        Params:
+            bundle_uuid  (str, optional): UUID of the bundle binary
+            runtime_uuid (str, optional): UUID of the runtime binary
+        """
+        bundle_uuid = params.get("bundle_uuid") or None
+        runtime_uuid = params.get("runtime_uuid") or None
+        self._push_binary_drift_error(bundle_uuid, runtime_uuid)
         return {"ok": True}
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
@@ -6068,7 +6175,18 @@ class IPCServer:
             self.socket_path.unlink()
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(self.socket_path))
+        # Wave 58 LOW-2 closure (Wave 47 B2 audit): tighten umask BEFORE bind so the
+        # socket is created with owner-only perms from the start. Combined with the
+        # explicit `os.chmod()` below this eliminates the TOCTOU window where a
+        # concurrent process could open the socket during creation (umask of 0o022
+        # would have initial perms 0o755). `listen()` is not called yet, so no
+        # accept() can happen even in the theoretical window, but defense-in-depth
+        # is cheap here.
+        _old_umask = os.umask(0o077)
+        try:
+            server.bind(str(self.socket_path))
+        finally:
+            os.umask(_old_umask)
         os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
         server.listen(IPC_SOCKET_BACKLOG)
         server.settimeout(IPC_SOCKET_TIMEOUT_SEC)

@@ -246,4 +246,76 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "error",
         "dedupe_seconds": 60,
     },
+
+    # ── Wave 50: codes from routine review findings (Wave 42 routine audit) ──
+    # Backend-log-scanner found 18 warmup WARNING/3 days but no dedicated
+    # error code → emit as WARN-tier to make recovery actionable.
+    "rewriter.warmup_failed": {
+        "user_msg_ru": (
+            "Rewriter не прогрелся при старте — LM Studio ещё загружается. "
+            "Будет повторная попытка через минуту."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 300,
+    },
+
+    # ── Layer: stt (additions) ───────────────────────────────────
+    # MLXWatchdog timeout (BACKEND-E/F). Wave 43 raised timeout 60→120s,
+    # but cold-load still occasionally exceeds. Dedicated code → toast.
+    "stt.mlx_timeout": {
+        "user_msg_ru": (
+            "Распознавание превысило таймаут MLX. Whisper модель долго грузится — "
+            "следующая попытка пройдёт быстрее."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 120,
+    },
+    # GigaAM padding mismatch on long audio (>60s with specific dim). Routine
+    # backend-log-scanner caught this 2026-05-10. Indicates audio chunking gap.
+    "stt.padding_mismatch": {
+        "user_msg_ru": (
+            "GigaAM не справился с длинной записью — переключился на Whisper fallback."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 120,
+    },
+
+    # ── Layer: diarization (additions) ───────────────────────────
+    # pyannote VAD model is HF-gated (manual accept required). Without it,
+    # GigaAM longform breaks. Memory: blocker_pyannote_gated_2026-04-26.md.
+    "diarization.vad_gated": {
+        "user_msg_ru": (
+            "pyannote VAD требует ручного accept на Hugging Face — открыть страницу модели?"
+        ),
+        "actionable": True,
+        "action_id": "open_pyannote_hf_page",
+        "action_label": "Открыть HF (accept terms)",
+        "severity": "warn",
+        "dedupe_seconds": 3600,
+    },
+
+    # ── Layer: agent (NEW) ───────────────────────────────────────
+    # Wave 42 smoke-diagnostic flagged two-binary drift (Krab Ear.app vs
+    # native/runtime/KrabEarAgent diverged UUIDs). Daily watcher routine
+    # in Wave 47 alerts on this — emit code so UI shows recovery hint.
+    "agent.binary_drift": {
+        "user_msg_ru": (
+            "Bundle и runtime бинари рассинхронизированы — запустите "
+            "`make release` чтобы синхронизировать (Wave 43 fix)."
+        ),
+        "actionable": True,
+        "action_id": "open_terminal_make_release",
+        "action_label": "Открыть terminal",
+        "severity": "warn",
+        "dedupe_seconds": 86400,  # once per day
+    },
 }

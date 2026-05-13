@@ -15,6 +15,14 @@ hash-таблице MTL::Resource* вызывает повреждение со�
 последовательно. Для однопользовательского десктоп-приложения это приемлемо.
 
 Используем RLock (reentrant) на случай вложенных MLX вызовов в fallback chain.
+
+Межпроцессная координация (Phase C Step 6):
+Дополнительная POSIX flock-блокировка в core/mlx_inter_lock.py для координации
+между несколькими OS-процессами Krab Ear. Включается через KRAB_EAR_MLX_INTER_PROCESS_LOCK=1.
+Паттерн wire-in (Wave 49):
+    with mlx_inter_process_lock():  # outer: cross-process flock
+        with mlx_lock():            # inner: intra-process RLock
+            mlx_whisper.transcribe(...)
 """
 import threading
 
@@ -24,3 +32,8 @@ _mlx_lock = threading.RLock()
 def mlx_lock() -> threading.RLock:
     """Вернуть глобальную блокировку сериализации MLX (использовать как context manager)."""
     return _mlx_lock
+
+
+# Re-export inter-process lock helper for convenient single-import call-sites.
+# Wave 49 wire-in: from core.mlx_lock import mlx_lock, mlx_inter_process_lock
+from core.mlx_inter_lock import mlx_inter_process_lock  # noqa: E402,F401 — re-export

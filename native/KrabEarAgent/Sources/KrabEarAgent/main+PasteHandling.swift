@@ -298,7 +298,11 @@ extension AgentAppDelegate {
         }
         let ipc = self.ipcClient
         let textCopy = text
-        Task.detached { [weak self] in
+        // Capture logger separately as a Sendable value to avoid crossing the
+        // @MainActor isolation boundary inside Task.detached (Swift 6 Sendable
+        // error: "capture of 'self' with non-sendable type in @Sendable closure").
+        let log = self.logger
+        Task.detached {
             let response = try? await ipc.callAsync(
                 method: "add_history_item",
                 params: [
@@ -310,9 +314,9 @@ extension AgentAppDelegate {
             let id = (response?["result"] as? [String: Any])?["id"] as? String
             await MainActor.run {
                 if let id {
-                    self?.logger.info("Создана fallback запись истории: id=\(id)")
+                    log.info("Создана fallback запись истории: id=\(id)")
                 } else {
-                    self?.logger.warn("Не удалось создать fallback запись в истории")
+                    log.warn("Не удалось создать fallback запись в истории")
                 }
                 completion(id)
             }

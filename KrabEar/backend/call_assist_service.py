@@ -1007,7 +1007,11 @@ class CallAssistService:
                 text = self._extract_text(preview_payload)
 
                 if text and text != last_sent_text:
-                    logger.debug(f"Call Assist: sending text='{text}'")
+                    logger.debug(
+                        "Call Assist: sending text len=%d preview=%r",
+                        len(text),
+                        text[:30],
+                    )
 
                     with self._lock:
                         self._pending_post_count += 1
@@ -1028,7 +1032,7 @@ class CallAssistService:
                         with self._lock:
                             self._pending_post_count = max(0, self._pending_post_count - 1)
 
-                    logger.debug(f"Call Assist: post result={resp}")
+                    logger.debug("Call Assist: post ok=%s", resp.get("ok"))
                     if resp.get("ok"):
                         backoff_delay = 0.0
                         last_sent_text = text

@@ -29,6 +29,15 @@ _SENSITIVE: frozenset[str] = frozenset({
     "hf_token",
     "rest_api_key",
     "lm_studio_api_key",
+    # Wave 58 follow-up — defense-in-depth from Wave 47 B2 security audit:
+    # these keys exist as Settings class fields but users can also override
+    # via IPC `set_settings` which persists to settings.json — backup must
+    # redact them regardless of where they came from.
+    "telnyx_api_key",
+    "twilio_account_sid",
+    "twilio_auth_token",
+    "sentry_dsn",
+    "stt_gigaam_hf_token",
 })
 
 

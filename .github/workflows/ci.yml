@@ -40,6 +40,15 @@ jobs:
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
             ${{ runner.os }}-pip-
 
+      - name: Install ffmpeg (torchcodec dylib dependency)
+        # torchcodec ships libtorchcodec_core{4..8}.dylib which dlopen libavutil.{56..60}.dylib.
+        # macos-latest doesn't ship ffmpeg by default — install via brew so the test suite
+        # can collect modules that transitively import torchcodec without OSError.
+        # Wave 49 fix: was the sole remaining Python 3.12 CI fail.
+        run: |
+          brew install ffmpeg
+          brew list --versions ffmpeg
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip

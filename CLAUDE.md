@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches 241 JSON-RPC methods via a handler lookup table, delegating to extracted services. Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines, all 241 handlers documented).
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches **349** JSON-RPC methods via a handler lookup table, delegating to extracted services. Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines, 78 handlers documented — 271 undocumented per Wave 45 drift report `docs/drift-report-2026-05-12.md`).
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -153,6 +153,61 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 
 #### Twilio / provider abstraction (Phase 3 step 5):
 - **`backend/twilio_adapter.py`** — `TwilioAdapter`: Twilio REST API adapter, same interface as `TelnyxAdapter`. Active provider selected via `CALL_PROVIDER` setting (`telnyx` | `twilio`); swap at runtime without code changes.
+- **`backend/call_provider.py`** — `CallProvider`: Protocol (structural typing) defining the common interface all telephony adapters must implement.
+- **`backend/call_provider_factory.py`** — `CallProviderFactory`: returns the active `CallProvider` adapter instance based on `CALL_PROVIDER` setting.
+
+#### Additional backend modules:
+- **`backend/action_items_extractor.py`** — `ActionItemsExtractor`: extract tasks, decisions, and questions from meeting transcripts with priority tagging.
+- **`backend/activity_calendar.py`** — `ActivityCalendar`: GitHub-style contribution graph data (recordings per day) for the history UI.
+- **`backend/api_versioning.py`** — `APIVersion`: enum + deprecation metadata for REST API v1/v2 version negotiation.
+- **`backend/archive_manager.py`** — `ArchiveManager`: move old history entries into a separate `archive.ndjson` file to keep the main store lean.
+- **`backend/auto_deduplication.py`** — `AutoDeduplicator`: automatically skip or merge near-duplicate history items above a configurable similarity threshold.
+- **`backend/bookmarks.py`** — `BookmarkManager`: timestamped bookmarks on long recordings; stored as NDJSON tombstones for deletion.
+- **`backend/bulk_reprocess.py`** — `BulkReprocessor`: batch re-transcribe old history entries using the current STT settings.
+- **`backend/calendar_link.py`** — `CalendarLinker`: link transcriptions to overlapping Calendar.app events via osascript.
+- **`backend/default_hotwords.py`** — curated list of default STT hotwords (AI names, tech terms, RU/ES proper nouns) loaded at startup.
+- **`backend/disk_monitor.py`** — `DiskSpaceMonitor`: background thread that warns when data-dir free space falls below 2 GB threshold.
+- **`backend/email_sender.py`** — `EmailSender`: send transcription digests via SMTP or macOS Mail.app with Keychain password retrieval.
+- **`backend/health_checker.py`** — `HealthChecker`: aggregate readiness checks for all backend subsystems (disk, IPC socket, STT model) into a single status dict.
+- **`backend/ipc_constants.py`** — module-level IPC socket constants (backlog, timeout, max message bytes) shared across service and supervisor.
+- **`backend/job_tracker.py`** — `JobTracker`: thread-safe in-memory store for async transcription job states (queued/running/done/failed/cancelled).
+- **`backend/lm_studio_lifecycle.py`** — `LMStudioLifecycle`: load and unload LM Studio models via REST API with CLI fallback for memory management.
+- **`backend/metadata_enricher.py`** — `MetadataEnricher`: auto-populate language, sentence count, word count, and keywords fields on history items.
+- **`backend/models.py`** — `HistoryItem` and related Pydantic dataclasses (shared data models used across backend services).
+- **`backend/paste_app_memory.py`** — `PasteAppMemory`: remember per-application paste format preferences between sessions.
+- **`backend/privacy_audit.py`** — `PrivacyAuditLogger`: singleton NDJSON log of privacy-mode events (enable/disable/purge) for compliance auditing.
+- **`backend/realtime_partial.py`** — `RealtimePartialTranscriber`: background thread that emits partial (`realtime.partial_transcript`) and final transcript events via EventBus during active recording.
+- **`backend/realtime_silence_filter.py`** — `RealtimeSilenceFilter`: energy-based silence detector that suppresses partial events during long pauses in real-time recording.
+- **`backend/recap_scheduler.py`** — `RecapScheduler`: daily cron-like scheduler that generates and emails a transcription digest at a configured hour.
+- **`backend/rest_auth.py`** — `RestAuth`: Bearer-token store (hashed) for optional authentication on the REST server (port 5005).
+- **`backend/search_history.py`** — `SearchHistoryManager`: persist and recall recent IPC search queries for autocomplete.
+- **`backend/semantic_search.py`** — `SemanticSearcher`: sentence-embedding index (`multilingual-e5-base`) for semantic similarity search over transcription history.
+- **`backend/session_tracker.py`** — `SessionTracker`: per-recording session metadata (start/end, device, mode) written alongside history items.
+- **`backend/settings_backup.py`** — `SettingsBackup`: rolling backup of settings.json before each write, with sensitive-field redaction.
+- **`backend/settings_validator.py`** — `SettingsValidator`: validate settings dict against allowed enum values and migrate older schema versions to `2.0`.
+- **`backend/shutdown_handler.py`** — `GracefulShutdownHandler`: coordinate orderly backend shutdown (flush stores, cancel jobs, write a runtime shutdown info file).
+- **`backend/stats_report.py`** — `StatsReportGenerator`: generate a comprehensive Markdown statistics report (top words, durations, language breakdown) from history.
+- **`backend/timeline_export.py`** — `TimelineExporter`: export recording timeline as SVG, JSON, or iCalendar (`.ics`) file.
+- **`backend/transcript_writer.py`** — `TranscriptWriter`: write each transcription to a timestamped Obsidian-compatible Markdown file in the transcripts directory.
+- **`backend/tts_service.py`** — `TTSService`: dual-engine TTS (Silero RU primary, Kokoro EN fallback, macOS `say` last resort) with language auto-detection.
+- **`backend/vg_ws_client.py`** — `VGWebSocketClient`: WebSocket client to the Voice Gateway `/v1/sessions/{id}/stream` endpoint for real-time conversation streaming.
+
+#### Additional core modules:
+- **`core/audio_denoiser.py`** — `AudioDenoiser`: adaptive spectral-gating noise reduction with configurable strength levels (`off/light/moderate/strong`) before STT.
+- **`core/audio_lang_id.py`** — `AudioLanguageID`: language identification from raw audio via mlx-whisper encoder (encoder-only, no decode) returning ISO 639-1 codes.
+- **`core/auto_glossary.py`** — `AutoGlossary`: build and cache a domain-specific glossary from transcription history for STT initial-prompt injection.
+- **`core/code_switching_detector.py`** — `CodeSwitchingDetector`: detect mid-sentence language switches (RU↔ES↔EN) in transcribed text, excluding technical tokens.
+- **`core/datetime_normalizer.py`** — `DateTimeNormalizer`: normalize spoken date/time expressions (Russian inflected forms, Spanish, numeric) to ISO-8601 in transcripts.
+- **`core/gain_normalizer.py`** — `GainNormalizer`: RMS-based audio gain normalization to a target dB level before STT pipeline.
+- **`core/mlx_inter_lock.py`** — `mlx_inter_process_lock()`: POSIX `flock`-based cross-process serialization of MLX GPU access (wraps `mlx_lock` for multi-process safety).
+- **`core/mlx_lock.py`** — `mlx_lock()`: global intra-process `RLock` for serializing all MLX/mlx-whisper inference calls to prevent SIGSEGV on concurrent GPU access.
+- **`core/mlx_subprocess.py`** — MLX inference watchdog: runs MLX transcription in a subprocess with a configurable timeout and auto-recovery on GPU hang.
+- **`core/number_normalizer.py`** — `NumberNormalizer`: expand spoken Russian and Spanish cardinal/ordinal numerals to digit form in transcripts.
+- **`core/parsing_utils.py`** — shared JSON parsing helpers (`safe_json_loads`) with graceful fallback and context-aware error logging.
+- **`core/stt_router.py`** — `STTRouter`: language-aware routing of audio to the best STT adapter (scored selection or legacy order) with graceful fallback.
+- **`core/transcript_context.py`** — `TranscriptContext`: builds Whisper `initial_prompt` from recent history items and merged hotword/glossary vocabulary within a 30-minute window.
+- **`core/voice_commands.py`** — `VoiceCommandProcessor`: post-STT layer that recognises dictation commands (punctuation, capitalize, delete-last) and applies them to transcript text.
+- **`core/word_timing.py`** — `WordTimingAnalyzer`: analyse per-word timestamps from Whisper segments to detect hesitations, pauses, and speech rhythm.
 
 ### Native agent (`native/KrabEarAgent/`):
 - Swift Package (swift-tools-version 6.0, macOS 13+). Single executable target.
@@ -169,7 +224,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 
 #### Phase 2 Swift additions:
 - **`SelectionTranslator.swift`** — Cmd+Shift+T global hotkey; reads selected text via AX API (`kAXSelectedTextAttribute`) or clipboard fallback; calls `translate_selection` IPC; writes result back via AX or Cmd+V.
-- **`SystemAudioCapture.swift`** — ScreenCaptureKit-based system audio tap; streams base64 PCM 16 kHz to backend IPC `live_subs_push_chunk`; requires Screen Recording permission.
+- **`SystemAudioCapture.swift`** — ScreenCaptureKit-based system audio tap; streams base64 PCM 16 kHz to backend IPC `live_subs_ingest`; requires Screen Recording permission.
 - **`LiveSubtitlesOverlay.swift`** — floating NSPanel HUD (always on top, draggable) for live subtitles; shows last 3 lines with 4 s auto-fade; subscribes to SSE `live_subs.result` events.
 - **`main+LiveSubs.swift`** — wires `SystemAudioCapture` start/stop to menu item and `HistoryPanelController+LiveSubsSettings`.
 
@@ -187,8 +242,8 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
 
 #### Phase B — Loud Errors (2026-05-04+) Python additions:
-- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. 19 codes wired runtime.
-- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (19 codes: paste×2, rewriter×7, stt×3, diarization×2, translation×1, mlx×1, history×1, vocabulary×1, hotkey×1, ipc×1).
+- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **24** codes wired runtime.
+- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**24** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc categories).
 - **`backend/error_actions.py`** — `ACTION_HANDLERS` dispatch + 8 action handlers (open_privacy_settings, disable_rewriter, etc.).
 - **`backend/llm_probe.py`** — `LLMHttpProbe` passive GET `/v1/models` health check (post-PR #364 F2 — was POST /v1/chat/completions which caused JIT churn).
 
@@ -360,6 +415,7 @@ python scripts/check_performance_budget.py
 - **Transcript files**: imported audio generates .md files in `~/Library/Application Support/KrabEar/transcripts/`.
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
+- **Runtime vs static settings reads (Wave 58 lesson)**: ВСЕ startup-time reads of user-overridable settings MUST use `self._get_runtime_setting(key, default)` (lines 593-601 в `service.py`), NOT `DEFAULT_SETTINGS.get(key, default)`. The latter reads the static dict imported at module load, ignoring settings.json runtime overrides — caused chronic warmup-timeout warnings (Wave 58 fix: rewriter_warmup line 187 + stt_warmup line 229). Legit fallback usages of `DEFAULT_SETTINGS` are nested: `cached_settings.get(key, DEFAULT_SETTINGS.get(key, hardcoded))` — runtime first, static as ultimate fallback.
 - **Test path setup**: Test files manually prepend `PROJECT_ROOT` to `sys.path` to resolve `backend.*` and `core.*` imports when run standalone.
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
@@ -367,9 +423,8 @@ python scripts/check_performance_budget.py
 - **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`.
 - **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
 - **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`).
-  - **When using `json`**: handlers use `JsonFormatter` from `backend.log_config` (or wherever defined).
-  - **Preferred logging pattern**: `logger.info("message", extra={"key": value, ...})` — structured context required for new code.
-  - **WARNING (as of 2026-04-18)**: `JsonFormatter` does NOT automatically merge `extra={}` fields into output — pending fix. Use top-level message only for now until blocker is closed; see followup task.
+  - **When using `json`**: handlers use `JsonFormatter` defined inline in `backend/service.py::configure_logging` (`service.py:6168-6186`). REST API server (`backend/rest_server.py:280`) emits its own structured records inline via `json.dumps(log_record)` — same `ts/level/...` shape.
+  - **Preferred logging pattern**: `logger.info("message", extra={"key": value, ...})` — structured context required for new code. Any non-standard `LogRecord` attribute (i.e. all keys in `extra={...}`) is merged into the JSON output. Standard attrs are filtered via `_STANDARD_LOG_ATTRS` frozenset in `configure_logging`.
   - **Don't use `print()`** in production code. Exceptions: doctest examples, CLI scripts.
 - **GitHub Actions CI**: `.github/workflows/ci.yml` runs Python tests (pytest) and Swift build on every push/PR.
 - **Profile presets**: four built-in presets (`default`, `meeting`, `translation`, `call_recording`) applied via `apply_profile_preset` IPC method. `list_profile_presets` returns their names/descriptions.
@@ -387,7 +442,7 @@ python scripts/check_performance_budget.py
 - **Call provider abstraction**: `CALL_PROVIDER` setting (`telnyx` | `twilio`) selects the active adapter at runtime. Both adapters (`TelnyxAdapter`, `TwilioAdapter`) implement the same interface. Credentials are per-provider settings: `telnyx_api_key` / `twilio_account_sid` + `twilio_auth_token`. Stub mode active when credentials absent.
 - **Single-instance guard**: `SingleInstanceGuard.swift` runs at app startup and kills any existing `KrabEarAgent` process (same bundle path). Prevents double-paste, double-hotkey, and IPC port conflicts after crash-restart.
 - **Selection translate flow (Phase 2A)**: Cmd+Shift+T → `SelectionTranslator.swift` → (A) AX API reads `kAXSelectedTextAttribute` → sends `translate_selection` IPC → writes back via `AXUIElementSetAttributeValue`; (B) fallback: save clipboard → Cmd+C → read clipboard → translate → Cmd+V → restore clipboard. Failure shows error HUD, never mutates text.
-- **Live subtitles flow (Phase 2B)**: `SystemAudioCapture.swift` (ScreenCaptureKit) taps system audio → base64-encodes 16 kHz PCM chunks → `live_subs_push_chunk` IPC → `live_subs_service.py` accumulates ≥3 s → Whisper STT → translate → emits `live_subs.result` via EventBus → SSE stream → `LiveSubtitlesOverlay.swift` HUD panel. Requires Screen Recording permission.
+- **Live subtitles flow (Phase 2B)**: `SystemAudioCapture.swift` (ScreenCaptureKit) taps system audio → base64-encodes 16 kHz PCM chunks → `live_subs_ingest` IPC → `live_subs_service.py` accumulates ≥3 s → Whisper STT → translate → emits `live_subs.result` via EventBus → SSE stream → `LiveSubtitlesOverlay.swift` HUD panel. Requires Screen Recording permission.
 - **MLX thread-safety**: MLX (mlx_whisper, mlx.core) is NOT thread-safe — concurrent GPU access corrupts internal `__hash_table<MTL::Resource*>` causing SIGSEGV. ALL MLX inference must be serialized through `core.mlx_lock.mlx_lock()` (RLock — reentrant). Pattern:
   ```python
   from core.mlx_lock import mlx_lock
