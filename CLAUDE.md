@@ -351,6 +351,7 @@ make lint          # Flake8 on Python backend
 - `scripts/repair_permissions.command` — reset TCC + re-grant Accessibility/Microphone (PR #234)
 - `scripts/create_local_signing_identity.command` — create `Krab Ear Dev Local` self-signed identity for stable TCC grants (PR #235)
 - `scripts/build_distribution_dmg.command` — build distribution DMG for sharing (PR #229)
+- `scripts/install_agent_launchagent.command` — opt-in launchd KeepAlive for Swift agent (Wave 59 self-recovery)
 
 ### Launch app
 ```bash

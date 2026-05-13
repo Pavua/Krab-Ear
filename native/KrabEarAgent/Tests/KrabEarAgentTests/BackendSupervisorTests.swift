@@ -130,4 +130,39 @@ final class BackendSupervisorTests: XCTestCase {
         supervisor.stopBackend()
         XCTAssertNil(supervisor.backendProcess, "passive mode: backendProcess остаётся nil после stopBackend")
     }
+
+    // MARK: Wave 59 — cooldown reset
+
+    func test_restartIfDead_active_cooldownReset_recoversAfterQuietPeriod() {
+        // Сценарий: 3 restart'а подряд исчерпывают лимит. Затем имитируем
+        // прошествие cooldownSec. 4-й restart должен снова работать,
+        // потому что lastRestartAttemptAt > cooldown назад → счётчик сбросился.
+        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+        supervisor.restartCooldownSec = 0.0  // мгновенный cooldown для теста
+
+        let r0 = supervisor.restartIfDead()  // 1
+        let r1 = supervisor.restartIfDead()  // 2
+        let r2 = supervisor.restartIfDead()  // 3
+        // 4-й после cooldown=0 → сброс счётчика → снова успех
+        let r3 = supervisor.restartIfDead()  // reset → 1
+
+        XCTAssertTrue(r0)
+        XCTAssertTrue(r1)
+        XCTAssertTrue(r2)
+        XCTAssertTrue(r3, "После cooldown supervisor должен снова разрешать restart")
+    }
+
+    func test_restartIfDead_active_cooldownNotElapsed_stillBlocked() {
+        // Если cooldown не истёк (defaultRestartCooldownSec = 300s),
+        // 4-й вызов всё ещё должен быть заблокирован.
+        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+        // cooldown по умолчанию 300s — за длительность теста не истечёт.
+
+        _ = supervisor.restartIfDead()  // 1
+        _ = supervisor.restartIfDead()  // 2
+        _ = supervisor.restartIfDead()  // 3
+        let r3 = supervisor.restartIfDead()
+
+        XCTAssertFalse(r3, "4-й restart до cooldown должен оставаться заблокированным")
+    }
 }

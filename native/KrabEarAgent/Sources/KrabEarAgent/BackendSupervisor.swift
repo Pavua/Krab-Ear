@@ -29,9 +29,21 @@ final class BackendSupervisor: @unchecked Sendable {
     let dataDir: String
     let socketPath: String
 
-    /// Счётчик последовательных перезапусков (сбрасывается при успешном ping).
+    /// Счётчик последовательных перезапусков (сбрасывается при успешном ping
+    /// или после `restartCooldownSec` тишины между попытками).
     private var consecutiveRestarts = 0
     private static let maxConsecutiveRestarts = 3
+
+    /// Время последней попытки restart — используется для cooldown reset.
+    /// Wave 59: даёт supervisor шанс восстановиться после системного memory pressure,
+    /// который заглушил backend на > 5 мин (например ночной Jetsam OOM кран).
+    private var lastRestartAttemptAt: Date?
+
+    /// Cooldown: если прошло столько секунд с последней failed попытки,
+    /// `consecutiveRestarts` обнуляется и можно снова делать `maxConsecutiveRestarts`
+    /// попыток. Тестовый хук позволяет overrid'ить значение для unit тестов.
+    private static let defaultRestartCooldownSec: TimeInterval = 300  // 5 минут
+    var restartCooldownSec: TimeInterval = BackendSupervisor.defaultRestartCooldownSec
 
     /// Режим супервизии, определяется один раз при первом обращении (lazy).
     /// Lazy init означает что реальный `launchctl print` вызов происходит
@@ -228,10 +240,18 @@ final class BackendSupervisor: @unchecked Sendable {
             }
 
         case .active:
+            // Wave 59: cooldown reset — если прошло >= restartCooldownSec с
+            // последней попытки, обнуляем счётчик. Backend получает свежий
+            // бюджет на maxConsecutiveRestarts попыток после периода тишины.
+            if let lastAttempt = lastRestartAttemptAt,
+               Date().timeIntervalSince(lastAttempt) >= restartCooldownSec {
+                consecutiveRestarts = 0
+            }
             guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
                 return false
             }
             consecutiveRestarts += 1
+            lastRestartAttemptAt = Date()
             stopBackend()
             do {
                 try ensureBackendRunning()
