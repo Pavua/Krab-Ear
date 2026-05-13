@@ -1,6 +1,16 @@
 """pytest conftest: captures [BENCH] output and appends to .benchmarks/history.jsonl."""
 from __future__ import annotations
 
+# Wave 58 ext CI fix: pre-import numpy.exceptions to dodge an infinite
+# recursion bug in numpy.__getattr__ that surfaces under pytest-xdist (-n auto)
+# when several worker processes import numpy concurrently. Without this,
+# `np.testing.assert_array_equal(...)` fails on Python 3.12 with
+# RecursionError: maximum recursion depth exceeded.
+# Anchoring numpy.exceptions in sys.modules BEFORE any test imports prevents
+# the lazy-load loop in numpy/__init__.py:730 __getattr__.
+import numpy  # noqa: F401,E402
+import numpy.exceptions  # noqa: F401,E402
+
 import json
 import platform
 import re
