@@ -204,14 +204,15 @@ def _handle_transcribe(params: dict) -> dict:
     longform = bool(params.get("longform", False))
     hf_token = params.get("hf_token", "")
 
-    # Если HF token передан явно — overwrite env vars (pyannote/HF Hub их читают).
-    # Используем прямое присваивание (не setdefault), чтобы explicit token из
-    # settings.STT_GIGAAM_HF_TOKEN имел приоритет над shell env (более частый
-    # case: env пустой, settings overrides cached ~/.cache/huggingface/token).
+    # SEC MED-1: set HF token only for the duration of the transcribe call, then
+    # restore the original env values (None → remove). This prevents the token from
+    # persisting across subsequent transcribe requests inside the same worker process.
+    _prev_hf: dict = {}
     if hf_token and isinstance(hf_token, str):
-        import os
-        os.environ["HF_TOKEN"] = hf_token
-        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        import os as _os
+        for _k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+            _prev_hf[_k] = _os.environ.get(_k)
+            _os.environ[_k] = hf_token
 
     try:
         if longform and hasattr(_MODEL, "transcribe_longform"):
@@ -252,6 +253,14 @@ def _handle_transcribe(params: dict) -> dict:
             result_meta = {"longform": False}
     except Exception as exc:
         return _err(f"transcribe_failed: {type(exc).__name__}: {exc}")
+    finally:
+        # SEC MED-1: restore env vars regardless of success/failure.
+        import os as _os
+        for _k, _v in _prev_hf.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
 
     # Memory tracing (opt-in: KRAB_EAR_TRACE_GIGAAM_MEM=1).
     # Logs RSS after inference so we can track MPS/PyTorch buffer pool growth.
