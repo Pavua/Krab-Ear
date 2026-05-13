@@ -414,5 +414,56 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         )
 
 
+class TestThrottleListsInvariants(unittest.TestCase):
+    """Wave 58 ext — Lock IPC throttle + audit_logger registries against dispatch.
+
+    Same fence-test pattern as Wave 51 (error_codes ↔ error_actions) and
+    Wave 54 (dispatch table itself). Catches stale throttle entries и audit
+    sensitive-method whitelist references что больше не существуют в IPC.
+    """
+
+    def _read_dispatch_keys(self) -> set[str]:
+        """Return all keys mentioned in service.py dispatch dict (broad scan)."""
+        import re
+        service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
+        with open(service_path, encoding="utf-8") as f:
+            source = f.read()
+        return set(re.findall(r'^\s+"([a-z_]+)"\s*:', source, re.MULTILINE))
+
+    def test_throttle_heavy_methods_all_in_dispatch(self):
+        """Every method in `HEAVY_METHODS` must be a real IPC method that
+        appears in service.py dispatch table. Otherwise throttle limit is
+        wasted — applies to nothing."""
+        from backend.ipc_throttle import HEAVY_METHODS
+        dispatch_keys = self._read_dispatch_keys()
+        orphans = HEAVY_METHODS - dispatch_keys
+        self.assertSetEqual(
+            orphans, set(),
+            f"HEAVY_METHODS contains entries not in service.py dispatch: {orphans}"
+        )
+
+    def test_throttle_medium_methods_all_in_dispatch(self):
+        """Same invariant for MEDIUM_METHODS — catches stale rate-limit
+        whitelist entries."""
+        from backend.ipc_throttle import MEDIUM_METHODS
+        dispatch_keys = self._read_dispatch_keys()
+        orphans = MEDIUM_METHODS - dispatch_keys
+        self.assertSetEqual(
+            orphans, set(),
+            f"MEDIUM_METHODS contains entries not in service.py dispatch: {orphans}"
+        )
+
+    def test_audit_logger_sensitive_methods_all_in_dispatch(self):
+        """Every method в `_SENSITIVE_METHODS` (params not logged for privacy)
+        must exist в dispatch. Stale entry = dead config."""
+        from backend.audit_logger import _SENSITIVE_METHODS
+        dispatch_keys = self._read_dispatch_keys()
+        orphans = _SENSITIVE_METHODS - dispatch_keys
+        self.assertSetEqual(
+            orphans, set(),
+            f"_SENSITIVE_METHODS contains stale entries: {orphans}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
