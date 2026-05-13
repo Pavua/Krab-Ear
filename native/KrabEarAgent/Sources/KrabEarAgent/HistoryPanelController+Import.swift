@@ -90,8 +90,51 @@ extension HistoryPanelController {
             return
         }
 
-        let preview = previewImport(paths: clean)
+        // Wave 59: preview IPC moved off-main to avoid AppHang (5 s timeout).
+        // Show interim status immediately; enqueue job after background fetch completes.
+        importStatusLabel.stringValue = "Импорт: проверяем файлы..."
+        let endpoint = ipcClient.endpoint
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let client = IPCClient(socketPath: endpoint)
+            let preview: ImportPreview
+            if
+                let response = try? client.call(
+                    method: "preview_transcribe_paths",
+                    params: ["paths": clean, "sample_limit": 3]),
+                let result = response["result"] as? [String: Any]
+            {
+                let audioCount  = (result["audio_count"]  as? Int)          ?? 0
+                let folderCount = (result["folder_count"] as? Int)          ?? 0
+                let sample      = (result["sample"]       as? [String])     ?? []
+                let totalBytes  = (result["total_bytes"]  as? Int)          ?? 0
+                let byExtension = (result["by_ext"]       as? [String: Int]) ?? [:]
+                preview = ImportPreview(
+                    audioCount: audioCount, folderCount: folderCount,
+                    sample: sample, byExtension: byExtension, totalBytes: totalBytes)
+            } else {
+                preview = ImportPreview(
+                    audioCount: 0, folderCount: 0, sample: [],
+                    byExtension: [:], totalBytes: 0)
+            }
+            DispatchQueue.main.async {
+                self?._enqueueImportWithPreview(
+                    paths: clean, sourceTag: sourceTag,
+                    signature: signature, preview: preview)
+            }
+        }
+    }
+
+    /// Завершает добавление задачи в очередь — вызывается на main thread после
+    /// background fetch preview. Разделение необходимо чтобы избежать захвата
+    /// [String: Any] (non-Sendable) через границу concurrency.
+    private func _enqueueImportWithPreview(
+        paths: [String],
+        sourceTag: String,
+        signature: String,
+        preview: ImportPreview
+    ) {
         if preview.audioCount == 0 {
+            importStatusLabel.stringValue = "Импорт: готов"
             showInfoAlert(title: "Импорт аудио", body: "Не найдено поддерживаемых аудиофайлов.")
             return
         }
@@ -103,7 +146,7 @@ extension HistoryPanelController {
         }
         importQueue.append(
             ImportJob(
-                paths: clean,
+                paths: paths,
                 sourceTag: sourceTag,
                 audioCount: preview.audioCount,
                 folderCount: preview.folderCount,
