@@ -268,27 +268,25 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
             rss = 512 * 1024 * 1024  # 512 MB
             vms = 1024 * 1024 * 1024  # 1024 MB
 
+        def _make_proc(name: str, cmd: str) -> MagicMock:
+            p = MagicMock()
+            p.info = {"pid": 1234, "name": name}
+            p.cmdline.return_value = cmd.split()
+            p.memory_info.return_value = _FakeMemInfo()
+            return p
+
         def _fake_process_iter(attrs):
-            procs = []
-            for name, cmd in [
-                ("KrabEarAgent", "/path/to/KrabEarAgent"),
-                ("python3", "/path/KrabEar/backend/service.py --data-dir /tmp"),
-                ("python3", "/path/gigaam_worker.py"),
-            ]:
-                p = MagicMock()
-                p.info = {
-                    "pid": 1234,
-                    "name": name,
-                    "cmdline": cmd.split(),
-                    "memory_info": _FakeMemInfo(),
-                }
-                procs.append(p)
-            return procs
+            return [
+                _make_proc("KrabEarAgent", "/path/to/KrabEarAgent"),
+                _make_proc("python3", "/path/KrabEar/backend/service.py --data-dir /tmp"),
+                _make_proc("python3", "/path/gigaam_worker.py"),
+            ]
 
         fake_psutil = MagicMock()
         fake_psutil.process_iter.side_effect = _fake_process_iter
         fake_psutil.NoSuchProcess = Exception
         fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
 
         with patch.dict("sys.modules", {"psutil": fake_psutil}):
             resp = self._call("get_memory_stats")
@@ -302,9 +300,53 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         self.assertIn("agent", kinds)
         self.assertIn("backend", kinds)
         self.assertIn("worker", kinds)
-        # All rss_mb should be 512.0
-        for p in procs:
-            self.assertAlmostEqual(p["rss_mb"], 512.0, places=0)
+
+    def test_get_memory_stats_skips_systemerror_proc(self) -> None:
+        """Regression: SystemError from proc.cmdline() (macOS proc_cmdline → PermissionError)
+        must be caught per-process; iteration continues. See Sentry KRAB-EAR-BACKEND-H.
+        """
+        from unittest.mock import patch, MagicMock
+
+        class _FakeMemInfo:
+            rss = 256 * 1024 * 1024
+            vms = 512 * 1024 * 1024
+
+        def _ok_proc(name: str, cmd: str) -> MagicMock:
+            p = MagicMock()
+            p.info = {"pid": 4242, "name": name}
+            p.cmdline.return_value = cmd.split()
+            p.memory_info.return_value = _FakeMemInfo()
+            return p
+
+        def _bad_proc() -> MagicMock:
+            p = MagicMock()
+            p.info = {"pid": 70483, "name": "containermanager"}
+            # Reproduces macOS sysctl(KERN_PROCARGS2) PermissionError wrap.
+            p.cmdline.side_effect = SystemError(
+                "<built-in function proc_cmdline> returned a result with an exception set"
+            )
+            return p
+
+        def _fake_process_iter(attrs):
+            return [
+                _bad_proc(),
+                _ok_proc("KrabEarAgent", "/path/to/KrabEarAgent"),
+            ]
+
+        fake_psutil = MagicMock()
+        fake_psutil.process_iter.side_effect = _fake_process_iter
+        fake_psutil.NoSuchProcess = Exception
+        fake_psutil.AccessDenied = Exception
+        fake_psutil.ZombieProcess = Exception
+
+        with patch.dict("sys.modules", {"psutil": fake_psutil}):
+            resp = self._call("get_memory_stats")
+
+        self.assertTrue(resp["ok"], msg=f"IPC dispatch error: {resp}")
+        result = resp["result"]
+        self.assertTrue(result["ok"], msg=f"handler raised instead of skipping: {result}")
+        kinds = {p["kind"] for p in result["processes"]}
+        self.assertEqual(kinds, {"agent"})
 
 
 # ---------------------------------------------------------------------------

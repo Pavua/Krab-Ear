@@ -2394,22 +2394,24 @@ class BackendService:
             return {"ok": False, "reason": "psutil_not_installed"}
 
         matches: list[dict] = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
-                cmd = " ".join(proc.info["cmdline"] or [])
-                if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
-                    mem = proc.info["memory_info"]
-                    kind = "agent" if "KrabEarAgent" in cmd else (
-                        "worker" if "gigaam_worker" in cmd else "backend"
-                    )
-                    matches.append({
-                        "pid": proc.info["pid"],
-                        "name": proc.info["name"],
-                        "rss_mb": round(mem.rss / 1024 / 1024, 1),
-                        "vsz_mb": round(mem.vms / 1024 / 1024, 1),
-                        "kind": kind,
-                    })
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                cmdline_list = proc.cmdline()
+                cmd = " ".join(cmdline_list or [])
+                if not any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
+                    continue
+                mem = proc.memory_info()
+                kind = "agent" if "KrabEarAgent" in cmd else (
+                    "worker" if "gigaam_worker" in cmd else "backend"
+                )
+                matches.append({
+                    "pid": proc.info["pid"],
+                    "name": proc.info["name"],
+                    "rss_mb": round(mem.rss / 1024 / 1024, 1),
+                    "vsz_mb": round(mem.vms / 1024 / 1024, 1),
+                    "kind": kind,
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, SystemError, OSError):
                 continue
 
         return {"ok": True, "processes": matches}
