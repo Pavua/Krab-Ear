@@ -6170,7 +6170,18 @@ class IPCServer:
             self.socket_path.unlink()
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(self.socket_path))
+        # Wave 58 LOW-2 closure (Wave 47 B2 audit): tighten umask BEFORE bind so the
+        # socket is created with owner-only perms from the start. Combined with the
+        # explicit `os.chmod()` below this eliminates the TOCTOU window where a
+        # concurrent process could open the socket during creation (umask of 0o022
+        # would have initial perms 0o755). `listen()` is not called yet, so no
+        # accept() can happen even in the theoretical window, but defense-in-depth
+        # is cheap here.
+        _old_umask = os.umask(0o077)
+        try:
+            server.bind(str(self.socket_path))
+        finally:
+            os.umask(_old_umask)
         os.chmod(str(self.socket_path), IPC_SOCKET_PERMISSIONS)
         server.listen(IPC_SOCKET_BACKLOG)
         server.settimeout(IPC_SOCKET_TIMEOUT_SEC)
