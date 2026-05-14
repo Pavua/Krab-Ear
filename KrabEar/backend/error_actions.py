@@ -118,6 +118,24 @@ def _open_pyannote_hf_page(*, settings_service, **kwargs) -> dict:
     return _open_url("https://huggingface.co/pyannote/voice-activity-detection")
 
 
+def _open_logs(*, settings_service, **kwargs) -> dict:
+    """Open the KrabEar logs/data directory in Finder so user can delete old files.
+
+    Used by disk.low_space actionable toast — Wave 60.
+    """
+    import os
+    logs_dir = os.path.expanduser("~/Library/Application Support/KrabEar")
+    try:
+        subprocess.run(["open", logs_dir], check=True)
+        return {
+            "executed": True,
+            "reason": None,
+            "side_effect": f"opened_finder_at:{logs_dir}",
+        }
+    except subprocess.CalledProcessError as exc:
+        return {"executed": False, "reason": f"open_failed: {exc}", "side_effect": None}
+
+
 def _open_terminal_make_release(*, settings_service, **kwargs) -> dict:
     """Open Terminal at the repo root so user can run `make release` to
     sync the two-binary drift. Cannot run `make release` directly —
@@ -150,6 +168,8 @@ ACTION_HANDLERS: dict[str, Callable] = {
     # agent.binary_drift).
     "open_pyannote_hf_page": _open_pyannote_hf_page,
     "open_terminal_make_release": _open_terminal_make_release,
+    # Wave 60 — open KrabEar data dir for disk.low_space actionable.
+    "open_logs": _open_logs,
 }
 
 

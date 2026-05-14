@@ -1743,6 +1743,11 @@ class AudioEngine:
                     f"MemoryError loading {model_name} — switching to balanced",
                     severity="error",
                 )
+                # Wave 60: stt.oom_model_evicted — model evicted from fallback chain
+                self._push_error(
+                    "stt.oom_model_evicted",
+                    f"MemoryError evicted {model_name} from STT chain",
+                )
             except OSError as e:
                 # errno 12 = Cannot allocate memory — ядро отказало в mmap
                 if e.errno == 12 or "Cannot allocate memory" in str(e):
@@ -1753,6 +1758,11 @@ class AudioEngine:
                         "stt.load_fail",
                         f"OOM (OSError errno={e.errno}) loading {model_name}",
                         severity="error",
+                    )
+                    # Wave 60: stt.oom_model_evicted — OS-level OOM eviction
+                    self._push_error(
+                        "stt.oom_model_evicted",
+                        f"OSError errno={e.errno} evicted {model_name} from STT chain",
                     )
                 else:
                     logger.warning("Модель %s не сработала (OSError): %s", model_name, e)

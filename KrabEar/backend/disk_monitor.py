@@ -58,6 +58,10 @@ class DiskSpaceMonitor:
         self._last_disk_level: str | None = None
         self._last_history_large_emitted: bool = False
 
+        # Late-injected by BackendService after construction (Phase B Wave 60).
+        # If None, disk.low_space errors are not pushed to the error bus.
+        self._error_bus: Any | None = None
+
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
@@ -226,6 +230,8 @@ class DiskSpaceMonitor:
                     free_gb,
                 )
                 self._last_disk_level = level
+                # Wave 60: push disk.low_space to error bus (severity matches level)
+                self._push_disk_error(level, free_gb)
 
                 # Auto-cleanup hook: если AUTO_CLEANUP_ENABLED и диск критический
                 if (
@@ -253,6 +259,36 @@ class DiskSpaceMonitor:
                 self._last_history_large_emitted = True
         else:
             self._last_history_large_emitted = False
+
+    def _push_disk_error(self, level: str, free_gb: float) -> None:
+        """Push disk.low_space error to error bus. Never raises.
+
+        Wave 60: severity mirrors threshold level (warn for DISK_WARNING_GB,
+        critical for DISK_CRITICAL_GB) by overriding the registry default.
+        """
+        error_bus = self._error_bus
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            severity = "critical" if level == "critical" else "warn"
+            entry = ERROR_REGISTRY.get("disk.low_space", {})
+            err = KrabError(
+                severity=severity,
+                component="disk",
+                code="disk.low_space",
+                message_user=entry.get("user_msg_ru", "Мало места на диске"),
+                message_debug=f"disk.{level}: {free_gb:.2f} GB free",
+                timestamp=datetime.now(timezone.utc),
+                context={"level": level, "free_gb": free_gb},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("DiskSpaceMonitor: error_bus.push failed")
 
     def _trigger_auto_cleanup(self) -> None:
         """Запускает авто-очистку старых записей в фоновом потоке."""

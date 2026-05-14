@@ -144,6 +144,7 @@ class AudioRecorder:
                     data, overflowed = stream.read(self.chunk_size)
                     if overflowed:
                         logger.warning("Переполнение аудиобуфера во время записи")
+                        self._push_buffer_overflow_error()
                     with self._lock:
                         self._chunks.append(data.copy())
                     if self._on_audio_level is not None:
@@ -162,3 +163,32 @@ class AudioRecorder:
         finally:
             with self._lock:
                 self._is_recording = False
+
+    def _push_buffer_overflow_error(self) -> None:
+        """Push audio.buffer_overflow to error bus. Never raises.
+
+        Wave 60: late-injected _error_bus attribute (set by BackendService).
+        The error_codes registry has dedupe_seconds=5 so spam is suppressed.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("audio.buffer_overflow", {})
+            err = KrabError(
+                severity=entry.get("severity", "warn"),
+                component="audio",
+                code="audio.buffer_overflow",
+                message_user=entry.get("user_msg_ru", "Аудиобуфер переполнен"),
+                message_debug="sounddevice stream.read overflowed=True",
+                timestamp=datetime.now(timezone.utc),
+                context={},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("AudioRecorder: error_bus.push failed")

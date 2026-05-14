@@ -318,4 +318,83 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 86400,  # once per day
     },
+
+    # ── Wave 60: production findings ─────────────────────────────
+
+    # rewriter.warmup_timeout — LM Studio warmup probe returned Timeout
+    # during warmup_probe(). Distinct from rewriter.warmup_failed (generic
+    # fail) — this specifically indicates a network-level timeout (LM Studio
+    # alive but model JIT cold-load stalled). Observed as chronic warmup
+    # log entries. Action: open LM Studio to check model state.
+    "rewriter.warmup_timeout": {
+        "user_msg_ru": (
+            "Rewriter warmup не завершился по таймауту — LM Studio жив но модель "
+            "ещё грузится. Откройте LM Studio для проверки."
+        ),
+        "actionable": True,
+        "action_id": "open_lm_studio_settings",
+        "action_label": "Открыть LM Studio",
+        "severity": "warn",
+        "dedupe_seconds": 120,
+    },
+
+    # disk.low_space — DiskSpaceMonitor detected free space below threshold.
+    # Severity matches threshold level: warn for DISK_WARNING_GB,
+    # critical for DISK_CRITICAL_GB. Action: open Logs dir so user can delete.
+    "disk.low_space": {
+        "user_msg_ru": (
+            "Мало свободного места на диске — освободите место "
+            "или удалите старые записи."
+        ),
+        "actionable": True,
+        "action_id": "open_logs",
+        "action_label": "Открыть папку логов",
+        "severity": "warn",
+        "dedupe_seconds": 300,
+    },
+
+    # audio.buffer_overflow — recorder.py detected sounddevice buffer overflow
+    # (overflowed=True from stream.read). Indicates system load causing audio
+    # chunks to be dropped. No action possible; dedupe 5s to avoid spam.
+    "audio.buffer_overflow": {
+        "user_msg_ru": (
+            "Аудиобуфер переполнен — возможны пропуски в записи "
+            "(высокая нагрузка на систему)."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 5,
+    },
+
+    # stt.oom_model_evicted — MemoryError or OOM OSError when loading STT
+    # model (separate from mlx.oom which is inference-time). This fires on
+    # model init failure in the fallback chain. No recovery action; the
+    # chain already falls back to next model.
+    "stt.oom_model_evicted": {
+        "user_msg_ru": (
+            "STT модель выгружена из-за нехватки памяти — "
+            "переключился на запасную модель."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 60,
+    },
+
+    # stt.gigaam_worker_timeout — GigaAM subprocess worker did not respond
+    # within the timeout window; _timeout_kill() sent SIGTERM. Worker will
+    # be respawned on next transcription attempt. No user action needed.
+    "stt.gigaam_worker_timeout": {
+        "user_msg_ru": (
+            "GigaAM воркер не ответил вовремя — перезапущу на следующей записи."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 30,
+    },
 }
