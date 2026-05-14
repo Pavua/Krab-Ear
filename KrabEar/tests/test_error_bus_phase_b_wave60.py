@@ -10,11 +10,10 @@ One test per new code:
 from __future__ import annotations
 
 import sys
-import os
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 # Allow imports from KrabEar/
 _HERE = Path(__file__).resolve().parent
@@ -223,14 +222,9 @@ class STTOomModelEvictedTests(unittest.TestCase):
         Use a lightweight stub rather than importing AudioEngine directly
         to avoid pyannote/torchcodec heavy imports in unit test context.
         """
-        from datetime import datetime, timezone
-
         bus, captured = _make_error_bus()
 
         # Replicate the _push_error logic from engine.py with a stub
-        from backend.error_bus import KrabError
-        from backend.error_codes import ERROR_REGISTRY
-
         code = "stt.oom_model_evicted"
         entry = ERROR_REGISTRY[code]
         err = KrabError(
