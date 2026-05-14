@@ -317,6 +317,12 @@ class TestGigaAMAdapterImportError(unittest.TestCase):
             self.assertIn(engine._GIGAAM_MARKER, engine._unavailable_models)
 
 
+@unittest.skipIf(
+    os.environ.get("CI") == "true",
+    "TestGigaAMDisabled triggers AudioEngine init + mlx_whisper on CI — "
+    "crashes xdist worker on Py3.12 macOS-latest (no Metal GPU). "
+    "Same pattern as TestGigaAMAdapterImportError/TestGigaAMEnabledNonRuLanguage.",
+)
 class TestGigaAMDisabled(unittest.TestCase):
     """GigaAM disabled → не вызывается."""
 
