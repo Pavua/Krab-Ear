@@ -40,6 +40,7 @@ def get_processes() -> list[dict]:
                     "rss_mb": proc.info["memory_info"].rss / 1024 / 1024,
                     "vsz_mb": proc.info["memory_info"].vms / 1024 / 1024,
                     "cmd_short": cmdline.split("/")[-1][:50],
+                    "cmdline": cmdline,
                 })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -75,9 +76,9 @@ def take_snapshot() -> dict:
     return {
         "timestamp": datetime.now().isoformat(),
         "uptime_sec": diag.get("system", {}).get("uptime_sec", 0),
-        "agent_rss_mb": next((p["rss_mb"] for p in procs if "KrabEarAgent" in p["cmd_short"]), 0),
-        "backend_rss_mb": next((p["rss_mb"] for p in procs if "service.py" in p["cmd_short"]), 0),
-        "worker_rss_mb_total": sum(p["rss_mb"] for p in procs if "gigaam_worker" in p["cmd_short"]),
+        "agent_rss_mb": next((p["rss_mb"] for p in procs if "KrabEarAgent" in p["cmdline"]), 0),
+        "backend_rss_mb": next((p["rss_mb"] for p in procs if "KrabEar/backend/service.py" in p["cmdline"]), 0),
+        "worker_rss_mb_total": sum(p["rss_mb"] for p in procs if "gigaam_worker" in p["cmdline"]),
         "history_total_items": diag.get("history", {}).get("total_items", 0),
         "llm_circuit": diag.get("llm", {}).get("circuit_state", "unknown"),
     }
