@@ -158,6 +158,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // немедленно завершаем этот процесс (не убивая старый экземпляр).
         guard acquireFileLock(logger: logger) else {
             // Другой экземпляр Krab Ear уже запущен и держит lock.
+            SentryConfig.recordTerminate(callsite: "acquire_file_lock_duplicate")
             NSApp.terminate(nil)
             return
         }
