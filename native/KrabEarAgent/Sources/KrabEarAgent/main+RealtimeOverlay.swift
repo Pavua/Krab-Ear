@@ -38,9 +38,23 @@ extension AgentAppDelegate {
         lastPreviewTranslationFailureAt = 0
         lastPreviewTranslationFailures = 0
         lastPreviewTranslationSuccessAt = 0
+        previewSilenceTickCount = 0
+        previewLastAudioRms = 1.0
         realtimeOverlay.stopPartialSSE()
         realtimeOverlay.hide()
     }
+
+    // MARK: - A3 Adaptive backoff constants
+
+    /// RMS below this threshold is considered silence (normalised 0–1 scale).
+    /// Typical speech is 0.05–0.3; idle mic noise is < 0.01.
+    static let previewSilenceRmsThreshold: Double = 0.02
+    /// After this many consecutive silence ticks the poll interval widens to `previewSilenceInterval`.
+    static let previewSilenceTicksToBackoff: Int = 3
+    /// Active-speech poll interval (seconds).
+    static let previewActiveInterval: TimeInterval = 0.85
+    /// Silence poll interval (seconds) — 3.5× slower, saves CPU + IPC round-trips.
+    static let previewSilenceInterval: TimeInterval = 3.0
 
     func refreshRealtimeOverlay() {
         guard isRecording, settings.realtimePreviewEnabled else {
@@ -75,9 +89,60 @@ extension AgentAppDelegate {
                 )
                 if let audioRms {
                     self.realtimeOverlay.setAudioLevel(Float(audioRms))
+                    // A3: adaptive backoff — throttle polling when mic is silent
+                    self.updatePreviewPollingInterval(rms: audioRms)
                 }
             }
         }
+    }
+
+    // MARK: - A3 Adaptive polling interval
+
+    /// Adjusts the realtimeOverlayTimer interval based on observed audio RMS.
+    ///
+    /// Logic:
+    ///  - Each call below `previewSilenceRmsThreshold` increments `previewSilenceTickCount`.
+    ///  - After `previewSilenceTicksToBackoff` consecutive silent ticks the timer is
+    ///    replaced with a `previewSilenceInterval` (3.0 s) timer.
+    ///  - Any tick with RMS ≥ threshold resets the counter and restores the fast
+    ///    `previewActiveInterval` (0.85 s) timer if currently in backoff mode.
+    ///
+    /// Timer replacement only happens on mode transitions to avoid recreation churn.
+    func updatePreviewPollingInterval(rms: Double) {
+        let isSilent = rms < AgentAppDelegate.previewSilenceRmsThreshold
+        let currentInterval = realtimeOverlayTimer?.timeInterval ?? AgentAppDelegate.previewActiveInterval
+
+        if isSilent {
+            previewSilenceTickCount += 1
+            let shouldBackoff = previewSilenceTickCount >= AgentAppDelegate.previewSilenceTicksToBackoff
+            if shouldBackoff, currentInterval < AgentAppDelegate.previewSilenceInterval - 0.1 {
+                // Transition → slow polling
+                restartPreviewTimer(interval: AgentAppDelegate.previewSilenceInterval)
+            }
+        } else {
+            // Audio detected — reset silence counter and restore fast polling if needed
+            if previewSilenceTickCount >= AgentAppDelegate.previewSilenceTicksToBackoff,
+               currentInterval > AgentAppDelegate.previewActiveInterval + 0.1 {
+                // Transition → fast polling
+                restartPreviewTimer(interval: AgentAppDelegate.previewActiveInterval)
+            }
+            previewSilenceTickCount = 0
+        }
+        previewLastAudioRms = rms
+    }
+
+    /// Replaces the polling timer with a new one at `interval` seconds.
+    /// Must be called on the main thread.
+    private func restartPreviewTimer(interval: TimeInterval) {
+        realtimeOverlayTimer?.invalidate()
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.refreshRealtimeOverlay()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        realtimeOverlayTimer = t
     }
 
     func previewTranslationModeHint() -> String {

@@ -50,6 +50,9 @@ _POSITIVE_WORDS: dict[str, list[str]] = {
     ],
 }
 
+# Precompiled regex for tokenization — called on every _tokenize() invocation
+_RE_WORD_TOKENS = re.compile(r"[А-Яа-яёЁA-Za-zÀ-ÿ]+")
+
 # ── Dataclass результата ──────────────────────────────────────────────────────
 
 
@@ -204,7 +207,7 @@ class EmotionDetector:
     @classmethod
     def _tokenize(cls, text: str) -> list[str]:
         """Разбивает текст на токены (слова), приводит к нижнему регистру."""
-        raw = re.findall(r"[А-Яа-яёЁA-Za-zÀ-ÿ]+", text)
+        raw = _RE_WORD_TOKENS.findall(text)
         return [w.lower() for w in raw if len(w) >= cls.MIN_WORD_LEN]
 
     @staticmethod

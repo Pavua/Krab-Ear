@@ -88,11 +88,15 @@ _RE_TECH_WITH_DIGITS = re.compile(r"\b([A-Za-zА-Яа-я]+[0-9]+[A-Za-zА-Яа-�
 _RE_ABBREV = re.compile(r"\b([A-ZА-Я]{2,})\b")
 # Слова для биграмм/триграмм
 _RE_WORD = re.compile(r"[А-Яа-яA-Za-zÁÉÍÓÚáéíóúÑñÜü]{3,}")
+# Разбиение на предложения по знакам конца (lookbehind)
+_RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# Очистка слова от не-буквенных кириллических/unicode символов
+_RE_WORD_CLEAN = re.compile(r"[^\wА-Яа-я]")
 
 
 def _sentences(text: str) -> list[str]:
     """Разбивает текст на предложения."""
-    return re.split(r"(?<=[.!?])\s+", text.strip())
+    return _RE_SENT_SPLIT.split(text.strip())
 
 
 def _is_stop_word(word: str) -> bool:
@@ -151,7 +155,7 @@ class TermExtractor:
             for i, word in enumerate(words_in_sent):
                 if i == 0:
                     continue
-                clean = re.sub(r"[^\wА-Яа-я]", "", word, flags=re.UNICODE)
+                clean = _RE_WORD_CLEAN.sub("", word)
                 if not clean or len(clean) < self.min_term_length:
                     continue
                 if _RE_CAPITALIZED.match(clean) and not _is_stop_word(clean):

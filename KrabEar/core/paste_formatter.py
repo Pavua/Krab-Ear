@@ -19,6 +19,9 @@ from typing import Any
 
 _log = logging.getLogger("KrabEar.Core.PasteFormatter")
 
+# Precompiled regex — разбиение на предложения по знакам конца (lookbehind)
+_RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
 # ---------------------------------------------------------------------------
 # Встроенные форматтеры (чистые функции)
 # ---------------------------------------------------------------------------
@@ -32,7 +35,7 @@ def _fmt_telegram(text: str) -> str:
         text = text[:-1]
     # Разбиваем на предложения, если текст длинный (>120 символов)
     if len(text) > 120:
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        sentences = _RE_SENT_SPLIT.split(text)
         text = "\n".join(s.strip() for s in sentences if s.strip())
     return text
 
@@ -142,7 +145,7 @@ def _apply_rules(text: str, rules: dict) -> str:
         text = text[:-1]
 
     if rules.get("bullet_sentences"):
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        sentences = _RE_SENT_SPLIT.split(text)
         if len(sentences) > 1:
             text = "\n".join(f"• {s.strip()}" for s in sentences if s.strip())
 

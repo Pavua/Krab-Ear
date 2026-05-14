@@ -53,9 +53,13 @@ def _stem_ru(word: str) -> str:
     return word
 
 
+# Precompiled regex for tokenization — called on every history item and every query
+_RE_TOKEN = re.compile(r"[а-яёa-z0-9]+")
+
+
 def _tokenize(text: str) -> list[str]:
     """Разбивает текст на слова (unicode-aware), возвращает стемминизированные токены."""
-    words = re.findall(r"[а-яёa-z0-9]+", text.lower())
+    words = _RE_TOKEN.findall(text.lower())
     return [_stem_ru(w) for w in words]
 
 
@@ -130,7 +134,7 @@ class SearchIndex:
         # AND: пересечение множеств item_id для каждого токена
         candidate_sets: list[set[str]] = []
         matched_per_token: dict[str, str] = {}  # token -> original query word
-        raw_words = re.findall(r"[а-яёa-z0-9]+", query.lower())
+        raw_words = _RE_TOKEN.findall(query.lower())
 
         for i, token in enumerate(query_tokens):
             ids = self._index.get(token)

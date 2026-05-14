@@ -47,6 +47,10 @@ _RE_TECH = re.compile(
 _RE_CAP_MID = re.compile(r"(?<=[.!?\s])([А-ЯA-Z][А-Яа-яa-z]{2,})\b")
 # Длинные слова (7+ символов) не из стоп-списка — вероятно предметная лексика
 _RE_LONG_WORD = re.compile(r"\b([А-Яа-яA-Za-zÁÉÍÓÚáéíóúÑñ]{7,})\b")
+# Разбиение текста на предложения
+_RE_SENT_SPLIT = re.compile(r"[.!?]+")
+# Очистка слова от не-буквенных символов (кроме дефиса)
+_RE_WORD_CLEAN = re.compile(r"[^\wА-Яа-яÁÉÍÓÚáéíóúÑñ-]")
 
 # Минимальная частота для включения в контекстные слова
 _MIN_WORD_FREQ = 1
@@ -88,12 +92,12 @@ def _extract_notable_words(text: str) -> List[str]:
         _add(m.group(1))
 
     # Заглавные слова не в начале предложения
-    for sent in re.split(r"[.!?]+", text):
+    for sent in _RE_SENT_SPLIT.split(text):
         words = sent.split()
         for i, word in enumerate(words):
             if i == 0:
                 continue
-            clean = re.sub(r"[^\wА-Яа-яÁÉÍÓÚáéíóúÑñ-]", "", word, flags=re.UNICODE)
+            clean = _RE_WORD_CLEAN.sub("", word)
             if not clean or len(clean) < 3:
                 continue
             if clean[0].isupper() and clean.lower() not in _STOP_WORDS:

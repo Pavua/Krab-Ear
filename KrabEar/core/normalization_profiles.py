@@ -20,6 +20,11 @@ from typing import Any
 
 logger = logging.getLogger("KrabEar.NormalizationProfiles")
 
+# Precompiled regex — используются в apply() и _apply_rule() на каждой транскрипции
+_RE_NORMALIZE_WS = re.compile(r"\s+")
+_RE_CAPITALIZE_SENT = re.compile(r"(?:^|(?<=[.!?…])\s+)([а-яa-z])")
+_RE_STRIP_TRAILING_PERIOD = re.compile(r"[.]+$")
+
 # ── Встроенные профили ──────────────────────────────────────────────────────
 
 _BUILTIN_PROFILES: list[dict[str, Any]] = [
@@ -96,13 +101,13 @@ def _apply_rule(text: str, rule: str) -> str:
         # Капитализируем первую букву каждого предложения
         def _cap(m: re.Match) -> str:
             return m.group(0).upper()
-        result = re.sub(r"(?:^|(?<=[.!?…])\s+)([а-яa-z])", _cap, text)
+        result = _RE_CAPITALIZE_SENT.sub(_cap, text)
         if result and result[0].islower():
             result = result[0].upper() + result[1:]
         return result
 
     if rule == "strip_trailing_period":
-        return re.sub(r"[.]+$", "", text.rstrip())
+        return _RE_STRIP_TRAILING_PERIOD.sub("", text.rstrip())
 
     if rule == "wrap_lines_42":
         # Разбиваем текст на строки по ~42 символа (не ломая слова)
@@ -123,7 +128,7 @@ class NormalizationProfile:
 
     def apply(self, text: str) -> str:
         """Применяет все правила профиля последовательно."""
-        result = re.sub(r"\s+", " ", text).strip()
+        result = _RE_NORMALIZE_WS.sub(" ", text).strip()
         for rule in self.rules:
             result = _apply_rule(result, rule)
         return result.strip()

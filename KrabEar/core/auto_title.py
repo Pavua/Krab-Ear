@@ -45,6 +45,8 @@ _SENTENCE_END_RE = re.compile(r"[.!?…]+\s*")
 
 # Очистка от служебных символов в начале строки
 _LEADING_PUNCT_RE = re.compile(r"^[\s\-—–_*•·:,;]+")
+# Очистка слова от не-буквенных символов при поиске значимого начала
+_RE_WORD_PUNCT = re.compile(r"[^\wА-Яа-яёЁ]")
 
 
 class AutoTitleGenerator:
@@ -207,7 +209,7 @@ class AutoTitleGenerator:
         start_idx = 0
         for i, word in enumerate(words):
             # Очищаем слово от пунктуации для проверки
-            clean_word = re.sub(r"[^\wА-Яа-яёЁ]", "", word, flags=re.UNICODE).lower()
+            clean_word = _RE_WORD_PUNCT.sub("", word).lower()
             if clean_word and clean_word not in _ALL_FILLER_WORDS:
                 start_idx = i
                 break
