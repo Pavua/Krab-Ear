@@ -83,29 +83,37 @@ extension HistoryPanelController {
             return
         }
 
-        guard
-            let response = try? ipcClient.call(method: "get_recording_state", params: [:]),
-            let result = response["result"] as? [String: Any]
-        else {
-            return
-        }
+        // Wave 59: use callAsync to avoid blocking MainActor (was sync IPC every 0.9 s).
+        // The timer Task { @MainActor in ... } context is already async — awaiting here
+        // yields MainActor while IPC is in-flight instead of spinning the runloop.
+        let ipcClient = self.ipcClient
+        Task { @MainActor in
+            guard
+                let response = try? await ipcClient.callAsync(
+                    method: "get_recording_state", params: [:]),
+                let result = response["result"] as? [String: Any]
+            else {
+                return
+            }
 
-        let isRecording = (result["is_recording"] as? Bool) ?? false
-        let durationSec = (result["duration_sec"] as? Double) ?? 0.0
-        let previewText = ((result["preview_text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let durationText = HistoryPanelController.formatDuration(durationSec)
+            let isRecording = (result["is_recording"] as? Bool) ?? false
+            let durationSec = (result["duration_sec"] as? Double) ?? 0.0
+            let previewText = ((result["preview_text"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let durationText = HistoryPanelController.formatDuration(durationSec)
 
-        if isRecording {
-            realtimeStatusLabel.stringValue = "Realtime: запись \(durationText)"
-            realtimeTextView.string = previewText.isEmpty
-                ? "Слушаю... первые слова появятся через ~1-2 секунды."
-                : previewText
-        } else {
-            realtimeStatusLabel.stringValue = "Realtime: idle"
-            if previewText.isEmpty {
-                realtimeTextView.string = "Запись не активна."
+            if isRecording {
+                self.realtimeStatusLabel.stringValue = "Realtime: запись \(durationText)"
+                self.realtimeTextView.string = previewText.isEmpty
+                    ? "Слушаю... первые слова появятся через ~1-2 секунды."
+                    : previewText
             } else {
-                realtimeTextView.string = previewText
+                self.realtimeStatusLabel.stringValue = "Realtime: idle"
+                if previewText.isEmpty {
+                    self.realtimeTextView.string = "Запись не активна."
+                } else {
+                    self.realtimeTextView.string = previewText
+                }
             }
         }
     }
