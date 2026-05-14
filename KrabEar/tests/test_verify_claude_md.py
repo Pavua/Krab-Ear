@@ -3,6 +3,7 @@
 Phase C C.8: Documentation drift verification.
 """
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,14 @@ class TestFileExistsInRepo:
         assert not self.mod.file_exists_in_repo("GhostFile.swift")
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from *text*."""
+    return _ANSI_RE.sub("", text)
+
+
 class TestMainScript:
     """Integration tests — run script as subprocess."""
 
@@ -113,8 +122,9 @@ class TestMainScript:
             f"Unexpected exit code {result.returncode}:\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        # One of the two expected output lines must be present
-        combined = result.stdout + result.stderr
+        # Strip ANSI color codes before matching so colored output (e.g.
+        # "\x1b[32mOK\x1b[0m — ...") is handled correctly.
+        combined = _strip_ansi(result.stdout + result.stderr)
         assert "DRIFT DETECTED" in combined or "OK —" in combined
 
     def test_exit_code_2_on_missing_claude_md(self):
