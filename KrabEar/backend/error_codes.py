@@ -397,4 +397,46 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 30,
     },
+
+    # ── Wave 61: final missing codes ─────────────────────────────
+
+    # vgw.reconnect — VGWebSocketClient disconnected from Voice Gateway and
+    # is entering exponential-backoff reconnect loop. Dedupe 120s to prevent
+    # spam during backoff (max backoff interval is 10s, so a single disconnect
+    # can fire many log lines before reconnecting).
+    "vgw.reconnect": {
+        "user_msg_ru": "Голосовой шлюз отключился — переподключаемся...",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 120,
+    },
+
+    # stt.diarization_skipped — diarization was requested but unavailable at
+    # inference time: either WhisperX pipeline raised (engine.py:2234) or
+    # pyannote pipeline failed to initialise (engine.py:2715 — already covered
+    # by diarization.pipeline_fail). This code covers the WhisperX failure path
+    # which previously had no dedicated code. Dedupe 600s — one toast per session.
+    "stt.diarization_skipped": {
+        "user_msg_ru": "Спикеры не определены — диаризация недоступна",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "info",
+        "dedupe_seconds": 600,
+    },
+
+    # rewriter.lm_studio_500 — LM Studio returned HTTP 500 with an HTML body
+    # (not the specific mlx_lm token-bug handled by rewriter.mlx_token_bug).
+    # Indicates LM Studio internal crash / OOM / model load failure.
+    # Action: open LM Studio so user can restart the server.
+    "rewriter.lm_studio_500": {
+        "user_msg_ru": "LM Studio вернул HTTP 500 — попробуй перезапустить сервер",
+        "actionable": True,
+        "action_id": "open_lm_studio_settings",
+        "action_label": "Открыть LM Studio",
+        "severity": "error",
+        "dedupe_seconds": 60,
+    },
 }

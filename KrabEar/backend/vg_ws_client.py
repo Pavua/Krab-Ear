@@ -61,6 +61,10 @@ class VGWebSocketClient:
                 if self._stop.is_set():
                     break
                 logger.warning("VG WS disconnected (%s), reconnect in %.0fs", exc, backoff)
+                self._push_error(
+                    "vgw.reconnect",
+                    f"{type(exc).__name__}: {exc} (reconnect in {backoff:.0f}s)",
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, _RECONNECT_MAX_SEC)
 
@@ -69,3 +73,28 @@ class VGWebSocketClient:
     def stop(self) -> None:
         """Сигнал остановки. Безопасно вызывать из другого потока."""
         self._stop.set()
+
+    def _push_error(self, code: str, message_debug: str) -> None:
+        """Push KrabError to late-injected ErrorBus. Never raises."""
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code, {})
+            err = KrabError(
+                severity=entry.get("severity", "warn"),
+                component="vgw",
+                code=code,
+                message_user=entry.get("user_msg_ru", "VGW ошибка"),
+                message_debug=message_debug,
+                timestamp=datetime.now(timezone.utc),
+                context={"session_id": self.session_id, "ws_url": self.ws_url},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("error_bus.push failed for code=%s", code)

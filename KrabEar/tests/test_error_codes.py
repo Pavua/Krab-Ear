@@ -74,5 +74,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "audio.buffer_overflow",
             "stt.oom_model_evicted",
             "stt.gigaam_worker_timeout",
+            # Added Wave 61 — 3 final missing codes:
+            # VGW reconnect / diarization skipped / LM Studio HTTP 500 HTML
+            "vgw.reconnect",
+            "stt.diarization_skipped",
+            "rewriter.lm_studio_500",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
