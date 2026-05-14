@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template for ai.krab.ear.agent launchd job (Wave 59 — Swift agent self-recovery).
+
+  Зачем launchd для Swift agent (в дополнение к ai.krab.ear.backend):
+  - Phase A HealthMonitor пингует Python backend каждые 3s и зовёт restartIfDead.
+    Это закрывает gap «backend умер».
+  - Но если сам Swift agent process умер (Sentry crash, OOM Jetsam, accident kill),
+    некому пинговать → backend остаётся живым, но никто не реагирует на хоткей,
+    history panel, paste flow. Из 12h post-Wave 58 audit: 04:07Z FAIL =
+    «Swift agent 0 procs», recovery only через user activity.
+  - launchd KeepAlive=true для agent label respawn'ит binary за ThrottleInterval (10s)
+    независимо от того, как именно он умер.
+
+  Запускает бинарь из ШИП-bundled .app пути (не native/runtime/) чтобы TCC
+  grants не сбивались (см. CLAUDE.md "Two-binary drift" raid).
+
+  Install via: scripts/install_agent_launchagent.command
+  Stop via:    launchctl bootout gui/$UID/ai.krab.ear.agent
+  Status via:  launchctl print gui/$UID/ai.krab.ear.agent
+
+  Opt-in: пользователь явно вызывает install. Без plist agent запускается
+  только через Dock click / Start Krab Ear.command (старый паттерн).
+  SingleInstanceGuard разрулит конфликты — newer process убивает older.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.krab.ear.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__AGENT_BINARY__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 10s ThrottleInterval — больше чем backend (5s) потому что Swift agent
+       не должен «спамиться» рестартами; для UI app допустима пауза. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Graceful shutdown timeout (NSApp.terminate cleanup). -->
+  <key>ExitTimeOut</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-agent.err.log</string>
+</dict>
+</plist>
