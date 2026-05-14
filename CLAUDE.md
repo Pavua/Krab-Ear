@@ -53,7 +53,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/collection_manager.py`** — `CollectionManager`: named collections of history items; CRUD + bulk operations.
 - **`backend/daily_digest.py`** — `DailyDigestGenerator`: daily summary digest of transcription activity.
 - **`backend/integrity_checker.py`** — `IntegrityChecker`: NDJSON integrity validation and repair for history store.
-- **`backend/period_comparison.py`** — `PeriodComparator`: compare transcription statistics across arbitrary time periods.
+- **`backend/period_comparison.py`** — `PeriodComparisonService`: compare transcription statistics across arbitrary time periods.
 - **`backend/quality_trends.py`** — `QualityTrendAnalyzer`: track confidence/quality trends over time.
 - **`backend/speaker_manager.py`** — `SpeakerManager`: persistent speaker profiles and rename/merge for diarization output.
 - **`core/punctuation_fixer.py`** — `PunctuationFixer`: rule-based Russian/Spanish punctuation correction.
@@ -70,16 +70,16 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/export_scheduler.py`** — `ExportScheduler`: scheduled auto-export to file on configurable interval.
 - **`backend/feature_flags.py`** — `FeatureFlags`: runtime on/off flags for experimental features.
 - **`backend/hotword_detector.py`** — `HotwordDetector`: scan transcripts for trigger words.
-- **`backend/html_report.py`** — `HtmlReportGenerator`: standalone HTML analytics report.
+- **`backend/html_report.py`** — `HTMLReportGenerator`: standalone HTML analytics report.
 - **`backend/input_sanitizer.py`** — `InputSanitizer`: validate and sanitize IPC params.
 - **`backend/ipc_throttle.py`** — `IPCThrottle`: per-method rate limiting (token bucket) for heavy IPC calls.
 - **`backend/keyword_cloud.py`** — `KeywordCloudGenerator`: word-cloud data (count, weight, font_size) from history.
 - **`backend/language_learning.py`** — `LanguageLearningManager`: bilingual vocabulary extraction and flashcard generation.
 - **`backend/model_cache_manager.py`** — `ModelCacheManager`: HuggingFace model cache management.
 - **`backend/performance_profiler.py`** — `PerformanceProfiler`: elapsed-time profiling for backend operations.
-- **`backend/period_comparison.py`** — `PeriodComparator`: compare transcription statistics across arbitrary time periods. *(listed above)*
+- **`backend/period_comparison.py`** — `PeriodComparisonService`: compare transcription statistics across arbitrary time periods. *(listed above)*
 - **`backend/playback_tracker.py`** — `PlaybackTracker`: persistent playback event tracking (play count, total listened).
-- **`backend/plugin_system.py`** — `PluginSystem`: simple plugin loader for extensibility.
+- **`backend/plugin_system.py`** — `PluginManager`: simple plugin loader for extensibility.
 - **`backend/recording_chain.py`** — `RecordingChainManager`: link related recordings into ordered chains.
 - **`backend/recording_comparison.py`** — `RecordingComparison`: side-by-side multi-recording comparison (similarity matrix, shared words).
 - **`backend/recording_insights.py`** — `RecordingInsightsGenerator`: heuristic insight generation from recording patterns.
@@ -154,7 +154,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 #### Twilio / provider abstraction (Phase 3 step 5):
 - **`backend/twilio_adapter.py`** — `TwilioAdapter`: Twilio REST API adapter, same interface as `TelnyxAdapter`. Active provider selected via `CALL_PROVIDER` setting (`telnyx` | `twilio`); swap at runtime without code changes.
 - **`backend/call_provider.py`** — `CallProvider`: Protocol (structural typing) defining the common interface all telephony adapters must implement.
-- **`backend/call_provider_factory.py`** — `CallProviderFactory`: returns the active `CallProvider` adapter instance based on `CALL_PROVIDER` setting.
+- **`backend/call_provider_factory.py`** — `get_provider()`: returns the active `CallProvider` adapter instance based on `CALL_PROVIDER` setting.
 
 #### Additional backend modules:
 - **`backend/action_items_extractor.py`** — `ActionItemsExtractor`: extract tasks, decisions, and questions from meeting transcripts with priority tagging.
@@ -171,7 +171,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`backend/health_checker.py`** — `HealthChecker`: aggregate readiness checks for all backend subsystems (disk, IPC socket, STT model) into a single status dict.
 - **`backend/ipc_constants.py`** — module-level IPC socket constants (backlog, timeout, max message bytes) shared across service and supervisor.
 - **`backend/job_tracker.py`** — `JobTracker`: thread-safe in-memory store for async transcription job states (queued/running/done/failed/cancelled).
-- **`backend/lm_studio_lifecycle.py`** — `LMStudioLifecycle`: load and unload LM Studio models via REST API with CLI fallback for memory management.
+- **`backend/lm_studio_lifecycle.py`** — `load_model_async()` / `unload_model_async()`: load and unload LM Studio models via REST API with CLI fallback for memory management.
 - **`backend/metadata_enricher.py`** — `MetadataEnricher`: auto-populate language, sentence count, word count, and keywords fields on history items.
 - **`backend/models.py`** — `HistoryItem` and related Pydantic dataclasses (shared data models used across backend services).
 - **`backend/paste_app_memory.py`** — `PasteAppMemory`: remember per-application paste format preferences between sessions.
@@ -205,7 +205,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/number_normalizer.py`** — `NumberNormalizer`: expand spoken Russian and Spanish cardinal/ordinal numerals to digit form in transcripts.
 - **`core/parsing_utils.py`** — shared JSON parsing helpers (`safe_json_loads`) with graceful fallback and context-aware error logging.
 - **`core/stt_router.py`** — `STTRouter`: language-aware routing of audio to the best STT adapter (scored selection or legacy order) with graceful fallback.
-- **`core/transcript_context.py`** — `TranscriptContext`: builds Whisper `initial_prompt` from recent history items and merged hotword/glossary vocabulary within a 30-minute window.
+- **`core/transcript_context.py`** — `build_initial_prompt()`: builds Whisper `initial_prompt` from recent history items and merged hotword/glossary vocabulary within a 30-minute window.
 - **`core/voice_commands.py`** — `VoiceCommandProcessor`: post-STT layer that recognises dictation commands (punctuation, capitalize, delete-last) and applies them to transcript text.
 - **`core/word_timing.py`** — `WordTimingAnalyzer`: analyse per-word timestamps from Whisper segments to detect hesitations, pauses, and speech rhythm.
 
