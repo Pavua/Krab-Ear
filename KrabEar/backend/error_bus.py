@@ -23,6 +23,8 @@ Component = Literal[
     "translation", "mlx", "history", "vocabulary", "hotkey", "ipc",
     # Wave 60 additions
     "disk", "audio", "agent",
+    # Wave 61 additions
+    "vgw",
 ]
 
 

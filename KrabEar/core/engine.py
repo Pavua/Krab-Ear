@@ -2232,6 +2232,11 @@ class AudioEngine:
                 speaker_turns = turns if turns else None
             except Exception as exc:
                 logger.warning("WhisperX diarization не удалась: %s — продолжаю без спикеров", exc)
+                self._push_error(
+                    "stt.diarization_skipped",
+                    f"WhisperX diarization failed: {type(exc).__name__}: {exc}",
+                    severity="info",
+                )
         elif settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
             logger.warning(
                 "WhisperX: WHISPERX_DIARIZATION=True, но HF_TOKEN не задан — "

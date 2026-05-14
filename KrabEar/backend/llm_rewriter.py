@@ -620,6 +620,14 @@ class LLMRewriter:
                     "rewriter.channel_error",
                     f"http_{response.status_code}: {body_preview}",
                 )
+            elif response.status_code == 500 and (
+                "<html" in body_preview.lower() or "<!doctype" in body_preview.lower()
+            ):
+                self._push_error(
+                    "rewriter.lm_studio_500",
+                    f"HTTP 500 HTML body: {body_preview}",
+                    severity="error",
+                )
             else:
                 self._push_error("rewriter.timeout", f"http_{response.status_code}_after_retry")
             return LLMRewriteResult(
