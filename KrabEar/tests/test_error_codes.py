@@ -67,5 +67,12 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "stt.padding_mismatch",
             "diarization.vad_gated",
             "agent.binary_drift",
+            # Added Wave 60 — production call-site findings:
+            # warmup timeout / disk space / buffer overflow / OOM eviction / GigaAM worker timeout
+            "rewriter.warmup_timeout",
+            "disk.low_space",
+            "audio.buffer_overflow",
+            "stt.oom_model_evicted",
+            "stt.gigaam_worker_timeout",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

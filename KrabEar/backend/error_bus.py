@@ -21,6 +21,8 @@ Severity = Literal["info", "warn", "error", "critical"]
 Component = Literal[
     "stt", "rewriter", "paste", "diarization",
     "translation", "mlx", "history", "vocabulary", "hotkey", "ipc",
+    # Wave 60 additions
+    "disk", "audio", "agent",
 ]
 
 

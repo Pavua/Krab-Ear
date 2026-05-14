@@ -486,6 +486,9 @@ class _GigaAMSubprocessSession:
         self._loaded = False
         # Optional callback for OOM detection: callable(name, returncode, stderr)
         self.oom_callback: Optional[object] = None
+        # Late-injected error bus (Phase B Wave 60). Set by GigaAMAdapter after
+        # session construction. If None, no error_bus push for worker timeout.
+        self._error_bus: Optional[object] = None
         # H3: ring buffer for stderr drain thread (capped at 200 lines).
         # Prevents 64 KB OS pipe-full backpressure when gigaam_worker writes
         # HuggingFace Hub progress / PyTorch warnings to stderr.
@@ -728,6 +731,33 @@ class _GigaAMSubprocessSession:
             self._proc.terminate()
         except Exception:
             pass
+        # Wave 60: push stt.gigaam_worker_timeout to error bus (never raises)
+        self._push_worker_timeout_error()
+
+    def _push_worker_timeout_error(self) -> None:
+        """Push stt.gigaam_worker_timeout to error bus. Never raises."""
+        error_bus = self._error_bus
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("stt.gigaam_worker_timeout", {})
+            err = KrabError(
+                severity=entry.get("severity", "warn"),
+                component="stt",
+                code="stt.gigaam_worker_timeout",
+                message_user=entry.get("user_msg_ru", "GigaAM воркер не ответил вовремя"),
+                message_debug="_timeout_kill fired: worker subprocess terminated",
+                timestamp=datetime.now(timezone.utc),
+                context={},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("_GigaAMSubprocessSession: error_bus.push failed")
 
 
 def is_subprocess_venv_available(venv_python_path: Optional[str] = None) -> bool:

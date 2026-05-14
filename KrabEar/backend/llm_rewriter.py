@@ -972,6 +972,10 @@ class LLMRewriter:
                 "LLM warmup failed: exc=Timeout elapsed_ms=%d timeout_sec=%.1f",
                 elapsed_ms, effective_timeout,
             )
+            self._push_error(
+                "rewriter.warmup_timeout",
+                f"warmup_probe Timeout after {elapsed_ms}ms (timeout_sec={effective_timeout:.1f})",
+            )
             return {"ok": False, "latency_ms": elapsed_ms, "error": "timeout"}
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
