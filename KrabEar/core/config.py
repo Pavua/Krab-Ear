@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "qwen3-4b-abliterated"
-    LLM_TIMEOUT_SEC: float = 120.0  # was 5.0 → bumped per fix/sentry-backend-syntax-2026-05-06: cold-load gemma-4-E4B vision multimodal MLX ~20-60s on M-series; under load can spike to 60-120s. Production setting в settings.json уже 120 — здесь default для fresh installs.
+    LLM_TIMEOUT_SEC: float = 240.0  # was 120.0 → bumped fix/lm-studio-warmup: External SSD cold-load gemma-4-26b-a4b-it-optiq ~3-4 min after 30min idle JIT eviction; 240s covers worst-case SSD cold load + queue.
     LLM_CIRCUIT_FAIL_THRESHOLD: int = 3
     LLM_CIRCUIT_INITIAL_RESET_SEC: int = 60
     LLM_CIRCUIT_MAX_RESET_SEC: int = 600
@@ -1023,11 +1023,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # загрузилась в память ДО первой диктовки. Устраняет «первая диктовка ждёт».
     # True по умолчанию: LM Studio lazy-loads модель, warmup делает это заранее.
     "rewriter_warmup_on_startup": True,
-    # Таймаут warmup-пробы в секундах. Загрузка gemma-4 vision multimodal MLX
-    # с SSD: ~20-30 сек обычно, под нагрузкой может быть 30-60 сек.
-    # Bumped 15 → 60 per fix/sentry-backend-syntax-2026-05-06: 15s слишком жёсткий
-    # для vision multimodal cold-load → ложные timeouts на старте.
-    "rewriter_warmup_timeout_sec": 60,
+    # Таймаут warmup-пробы в секундах. External SSD cold-load gemma-4-26b-a4b-it-optiq
+    # после 30min idle JIT eviction: 3-4 min (180-240s). Bumped 60 → 240 per
+    # fix/lm-studio-warmup: JIT TTL 1800s evicts model every 30min idle → chronic
+    # warmup timeouts on next use.
+    "rewriter_warmup_timeout_sec": 240,
+    # Keepalive: пингуем модель каждые 25 min чтобы LM Studio не выгружал её по idle TTL.
+    # Bumped False → True per fix/lm-studio-warmup: eliminates cold-load penalty after idle.
+    "llm_idle_keepalive_enabled": True,
     # --- STT startup warmup ---
     # Предварительная загрузка Whisper-модели при старте бэкенда в background thread.
     # Исключает задержку 1–3 с на первой диктовке (cold-start model load).

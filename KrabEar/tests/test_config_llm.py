@@ -58,11 +58,14 @@ class ConfigLLMFieldsTestCase(unittest.TestCase):
         self.assertEqual(s.LLM_API_KEY, "")
 
     def test_llm_timeout_sec_default(self):
+        # Bumped 120 → 240 (fix/lm-studio-warmup): External SSD cold-load
+        # gemma-4-26b-a4b-it-optiq after 30min idle JIT eviction takes 3-4 min;
+        # 240s covers worst-case SSD cold load + queue drain.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("KRAB_EAR_LLM_TIMEOUT_SEC", None)
             from core.config import Settings
             s = Settings(_env_file=())
-            self.assertEqual(s.LLM_TIMEOUT_SEC, 120.0)
+            self.assertEqual(s.LLM_TIMEOUT_SEC, 240.0)
 
     def test_llm_circuit_fail_threshold_default(self):
         with patch.dict(os.environ, {}, clear=False):
