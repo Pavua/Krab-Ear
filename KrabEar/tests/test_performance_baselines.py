@@ -184,8 +184,9 @@ class NormalizeAudioBaseline(unittest.TestCase):
             rounds=3,
             iters=500,
         )
-        # Missing-file path does only os.path.exists — must be sub-millisecond
-        limit_ms = 1.0
+        # Missing-file path does only os.path.exists — sub-ms on M4 Max,
+        # but CI macOS runners (GitHub Actions) can take ~2-3 ms per call.
+        limit_ms = 5.0
         self.assertLess(
             elapsed_ms,
             limit_ms,
