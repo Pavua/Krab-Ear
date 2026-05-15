@@ -349,6 +349,12 @@ class BackendService:
         self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
         self._cost_estimator = CostEstimator()
         self._audio_converter = AudioConverter()
+        # Wave 64: stt.gigaam.ffmpeg_missing — push once at startup if ffmpeg absent.
+        if not self._audio_converter.is_ffmpeg_available():
+            self._push_startup_error(
+                "stt.gigaam.ffmpeg_missing",
+                "ffmpeg not found in PATH — REST STT disabled",
+            )
         self._auto_backup = AutoBackupManager(
             store=self.store,
             interval_hours=AUTO_BACKUP_INTERVAL_HOURS,
@@ -2584,6 +2590,36 @@ class BackendService:
             action_id=entry["action_id"],
         )
         self._error_bus.push(err)
+
+    def _push_startup_error(self, code: str, debug_msg: str) -> None:
+        """Push a KrabError to the error bus using a registry-defined code.
+
+        Used for one-time startup checks (e.g. missing ffmpeg) that don't
+        have a dedicated call site deeper in the stack. Never raises.
+        """
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get(code)
+            if entry is None:
+                logger.warning("_push_startup_error: unknown code=%s", code)
+                return
+            component = code.split(".")[0] if "." in code else "system"
+            err = KrabError(
+                severity=entry["severity"],
+                component=component,
+                code=code,
+                message_user=entry["user_msg_ru"],
+                message_debug=debug_msg,
+                timestamp=datetime.now(timezone.utc),
+                context={},
+                actionable=entry["actionable"],
+                action_id=entry["action_id"],
+            )
+            self._error_bus.push(err)
+        except Exception:
+            logger.exception("_push_startup_error failed for code=%s", code)
 
     def _check_binary_drift_on_startup(self) -> None:
         """Startup Option-B drift check.

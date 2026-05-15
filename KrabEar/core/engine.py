@@ -1839,6 +1839,19 @@ class AudioEngine:
                             f"{type(e).__name__}: {e} (model={model_name})",
                             severity="critical",
                         )
+                    # Wave 64: mlx.metal_assertion_failure — IOGPUMetal command-buffer
+                    # assertion or uncommitted encoder; recovery is automatic (subprocess).
+                    if any(
+                        kw in _emsg for kw in (
+                            "iogpumetal", "validate failed assertion",
+                            "commit command buffer", "uncommitted encoder",
+                        )
+                    ):
+                        self._push_error(
+                            "mlx.metal_assertion_failure",
+                            f"{type(e).__name__}: {e} (model={model_name})",
+                            severity="error",
+                        )
                     last_err = e
         raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 

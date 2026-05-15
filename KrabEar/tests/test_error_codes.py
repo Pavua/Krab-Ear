@@ -79,5 +79,12 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "vgw.reconnect",
             "stt.diarization_skipped",
             "rewriter.lm_studio_500",
+            # Added Wave 64 — 5 new codes from backend log analysis 2026-05-14/16:
+            # ffmpeg missing / Metal assertion / semaphore leak / empty audio / malloc env leak
+            "stt.gigaam.ffmpeg_missing",
+            "mlx.metal_assertion_failure",
+            "mlx.semaphore_leak",
+            "stt.empty_audio_warning",
+            "system.malloc_env_leak",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

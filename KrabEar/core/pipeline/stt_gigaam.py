@@ -504,6 +504,36 @@ class _GigaAMSubprocessSession:
         """Spawn subprocess + отправить load-команду. Idempotent."""
         if self._proc is not None:
             return
+        # Wave 64: system.malloc_env_leak — strip MALLOC_STACK_LOGGING from the
+        # subprocess environment to prevent macOS from logging the warning
+        # "can't turn off malloc stack logging because it was not enabled".
+        _env = os.environ.copy()
+        if "MALLOC_STACK_LOGGING" in _env:
+            _env.pop("MALLOC_STACK_LOGGING")
+            _error_bus = getattr(self, "_error_bus", None)
+            if _error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("system.malloc_env_leak", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "info"),
+                        component="system",
+                        code="system.malloc_env_leak",
+                        message_user=_entry.get("user_msg_ru", ""),
+                        message_debug=(
+                            "MALLOC_STACK_LOGGING found in subprocess env; "
+                            "stripped before Popen to prevent macOS warning"
+                        ),
+                        timestamp=datetime.now(timezone.utc),
+                        context={},
+                        actionable=False,
+                        action_id=None,
+                    )
+                    _error_bus.push(_err)
+                except Exception:
+                    pass
         try:
             self._proc = subprocess.Popen(
                 [self._venv_python, "-u", self._worker_path],
@@ -512,6 +542,7 @@ class _GigaAMSubprocessSession:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # line-buffered для синхронной работы с readline()
+                env=_env,
             )
         except (OSError, FileNotFoundError) as exc:
             raise RuntimeError(
@@ -593,6 +624,30 @@ class _GigaAMSubprocessSession:
         finally:
             self._proc = None
             self._loaded = False
+            # Wave 64: mlx.semaphore_leak — multiprocessing resource_tracker emits
+            # a "leaked semaphore objects" warning after subprocess shutdown.
+            # Push to error_bus so it appears once per session (dedupe 1800s).
+            _error_bus = getattr(self, "_error_bus", None)
+            if _error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("mlx.semaphore_leak", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="mlx",
+                        code="mlx.semaphore_leak",
+                        message_user=_entry.get("user_msg_ru", ""),
+                        message_debug="GigaAM worker subprocess shutdown: potential semaphore leak",
+                        timestamp=datetime.now(timezone.utc),
+                        context={},
+                        actionable=False,
+                        action_id=None,
+                    )
+                    _error_bus.push(_err)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Internal protocol helpers
