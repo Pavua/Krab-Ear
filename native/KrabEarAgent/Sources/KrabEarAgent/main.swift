@@ -143,6 +143,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var lastPreviewTranslationFailures = 0
     var lastPreviewTranslationSuccessAt: TimeInterval = 0
     var recentAutoPasteFingerprints: [String: TimeInterval] = [:]
+    /// A3 adaptive backoff: consecutive silence ticks (RMS below threshold)
+    var previewSilenceTickCount = 0
+    /// A3 adaptive backoff: last observed audio RMS from get_recording_state
+    var previewLastAudioRms: Double = 1.0
 
     init(options: LaunchOptions) {
         self.options = options

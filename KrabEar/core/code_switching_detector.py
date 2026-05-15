@@ -45,6 +45,8 @@ _CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
 
 # Один или несколько латинских символов (базовый ASCII латинский диапазон)
 _LATIN_RE = re.compile(r"[a-zA-Z]")
+# Удаление знаков препинания и спецсимволов перед анализом скрипта
+_RE_NON_WORD = re.compile(r"[^\w]")
 
 
 def _classify_word(word: str) -> Optional[str]:
@@ -61,7 +63,7 @@ def _classify_word(word: str) -> Optional[str]:
         return None
 
     # Убираем знаки препинания и спецсимволы для анализа скрипта
-    clean = re.sub(r"[^\w]", "", word)
+    clean = _RE_NON_WORD.sub("", word)
     if not clean:
         return None
 

@@ -25,6 +25,8 @@ _ALL_VOWELS = _VOWELS_RU | _VOWELS_ES | _VOWELS_EN
 _RE_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 # Паттерн для токенизации слов (кириллица + латиница + дефис внутри)
 _RE_WORD = re.compile(r"[А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+(?:[-'][А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+)*")
+# Паттерн для очистки дефисов/апострофов при подсчёте длины слова
+_RE_HYPHEN_APOS = re.compile(r"[-']")
 
 
 def _count_syllables(word: str) -> int:
@@ -119,7 +121,7 @@ class ReadabilityScorer:
         avg_sentence_length = word_count / sentence_count if sentence_count else float(word_count)
 
         # Средняя длина слова (в символах, без учёта дефисов)
-        char_lengths = [len(re.sub(r"[-']", "", w)) for w in all_words]
+        char_lengths = [len(_RE_HYPHEN_APOS.sub("", w)) for w in all_words]
         avg_word_length = sum(char_lengths) / word_count if word_count else 0.0
 
         # Среднее число слогов на слово
