@@ -1,4 +1,4 @@
-"""Tests for BulkReprocessor and IPC handlers (bulk_reprocess_start/status/cancel)."""
+"""Tests for BulkReprocessor (bulk_reprocess_start/status/cancel IPC handlers removed in Wave 65)."""
 from __future__ import annotations
 
 import os
@@ -15,7 +15,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.bulk_reprocess import BulkReprocessor, HARD_LIMIT
-from backend.ipc_throttle import HEAVY_METHODS
 
 
 # ---------------------------------------------------------------------------
@@ -327,88 +326,6 @@ class TestBulkReprocessBatchSize(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-class TestBulkReprocessIPCHandlers(unittest.TestCase):
-    """9. IPC handler smoke tests: start / status / cancel.
-
-    Uses a minimal service mock (no full BackendService init) by calling the
-    unbound handler methods with a hand-crafted self object.
-    """
-
-    def _make_service_ns(self):
-        """Build a minimal namespace that satisfies handler method requirements."""
-        import types
-        tmpdir = tempfile.mkdtemp()
-        # Minimal store with text_updates_path support
-        store = MagicMock()
-        import contextlib
-        store._lock = MagicMock(return_value=contextlib.nullcontext())
-        store._load_active_items_unlocked = MagicMock(return_value=[])
-
-        ns = types.SimpleNamespace(
-            store=store,
-            _transcriber=_make_transcriber_mock(),
-            _transcript_versioning=_make_version_manager_mock(),
-            _event_bus=None,
-            _bulk_tasks={},
-            _bulk_tasks_lock=threading.Lock(),
-        )
-        return ns, tmpdir
-
-    def test_start_returns_task_id(self):
-        from backend.service import BackendService
-        ns, tmpdir = self._make_service_ns()
-        try:
-            result = BackendService._handle_bulk_reprocess_start(ns, {"dry_run": True})
-            self.assertIn("task_id", result)
-            self.assertTrue(result["task_id"].startswith("br-"))
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_status_returns_running_or_done(self):
-        from backend.service import BackendService
-        ns, tmpdir = self._make_service_ns()
-        try:
-            start_result = BackendService._handle_bulk_reprocess_start(ns, {"dry_run": True})
-            task_id = start_result["task_id"]
-            # Poll briefly
-            status_result = None
-            for _ in range(20):
-                status_result = BackendService._handle_bulk_reprocess_status(
-                    ns, {"task_id": task_id}
-                )
-                if status_result["status"] in ("done", "failed", "cancelled"):
-                    break
-                time.sleep(0.05)
-            self.assertIsNotNone(status_result)
-            self.assertIn(status_result["status"], ("running", "done", "cancelled", "failed"))
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_cancel_sets_requested(self):
-        from backend.service import BackendService
-        ns, tmpdir = self._make_service_ns()
-        try:
-            start_result = BackendService._handle_bulk_reprocess_start(ns, {"dry_run": False})
-            task_id = start_result["task_id"]
-            cancel_result = BackendService._handle_bulk_reprocess_cancel(
-                ns, {"task_id": task_id}
-            )
-            self.assertTrue(cancel_result["requested"])
-            self.assertEqual(cancel_result["task_id"], task_id)
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-class TestBulkReprocessThrottleCategory(unittest.TestCase):
-    """10. bulk_reprocess_start is in HEAVY_METHODS throttle category."""
-
-    def test_in_heavy_methods(self):
-        self.assertIn("bulk_reprocess_start", HEAVY_METHODS)
 
 
 class TestBulkReprocessEventsEmitted(unittest.TestCase):

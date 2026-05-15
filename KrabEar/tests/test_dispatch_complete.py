@@ -568,12 +568,6 @@ class TestDiagnosticsGroup(_DispatchBase):
 class TestAnalysisGroup(_DispatchBase):
     """Текстовый анализ: язык, термины, сравнение, темп, эмоция."""
 
-    def test_detect_language(self):
-        self.assert_dispatch("detect_language", {"text": "привет мир"}, ok_required=True)
-
-    def test_detect_language_batch(self):
-        self.assert_dispatch("detect_language", {"texts": ["hello", "привет"]}, ok_required=True)
-
     def test_extract_terms(self):
         self.assert_dispatch("extract_terms", {"text": "нейронная сеть машинное обучение"}, ok_required=True)
 
@@ -594,12 +588,6 @@ class TestAnalysisGroup(_DispatchBase):
             "confidence": 0.9,
         }, ok_required=True)
 
-    def test_analyze_speech_pace(self):
-        self.assert_dispatch("analyze_speech_pace", {
-            "text": "Hello world this is a test of speech pace analysis",
-            "duration_sec": 5.0,
-        }, ok_required=True)
-
     def test_detect_emotion(self):
         self.assert_dispatch("detect_emotion", {
             "text": "Я очень рад этому событию!",
@@ -608,11 +596,6 @@ class TestAnalysisGroup(_DispatchBase):
     def test_generate_auto_title(self):
         self.assert_dispatch("generate_auto_title", {
             "text": "Сегодня мы обсуждали планы на следующий квартал.",
-        }, ok_required=True)
-
-    def test_anonymize_text(self):
-        self.assert_dispatch("anonymize_text", {
-            "text": "Иван Иванов, телефон 8-800-555-35-35",
         }, ok_required=True)
 
     def test_post_process_text(self):
@@ -656,22 +639,11 @@ class TestAnalyticsTrendsGroup(_DispatchBase):
     def test_generate_daily_digest(self):
         self.assert_dispatch("generate_daily_digest", {}, ok_required=True)
 
-    def test_analyze_quality_trends(self):
-        self.assert_dispatch("analyze_quality_trends", {"days": 7}, ok_required=True)
-
     def test_get_speaker_statistics(self):
         self.assert_dispatch("get_speaker_statistics", ok_required=True)
 
     def test_get_sentiment_trends(self):
         self.assert_dispatch("get_sentiment_trends", {"days": 7}, ok_required=True)
-
-    def test_compare_periods(self):
-        self.assert_dispatch("compare_periods", {
-            "period1_start": "2026-01-01",
-            "period1_end": "2026-01-15",
-            "period2_start": "2026-01-16",
-            "period2_end": "2026-01-31",
-        }, ok_required=True)
 
     def test_get_analytics_dashboard(self):
         self.assert_dispatch("get_analytics_dashboard", {"days": 7}, ok_required=True)
@@ -840,32 +812,13 @@ class TestNormalizationGroup(_DispatchBase):
     def test_list_normalization_profiles(self):
         self.assert_dispatch("list_normalization_profiles", ok_required=True)
 
-    def test_apply_normalization_profile(self):
-        self.assert_dispatch("apply_normalization_profile", {
-            "text": "  тест  текст  ",
-            "profile": "soft",
-        })
-
 
 # ===========================================================================
 # Группа 17: Голосовые и аудио утилиты
 # ===========================================================================
 
 class TestAudioUtilsGroup(_DispatchBase):
-    """Аудио-утилиты: конвертация, VAD, шум, waveform, fingerprint."""
-
-    def test_convert_audio(self):
-        # Требует файл → ok=False допустимо
-        self.assert_dispatch("convert_audio", {"path": "/nonexistent.mp3"})
-
-    def test_analyze_audio_quality(self):
-        self.assert_dispatch("analyze_audio_quality", {"path": "/nonexistent.wav"})
-
-    def test_analyze_silence(self):
-        self.assert_dispatch("analyze_silence", {"path": "/nonexistent.wav"})
-
-    def test_detect_voice_activity(self):
-        self.assert_dispatch("detect_voice_activity", {"path": "/nonexistent.wav"})
+    """Аудио-утилиты: шум, waveform, fingerprint."""
 
     def test_profile_noise(self):
         self.assert_dispatch("profile_noise", {"path": "/nonexistent.wav"})
@@ -1013,14 +966,6 @@ class TestAbbreviationsGroup(_DispatchBase):
     def test_list_abbreviations(self):
         self.assert_dispatch("list_abbreviations", {"language": "ru"}, ok_required=True)
 
-    def test_add_abbreviation(self):
-        # Params: abbr (abbreviation), expansion, language
-        self.assert_dispatch("add_abbreviation", {
-            "abbr": "ИИ",
-            "expansion": "искусственный интеллект",
-            "language": "ru",
-        }, ok_required=True)
-
     def test_expand_abbreviations(self):
         self.assert_dispatch("expand_abbreviations", {
             "text": "ИИ решает тест задачу",
@@ -1119,9 +1064,6 @@ class TestSmartVocabModelGroup(_DispatchBase):
 
     def test_get_smart_vocabulary_suggestions(self):
         self.assert_dispatch("get_smart_vocabulary_suggestions", {"scan_limit": 10}, ok_required=True)
-
-    def test_auto_update_vocabulary(self):
-        self.assert_dispatch("auto_update_vocabulary", {"min_frequency": 1, "scan_limit": 10}, ok_required=True)
 
     def test_select_model(self):
         self.assert_dispatch("select_model", {"duration_sec": 30.0}, ok_required=True)
@@ -1270,12 +1212,6 @@ class TestSearchArchiveGroup(_DispatchBase):
     def test_get_activity_calendar(self):
         self.assert_dispatch("get_activity_calendar", ok_required=True)
 
-    def test_analyze_word_timing(self):
-        # Требует word-level timing из Whisper — без реального аудио ok=False допустимо
-        self.assert_dispatch("analyze_word_timing", {
-            "word_timestamps": [],
-        })
-
 
 # ===========================================================================
 # Группа 30: Метод unknown — проверка fallback
@@ -1338,22 +1274,21 @@ class TestMethodCountSummary(_DispatchBase):
         "get_audio_devices", "test_microphone",
         "auto_summarize_batch", "list_summary_profiles", "add_summary_profile",
         "filter_by_confidence", "health_check",
-        "analyze_audio_quality", "analyze_silence",
         "get_session_history", "get_session_stats",
         "get_error_report", "get_error_stats",
-        "detect_language", "get_usage_stats",
-        "convert_audio", "get_audio_info", "get_system_info",
+        "get_usage_stats",
+        "get_audio_info", "get_system_info",
         "find_duplicates", "set_annotation", "get_annotation", "search_annotations",
         "create_collection", "delete_collection", "list_collections",
         "add_to_collection", "remove_from_collection",
-        "list_normalization_profiles", "apply_normalization_profile",
+        "list_normalization_profiles",
         "get_collection_items",
         "start_chain", "add_to_chain", "end_chain",
         "get_chain", "list_chains", "merge_chain_text",
         "schedule_recording", "cancel_scheduled_recording", "list_scheduled_recordings",
-        "generate_daily_digest", "analyze_quality_trends",
+        "generate_daily_digest",
         "get_speaker_statistics", "get_recording_insights",
-        "get_sentiment_trends", "compare_periods",
+        "get_sentiment_trends",
         "check_integrity", "repair_integrity",
         "extract_terms", "compare_texts",
         "get_context_memory", "score_readability", "score_transcription",
@@ -1362,24 +1297,23 @@ class TestMethodCountSummary(_DispatchBase):
         "batch", "get_keyword_cloud",
         "prepare_share", "list_shared", "get_shared",
         "save_transcript_version", "get_transcript_versions", "revert_transcript_version",
-        "analyze_speech_pace", "generate_auto_title",
+        "generate_auto_title",
         "format_for_paste", "merge_recordings", "preview_merge", "list_paste_formatters",
         "extract_learning_vocabulary", "generate_flashcards", "get_learning_stats",
         "get_analytics_dashboard", "get_topic_timeline",
         "list_config_presets", "apply_config_preset", "create_config_preset",
-        "anonymize_text",
         "enqueue_transcription", "cancel_transcription",
         "get_queue_status", "list_transcription_queue",
         "detect_emotion",
         "estimate_recording_cost", "get_daily_cost_summary",
         "check_migration", "run_migration",
-        "expand_abbreviations", "add_abbreviation", "remove_abbreviation", "list_abbreviations",
-        "detect_voice_activity", "profile_noise",
+        "expand_abbreviations", "remove_abbreviation", "list_abbreviations",
+        "profile_noise",
         "configure_obsidian_sync", "run_obsidian_sync", "get_obsidian_sync_status",
         "record_playback", "get_playback_stats", "get_most_replayed",
         "post_process_text", "list_post_process_steps",
         "compare_recordings", "select_model",
-        "auto_update_vocabulary", "get_smart_vocabulary_suggestions",
+        "get_smart_vocabulary_suggestions",
         "get_startup_diagnostics",
         # New methods (post-main dev batch 1)
         "enrich_recording", "get_shutdown_status",
@@ -1388,7 +1322,7 @@ class TestMethodCountSummary(_DispatchBase):
         # New methods (post-main dev batch 2)
         "get_recent_searches", "get_popular_searches", "clear_search_history",
         "archive_items", "unarchive_items", "list_archived", "get_archive_stats",
-        "get_activity_calendar", "analyze_word_timing",
+        "get_activity_calendar",
     ]
 
     def test_all_methods_return_valid_response(self):
