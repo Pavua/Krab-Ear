@@ -321,9 +321,14 @@ class TestQualityTrendAnalyzerTimestampHandling(unittest.TestCase):
 
     def test_iso_string_timestamp(self) -> None:
         """Обработка ISO-формата строк (YYYY-MM-DDTHH:MM:SS)."""
+        # Используем дату относительно "сегодня", чтобы тест не устарел.
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        recent = today - timedelta(days=5)
+        ts_z = recent.strftime("%Y-%m-%dT10:30:00Z")
+        ts_offset = recent.strftime("%Y-%m-%dT14:30:00+00:00")
         items = [
-            {"ts": "2026-04-15T10:30:00Z", "confidence": 0.95},
-            {"ts": "2026-04-15T14:30:00+00:00", "confidence": 0.85},
+            {"ts": ts_z, "confidence": 0.95},
+            {"ts": ts_offset, "confidence": 0.85},
         ]
 
         report = self.analyzer.analyze_trends(items, days=30)
