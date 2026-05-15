@@ -196,6 +196,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
         SentryConfig.initialize(dsn: sentryDsn.isEmpty ? nil : sentryDsn, environment: sentryEnv)
 
+        // AGENT-K fix: pre-warm BackendToast panel здесь, пока startup latency
+        // ещё ожидается пользователем. NSVisualEffectView + ColorSync transform
+        // выполняются один раз сейчас, а не при первом show() в showFatalAndTerminate.
+        BackendToast.shared.prewarmPanel()
+
         logger.info("Старт агента. projectRoot=\(options.projectRoot), launchedByLaunchd=\(options.launchedByLaunchd)")
         logger.info("BackendSupervisor режим: \(backendSupervisor.supervisionMode == .passive ? "passive (launchd Variant B)" : "active (standalone)")")
         notificationService.requestAuthorizationIfNeeded()
@@ -1034,6 +1039,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // AGENT-H fix: NSAlert.runModal() blocks main thread → Sentry ANR ≥2 s.
         // Use BackendToast (non-modal, floating panel) so main thread stays free,
         // then terminate after 3 s — enough time for user to read the message.
+        // AGENT-K: breadcrumb добавляется ДО show() — если ColorSync всё-таки
+        // заблокирует (panel не был pre-warmed), breadcrumb уже будет в Sentry.
+        SentryConfig.recordBreadcrumb(
+            category: "lifecycle",
+            message: "showFatalAndTerminate called",
+            data: ["title": title]
+        )
         logger.error("FATAL: \(title) — \(body)")
         BackendToast.shared.show("FATAL: \(title)\n\(body)", duration: 3.0)
         SentryConfig.recordTerminate(callsite: "showFatalAndTerminate")
