@@ -4,9 +4,16 @@
  Показывается в правом-нижнем углу основного экрана на 3 секунды,
  затем fade-out. НЕ блокирует активное окно.
 
+ AGENT-K fix: NSVisualEffectView при ПЕРВОМ render на macOS 26 запускает
+ heavy ColorSync transform синхронно на main thread → блокирует ≥2s → AppHang.
+ Решение: prewarmPanel() создаёт NSWindow + NSVisualEffectView заранее
+ в applicationDidFinishLaunching (когда startup latency приемлема), чтобы
+ ColorSync transform выполнился один раз до первого show().
+
  Связи модуля:
  1) HealthMonitor: вызывает show() из onHangDetected.
- 2) main.swift: создаёт singleton при старте приложения.
+ 2) main.swift: вызывает prewarmPanel() в applicationDidFinishLaunching,
+    show() при showFatalAndTerminate и backend restart events.
 */
 
 import AppKit
@@ -19,6 +26,24 @@ final class BackendToast {
     private var dismissTimer: Timer?
 
     private init() {}
+
+    /// Pre-warm NSWindow + NSVisualEffectView при app init.
+    ///
+    /// ColorSync transform на macOS 26 выполняется синхронно при первом
+    /// attach к window (viewDidMoveToWindow). Вызов при startup позволяет
+    /// "оплатить" эту цену один раз в нечувствительный момент, после чего
+    /// последующие show() не блокируют main thread.
+    ///
+    /// Безопасно вызывать несколько раз — повторный вызов игнорируется.
+    func prewarmPanel() {
+        guard panel == nil else { return }
+        createPanel()
+        // orderFrontRegardless + немедленный orderOut заставляет AppKit
+        // выполнить NSVisualEffectView layout и ColorSync transform,
+        // после чего скрываем панель.
+        panel?.orderFrontRegardless()
+        panel?.orderOut(nil)
+    }
 
     /// Показывает toast с заданным текстом на `duration` секунд.
     /// Повторный вызов до dismiss заменяет текст на новый.
