@@ -5,7 +5,7 @@
    - E.164 валидацию номера
    - CallSession.Status display / badge color / historyIcon
    - IPC response parsing (handleDialResponse whitebox)
-   - callHistory parsing из "list_call_sessions" ответа
+   - callHistory parsing из "call_session_list" ответа
    - ConfigBanner показывается при telnyx_not_configured
    - AgentSettings Telnyx fields roundtrip (toPayload / init(from:))
    - PanelTab.callAutomation rawValue и from()
