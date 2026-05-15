@@ -51,9 +51,17 @@ log() {
 }
 
 count_agent_pids() {
-    # Match both bundle path and runtime path.
-    pgrep -fl "Krab Ear.app/Contents/MacOS/KrabEarAgent\|native/runtime/KrabEarAgent" \
-        2>/dev/null | grep -v "ensure_agent_running\|grep\|pgrep" | wc -l | tr -d ' '
+    # Wave 65 fix: pgrep exits 1 when no process matches, which under `set -e`
+    # aborted the entire script BEFORE the auto-launch block could run.
+    # Root cause: `pgrep ... | grep ...` — pgrep exit-1 propagates through the
+    # pipeline's last-command-status rule and the `set -e` trap fires immediately,
+    # killing the script before PRE_COUNT is assigned, so auto-launch NEVER ran.
+    # Fix: capture pgrep output in a variable with `|| true` so a "no match"
+    # result is an empty string, not a fatal exit.
+    local raw
+    raw="$(pgrep -fl "Krab Ear.app/Contents/MacOS/KrabEarAgent\|native/runtime/KrabEarAgent" 2>/dev/null || true)"
+    # Filter out this script itself, grep, and pgrep from the list.
+    echo "$raw" | grep -v "ensure_agent_running\|grep\|pgrep" | grep -c . || true
 }
 
 PRE_COUNT="$(count_agent_pids)"
