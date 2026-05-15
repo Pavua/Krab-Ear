@@ -121,7 +121,9 @@ class NormalizeAudioBaseline(unittest.TestCase):
     """
 
     BASELINE_MS = 10.49
-    THRESHOLD_MULT = 3.0
+    # Allow 8× — soundfile cold-load on CI runners (GitHub macos-15-arm64)
+    # can spike to ~75 ms; 8× gives headroom without masking real regressions
+    THRESHOLD_MULT = 8.0
 
     _tmp_wav: str = ""
 
