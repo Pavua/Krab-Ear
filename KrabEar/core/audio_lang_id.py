@@ -213,9 +213,15 @@ class AudioLanguageID:
         """
         model_path = self._get_model_path()
 
-        # Ленивая загрузка модели с кешированием
+        # Ленивая загрузка модели с кешированием (max 1 запись).
+        # H4: старые записи — чистый leak: объект модели удерживает MLX Metal
+        # буферы, даже после mx.clear_cache() в engine.py.  Держим только
+        # текущую модель; при смене профиля (balanced→max) старая вытесняется.
         if model_path not in AudioLanguageID._model_cache:
             logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
+            if len(AudioLanguageID._model_cache) >= 1:
+                logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
+                AudioLanguageID._model_cache.clear()
             try:
                 model = mlx_whisper.load_models.load_model(model_path)
                 AudioLanguageID._model_cache[model_path] = model
