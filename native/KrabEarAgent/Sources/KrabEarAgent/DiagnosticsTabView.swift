@@ -477,14 +477,14 @@ final class DiagnosticsTabViewController: NSViewController {
         Task { @MainActor in
             do {
                 _ = try await ipcClient.callAsync(
-                    method: "clear_errors",
+                    method: "clear_recent_errors",
                     params: [:],
                     timeoutSec: IPCClient.quickTimeoutSec
                 )
                 allErrors = []
                 applyFilter()
             } catch {
-                logger.error("clear_errors failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("clear_recent_errors failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

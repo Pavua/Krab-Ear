@@ -1,7 +1,7 @@
 /*
  CallAutomationController — NSViewController для вкладки «Автозвонки».
 
- Отправляет IPC-команды (call_dial, call_hangup, call_intervene) и отображает
+ Отправляет IPC-команды (call_session_create, call_session_end, call_intervene) и отображает
  активную сессию: статус, живой транскрипт, длительность, текущую стоимость,
  историю последних 10 звонков.
 
@@ -702,8 +702,8 @@ final class CallAutomationController: NSViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let result = try? self.ipcClient.call(
-                method: "call_dial",
-                params: ["phone": phone, "goal": goal, "provider": providerKey]
+                method: "call_session_create",
+                params: ["phone": phone, "goal_text": goal, "provider": providerKey]
             )
             DispatchQueue.main.async {
                 self.handleDialResponse(result, phone: phone, goal: goal)
@@ -717,8 +717,8 @@ final class CallAutomationController: NSViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let _ = try? self.ipcClient.call(
-                method: "call_hangup",
-                params: ["session_id": sessionID]
+                method: "call_session_end",
+                params: ["id": sessionID, "reason": "completed"]
             )
             DispatchQueue.main.async {
                 self.stopSessionPolling()
@@ -745,8 +745,8 @@ final class CallAutomationController: NSViewController {
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self else { return }
             let _ = try? self.ipcClient.call(
-                method: "call_hangup",
-                params: ["session_id": sessionID]
+                method: "call_session_end",
+                params: ["id": sessionID, "reason": "completed"]
             )
             DispatchQueue.main.async {
                 var s2 = self.currentSession
@@ -925,8 +925,8 @@ final class CallAutomationController: NSViewController {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let result = try? self.ipcClient.call(
-                method: "call_session_status",
-                params: ["session_id": sessionID]
+                method: "call_session_get",
+                params: ["id": sessionID]
             )
             DispatchQueue.main.async {
                 self.applySessionPoll(result)
@@ -1008,7 +1008,7 @@ final class CallAutomationController: NSViewController {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let response = try? self.ipcClient.call(
-                method: "list_call_sessions",
+                method: "call_session_list",
                 params: ["limit": 10]
             )
             DispatchQueue.main.async {
