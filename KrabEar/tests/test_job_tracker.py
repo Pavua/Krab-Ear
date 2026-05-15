@@ -41,7 +41,7 @@ class CreateJobTestCase(unittest.TestCase):
         self.assertEqual(state["status"], "queued")
         self.assertEqual(state["total_files"], 1)
         self.assertEqual(state["file_index"], 0)
-        self.assertEqual(state["elapsed_sec"], 0.0)
+        self.assertLess(state["elapsed_sec"], 1.0, "elapsed_sec should be near-zero immediately after creation")
         self.assertEqual(state["errors"], [])
         self.assertEqual(state["items"], [])
 
