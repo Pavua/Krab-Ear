@@ -518,6 +518,13 @@ class AudioEngine:
         logger.info("Смена профиля STT: %s -> %s (модель: %s)", self.quality_profile, clean_profile, new_model)
         self.quality_profile = clean_profile
         self.current_model = new_model
+        # H2: при смене профиля balanced↔max старая модель выгружается из MLX.
+        # Явный flush Metal cache освобождает GPU буферы немедленно, не дожидаясь GC.
+        try:
+            import mlx.core as _mx
+            _mx.clear_cache()
+        except (ImportError, AttributeError):
+            pass  # MLX не установлен или старая версия без clear_cache
         return True
 
     def normalize_audio(self, audio_path: str) -> bool | str:
@@ -869,6 +876,13 @@ class AudioEngine:
             # MLX держит Metal-буферы пока Python GC не удалит ссылки на mx.array.
             import gc as _gc
             _gc.collect()
+            # H2: явный flush MLX Metal cache — без этого GPU буферы остаются в
+            # Metal heap и backend не возвращается к baseline RSS после каждого STT.
+            try:
+                import mlx.core as _mx
+                _mx.clear_cache()
+            except (ImportError, AttributeError):
+                pass  # MLX не установлен или старая версия без clear_cache
 
             # 4. Очистка результата через утилиты (D.7 normalization)
             _report("cleanup")
