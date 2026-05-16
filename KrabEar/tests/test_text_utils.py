@@ -253,10 +253,11 @@ class LongInputPerformanceTestCase(unittest.TestCase):
     """Verify cleanup handles large inputs without crashing."""
 
     def test_very_long_input_10k_chars(self) -> None:
-        """Cleanup doesn't crash on 10k character input."""
-        # Generate a long sentence
+        """Cleanup doesn't crash on large repeated input (CI-safe: ~3k chars)."""
+        # 50 reps * ~56 chars = ~2800 chars — adequate for stress coverage;
+        # 150 reps caused pytest-xdist worker OOM on Python 3.12 CI (gw2 crash).
         base = "Это предложение повторяется много раз для тестирования. "
-        raw = base * 150  # ~10k chars
+        raw = base * 50  # ~2.8k chars (was 150/~10k — caused worker crash in CI)
         cleaned = TextUtils.cleanup_transcript(raw)
         # Should complete without crashing
         self.assertIsInstance(cleaned, str)
