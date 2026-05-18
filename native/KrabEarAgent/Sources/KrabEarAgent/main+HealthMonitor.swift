@@ -128,16 +128,19 @@ extension AgentAppDelegate {
         case .stopped: dotColor = .systemRed
         }
 
-        refreshStatusItemTitle()
-        let baseTitle = button.title
+        // Wave 67 (AGENT-J fix): use SF Symbol image instead of `●` Unicode char.
+        // `●` (U+25CF) is not in SF Pro primary glyphs → CoreText fallback to Apple Symbols
+        // → `TFPFont::CopyGlyphPath` heavy synchronous on first CALayer commit → AppHang ≥2s.
+        // SF Symbol is pre-rendered template via NSImage — no glyph path generation.
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [dotColor]))
+        let dotImage = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(symConfig)
+        button.image = dotImage
+        button.imagePosition = .imageLeft  // dot слева от title
 
-        let attributed = NSMutableAttributedString()
-        attributed.append(NSAttributedString(
-            string: "● ",
-            attributes: [.foregroundColor: dotColor]
-        ))
-        attributed.append(NSAttributedString(string: baseTitle))
-        button.attributedTitle = attributed
+        refreshStatusItemTitle()
+        button.title = button.title  // plain text — без ● prefix
 
         // Phase B.1: синхронизируем StatusIndicatorView
         statusIndicatorView.updateState(state)

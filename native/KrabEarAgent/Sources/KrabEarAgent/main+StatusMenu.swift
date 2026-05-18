@@ -52,10 +52,20 @@ extension AgentAppDelegate {
         }
         let badge = activePresetBadge()
         if isRecording {
-            button.title = "KE ● [\(badge)]"
+            // Wave 67 (AGENT-J): `●` U+25CF → SF Symbol to avoid TFPFont::CopyGlyphPath hang.
+            let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor.systemRed]))
+            if let dotImg = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
+                    .withSymbolConfiguration(symConfig) {
+                button.image = dotImg
+                button.imagePosition = .imageLeft
+            }
+            button.title = "KE [\(badge)]"
         } else if isProcessing {
+            button.image = nil
             button.title = "KE … [\(badge)]"
         } else {
+            button.image = nil
             button.title = "KE [\(badge)]"
         }
     }
