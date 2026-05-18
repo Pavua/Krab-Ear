@@ -183,6 +183,19 @@ class TestFindPythonTestCallers(unittest.TestCase):
         self.assertIn("add_history_item", result)
         self.assertIn("get_favorites", result)
 
+    def test_finds_underscore_prefix_direct_handle_call(self):
+        """svc._handle_warmup_stt({}) — most common pattern in actual test files."""
+        f = self.tmp / "test_underscore.py"
+        _write(f, """\
+            result = svc._handle_warmup_stt({})
+            result2 = self.svc._handle_warmup_rewriter({})
+            result3 = service._handle_probe_llm_http({})
+        """)
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("warmup_stt", result)
+        self.assertIn("warmup_rewriter", result)
+        self.assertIn("probe_llm_http", result)
+
     def test_finds_dispatch_helper_pattern(self):
         f = self.tmp / "test_dispatch.py"
         _write(f, """\

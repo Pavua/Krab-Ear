@@ -124,8 +124,9 @@ _TEST_METHOD_DICT_SINGLE_PATTERN = re.compile(r'"method"\s*:\s*\'([a-z][a-z0-9_]
 _TEST_REQ_DOUBLE_PATTERN = re.compile(r'\.\s*req\s*\(\s*"([a-z][a-z0-9_]*)"')
 _TEST_REQ_SINGLE_PATTERN = re.compile(r"\.\s*req\s*\(\s*'([a-z][a-z0-9_]*)'")
 # Matches: svc.handle_foo(  or  service.handle_foo(  or  self.svc.handle_foo(
+# Also matches underscore-prefix variant: svc._handle_foo(  (most common in actual tests)
 _TEST_DIRECT_HANDLE_PATTERN = re.compile(
-    r'(?:svc|service|self\.svc|self\.service)\s*\.\s*handle_([a-z][a-z0-9_]*)\s*\('
+    r'(?:svc|service|self\.svc|self\.service)\s*\.\s*_?handle_([a-z][a-z0-9_]*)\s*\('
 )
 # dispatch helper: dispatch("foo", ...)
 _TEST_DISPATCH_PATTERN = re.compile(r'dispatch\s*\(\s*"([a-z][a-z0-9_]*)"')
