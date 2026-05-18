@@ -184,9 +184,6 @@ class TestGetStorageBreakdown(unittest.TestCase):
 class TestIpcHandlerThrottle(unittest.TestCase):
     """Тесты категорий throttle для новых методов."""
 
-    def test_auto_cleanup_old_in_heavy(self) -> None:
-        self.assertIn("auto_cleanup_old", HEAVY_METHODS)
-
     def test_get_disk_status_in_medium(self) -> None:
         self.assertIn("get_disk_status", MEDIUM_METHODS)
 

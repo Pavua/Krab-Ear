@@ -38,20 +38,10 @@ HEAVY_METHODS: Set[str] = {
     "export_obsidian",          # Obsidian экспорт
     "batch_export",             # пакетный экспорт
     "generate_daily_digest",    # генерация дайджеста
-    "analyze_quality_trends",   # анализ трендов качества
-    "compare_periods",          # сравнение периодов
     "check_integrity",          # проверка целостности
     "repair_integrity",         # исправление целостности
-    "analyze_audio_quality",    # анализ качества аудио
-    "analyze_silence",          # анализ тишины в аудио
     "get_waveform",             # генерация waveform-данных
-    "convert_audio",            # конвертация аудио
-    "bulk_reprocess_start",     # массовое перетранскрибирование (запуск фонового задания)
-    "auto_cleanup_old",         # удаление старых записей истории (CPU + disk I/O)
-    "extract_action_items",       # LLM извлечение action items из одной записи
-    "batch_extract_action_items",  # LLM пакетное извлечение action items
     "extract_action_items",     # LLM извлечение задач/решений/вопросов из транскрипта
-    "batch_extract_action_items",  # пакетное LLM извлечение (несколько items)
 }
 
 MEDIUM_METHODS: Set[str] = {

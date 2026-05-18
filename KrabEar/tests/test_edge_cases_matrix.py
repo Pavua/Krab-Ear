@@ -182,16 +182,6 @@ class EmptyStringEdgeCases(EdgeCaseMatrixBase):
         r = self.req("fuzzy_search", {"query": ""})
         self.assertIn("ok", r)
 
-    def test_detect_language_empty_text(self):
-        """detect_language с пустым текстом — не падает."""
-        r = self.req("detect_language", {"text": ""})
-        self.assertIn("ok", r)
-
-    def test_anonymize_text_empty(self):
-        """anonymize_text с пустым текстом — не падает."""
-        r = self.req("anonymize_text", {"text": ""})
-        self.assertIn("ok", r)
-
 
 # ---------------------------------------------------------------------------
 # 2. None/null для необязательных параметров
@@ -287,21 +277,6 @@ class NegativeNumberEdgeCases(EdgeCaseMatrixBase):
 class ZeroLengthAudioEdgeCases(EdgeCaseMatrixBase):
     """Массивы аудио нулевой длины в методах, принимающих numpy-данные напрямую."""
 
-    def test_detect_voice_activity_empty_path(self):
-        """detect_voice_activity с несуществующим файлом — не падает."""
-        r = self.req("detect_voice_activity", {"file_path": "/nonexistent/audio.wav"})
-        self.assertIn("ok", r)
-
-    def test_analyze_silence_nonexistent_file(self):
-        """analyze_silence с несуществующим файлом — не падает."""
-        r = self.req("analyze_silence", {"file_path": "/nonexistent/audio.wav"})
-        self.assertIn("ok", r)
-
-    def test_analyze_audio_quality_nonexistent_file(self):
-        """analyze_audio_quality с несуществующим файлом — не падает."""
-        r = self.req("analyze_audio_quality", {"file_path": "/nonexistent/audio.wav"})
-        self.assertIn("ok", r)
-
     def test_profile_noise_nonexistent_file(self):
         """profile_noise с несуществующим файлом — не падает."""
         r = self.req("profile_noise", {"file_path": "/nonexistent/audio.wav"})
@@ -324,11 +299,6 @@ class SingleCharTextEdgeCases(EdgeCaseMatrixBase):
         """search_history с однобуквенным запросом — не падает."""
         r = self.req("search_history", {"query": "А"})
         self.assertTrue(r["ok"], f"Однобуквенный поиск: {r}")
-
-    def test_detect_language_single_char(self):
-        """detect_language с одной буквой — не падает."""
-        r = self.req("detect_language", {"text": "я"})
-        self.assertIn("ok", r)
 
     def test_score_readability_single_char(self):
         """score_readability с одним символом — не падает."""
@@ -384,16 +354,6 @@ class MaxLengthTextEdgeCases(EdgeCaseMatrixBase):
     def test_translate_text_long(self):
         """translate_text с 10000-символьным текстом — не падает."""
         r = self.req("translate_text", {"text": self.LONG_TEXT, "mode": "ru_to_es"})
-        self.assertIn("ok", r)
-
-    def test_anonymize_text_long(self):
-        """anonymize_text с 10000-символьным текстом — не падает."""
-        r = self.req("anonymize_text", {"text": self.LONG_TEXT})
-        self.assertIn("ok", r)
-
-    def test_detect_language_long_text(self):
-        """detect_language с 10000-символьным текстом — не падает."""
-        r = self.req("detect_language", {"text": self.LONG_TEXT})
         self.assertIn("ok", r)
 
     def test_compare_texts_both_long(self):
@@ -578,16 +538,6 @@ class BadTimestampEdgeCases(EdgeCaseMatrixBase):
             # from_ts > to_ts — либо пустой список, либо ошибка
             self.assertIsInstance(items, list)
 
-    def test_compare_periods_bad_timestamps(self):
-        """compare_periods с мусорными датами — не падает."""
-        r = self.req("compare_periods", {
-            "period_a_start": "garbage",
-            "period_a_end": "trash",
-            "period_b_start": "noise",
-            "period_b_end": "junk",
-        })
-        self.assertIn("ok", r)
-
     def test_generate_daily_digest_bad_date(self):
         """generate_daily_digest с date='not-a-date' — не падает."""
         r = self.req("generate_daily_digest", {"date": "not-a-date"})
@@ -643,10 +593,6 @@ class MixedEncodingEdgeCases(EdgeCaseMatrixBase):
         r = self.req("add_history_item", {"text": rtl_text})
         self.assertTrue(r["ok"], f"RTL-текст должен сохраняться: {r}")
 
-    def test_detect_language_with_bom(self):
-        """detect_language с BOM-меткой в тексте — не падает."""
-        r = self.req("detect_language", {"text": "\ufeffПривет"})
-        self.assertIn("ok", r)
 
     def test_score_readability_mixed_encoding(self):
         """score_readability с Latin-1 и Кириллицей — не падает."""

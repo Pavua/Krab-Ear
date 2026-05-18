@@ -459,16 +459,6 @@ class FullWorkflowTestCase(unittest.TestCase):
         self.assertGreater(len(result["markdown"]), 0)
 
     # ======================================================================
-    # Step 14: Quality trends
-    # ======================================================================
-
-    def test_36_quality_trends_structure(self) -> None:
-        result = self.assertOk(self.req("analyze_quality_trends", {"days": 7}))
-        self.assertIn("overall_trend", result)
-        self.assertIn("trend_slope", result)
-        self.assertIn("confidence_distribution", result)
-
-    # ======================================================================
     # Step 15: Obsidian export
     # ======================================================================
 
