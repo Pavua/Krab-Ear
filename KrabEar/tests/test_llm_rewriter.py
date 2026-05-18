@@ -856,7 +856,12 @@ class LLMRewriter503JitRetryTestCase(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.text_or_fallback("raw"), rewritten)
         self.assertIsNotNone(result.latency_ms)
-        mock_sleep.assert_called_once_with(10)
+        # Use assertIn instead of assert_called_once_with to guard against spurious
+        # time.sleep() calls from background threads of unrelated BackendService
+        # instances in the same xdist worker (patch targets the shared time module).
+        from unittest.mock import call as _call
+        self.assertIn(_call(10), mock_sleep.call_args_list,
+                      "Expected time.sleep(10) to be called by 503 JIT retry path")
         self.assertEqual(self.rewriter._circuit.state, "closed")
 
     @patch("backend.llm_rewriter.time.sleep")
