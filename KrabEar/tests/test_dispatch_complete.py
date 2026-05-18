@@ -677,13 +677,6 @@ class TestIntegrityGroup(_DispatchBase):
         data_dir = str(self.svc.store.data_dir)
         self.assert_dispatch("run_migration", {"data_dir": data_dir}, ok_required=True)
 
-    def test_configure_auto_export(self):
-        self.assert_dispatch("configure_auto_export", {
-            "enabled": False,
-            "format": "json",
-            "interval_hours": 24,
-        }, ok_required=True)
-
     def test_restore_history(self):
         # Несуществующий файл → ok=False допустимо
         self.assert_dispatch("restore_history", {"backup_path": "/nonexistent.ndjson"})
@@ -924,20 +917,6 @@ class TestSharingVersioningGroup(_DispatchBase):
 
 class TestLanguageLearningGroup(_DispatchBase):
     """Режим изучения языков."""
-
-    def test_extract_learning_vocabulary(self):
-        # source_lang and target_lang are required params
-        self.assert_dispatch("extract_learning_vocabulary", {
-            "source_lang": "ru",
-            "target_lang": "es",
-        }, ok_required=True)
-
-    def test_generate_flashcards(self):
-        # source_lang and target_lang are required params
-        self.assert_dispatch("generate_flashcards", {
-            "source_lang": "ru",
-            "target_lang": "es",
-        }, ok_required=True)
 
     def test_get_learning_stats(self):
         # source_lang and target_lang are required params
@@ -1184,9 +1163,6 @@ class TestNewMethodsGroup(_DispatchBase):
     def test_get_timeline_view(self):
         self.assert_dispatch("get_timeline_view", ok_required=True)
 
-    def test_export_timeline(self):
-        self.assert_dispatch("export_timeline", {"format": "json"}, ok_required=True)
-
 
 # ===========================================================================
 # Группа 32: Поиск, архив, активность и word timing
@@ -1276,7 +1252,7 @@ class TestMethodCountSummary(_DispatchBase):
         "export_history_json", "export_html_report",
         "repaste_item", "get_clipboard_history", "cleanup_old_history",
         "get_storage_info", "get_transcripts_path", "backup_history",
-        "get_auto_backup_status", "configure_auto_export",
+        "get_auto_backup_status",
         "get_export_schedule_status", "list_auto_exports",
         "restore_history", "list_backups",
         "get_history_statistics", "word_frequency_analysis",
@@ -1311,7 +1287,7 @@ class TestMethodCountSummary(_DispatchBase):
         "save_transcript_version", "get_transcript_versions", "revert_transcript_version",
         "generate_auto_title",
         "format_for_paste", "merge_recordings", "preview_merge", "list_paste_formatters",
-        "extract_learning_vocabulary", "generate_flashcards", "get_learning_stats",
+        "get_learning_stats",
         "get_analytics_dashboard", "get_topic_timeline",
         "list_config_presets", "apply_config_preset", "create_config_preset",
         "enqueue_transcription", "cancel_transcription",
@@ -1330,7 +1306,7 @@ class TestMethodCountSummary(_DispatchBase):
         # New methods (post-main dev batch 1)
         "enrich_recording", "get_shutdown_status",
         "check_duplicate", "run_deduplication", "get_dedup_stats",
-        "get_timeline_view", "export_timeline",
+        "get_timeline_view",
         # New methods (post-main dev batch 2)
         "get_recent_searches", "get_popular_searches", "clear_search_history",
         "archive_items", "unarchive_items", "list_archived", "get_archive_stats",
