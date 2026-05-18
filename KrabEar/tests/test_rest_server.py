@@ -99,6 +99,12 @@ try:
 
     _engine_cls_mock = MagicMock(side_effect=_capturing_engine_constructor)
 
+    # Force a fresh import even if another test file already imported rest_server
+    # in this worker process (xdist -n auto shares processes across test files).
+    # Without this eviction the cached real AudioEngine is reused and the mock
+    # is never called, causing TestEngineInitSkipsGigaamWarmup to fail.
+    _prev_rest_mod = sys.modules.pop("backend.rest_server", None)
+
     with patch("core.engine.AudioEngine", _engine_cls_mock), \
             patch("backend.state_store.StateStore", return_value=_mock_store), \
             patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
