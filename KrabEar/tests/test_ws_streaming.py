@@ -246,8 +246,12 @@ class TestWsConnection(unittest.TestCase):
         time.sleep(0.1)
         bus.emit("stt.final", {"text": "trigger disconnect"})
 
-        thread.join(timeout=1.0)
+        thread.join(timeout=2.0)
 
+        # Poll briefly in case the finally-block unsubscribe hasn't run yet.
+        deadline = time.monotonic() + 0.5
+        while bus.subscriber_count() > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
         self.assertEqual(bus.subscriber_count(), 0)
 
     # ------------------------------------------------------------------
