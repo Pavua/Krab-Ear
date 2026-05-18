@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches **~305** JSON-RPC methods via a handler lookup table, delegating to extracted services (Wave 65 batch 1+2 removed 44 dead handlers from the original 349). Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines). Dead-handler removal ongoing — see `docs/drift-report-2026-05-12.md`.
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches **306** JSON-RPC methods via a handler lookup table, delegating to extracted services (Wave 65 batch 1 removed 19 dead handlers from 325; removal ongoing). Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines). Dead-handler removal ongoing — see `docs/drift-report-2026-05-12.md`.
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -244,8 +244,8 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
 
 #### Phase B — Loud Errors (2026-05-04+) Python additions:
-- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **24** codes wired runtime.
-- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**24** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc categories).
+- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **40** codes wired runtime.
+- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**40** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc, disk, audio, system, vgw categories). Wave 60 +5, Wave 61 +3, Wave 64 +5 added codes post-Phase B initial 24.
 - **`backend/error_actions.py`** — `ACTION_HANDLERS` dispatch + 8 action handlers (open_privacy_settings, disable_rewriter, etc.).
 - **`backend/llm_probe.py`** — `LLMHttpProbe` passive GET `/v1/models` health check (post-PR #364 F2 — was POST /v1/chat/completions which caused JIT churn).
 
@@ -427,7 +427,7 @@ python scripts/check_performance_budget.py
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
 - **Service extraction pattern**: each extracted service takes `store` + specific collaborators in its constructor; handler methods named `handle_*`; `BackendService` imports the service and delegates matching IPC methods to it.
-- **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`. Wave 65 identified 177 dead handler candidates; batch 1 (19 removed) + batch 2 shipped — removal ongoing in small batches to avoid merge conflicts.
+- **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`. Wave 65 batch 1 shipped (PR #410, 19 removed → 306 active). **Critical audit lesson**: dead handler candidates MUST be checked in Python test scope too (grep `assert_dispatch`, `_handle_X` direct calls, `handle_request` calls) — naive Swift-only grep over-counts by ~4×. Reference: Wave 65 audit found 177 candidates but only 19 confirmed dead after full test scope check.
 - **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
 - **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`).
   - **When using `json`**: handlers use `JsonFormatter` defined inline in `backend/service.py::configure_logging` (`service.py:6168-6186`). REST API server (`backend/rest_server.py:280`) emits its own structured records inline via `json.dumps(log_record)` — same `ts/level/...` shape.
@@ -460,14 +460,17 @@ python scripts/check_performance_budget.py
   - PyTorch+MPS adapters (SenseVoice, Parakeet, WhisperX, Voxtral) don't need this lock.
   - Profile switches (balanced↔max) trigger model reload in MLX → protect these too.
   - 2026-04-19 crash report: `~/Library/Logs/DiagnosticReports/Python-2026-04-19-213636.ips`. Fix: PR #71.
-  - **Wave 63 memory leak fix**: call `mx.clear_cache()` after each `mlx_whisper.transcribe()` to release Metal GPU cache — prevents RAM growth on long sessions (shipped, no separate PR tag).
+  - **Wave 63 memory leak fix (PR #405)**: call `mx.clear_cache()` after each `mlx_whisper.transcribe()` + bound `audio_lang_id` model cache — prevents RAM growth on long sessions. Production evidence: backend RSS stable at 35–40 MB vs 408 MB pre-fix growth on extended sessions.
 
 - **Sentry breadcrumbs (PR #238)**: `backend/observability.py` logs privacy-respecting breadcrumbs (no transcript text, only metadata: method name, duration_ms, error_type). Breadcrumbs auto-attach to next crash report. Pattern: `add_breadcrumb(category="ipc", message="method_name", data={"ok": True})`.
 - **Sentry release tracking (PR #241)**: `SentryConfig.swift` reads `CFBundleVersion` and sets `sentry_sdk.set_tag("release", version)` at startup. Enables regression tracking per release in Sentry issues dashboard. Python side sets `release=` in `sentry_sdk.init()`.
 - **Stable codesign identity (PR #235)**: `scripts/create_local_signing_identity.command` creates a self-signed cert `Krab Ear Dev Local` in the system keychain. Sign binary with: `codesign -s "Krab Ear Dev Local" -f ...`. TCC grants persist across rebuilds because the identity hash stays constant. **Caveat**: for distribution (App Store / Notarization), replace with Apple Developer ID. See `docs/DEV_CODESIGN.md`.
 - **Distribution DMG (PR #229)**: `scripts/build_distribution_dmg.command` creates a signed `.dmg` for sharing. Requires `Krab Ear Dev Local` identity or Apple Developer ID. See `docs/DISTRIBUTION.md`.
 - **Analytics UI (PR #231 / #233)**: `AnalyticsDashboardViewController.swift` renders the analytics dashboard via `get_analytics_dashboard` IPC. Shows sentiment trend, quality trend, keyword cloud. Bug fixes in PR #233 (nil guard crash on empty history).
-- **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, JSON-RPC handlers documented with params/response schema and examples (PR #243). Active handler count ~305 (Wave 65 batch 1+2 removed 44 dead handlers; removal ongoing — 177 candidates identified). Use as ground truth before implementing new IPC calls.
+- **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, JSON-RPC handlers documented with params/response schema and examples (PR #243). Active handler count **306** (Wave 65 batch 1 removed 19 dead handlers from 325; removal ongoing — see dead code removal workflow note). Use as ground truth before implementing new IPC calls.
+- **Wave 67 (PR #412)**: `StatusIndicatorView.swift` — replaced `●` Unicode literal with SF Symbol `circle.fill` to fix font hang (AGENT-J root cause was CoreText attempting to render Unicode bullet in system font during ColorSync callback).
+- **Wave 68 (PR #415)**: `_handle_list_llm_models` — corrected LM Studio endpoint `/v1/models` → `/api/v1/models` (sister fix to PR #396 which fixed the probe URL). Eliminates silent empty model list in GUI.
+- **Wave 69 (PR #417)**: `rest_server.py` — skip GigaAM worker spawn when backend already has a live worker; prevents 1.46 GB duplicate process leak on REST server startup.
 - **User manual**: `docs/USER_MANUAL.md` — full end-user guide in Russian (PR #230). Start here for onboarding new users.
 - **NSStackView distribution fixes (PRs #228, #239, #240)**: Fixed NSStackView `distribution` property (`.fill` → `.fillEqually` / `.fillProportionally`) for correct layout in Settings + ConversationVC. Actor isolation warnings resolved in ConversationViewController (Swift 6 strict concurrency).
 
@@ -533,6 +536,14 @@ macOS TCC (Accessibility, Microphone) кэширует grants по (bundle-id OR
 - **CI parallelization** (3 min backend-tests каждый PR) не блокирует coordinator work.
 - **Merge train**: когда 3+ PRs одновременно конфликтуют — rebase всех параллельно через sub-agents, merge sequentially.
 - **Research-first for big decisions**: run 3-4 parallel Haiku research agents BEFORE writing implementation plan (Moshi MLX, SeamlessM4T MLX, qwen3-30b benchmarks — каждый ~5 min, results inform plan).
+
+### Dead handler audit methodology (Wave 65 lesson)
+
+When removing dead IPC handlers, a Swift-side grep alone over-counts by ~4×. Full scope required:
+1. **Swift callers**: `grep -r "\"method_name\"" native/` — checks HistoryPanel, main.swift, extension files.
+2. **Python test dispatch**: `grep -rn "\"method_name\"\|handle_method_name\|assert_dispatch" KrabEar/tests/` — catches test-only callers that verify the handler exists.
+3. **Direct Python calls**: `grep -rn "_handle_method_name" KrabEar/` — catches internal calls (cron jobs, batch calls, etc.).
+4. Only remove if ALL three are empty. Wave 65 found 177 candidates via Swift-only grep → only 19 confirmed dead after full scope check.
 
 ### MLX thread-safety in any session
 
