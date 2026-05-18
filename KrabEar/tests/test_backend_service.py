@@ -14,6 +14,7 @@ import time
 import unittest
 
 import numpy as np
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -1232,6 +1233,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(imported["result"]["imported"], 1)
         self.assertEqual(imported["result"]["skipped"], 1)
 
+    @pytest.mark.slow
     def test_integration_1000_cycles(self) -> None:
         for idx in range(1000):
             start = self.request("start_recording", request_id=f"s{idx}")
