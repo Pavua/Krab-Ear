@@ -526,12 +526,6 @@ class TestDiagnosticsGroup(_DispatchBase):
     def test_get_system_info(self):
         self.assert_dispatch("get_system_info", ok_required=True)
 
-    def test_get_session_history(self):
-        self.assert_dispatch("get_session_history", ok_required=True)
-
-    def test_get_session_stats(self):
-        self.assert_dispatch("get_session_stats", ok_required=True)
-
     def test_get_error_report(self):
         self.assert_dispatch("get_error_report", ok_required=True)
 
@@ -639,8 +633,8 @@ class TestAnalyticsTrendsGroup(_DispatchBase):
     def test_generate_daily_digest(self):
         self.assert_dispatch("generate_daily_digest", {}, ok_required=True)
 
-    def test_get_speaker_statistics(self):
-        self.assert_dispatch("get_speaker_statistics", ok_required=True)
+    def test_analyze_quality_trends(self):
+        self.assert_dispatch("analyze_quality_trends", {"days": 7}, ok_required=True)
 
     def test_get_sentiment_trends(self):
         self.assert_dispatch("get_sentiment_trends", {"days": 7}, ok_required=True)
@@ -1274,7 +1268,7 @@ class TestMethodCountSummary(_DispatchBase):
         "get_audio_devices", "test_microphone",
         "auto_summarize_batch", "list_summary_profiles", "add_summary_profile",
         "filter_by_confidence", "health_check",
-        "get_session_history", "get_session_stats",
+        "analyze_audio_quality", "analyze_silence",
         "get_error_report", "get_error_stats",
         "get_usage_stats",
         "get_audio_info", "get_system_info",
@@ -1286,9 +1280,9 @@ class TestMethodCountSummary(_DispatchBase):
         "start_chain", "add_to_chain", "end_chain",
         "get_chain", "list_chains", "merge_chain_text",
         "schedule_recording", "cancel_scheduled_recording", "list_scheduled_recordings",
-        "generate_daily_digest",
-        "get_speaker_statistics", "get_recording_insights",
-        "get_sentiment_trends",
+        "generate_daily_digest", "analyze_quality_trends",
+        "get_recording_insights",
+        "get_sentiment_trends", "compare_periods",
         "check_integrity", "repair_integrity",
         "extract_terms", "compare_texts",
         "get_context_memory", "score_readability", "score_transcription",

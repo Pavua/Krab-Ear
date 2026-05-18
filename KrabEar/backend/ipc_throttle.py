@@ -57,7 +57,6 @@ MEDIUM_METHODS: Set[str] = {
     "get_metrics_dashboard",    # метрики (расчёт перцентилей)
     "get_diagnostics",          # диагностика
     "get_recording_stats",      # статистика записи
-    "get_session_stats",        # статистика сессий
     "get_usage_stats",          # статистика использования
     "get_system_info",          # системные ресурсы
     "filter_by_confidence",     # фильтрация по confidence
@@ -73,7 +72,6 @@ MEDIUM_METHODS: Set[str] = {
     "get_error_report",         # отчёт об ошибках
     "get_error_stats",          # статистика ошибок
     "health_check",             # health check подсистем
-    "get_session_history",      # история сессий
     "get_disk_status",          # статус дискового пространства
     "get_storage_breakdown",    # разбивка использования диска
 }
