@@ -368,6 +368,28 @@ class TestIPCDispatchInvariants(unittest.TestCase):
                 f"{handler} was deleted in Wave 65 batch 3 but has reappeared — revert or update this test.",
             )
 
+    def test_session_speaker_handlers_deleted_wave65_batch4(self):
+        """Wave 65 batch 4: _handle_get_session_history, _handle_get_session_stats,
+        and _handle_get_speaker_statistics deleted as dead code (zero callers confirmed
+        by audit script PR #418). Regression guard: these methods must NOT reappear.
+        """
+        import re
+        service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
+        with open(service_path, encoding="utf-8") as f:
+            source = f.read()
+
+        deleted_handlers = [
+            "_handle_get_session_history",
+            "_handle_get_session_stats",
+            "_handle_get_speaker_statistics",
+        ]
+        for handler in deleted_handlers:
+            self.assertNotIn(
+                f"def {handler}",
+                source,
+                f"{handler} was deleted in Wave 65 batch 4 but has reappeared — revert or update this test.",
+            )
+
     def test_get_recording_insights_alias_consistency(self):
         """'get_recording_insights' in dispatch points to _handle_get_recording_stats,
         NOT _handle_get_recording_insights.  This is either intentional aliasing or

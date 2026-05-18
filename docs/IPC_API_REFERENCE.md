@@ -243,8 +243,6 @@ Returns: `{id, summary, text_length, source_chars}`
 |---|---|
 | `get_recording_stats` | Cumulative recording statistics |
 | `get_metrics_dashboard` | Real-time session/LLM/call_assist snapshot |
-| `get_session_history` | Past recording sessions with metadata |
-| `get_session_stats` | Aggregated session statistics |
 | `get_usage_stats` | Daily usage: recordings, duration, words |
 | `get_error_report` | Recent errors from ring buffer |
 | `get_error_stats` | Error counts by component/type/window |
@@ -252,10 +250,6 @@ Returns: `{id, summary, text_length, source_chars}`
 ### `get_recording_stats`
 No params.  
 Returns: `{total_count, total_duration_sec, today_count, today_duration_sec, week_count, week_duration_sec, avg_duration_sec, most_used_lang, lang_distribution, llm_applied_count, llm_correction_rate, diarization_used_count, diarization_usage_rate}`
-
-### `get_session_history`
-Params: `limit` (int, default 50)  
-Returns: `{sessions: [...], count}`
 
 ### `get_metrics_dashboard`
 No params.  
@@ -592,7 +586,6 @@ No params. Returns: `{steps: [...]}`
 |---|---|
 | `generate_daily_digest` | Daily digest summary of transcription activity |
 | `analyze_quality_trends` | Confidence/quality trends over N days |
-| `get_speaker_statistics` | Per-speaker speech stats from diarized recordings |
 | `get_recording_insights` | Heuristic insights about recordings |
 | `get_sentiment_trends` | Sentiment trend analysis over N days |
 | `compare_periods` | Compare usage stats between two time periods |
@@ -606,10 +599,6 @@ Returns: `{date, total_recordings, total_duration_min, total_words, languages_us
 ### `analyze_quality_trends`
 Params: optional `days` (int, default 30)  
 Returns: `{daily_confidence, overall_trend, trend_slope, best_day, worst_day, confidence_distribution}`
-
-### `get_speaker_statistics`
-Params: optional `limit` (int)  
-Returns: `{speakers: [{speaker_id, name, total_words, total_duration_sec, recording_count, avg_confidence}, ...]}`
 
 ### `get_recording_insights`
 Params: optional `days` (int, default 7)  
