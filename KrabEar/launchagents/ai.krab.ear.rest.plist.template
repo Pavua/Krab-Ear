@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template for ai.krab.ear.rest launchd job (REST API server, port 5005).
+
+  Install via: scripts/install_rest_launchagent.command
+  Stop via:    launchctl bootout gui/$UID/ai.krab.ear.rest
+  Status via:  launchctl print gui/$UID/ai.krab.ear.rest
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.krab.ear.rest</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT_ROOT__/.venv_krab_ear/bin/python3</string>
+    <string>__PROJECT_ROOT__/KrabEar/backend/rest_server.py</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Wave 70: launchd не наследует shell PATH → ffmpeg не найден в
+         gigaam_worker subprocess (FileNotFoundError: 'ffmpeg' × 100+/restart).
+         AudioConverter и engine._find_ffmpeg_path() имеют hardcoded fallbacks,
+         но gigaam внутри использует PATH напрямую через subprocess.
+         Явный PATH устраняет проблему для всех subprocess-вызовов ffmpeg. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+    <key>PYTHONPATH</key>
+    <string>__PROJECT_ROOT__/KrabEar</string>
+
+    <!-- Diarization (pyannote/speaker-diarization-3.1) требует HF token. -->
+    <key>HF_TOKEN</key>
+    <string>__HF_TOKEN__</string>
+    <key>KRAB_EAR_HF_TOKEN</key>
+    <string>__HF_TOKEN__</string>
+
+    <!-- D.7 dictation prompt. -->
+    <key>KRAB_EAR_TRANSCRIBE_PROMPT</key>
+    <string>Ты транскрибируешь русскую речь владельца по имени Pablito. Пиши грамотно и с пунктуацией. Ставь точки в конце предложений, запятые перед "что", "который", "если", "но", "потому что", "чтобы", "когда". Вопросы заканчивай знаком вопроса. Числа всегда пиши цифрами (47 евро, 30 минут). Время пиши в формате ЧЧ:ММ (15:00, 14:30), не 15.00. Названия брендов и продуктов пиши латиницей: Mercadona, Krab, Krab Ear, Krab Voice Gateway, Antigravity, OpenClaw, Hammerspoon, Pyannote, Pyrofork, Telegram, GitHub, FastAPI, Claude, Anthropic, MacBook, Python, Whisper, MLX. Имена: Pablito, yung_nagato, p0lrd. Сохраняй смысл и естественные паузы. Не добавляй слов которых нет, не повторяй фразы.</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-rest.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJECT_ROOT__/logs/krab-ear-rest.err.log</string>
+</dict>
+</plist>

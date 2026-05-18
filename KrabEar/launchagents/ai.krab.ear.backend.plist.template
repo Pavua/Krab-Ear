@@ -51,6 +51,12 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <!-- Wave 70: launchd не наследует shell PATH → ffmpeg не найден в subprocess.
+         engine._find_ffmpeg_path() имеет hardcoded fallback /opt/homebrew/bin/ffmpeg,
+         но gigaam_worker и gigaam lib используют PATH напрямую. Defense-in-depth. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
     <key>PYTHONPATH</key>
     <string>__PROJECT_ROOT__/KrabEar</string>
 
