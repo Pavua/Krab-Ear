@@ -90,7 +90,8 @@ try:
 
     # Import rest_server using sys.modules cache if available (avoids re-loading
     # the module-level AudioEngine which would conflict with other test files in
-    # the same xdist worker).  We patch via patch.object after import.
+    # the same xdist worker).  We patch the engine attribute after import so that
+    # TestNoModuleLevelAudioEngineLoad sees a stub regardless of import order.
     if "backend.rest_server" not in sys.modules:
         with patch("core.engine.AudioEngine", return_value=_mock_engine), \
                 patch("backend.state_store.StateStore", return_value=_mock_store), \
@@ -99,6 +100,9 @@ try:
             import backend.rest_server as _rest_mod  # type: ignore
     else:
         import backend.rest_server as _rest_mod  # type: ignore
+        # Replace the module-level engine with our mock so isolation tests pass
+        # when this module is imported after another file already loaded rest_server.
+        _rest_mod.engine = _mock_engine
 
     _REST_AVAILABLE = True
 except Exception:  # pragma: no cover
