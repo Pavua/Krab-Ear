@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -21,6 +22,7 @@ class StateStoreSearchTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
 
+    @pytest.mark.slow
     def test_search_fallback_finds_old_record_outside_recent_index(self) -> None:
         self.store.add_history_item(text="needle-very-old", paste_status="failed")
         for idx in range(4105):
