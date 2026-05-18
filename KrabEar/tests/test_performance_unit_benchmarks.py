@@ -48,13 +48,14 @@ def _budget(budget_ms: float, mult: float = 5.0) -> float:
 
 @unittest.skipIf(_SKIP_BENCH, "SKIP_BENCH set")
 class BenchTextUtilsSoft(unittest.TestCase):
-    """1000 calls to TextUtils.cleanup_transcript(soft) must finish in <600 ms.
+    """1000 calls to TextUtils.cleanup_transcript(soft) must finish in <2000 ms.
 
     Soft profile runs 45 pre-compiled brand-name regexes per call (~0.4 ms/call).
-    Budget reflects real M4 Max measurement (407ms for 1000×) with 1.5× CI headroom.
+    Budget: M4 Max baseline ~407ms, CI macos-15-arm64 observed ~1200ms (3×). 2000ms
+    gives ~5× headroom over local and ~1.7× over worst CI observation.
     """
 
-    BUDGET_MS = 600.0
+    BUDGET_MS = 2000.0
 
     def setUp(self):
         from core.utils import TextUtils  # noqa: PLC0415
@@ -83,12 +84,13 @@ class BenchTextUtilsSoft(unittest.TestCase):
 
 @unittest.skipIf(_SKIP_BENCH, "SKIP_BENCH set")
 class BenchTextUtilsStrict(unittest.TestCase):
-    """1000 calls to TextUtils.cleanup_transcript(strict) must finish in <600 ms.
+    """1000 calls to TextUtils.cleanup_transcript(strict) must finish in <2000 ms.
 
-    Strict profile measured ~395ms/1000 calls on M4 Max. 600ms gives ~1.5× CI headroom.
+    Strict profile measured ~395ms/1000 calls on M4 Max. CI macos-15-arm64 observed
+    ~810ms; 2000ms gives ~5× over local and ~2.5× over worst CI observation.
     """
 
-    BUDGET_MS = 600.0
+    BUDGET_MS = 2000.0
 
     def setUp(self):
         from core.utils import TextUtils  # noqa: PLC0415
