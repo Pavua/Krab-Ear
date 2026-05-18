@@ -94,6 +94,7 @@ from backend.bookmarks import BookmarkManager
 from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
+from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
@@ -440,6 +441,13 @@ class BackendService:
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
             auto_end=self._call_auto_end,
+        )
+        self._audio_analytics_svc = AudioAnalyticsService(
+            audio_converter=self._audio_converter,
+            quality_trends=self._quality_trends,
+            audio_fingerprinter=self._audio_fingerprinter,
+            word_timing_analyzer=self._word_timing_analyzer,
+            store=self.store,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
         self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
@@ -845,15 +853,14 @@ class BackendService:
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
             "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
-            "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
-            "analyze_silence": self._handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
+            "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
+            "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
             "get_error_stats": self._error_reporter.handle_get_error_stats,  # счётчики ошибок по компоненту/типу/окну
             "send_diagnostics_to_sentry": self._handle_send_diagnostics_to_sentry,  # экспортирует ring-буфер ошибок в Sentry (breadcrumbs + capture_message)
             "get_memory_stats": self._handle_get_memory_stats,  # RSS/VSZ для backend/agent/worker процессов (psutil)
             "get_usage_stats": self._handle_get_usage_stats,
-
-            "get_audio_info": self._handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
+            "get_audio_info": self._audio_analytics_svc.handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
             "get_system_info": self._handle_get_system_info,  # мониторинг системных ресурсов: CPU, RAM, диск, GPU
             "find_duplicates": self._history.handle_find_duplicates,  # обнаружение дублирующихся транскрипций по текстовому сходству
             "set_annotation": self._history.handle_set_annotation,  # сохранить пользовательскую заметку к записи истории
@@ -876,7 +883,7 @@ class BackendService:
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
-            "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
@@ -892,9 +899,9 @@ class BackendService:
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
-            "get_waveform": self._handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
+            "get_waveform": self._audio_analytics_svc.handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
-            "check_audio_duplicate": self._handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
+            "check_audio_duplicate": self._audio_analytics_svc.handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
             "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
@@ -929,7 +936,7 @@ class BackendService:
             "expand_abbreviations": self._handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
             "remove_abbreviation": self._handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
-            "profile_noise": self._handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
+            "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
             "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
             "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
             "get_obsidian_sync_status": self._obsidian_sync.handle_get_status,  # статус синхронизации с Obsidian vault
@@ -1009,7 +1016,7 @@ class BackendService:
             "wake_word_status": self._oww_adapter.handle_wake_word_status,  # статус адаптера
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
-            "analyze_word_timing": self._handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
+            "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
             # --- Apple Notes integration (Phase D.4) ---
@@ -1849,20 +1856,6 @@ class BackendService:
     # Audio converter IPC handlers
     # ------------------------------------------------------------------
 
-    def _handle_get_audio_info(self, params: dict) -> dict:
-        """Возвращает метаданные аудиофайла."""
-        path = str(params.get("path", "")).strip()
-        if not path:
-            raise ValueError("Параметр 'path' обязателен")
-        info = self._audio_converter.get_audio_info(path)
-        return {
-            "duration": info.duration,
-            "sample_rate": info.sample_rate,
-            "channels": info.channels,
-            "format": info.format,
-            "size_mb": info.size_mb,
-        }
-
     # ------------------------------------------------------------------
     # Readiness probing — честная проверка доступности компонентов
     # ------------------------------------------------------------------
@@ -2541,98 +2534,6 @@ class BackendService:
         """Возвращает результаты диагностики при старте бэкенда."""
         report = self._startup_diagnostics.run_all_checks()
         return report.to_dict()
-
-    def _handle_profile_noise(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Профилирует фоновый шум в аудиофайле.
-
-        Params:
-            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
-
-        Returns:
-            Словарь с полями: noise_type, noise_level_db, snr_db,
-            frequency_profile, recommendations, suitable_for_stt.
-        """
-        from core.noise_profiler import NoiseProfiler
-
-        file_path = params.get("file_path", "")
-        if not file_path:
-            raise ValueError("Параметр file_path обязателен")
-
-        import soundfile as sf  # lazy import, аналогично analyze_audio_quality
-
-        path = Path(file_path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(f"Аудиофайл не найден: {path}")
-
-        audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
-        profiler = NoiseProfiler()
-        result = profiler.profile(audio_data, sample_rate)
-        return result.to_dict()
-
-    def _handle_analyze_audio_quality(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Pre-flight анализ качества аудиофайла перед транскрипцией.
-
-        Params:
-            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
-
-        Returns:
-            Словарь с метриками качества: rms_level, peak_level, snr_estimate_db,
-            clipping_ratio, silence_ratio, duration_sec, quality_score, warnings.
-        """
-        from core.audio_quality import analyze_file
-
-        file_path = params.get("file_path", "")
-        if not file_path:
-            raise ValueError("Параметр file_path обязателен")
-
-        report = analyze_file(file_path)
-        return report.to_dict()
-
-    def _handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Обнаруживает участки тишины в аудиофайле.
-
-        Params:
-            file_path (str): путь к аудиофайлу.
-            threshold_db (float, optional): порог тишины в дБ (по умолчанию -40).
-
-        Returns:
-            Словарь с silence_regions, speech_ratio, total_silence_sec, duration_sec.
-        """
-        from core.silence_detector import analyze_silence_file
-
-        file_path = params.get("file_path", "")
-        if not file_path:
-            raise ValueError("Параметр file_path обязателен")
-
-        threshold_db = float(params.get("threshold_db", -40.0))
-        return analyze_silence_file(file_path, threshold_db=threshold_db)
-
-    def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
-
-        Params:
-            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
-            num_points (int, optional): количество точек waveform (по умолчанию 200).
-
-        Returns:
-            Словарь с полями: points, duration_sec, sample_rate, peak_amplitude, rms_amplitude.
-        """
-        from core.waveform_generator import WaveformGenerator
-
-        file_path = params.get("file_path", "")
-        if not file_path:
-            raise ValueError("Параметр file_path обязателен")
-
-        num_points = int(params.get("num_points", 200))
-        gen = WaveformGenerator()
-        wf = gen.generate_from_file(file_path, num_points=num_points)
-        return {
-            "points": wf.points,
-            "duration_sec": wf.duration_sec,
-            "sample_rate": wf.sample_rate,
-            "peak_amplitude": wf.peak_amplitude,
-            "rms_amplitude": wf.rms_amplitude,
-        }
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -4384,24 +4285,6 @@ class BackendService:
         markdown = self._stats_report.generate_mini_report(store=self.store)
         return {"markdown": markdown}
 
-    def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды качества распознавания за последние N дней."""
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._quality_trends.analyze_trends(items, days=days)
-        return {
-            "daily_confidence": report.daily_confidence,
-            "overall_trend": report.overall_trend,
-            "trend_slope": report.trend_slope,
-            "best_day": report.best_day,
-            "worst_day": report.worst_day,
-            "confidence_distribution": report.confidence_distribution,
-        }
-
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает статистику двух временных периодов."""
         p1_start = params.get("period1_start")
@@ -4457,20 +4340,6 @@ class BackendService:
                 items, months=months, cell_size=cell_size
             )
         return result
-
-    def _handle_analyze_word_timing(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует ритм речи по пословным таймстемпам Whisper.
-
-        Params:
-            segments: list[dict] — список сегментов Whisper (с полем 'words' или без).
-
-        Возвращает TimingReport в виде словаря.
-        """
-        segments = params.get("segments")
-        if not isinstance(segments, list):
-            raise ValueError("Параметр 'segments' должен быть списком")
-        report = self._word_timing_analyzer.analyze(segments)
-        return report.as_dict()
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -4683,40 +4552,6 @@ class BackendService:
         }
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
-
-    def _handle_check_audio_duplicate(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Проверяет, являются ли два аудио-сигнала дубликатами по фингерпринту.
-
-        Параметры (params):
-          - audio1: list[float] — первый аудио-сигнал (PCM float32).
-          - audio2: list[float] — второй аудио-сигнал (PCM float32).
-          - sample_rate: int — частота дискретизации (по умолчанию 16000).
-          - threshold: float — порог сходства [0..1] (по умолчанию 0.95).
-
-        Возвращает dict с ключами:
-          fingerprint1, fingerprint2, similarity, is_duplicate.
-        """
-        audio1_raw = params.get("audio1")
-        audio2_raw = params.get("audio2")
-        if audio1_raw is None or audio2_raw is None:
-            raise RuntimeError("audio1 и audio2 обязательны")
-
-        sample_rate = int(params.get("sample_rate", 16000))
-        threshold = float(params.get("threshold", 0.95))
-
-        audio1 = np.asarray(audio1_raw, dtype=np.float32)
-        audio2 = np.asarray(audio2_raw, dtype=np.float32)
-
-        fp1 = self._audio_fingerprinter.fingerprint(audio1, sample_rate)
-        fp2 = self._audio_fingerprinter.fingerprint(audio2, sample_rate)
-        similarity = self._audio_fingerprinter.compare(fp1, fp2)
-
-        return {
-            "fingerprint1": fp1,
-            "fingerprint2": fp2,
-            "similarity": round(similarity, 6),
-            "is_duplicate": similarity >= threshold,
-        }
 
     # ── Telegram Bridge ──────────────────────────────────────────────────────
 
