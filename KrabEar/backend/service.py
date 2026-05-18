@@ -59,6 +59,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
+from backend.period_comparison import compare_periods as _compare_periods_fn
 from core.utils import TextUtils
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
@@ -778,8 +779,6 @@ class BackendService:
             "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
-            "get_auto_glossary": self._handle_get_auto_glossary,  # список терминов из авто-глоссария истории
-            "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # принудительное перестроение авто-глоссария
             "toggle_favorite": self._history.handle_toggle_favorite,
             "get_favorites": self._history.handle_get_favorites,
             "is_favorite": self._history.handle_is_favorite,
@@ -835,20 +834,21 @@ class BackendService:
             "report_hotkey_conflict": self._handle_report_hotkey_conflict,  # Swift→backend hotkey conflict (chord taken by another app)
             "handshake": self._handle_handshake,  # Swift→backend handshake on connect: version + capabilities exchange
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
-            "report_binary_drift": self._handle_report_binary_drift,  # external watcher→backend binary drift alert (bundle vs runtime UUID mismatch)
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
-            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
-            "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
-            "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
+            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
+            "analyze_audio_quality": self._handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
+            "analyze_silence": self._handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
             "get_error_stats": self._error_reporter.handle_get_error_stats,  # счётчики ошибок по компоненту/типу/окну
             "send_diagnostics_to_sentry": self._handle_send_diagnostics_to_sentry,  # экспортирует ring-буфер ошибок в Sentry (breadcrumbs + capture_message)
             "get_memory_stats": self._handle_get_memory_stats,  # RSS/VSZ для backend/agent/worker процессов (psutil)
             "get_usage_stats": self._handle_get_usage_stats,
+            "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
+            "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
             "get_audio_info": self._handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
             "get_system_info": self._handle_get_system_info,  # мониторинг системных ресурсов: CPU, RAM, диск, GPU
             "find_duplicates": self._history.handle_find_duplicates,  # обнаружение дублирующихся транскрипций по текстовому сходству
@@ -872,14 +872,12 @@ class BackendService:
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
-            "send_recap_now": self._handle_send_recap_now,  # отправить ежедневный дайджест прямо сейчас (ручной триггер)
-            "get_recap_status": self._handle_get_recap_status,  # статус планировщика дайджеста: last_sent_date, next_run
+            "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
-            "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_calendar_link": self._handle_get_calendar_link,  # Wave 54: registered orphan handler
-            "search_by_calendar_event": self._handle_search_by_calendar_event,  # Wave 54: registered orphan handler
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
             "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
@@ -1000,8 +998,6 @@ class BackendService:
             "list_cached_models": self._model_cache_manager.handle_list_cached_models,  # список кэшированных ML-моделей
             "get_model_cache_info": self._model_cache_manager.handle_get_model_cache_info,  # информация о кэше конкретной модели
             # --- Voice Assistant wake word config (PR 1.5) ---
-            "get_wake_word_config": self._handle_get_wake_word_config,  # конфигурация wake word: enabled, access_key_present, ppn_present
-            "set_wake_word_config": self._handle_set_wake_word_config,  # обновить wake word настройки (enabled, engine, brain)
             # --- openWakeWord adapter (free, Apache 2.0) ---
             "wake_word_list_models": self._oww_adapter.handle_wake_word_list_models,  # список builtin+custom моделей
             "wake_word_start": self._oww_adapter.handle_wake_word_start,  # запустить прослушивание
@@ -1009,9 +1005,7 @@ class BackendService:
             "wake_word_status": self._oww_adapter.handle_wake_word_status,  # статус адаптера
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
-            # --- Hallucination pattern management ---
-            "remove_hallucination_pattern": self._handle_remove_hallucination_pattern,  # удалить пользовательский паттерн галлюцинации
-            "list_hallucination_patterns": self._handle_list_hallucination_patterns,  # получить все паттерны галлюцинаций (встроенные + пользовательские)
+            "analyze_word_timing": self._handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
             # --- Apple Notes integration (Phase D.4) ---
@@ -1027,8 +1021,6 @@ class BackendService:
             "call_session_create": self._handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._handle_call_session_get,  # получить сессию по id
             "call_session_list": self._handle_call_session_list,  # список сессий с опциональным фильтром по статусу
-            "call_session_update_status": self._handle_call_session_update_status,  # перевести статус сессии
-            "call_session_add_transcript": self._handle_call_session_add_transcript,  # добавить реплику в транскрипт
             "call_session_end": self._handle_call_session_end,  # завершить сессию: compute duration, total_cost
             # --- STT hotwords (initial_prompt boost) ---
             "add_stt_hotword": self._handle_add_stt_hotword,  # добавить термин в STT hotwords список
@@ -1054,7 +1046,6 @@ class BackendService:
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
-            "seed_default_hotwords": self._handle_seed_default_hotwords,  # заполнить hotwords дефолтным списком брендов/терминов
         }
 
         handler = handlers.get(method)
@@ -1829,6 +1820,9 @@ class BackendService:
             "session_id": session_id,
         }
 
+    def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает ежедневную статистику использования: записи, длительность, слова."""
+
     def _handle_get_session_history(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает последние N сессий записи с метаданными."""
         limit = int(params.get("limit", 50))
@@ -1838,9 +1832,6 @@ class BackendService:
     def _handle_get_session_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает агрегированную статистику по всем сессиям в памяти."""
         return self._session_tracker.get_session_stats()
-
-    def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает ежедневную статистику использования: записи, длительность, слова."""
 
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
         """Возвращает список всех профилей нормализации текста."""
@@ -2486,22 +2477,6 @@ class BackendService:
         else:
             logger.debug("binary_drift_check OK: UUIDs match (%s)", bundle_uuid)
 
-    def _handle_report_binary_drift(self, params: dict) -> dict:
-        """External watcher→backend binary drift alert (Option A — IPC path).
-
-        Called by the daily scheduled routine `krab-ear-two-binary-drift-watch`
-        (or any other watcher) when it detects that bundle and runtime binaries
-        have diverged UUIDs.
-
-        Params:
-            bundle_uuid  (str, optional): UUID of the bundle binary
-            runtime_uuid (str, optional): UUID of the runtime binary
-        """
-        bundle_uuid = params.get("bundle_uuid") or None
-        runtime_uuid = params.get("runtime_uuid") or None
-        self._push_binary_drift_error(bundle_uuid, runtime_uuid)
-        return {"ok": True}
-
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
         if self._llm_rewriter is None:
@@ -2597,6 +2572,44 @@ class BackendService:
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()
+
+    def _handle_analyze_audio_quality(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pre-flight анализ качества аудиофайла перед транскрипцией.
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+
+        Returns:
+            Словарь с метриками качества: rms_level, peak_level, snr_estimate_db,
+            clipping_ratio, silence_ratio, duration_sec, quality_score, warnings.
+        """
+        from core.audio_quality import analyze_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        report = analyze_file(file_path)
+        return report.to_dict()
+
+    def _handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обнаруживает участки тишины в аудиофайле.
+
+        Params:
+            file_path (str): путь к аудиофайлу.
+            threshold_db (float, optional): порог тишины в дБ (по умолчанию -40).
+
+        Returns:
+            Словарь с silence_regions, speech_ratio, total_silence_sec, duration_sec.
+        """
+        from core.silence_detector import analyze_silence_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        threshold_db = float(params.get("threshold_db", -40.0))
+        return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
@@ -4364,16 +4377,6 @@ class BackendService:
             "markdown": digest.formatted_markdown,
         }
 
-    def _handle_send_recap_now(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Ручная отправка ежедневного дайджеста прямо сейчас."""
-        target_date = params.get("date")  # None -> today
-        result = self._recap_scheduler.send_recap(target_date=target_date)
-        return result
-
-    def _handle_get_recap_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает статус планировщика дайджеста: last_sent_date, next_run и т.д."""
-        return self._recap_scheduler.get_status()
-
     def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует полный Markdown-отчёт статистики использования за период."""
         days = int(params.get("days", 30))
@@ -4384,6 +4387,61 @@ class BackendService:
         """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
         markdown = self._stats_report.generate_mini_report(store=self.store)
         return {"markdown": markdown}
+
+    def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует тренды качества распознавания за последние N дней."""
+        days = int(params.get("days", 30))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._quality_trends.analyze_trends(items, days=days)
+        return {
+            "daily_confidence": report.daily_confidence,
+            "overall_trend": report.overall_trend,
+            "trend_slope": report.trend_slope,
+            "best_day": report.best_day,
+            "worst_day": report.worst_day,
+            "confidence_distribution": report.confidence_distribution,
+        }
+
+    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сравнивает статистику двух временных периодов."""
+        p1_start = params.get("period1_start")
+        p1_end = params.get("period1_end")
+        p2_start = params.get("period2_start")
+        p2_end = params.get("period2_end")
+        if not all([p1_start, p1_end, p2_start, p2_end]):
+            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
+        report = _compare_periods_fn(
+            store=self.store,
+            period1_start=p1_start,
+            period1_end=p1_end,
+            period2_start=p2_start,
+            period2_end=p2_end,
+        )
+        return {
+            "period1": {
+                "recordings": report.period1.recordings,
+                "duration_sec": report.period1.duration_sec,
+                "words": report.period1.words,
+                "avg_confidence": report.period1.avg_confidence,
+                "languages": report.period1.languages,
+            },
+            "period2": {
+                "recordings": report.period2.recordings,
+                "duration_sec": report.period2.duration_sec,
+                "words": report.period2.words,
+                "avg_confidence": report.period2.avg_confidence,
+                "languages": report.period2.languages,
+            },
+            "recordings_change_pct": report.recordings_change_pct,
+            "duration_change_pct": report.duration_change_pct,
+            "confidence_change": report.confidence_change,
+            "new_languages": report.new_languages,
+            "summary": report.summary,
+        }
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
@@ -4404,13 +4462,19 @@ class BackendService:
             )
         return result
 
-    def _handle_get_speaker_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает per-speaker статистику речи из диаризованных записей истории."""
-        return self._speaker_statistics.handle_get_speaker_statistics(
-            params,
-            store=self.store,
-            speaker_manager=self._speaker_manager,
-        )
+    def _handle_analyze_word_timing(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует ритм речи по пословным таймстемпам Whisper.
+
+        Params:
+            segments: list[dict] — список сегментов Whisper (с полем 'words' или без).
+
+        Возвращает TimingReport в виде словаря.
+        """
+        segments = params.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("Параметр 'segments' должен быть списком")
+        report = self._word_timing_analyzer.analyze(segments)
+        return report.as_dict()
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -4437,6 +4501,14 @@ class BackendService:
             items = []
         report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
         return self._sentiment_trends.to_dict(report)
+
+    def _handle_get_speaker_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает per-speaker статистику речи из диаризованных записей истории."""
+        return self._speaker_statistics.handle_get_speaker_statistics(
+            params,
+            store=self.store,
+            speaker_manager=self._speaker_manager,
+        )
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -4657,21 +4729,6 @@ class BackendService:
             "similarity": round(similarity, 6),
             "is_duplicate": similarity >= threshold,
         }
-
-    # ── Hallucination patterns management ───────────────────────────────────
-
-    def _handle_remove_hallucination_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет пользовательский паттерн галлюцинации."""
-        pattern = str(params.get("pattern", "")).strip()
-        if not pattern:
-            raise RuntimeError("Параметр 'pattern' обязателен")
-        removed = self._hallucination_manager.remove_pattern(pattern)
-        return {"removed": removed}
-
-    def _handle_list_hallucination_patterns(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает все паттерны галлюцинаций (встроенные + пользовательские)."""
-        patterns = self._hallucination_manager.list_patterns()
-        return {"patterns": patterns, "total": len(patterns)}
 
     # ── Telegram Bridge ──────────────────────────────────────────────────────
 
@@ -5026,59 +5083,6 @@ end tell'''
         )
         return {"sessions": sessions, "total": len(sessions)}
 
-    def _handle_call_session_update_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Переводит статус звонковой сессии через машину состояний.
-
-        Параметры:
-          - id: str — идентификатор сессии.
-          - new_status: str — целевой статус.
-
-        Возвращает:
-          {session_id, status}
-        """
-        session_id = str(params.get("id") or "").strip()
-        if not session_id:
-            raise ValueError("Параметр 'id' обязателен")
-        new_status = str(params.get("new_status") or "").strip()
-        if not new_status:
-            raise ValueError("Параметр 'new_status' обязателен")
-
-        session = self._call_session_store.update_status(session_id, new_status)
-        return {"session_id": session.id, "status": session.status}
-
-    def _handle_call_session_add_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Добавляет реплику в транскрипт звонковой сессии.
-
-        Параметры:
-          - id: str — идентификатор сессии.
-          - speaker: str — источник реплики: "user" | "bot" | "operator".
-          - text: str — текст реплики.
-          - ts: str | None — временная метка ISO (опционально, по умолчанию now).
-
-        Возвращает:
-          {session_id, transcript_count}
-        """
-        session_id = str(params.get("id") or "").strip()
-        if not session_id:
-            raise ValueError("Параметр 'id' обязателен")
-        speaker = str(params.get("speaker") or "").strip()
-        if not speaker:
-            raise ValueError("Параметр 'speaker' обязателен")
-        text = str(params.get("text") or "").strip()
-        if not text:
-            raise ValueError("Параметр 'text' обязателен")
-        ts = params.get("ts") or None
-        if ts:
-            ts = str(ts).strip() or None
-
-        session = self._call_session_store.add_transcript(
-            session_id=session_id,
-            speaker=speaker,
-            text=text,
-            ts=ts,
-        )
-        return {"session_id": session.id, "transcript_count": len(session.transcript_history)}
-
     def _handle_call_session_end(self, params: dict[str, Any]) -> dict[str, Any]:
         """Завершает звонковую сессию: переводит в COMPLETED, вычисляет duration/cost.
 
@@ -5192,71 +5196,6 @@ end tell'''
         if not isinstance(current, list):
             current = []
         return {"hotwords": sorted(current), "enabled": True}
-
-    def _handle_seed_default_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Заполняет STT hotwords дефолтным списком брендов/терминов.
-
-        Параметры:
-          - category (str, optional): фильтр по категории
-            ("ai", "dev_tools", "languages", "formats", "infra", "apple", "common").
-            Отсутствие параметра → все категории.
-          - only_if_empty (bool, optional): по умолчанию True.
-            True = добавлять только если список полностью пуст.
-            False = мерж поверх существующего списка (без дублей).
-
-        Возвращает: {ok: bool, added_count: int, skipped: bool}
-        """
-        from backend.default_hotwords import seed_hotwords as _seed_hotwords
-
-        category: str | None = params.get("category") or None
-        only_if_empty: bool = bool(params.get("only_if_empty", True))
-
-        added = _seed_hotwords(
-            self._settings_svc,
-            category=category,
-            only_if_empty=only_if_empty,
-        )
-        skipped = added == 0 and only_if_empty and bool(
-            self._settings_svc.cached_settings().get("stt_hotwords", [])
-        )
-        return {"ok": True, "added_count": added, "skipped": skipped}
-
-    # ── Auto-Glossary IPC handlers ───────────────────────────────────────────
-
-    def _handle_get_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий авто-глоссарий из истории транскрибаций.
-
-        Возвращает: {terms: list[str], count: int, cache_age_hours: float, enabled: bool}
-        """
-        _s = self._settings_svc.cached_settings()
-        enabled = bool(_s.get("auto_glossary_enabled", settings.AUTO_GLOSSARY_ENABLED))
-        if not enabled:
-            return {"terms": [], "count": 0, "cache_age_hours": 0.0, "enabled": False}
-        import time as _time
-        terms = self._auto_glossary.get_cached()
-        built_at = self._auto_glossary._cache_built_at
-        age_hours = (_time.time() - built_at) / 3600.0 if built_at else 0.0
-        return {
-            "terms": terms,
-            "count": len(terms),
-            "cache_age_hours": round(age_hours, 2),
-            "enabled": enabled,
-        }
-
-    def _handle_refresh_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Принудительно перестраивает авто-глоссарий из истории (игнорирует кэш).
-
-        Параметры:
-          - window_days: int — горизонт истории в днях (по умолчанию из настроек).
-          - top_n: int — максимальное число терминов (по умолчанию из настроек).
-
-        Возвращает: {terms: list[str], count: int}
-        """
-        _s = self._settings_svc.cached_settings()
-        window_days = int(params.get("window_days", _s.get("auto_glossary_window_days", settings.AUTO_GLOSSARY_WINDOW_DAYS)))
-        top_n = int(params.get("top_n", _s.get("auto_glossary_top_n", settings.AUTO_GLOSSARY_TOP_N)))
-        terms = self._auto_glossary.build(window_days=window_days, top_n=top_n, force=True)
-        return {"terms": terms, "count": len(terms)}
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
@@ -5673,108 +5612,6 @@ end tell'''
             dict: total_checked, duplicates_found, chars_saved, dedup_rate.
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
-
-    # ------------------------------------------------------------------ PR 1.5
-
-    def _handle_get_wake_word_config(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущую конфигурацию wake word.
-
-        Проверяет наличие:
-          - AccessKey (env var KRAB_EAR_PORCUPINE_ACCESS_KEY или файл в DATA_DIR)
-          - .ppn файла «Краб» в ~/Library/Application Support/KrabEar/
-
-        Returns:
-            dict с полями:
-              wake_word_enabled (bool): текущее значение из settings.
-              access_key_present (bool): AccessKey найден.
-              ppn_present (bool): .ppn файл найден.
-              ppn_path (str | None): путь к .ppn если найден.
-              engine_preference (str): "auto" | "moshi" | "seamless".
-              brain_preference (str): "auto" | "qwen3-30b" | "qwen3-4b".
-        """
-        import os
-        from pathlib import Path
-
-        current_settings = self._settings_svc.cached_settings()
-        wake_word_enabled = current_settings.get("wake_word_enabled", False)
-        engine_pref = current_settings.get("conversation_engine", "auto")
-        brain_pref = current_settings.get("conversation_brain", "auto")
-
-        # Проверить наличие AccessKey
-        access_key = (
-            os.environ.get("KRAB_EAR_PORCUPINE_ACCESS_KEY", "")
-            or settings.PORCUPINE_ACCESS_KEY
-        )
-        key_file_path = Path(settings.DATA_DIR) / "porcupine_access_key"
-        if not access_key and key_file_path.exists():
-            access_key = key_file_path.read_text(encoding="utf-8").strip()
-        access_key_present = bool(access_key)
-
-        # Проверить наличие .ppn файла
-        ppn_candidates = [
-            Path.home() / "Library" / "Application Support" / "KrabEar" / "Краб_ru_mac_v3_0_0.ppn",
-            Path.home() / "Library" / "Application Support" / "KrabEar" / "Krab_ru_mac.ppn",
-            Path(settings.DATA_DIR) / "Краб_ru_mac_v3_0_0.ppn",
-        ]
-        ppn_path = next((str(p) for p in ppn_candidates if p.exists()), None)
-
-        return {
-            "wake_word_enabled": wake_word_enabled,
-            "access_key_present": access_key_present,
-            "ppn_present": ppn_path is not None,
-            "ppn_path": ppn_path,
-            "engine_preference": engine_pref,
-            "brain_preference": brain_pref,
-        }
-
-    def _handle_set_wake_word_config(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Обновить конфигурацию wake word и разговора с AI.
-
-        Параметры:
-            wake_word_enabled (bool, optional): включить/выключить wake word.
-            conversation_engine (str, optional): "auto" | "moshi" | "seamless".
-            conversation_brain (str, optional): "auto" | "qwen3-30b" | "qwen3-4b".
-
-        Returns:
-            dict: updated — количество обновлённых полей.
-        """
-        patch: dict[str, Any] = {}
-
-        if "wake_word_enabled" in params:
-            enabled = bool(params["wake_word_enabled"])
-            patch["wake_word_enabled"] = enabled
-
-        engine = params.get("conversation_engine")
-        if engine in ("auto", "moshi", "seamless"):
-            patch["conversation_engine"] = engine
-
-        brain = params.get("conversation_brain")
-        if brain in ("auto", "qwen3-30b", "qwen3-4b"):
-            patch["conversation_brain"] = brain
-
-        if patch:
-            # handle_set_settings принимает patch (только изменённые поля)
-            self._settings_svc.handle_set_settings(patch)
-
-        return {"updated": len(patch), "fields": list(patch.keys())}
-
-    # ------------------------------------------------------------------ #
-    # Calendar auto-link IPC handlers                                     #
-    # ------------------------------------------------------------------ #
-
-    def _handle_get_calendar_link(self, params: dict) -> dict:
-        """Возвращает событие Calendar, связанное с транскрипцией."""
-        item_id = str(params.get("item_id", "")).strip()
-        if not item_id:
-            return {"ok": False, "error": "item_id_required"}
-        event = self.store.get_history_item_calendar(item_id)
-        return {"ok": True, "item_id": item_id, "calendar_event": event}
-
-    def _handle_search_by_calendar_event(self, params: dict) -> dict:
-        """Ищет транскрипции, связанные с событием Calendar по подстроке в названии."""
-        event_title = str(params.get("event_title", "")).strip()
-        results = self.store.search_by_calendar_event(event_title)
-        return {"ok": True, "results": results, "count": len(results)}
 
 
 class IPCServer:

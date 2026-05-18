@@ -328,13 +328,11 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         # Remove from this set once they are either wired into the dispatch table
         # or deleted from service.py.
         known_orphans_wave55 = {
-            # Defined at line ~6032/6040 but never registered in dispatch table.
-            # Possibly added speculatively and never wired.
-            "_handle_get_calendar_link",
-            "_handle_search_by_calendar_event",
             # Defined at line ~4551. 'get_recording_insights' in dispatch points
             # to _handle_get_recording_stats instead (alias / naming inconsistency).
             "_handle_get_recording_insights",
+            # Wave 65 batch 3: _handle_get_calendar_link and
+            # _handle_search_by_calendar_event deleted (dead code, no callers).
         }
 
         new_orphans = [m for m in orphan_private if m not in known_orphans_wave55]
@@ -350,35 +348,24 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         still_present = [m for m in known_orphans_wave55 if m in orphan_private]
         if still_present:
             # This branch is expected — orphans not yet fixed
-            pass  # documented, not an error here; see test_calendar_handlers_orphan_detection
+            pass  # documented, not an error here; see test_get_recording_insights_alias_consistency
 
-    def test_calendar_handlers_orphan_detection(self):
-        """Regression test: _handle_get_calendar_link and
-        _handle_search_by_calendar_event were found as orphans in Wave 51
-        audit — they must either be registered or this test documents them.
-
-        If they ARE now registered this test will pass naturally. If they remain
-        unregistered, this test FAILS to draw attention to the known gap.
+    def test_calendar_handlers_deleted_wave65(self):
+        """Wave 65 batch 3: _handle_get_calendar_link and _handle_search_by_calendar_event
+        were deleted as dead code (no callers). Regression guard: these methods must
+        NOT be present in service.py anymore.
         """
         import re
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
 
-        dispatch_block_start = source.index("handlers: dict[str, Callable")
-        dispatch_block_end = source.index("\n        handler = handlers.get(method)")
-        dispatch_block = source[dispatch_block_start:dispatch_block_end]
-
-        defined_calendar = {"_handle_get_calendar_link", "_handle_search_by_calendar_event"}
-        referenced = set(re.findall(r"self\.(_handle_\w+)", dispatch_block))
-
-        orphans = defined_calendar - referenced
-        if orphans:
-            self.fail(
-                "Known orphan calendar handlers are still not registered in dispatch:\n"
-                + "\n".join(f"  - {m}" for m in sorted(orphans))
-                + "\n\nFix: add them to the handlers dict in handle_request, or "
-                  "delete the methods if they are dead code. (Wave 55 cleanup target)"
+        deleted_handlers = ["_handle_get_calendar_link", "_handle_search_by_calendar_event"]
+        for handler in deleted_handlers:
+            self.assertNotIn(
+                f"def {handler}",
+                source,
+                f"{handler} was deleted in Wave 65 batch 3 but has reappeared — revert or update this test.",
             )
 
     def test_get_recording_insights_alias_consistency(self):
