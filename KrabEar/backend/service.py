@@ -847,6 +847,8 @@ class BackendService:
             "send_diagnostics_to_sentry": self._handle_send_diagnostics_to_sentry,  # экспортирует ring-буфер ошибок в Sentry (breadcrumbs + capture_message)
             "get_memory_stats": self._handle_get_memory_stats,  # RSS/VSZ для backend/agent/worker процессов (psutil)
             "get_usage_stats": self._handle_get_usage_stats,
+            "get_session_history": self._handle_get_session_history,  # история сессий записи с метаданными
+            "get_session_stats": self._handle_get_session_stats,  # агрегированная статистика сессий
             "get_audio_info": self._handle_get_audio_info,  # метаданные аудиофайла  # ежедневная статистика использования: записи, длительность, слова
             "get_system_info": self._handle_get_system_info,  # мониторинг системных ресурсов: CPU, RAM, диск, GPU
             "find_duplicates": self._history.handle_find_duplicates,  # обнаружение дублирующихся транскрипций по текстовому сходству
@@ -875,6 +877,7 @@ class BackendService:
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "get_speaker_statistics": self._handle_get_speaker_statistics,  # per-speaker статистика речи из диаризованных записей
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
             "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
@@ -1819,6 +1822,16 @@ class BackendService:
 
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
+
+    def _handle_get_session_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние N сессий записи с метаданными."""
+        limit = int(params.get("limit", 50))
+        sessions = self._session_tracker.get_sessions(limit=limit)
+        return {"sessions": sessions, "count": len(sessions)}
+
+    def _handle_get_session_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает агрегированную статистику по всем сессиям в памяти."""
+        return self._session_tracker.get_session_stats()
 
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
         """Возвращает список всех профилей нормализации текста."""
@@ -4488,6 +4501,14 @@ class BackendService:
             items = []
         report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
         return self._sentiment_trends.to_dict(report)
+
+    def _handle_get_speaker_statistics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает per-speaker статистику речи из диаризованных записей истории."""
+        return self._speaker_statistics.handle_get_speaker_statistics(
+            params,
+            store=self.store,
+            speaker_manager=self._speaker_manager,
+        )
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
