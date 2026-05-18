@@ -12,13 +12,13 @@
 # Behavior:
 #   1. Check if any KrabEarAgent process is running (.app bundle OR runtime path).
 #   2. If absent → `open Krab Ear.app` (login-session-style launch, preserves TCC).
-#   3. Wait 5s, re-check. If still absent → log error to .remember/agent-recovery.log.
+#   3. Wait 15s, re-check. If still absent → log error to .remember/agent-recovery.log.
 #   4. If present → log line + exit 0.
 #
 # Exit codes:
 #   0  agent running (was already, or successfully restarted)
 #   1  agent absent and `open` failed
-#   2  agent absent, `open` ran but agent didn't appear in 5s
+#   2  agent absent, `open` ran but agent didn't appear in 15s
 #
 # Usage:
 #   scripts/ensure_agent_running.command                # interactive
@@ -83,8 +83,10 @@ if ! open "$BUNDLE_PATH"; then
     exit 1
 fi
 
-# Wait up to 5 s for the agent to register
-for _ in 1 2 3 4 5; do
+# Wave 50 follow-up: agent takes 10-15s to launch + register в pgrep
+# после `open Krab Ear.app` на M4 Max. 5s timeout was too short.
+# Wait up to 15 s for the agent to register
+for _ in $(seq 1 15); do
     sleep 1
     if [ "$(count_agent_pids)" -gt 0 ]; then
         log "OK  agent restored (pids=$(count_agent_pids))"
@@ -92,5 +94,5 @@ for _ in 1 2 3 4 5; do
     fi
 done
 
-log "FAIL  agent still absent 5s after 'open'"
+log "FAIL  agent still absent 15s after 'open'"
 exit 2
