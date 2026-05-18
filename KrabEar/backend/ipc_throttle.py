@@ -39,6 +39,7 @@ HEAVY_METHODS: Set[str] = {
     "batch_export",             # пакетный экспорт
     "generate_daily_digest",    # генерация дайджеста
     "check_integrity",          # проверка целостности
+    "analyze_quality_trends",   # анализ трендов качества
     "repair_integrity",         # исправление целостности
     "get_waveform",             # генерация waveform-данных
     "extract_action_items",     # LLM извлечение задач/решений/вопросов из транскрипта
@@ -61,8 +62,6 @@ MEDIUM_METHODS: Set[str] = {
     "get_system_info",          # системные ресурсы
     "filter_by_confidence",     # фильтрация по confidence
     "find_duplicates",          # поиск дублей
-    "extract_terms",            # извлечение терминов
-    "compare_texts",            # сравнение текстов
     "translate_text",           # перевод текста
     "get_glossary_suggestions",  # предложения для глоссария
     "get_vocabulary_suggestions",
