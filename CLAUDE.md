@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches **349** JSON-RPC methods via a handler lookup table, delegating to extracted services. Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines, 78 handlers documented — 271 undocumented per Wave 45 drift report `docs/drift-report-2026-05-12.md`).
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~3451 lines. The `handle_request` method dispatches **~305** JSON-RPC methods via a handler lookup table, delegating to extracted services (Wave 65 batch 1+2 removed 44 dead handlers from the original 349). Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines). Dead-handler removal ongoing — see `docs/drift-report-2026-05-12.md`.
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -237,8 +237,10 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 
 #### Phase A — Auto-heal (2026-05-02) Swift additions:
 - **`BackendSupervisor.swift`** — двухкольцевой supervisor; passive mode (launchd Variant B = `KeepAlive=true`) или active mode (standalone). Exp backoff restart 0/2/5/15s + circuit breaker (5 fails в 60s window → 5 min cooldown). Spec: `docs/superpowers/specs/2026-05-04-phase-c-roadmap-refinement-design.md` Phase A.
+  - **Wave 50 self-recovery bug** (FIXED PR #408): `pgrep + set -e` в launchd plist никогда не работал — `set -e` вызывал немедленный exit при non-zero pgrep exit code. Исправлено в `scripts/install_agent_launchagent.command` (убран `set -e`, добавлен explicit check).
 - **`HealthMonitor.swift`** — actor с 3s ping `handle_ping` IPC; 2 fails подряд → SIGTERM Python backend → wait → SIGKILL → respawn. Phase B.1 расширит подпиской на `rewriter_recovered` события из active LLM probe.
 - **`BackendToast.swift`** — non-modal toast (severity-aware), используется для backend restart notifications в Phase A. Phase B.1 добавит `ErrorToastView` для UI ошибок (отдельный компонент).
+  - **AGENT-K fix (PR #406)**: BackendToast crash при ColorSync callback на stale bundle (v2.0.2). Исправлено — guard на nil window + weak capture в colorAppearanceDidChange.
 - **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
 
 #### Phase B — Loud Errors (2026-05-04+) Python additions:
@@ -279,8 +281,8 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 
 Основной Краб (Telegram userbot) запускается/останавливается ТОЛЬКО через:
 ```bash
-/Users/pablito/Antigravity_AGENTS/new\ start_krab.command   # СТАРТ
-/Users/pablito/Antigravity_AGENTS/new\ Stop\ Krab.command    # СТОП
+~/Antigravity_AGENTS/new\ start_krab.command   # СТАРТ  (абсолютный путь: /Users/<you>/Antigravity_AGENTS/)
+~/Antigravity_AGENTS/new\ Stop\ Krab.command    # СТОП
 ```
 
 **ЗАПРЕЩЕНО:** `kill -9`, `SIGHUP`, `Restart Krab.command`, прямой `python -m src.main`.
@@ -366,15 +368,19 @@ python KrabEar/main.py --data-dir ~/.krab_ear_data &
 ### Sentry / observability
 ```bash
 # Enable Sentry crash reporting (set DSN via IPC)
+# Socket path: production = default_data_dir()/krabear.sock (see KrabEar/core/config.py)
+#              dev        = ~/.krab_ear_data/backend.sock (via --data-dir flag)
 python3 -c "
-import socket, json
+import os, socket, json
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+# Production socket (launchd Variant B):
 sock.connect(os.path.expanduser('~/Library/Application Support/KrabEar/krabear.sock'))
 sock.sendall(json.dumps({'id':'1','method':'set_settings','params':{'sentry_dsn':'https://YOUR_DSN@sentry.io/PROJECT_ID'}}).encode()+b'\n')
 print(sock.recv(4096).decode())
 "
 
 # Sentry alerts also land in: ~/Library/Logs/KrabEar/sentry_errors.log (when log level=debug)
+# (log dir = default_data_dir()/logs/ — matches data dir, not hardcoded)
 ```
 
 ### Performance benchmarks (PR #237 / #242)
@@ -413,7 +419,7 @@ python scripts/check_performance_budget.py
 - **Collapsible GUI sections**: CollapsibleSectionView with UserDefaults persistence (key: `CollapsibleSection_{sectionId}`). Disclosure triangle toggle with animation.
 - **iCloud audio import**: files from `Mobile Documents/com~apple~CloudDocs` are auto-copied to /tmp before ffmpeg (errno 11 workaround).
 - **Audio import limits & errors** (PR #12): `MAX_AUDIO_MB` default = 1000 MB (часовые ALAC/AAC звонки 70-100 MB норма); `backend/service.py` ловит русский паттерн "Файл слишком большой" в err_msg matching. Swift `HistoryPanelController+Import.swift` прокидывает actual backend error messages в UI: первые 3 в alert, все в `.md` отчёт под `## Errors` секцией (поле `importErrorMessages: [String]`).
-- **Transcript files**: imported audio generates .md files in `~/Library/Application Support/KrabEar/transcripts/`.
+- **Transcript files**: imported audio generates .md files in `<data_dir>/transcripts/` (production default: `~/Library/Application Support/KrabEar/transcripts/`; dev: `~/.krab_ear_data/transcripts/`). Data dir resolved via `default_data_dir()` in `KrabEar/core/config.py`.
 - **Legacy compatibility**: `AudioEngine` has static method aliases (`_cleanup_soft`, `_normalize_phrase`, etc.) that delegate to `TextUtils` — these exist for backwards compatibility with older tests.
 - **Config override**: Any setting in `core/config.py` can be overridden via `KRAB_EAR_<SETTING_NAME>` environment variable.
 - **Runtime vs static settings reads (Wave 58 lesson)**: ВСЕ startup-time reads of user-overridable settings MUST use `self._get_runtime_setting(key, default)` (lines 593-601 в `service.py`), NOT `DEFAULT_SETTINGS.get(key, default)`. The latter reads the static dict imported at module load, ignoring settings.json runtime overrides — caused chronic warmup-timeout warnings (Wave 58 fix: rewriter_warmup line 187 + stt_warmup line 229). Legit fallback usages of `DEFAULT_SETTINGS` are nested: `cached_settings.get(key, DEFAULT_SETTINGS.get(key, hardcoded))` — runtime first, static as ultimate fallback.
@@ -421,7 +427,7 @@ python scripts/check_performance_budget.py
 - **Event contracts**: All events use `{type, ts, data}` envelope (EVENT_CONTRACT_V1). Event types are defined in `contracts/registry.py`. Each service owns its event schemas — Krab Ear owns STT + Translation, Voice Gateway owns TTS + Session.
 - **Release process**: `RELEASE_CHECKLIST.md` at repo root. Automated part via `scripts/run_release_checklist.command`.
 - **Service extraction pattern**: each extracted service takes `store` + specific collaborators in its constructor; handler methods named `handle_*`; `BackendService` imports the service and delegates matching IPC methods to it.
-- **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`.
+- **Dead code removal workflow**: extract logic into new service → add delegation calls in `BackendService.handle_request` → verify all tests pass → remove original methods from `BackendService`. Wave 65 identified 177 dead handler candidates; batch 1 (19 removed) + batch 2 shipped — removal ongoing in small batches to avoid merge conflicts.
 - **CallAssistService delegation**: `HistoryPanelController+CallAssist.swift` delegates all call assist logic to `CallAssistService` (Python backend); Swift side is thin UI/IPC glue only.
 - **JSON structured logging**: `LOG_FORMAT` setting (`json` or `text`).
   - **When using `json`**: handlers use `JsonFormatter` defined inline in `backend/service.py::configure_logging` (`service.py:6168-6186`). REST API server (`backend/rest_server.py:280`) emits its own structured records inline via `json.dumps(log_record)` — same `ts/level/...` shape.
@@ -454,13 +460,14 @@ python scripts/check_performance_budget.py
   - PyTorch+MPS adapters (SenseVoice, Parakeet, WhisperX, Voxtral) don't need this lock.
   - Profile switches (balanced↔max) trigger model reload in MLX → protect these too.
   - 2026-04-19 crash report: `~/Library/Logs/DiagnosticReports/Python-2026-04-19-213636.ips`. Fix: PR #71.
+  - **Wave 63 memory leak fix**: call `mx.clear_cache()` after each `mlx_whisper.transcribe()` to release Metal GPU cache — prevents RAM growth on long sessions (shipped, no separate PR tag).
 
 - **Sentry breadcrumbs (PR #238)**: `backend/observability.py` logs privacy-respecting breadcrumbs (no transcript text, only metadata: method name, duration_ms, error_type). Breadcrumbs auto-attach to next crash report. Pattern: `add_breadcrumb(category="ipc", message="method_name", data={"ok": True})`.
 - **Sentry release tracking (PR #241)**: `SentryConfig.swift` reads `CFBundleVersion` and sets `sentry_sdk.set_tag("release", version)` at startup. Enables regression tracking per release in Sentry issues dashboard. Python side sets `release=` in `sentry_sdk.init()`.
 - **Stable codesign identity (PR #235)**: `scripts/create_local_signing_identity.command` creates a self-signed cert `Krab Ear Dev Local` in the system keychain. Sign binary with: `codesign -s "Krab Ear Dev Local" -f ...`. TCC grants persist across rebuilds because the identity hash stays constant. **Caveat**: for distribution (App Store / Notarization), replace with Apple Developer ID. See `docs/DEV_CODESIGN.md`.
 - **Distribution DMG (PR #229)**: `scripts/build_distribution_dmg.command` creates a signed `.dmg` for sharing. Requires `Krab Ear Dev Local` identity or Apple Developer ID. See `docs/DISTRIBUTION.md`.
 - **Analytics UI (PR #231 / #233)**: `AnalyticsDashboardViewController.swift` renders the analytics dashboard via `get_analytics_dashboard` IPC. Shows sentiment trend, quality trend, keyword cloud. Bug fixes in PR #233 (nil guard crash on empty history).
-- **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, all 241 JSON-RPC handlers documented with params/response schema and examples (PR #243). Use as ground truth before implementing new IPC calls.
+- **IPC full reference**: `docs/IPC_API_REFERENCE.md` — 4341 lines, JSON-RPC handlers documented with params/response schema and examples (PR #243). Active handler count ~305 (Wave 65 batch 1+2 removed 44 dead handlers; removal ongoing — 177 candidates identified). Use as ground truth before implementing new IPC calls.
 - **User manual**: `docs/USER_MANUAL.md` — full end-user guide in Russian (PR #230). Start here for onboarding new users.
 - **NSStackView distribution fixes (PRs #228, #239, #240)**: Fixed NSStackView `distribution` property (`.fill` → `.fillEqually` / `.fillProportionally`) for correct layout in Settings + ConversationVC. Actor isolation warnings resolved in ConversationViewController (Swift 6 strict concurrency).
 
