@@ -59,6 +59,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
+from backend.period_comparison import compare_periods as _compare_periods_fn
 from core.utils import TextUtils
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
@@ -868,6 +869,7 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._handle_analyze_quality_trends,  # анализ трендов качества
+            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
@@ -998,6 +1000,7 @@ class BackendService:
             "wake_word_status": self._oww_adapter.handle_wake_word_status,  # статус адаптера
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
+            "analyze_word_timing": self._handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
             "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
             # --- Apple Notes integration (Phase D.4) ---
@@ -2510,6 +2513,44 @@ class BackendService:
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()
+
+    def _handle_analyze_audio_quality(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pre-flight анализ качества аудиофайла перед транскрипцией.
+
+        Params:
+            file_path (str): путь к аудиофайлу (WAV, FLAC, MP3 и т.д.)
+
+        Returns:
+            Словарь с метриками качества: rms_level, peak_level, snr_estimate_db,
+            clipping_ratio, silence_ratio, duration_sec, quality_score, warnings.
+        """
+        from core.audio_quality import analyze_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        report = analyze_file(file_path)
+        return report.to_dict()
+
+    def _handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обнаруживает участки тишины в аудиофайле.
+
+        Params:
+            file_path (str): путь к аудиофайлу.
+            threshold_db (float, optional): порог тишины в дБ (по умолчанию -40).
+
+        Returns:
+            Словарь с silence_regions, speech_ratio, total_silence_sec, duration_sec.
+        """
+        from core.silence_detector import analyze_silence_file
+
+        file_path = params.get("file_path", "")
+        if not file_path:
+            raise ValueError("Параметр file_path обязателен")
+
+        threshold_db = float(params.get("threshold_db", -40.0))
+        return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def _handle_get_waveform(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует waveform-данные из аудиофайла для GUI-визуализации.
@@ -4287,6 +4328,61 @@ class BackendService:
         """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
         markdown = self._stats_report.generate_mini_report(store=self.store)
         return {"markdown": markdown}
+
+    def _handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует тренды качества распознавания за последние N дней."""
+        days = int(params.get("days", 30))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._quality_trends.analyze_trends(items, days=days)
+        return {
+            "daily_confidence": report.daily_confidence,
+            "overall_trend": report.overall_trend,
+            "trend_slope": report.trend_slope,
+            "best_day": report.best_day,
+            "worst_day": report.worst_day,
+            "confidence_distribution": report.confidence_distribution,
+        }
+
+    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Сравнивает статистику двух временных периодов."""
+        p1_start = params.get("period1_start")
+        p1_end = params.get("period1_end")
+        p2_start = params.get("period2_start")
+        p2_end = params.get("period2_end")
+        if not all([p1_start, p1_end, p2_start, p2_end]):
+            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
+        report = _compare_periods_fn(
+            store=self.store,
+            period1_start=p1_start,
+            period1_end=p1_end,
+            period2_start=p2_start,
+            period2_end=p2_end,
+        )
+        return {
+            "period1": {
+                "recordings": report.period1.recordings,
+                "duration_sec": report.period1.duration_sec,
+                "words": report.period1.words,
+                "avg_confidence": report.period1.avg_confidence,
+                "languages": report.period1.languages,
+            },
+            "period2": {
+                "recordings": report.period2.recordings,
+                "duration_sec": report.period2.duration_sec,
+                "words": report.period2.words,
+                "avg_confidence": report.period2.avg_confidence,
+                "languages": report.period2.languages,
+            },
+            "recordings_change_pct": report.recordings_change_pct,
+            "duration_change_pct": report.duration_change_pct,
+            "confidence_change": report.confidence_change,
+            "new_languages": report.new_languages,
+            "summary": report.summary,
+        }
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает GitHub-style activity calendar данные за последние N месяцев."""

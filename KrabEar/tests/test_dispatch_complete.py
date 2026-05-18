@@ -636,6 +636,14 @@ class TestAnalyticsTrendsGroup(_DispatchBase):
     def test_analyze_quality_trends(self):
         self.assert_dispatch("analyze_quality_trends", {"days": 7}, ok_required=True)
 
+    def test_compare_periods(self):
+        self.assert_dispatch("compare_periods", {
+            "period1_start": "2026-01-01",
+            "period1_end": "2026-01-15",
+            "period2_start": "2026-01-16",
+            "period2_end": "2026-01-31",
+        }, ok_required=True)
+
     def test_get_sentiment_trends(self):
         self.assert_dispatch("get_sentiment_trends", {"days": 7}, ok_required=True)
 
@@ -816,6 +824,12 @@ class TestAudioUtilsGroup(_DispatchBase):
 
     def test_profile_noise(self):
         self.assert_dispatch("profile_noise", {"path": "/nonexistent.wav"})
+
+    def test_analyze_audio_quality(self):
+        self.assert_dispatch("analyze_audio_quality", {"file_path": "/nonexistent.wav"})
+
+    def test_analyze_silence(self):
+        self.assert_dispatch("analyze_silence", {"file_path": "/nonexistent.wav"})
 
     def test_get_waveform(self):
         self.assert_dispatch("get_waveform", {"path": "/nonexistent.wav"})
@@ -1206,6 +1220,10 @@ class TestSearchArchiveGroup(_DispatchBase):
     def test_get_activity_calendar(self):
         self.assert_dispatch("get_activity_calendar", ok_required=True)
 
+    def test_analyze_word_timing(self):
+        # Пустой список segments — метод должен ответить
+        self.assert_dispatch("analyze_word_timing", {"segments": []})
+
 
 # ===========================================================================
 # Группа 30: Метод unknown — проверка fallback
@@ -1316,7 +1334,7 @@ class TestMethodCountSummary(_DispatchBase):
         # New methods (post-main dev batch 2)
         "get_recent_searches", "get_popular_searches", "clear_search_history",
         "archive_items", "unarchive_items", "list_archived", "get_archive_stats",
-        "get_activity_calendar",
+        "get_activity_calendar", "analyze_word_timing",
     ]
 
     def test_all_methods_return_valid_response(self):
