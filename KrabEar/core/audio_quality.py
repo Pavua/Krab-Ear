@@ -71,6 +71,32 @@ class AudioQualityAnalyzer:
         audio_data = audio_data.astype(np.float64)
         n_samples = len(audio_data)
 
+        # Wave 64: stt.empty_audio_warning — push when audio frame is empty
+        # (n_samples == 0) to surface the numpy RuntimeWarning that would otherwise
+        # fire for 'Mean of empty slice' / 'invalid value encountered in divide'.
+        if n_samples == 0:
+            _error_bus = getattr(self, "_error_bus", None)
+            if _error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("stt.empty_audio_warning", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="stt",
+                        code="stt.empty_audio_warning",
+                        message_user=_entry.get("user_msg_ru", ""),
+                        message_debug="audio_quality.analyze: n_samples=0 (empty audio frame)",
+                        timestamp=datetime.now(timezone.utc),
+                        context={"sample_rate": sample_rate},
+                        actionable=False,
+                        action_id=None,
+                    )
+                    _error_bus.push(_err)
+                except Exception:
+                    pass
+
         # --- Длительность ---
         duration_sec = n_samples / max(sample_rate, 1)
 

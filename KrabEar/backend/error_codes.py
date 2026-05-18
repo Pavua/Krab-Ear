@@ -398,6 +398,72 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 30,
     },
 
+    # ── Wave 64: 5 new codes from backend log analysis 2026-05-14/16 ─────
+
+    # stt.gigaam.ffmpeg_missing — REST server startup or audio_converter.py
+    # raises RuntimeError when ffmpeg binary not found in PATH. 100+ occurrences
+    # historically. Dedupe 3600s (once per hour — it's a persistent env issue).
+    "stt.gigaam.ffmpeg_missing": {
+        "user_msg_ru": (
+            "ffmpeg не найден в PATH — REST STT отключён. "
+            "Установите: brew install ffmpeg"
+        ),
+        "actionable": True,
+        "action_id": "open_logs",
+        "action_label": "Открыть логи",
+        "severity": "error",
+        "dedupe_seconds": 3600,
+    },
+
+    # mlx.metal_assertion_failure — Metal GPU command-buffer assertion error:
+    # 'IOGPUMetalCommandBuffer validate failed assertion' or
+    # 'commit command buffer with uncommitted encoder'. Recovery is automatic
+    # (MLX subprocess restart). No user action needed.
+    "mlx.metal_assertion_failure": {
+        "user_msg_ru": "Metal GPU ошибка в MLX — автоматически перезапускаю...",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 60,
+    },
+
+    # mlx.semaphore_leak — multiprocessing resource_tracker warns about N
+    # leaked semaphore objects at subprocess shutdown (GigaAM worker or
+    # other MLX subprocess). Cosmetic: OS reclaims them. Dedupe 1800s.
+    "mlx.semaphore_leak": {
+        "user_msg_ru": "MLX воркер оставил незакрытые семафоры (не критично)",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 1800,
+    },
+
+    # stt.empty_audio_warning — numpy RuntimeWarning: 'Mean of empty slice'
+    # or 'invalid value encountered in divide' during audio quality metrics
+    # computation on a zero-length audio frame. No action; automatic.
+    "stt.empty_audio_warning": {
+        "user_msg_ru": "Пустой аудиофрагмент — метрики качества пропущены",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 600,
+    },
+
+    # system.malloc_env_leak — MALLOC_STACK_LOGGING env var leaked from parent
+    # process to subprocess. macOS logs 'can't turn off malloc stack logging
+    # because it was not enabled'. Purely cosmetic; dedupe 3600s.
+    "system.malloc_env_leak": {
+        "user_msg_ru": "MALLOC_STACK_LOGGING просочился в subprocess (не критично)",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "info",
+        "dedupe_seconds": 3600,
+    },
+
     # ── Wave 61: final missing codes ─────────────────────────────
 
     # vgw.reconnect — VGWebSocketClient disconnected from Voice Gateway and

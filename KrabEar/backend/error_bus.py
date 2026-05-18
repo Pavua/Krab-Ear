@@ -25,6 +25,8 @@ Component = Literal[
     "disk", "audio", "agent",
     # Wave 61 additions
     "vgw",
+    # Wave 64 additions
+    "system",
 ]
 
 
