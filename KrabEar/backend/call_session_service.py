@@ -1,0 +1,185 @@
+"""CallSessionService — управление жизненным циклом звонковых сессий (CRUD + переходы состояний).
+
+Выделено из service.py для уменьшения размера монолитного BackendService.
+Все handler-методы делегируются сюда из BackendService.handle_request.
+
+Связи модуля:
+1) CallSessionStore: NDJSON-backed хранилище сессий.
+2) CallAutoEnd: логика автоматического завершения (тишина / превышение лимита).
+3) BackendService: делегирует IPC-обработчики через handle_request.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+logger = logging.getLogger("KrabEar.Backend.CallSession")
+
+
+class CallSessionService:
+    """Обработчики IPC для управления звонковыми сессиями."""
+
+    def __init__(self, store: Any, auto_end: Any) -> None:
+        """
+        Args:
+            store:    CallSessionStore — NDJSON-хранилище сессий.
+            auto_end: CallAutoEnd     — логика автоматического завершения.
+        """
+        self._store = store
+        self._auto_end = auto_end
+
+    # ------------------------------------------------------------------ #
+    # CRUD handlers                                                        #
+    # ------------------------------------------------------------------ #
+
+    def handle_call_session_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Создаёт новую звонковую сессию.
+
+        Параметры:
+          - phone: str — номер телефона (обязательный).
+          - goal_text: str — цель звонка (обязательный).
+
+        Возвращает:
+          {session_id, status, created_at}
+        """
+        phone = str(params.get("phone") or "").strip()
+        if not phone:
+            raise ValueError("Параметр 'phone' обязателен")
+        goal = str(params.get("goal_text") or "").strip()
+        if not goal:
+            raise ValueError("Параметр 'goal_text' обязателен")
+
+        session = self._store.create(
+            phone_number=phone,
+            goal_text=goal,
+        )
+        return {"session_id": session.id, "status": session.status, "created_at": session.created_at}
+
+    def handle_call_session_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает полную запись сессии по id.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+
+        Возвращает полный словарь CallSession или ошибку "not_found".
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        session = self._store.get(session_id)
+        if session is None:
+            raise KeyError(f"Сессия не найдена: {session_id!r}")
+        return session.to_dict()
+
+    def handle_call_session_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает список звонковых сессий.
+
+        Параметры:
+          - limit: int — макс. количество сессий (по умолчанию 50, макс. 500).
+          - status_filter: str | None — фильтр по статусу (idle/dialing/...).
+
+        Возвращает:
+          {sessions: [...], total: N}
+        """
+        limit = max(1, min(int(params.get("limit", 50)), 500))
+        status_filter = params.get("status_filter") or None
+        if status_filter:
+            status_filter = str(status_filter).strip() or None
+
+        sessions = self._store.list_sessions(
+            limit=limit,
+            status_filter=status_filter,
+        )
+        return {"sessions": sessions, "total": len(sessions)}
+
+    def handle_call_session_update_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Применяет переход статуса звонковой сессии.
+
+        Параметры:
+          - id: str        — идентификатор сессии (обязательный).
+          - status: str    — новый статус (idle/dialing/connected/talking/ending/completed/failed).
+
+        Возвращает:
+          {session_id, status}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        new_status = str(params.get("status") or "").strip()
+        if not new_status:
+            raise ValueError("Параметр 'status' обязателен")
+
+        session = self._store.update_status(session_id=session_id, new_status=new_status)
+        return {"session_id": session.id, "status": session.status}
+
+    def handle_call_session_add_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет реплику в транскрипт сессии.
+
+        Параметры:
+          - id: str      — идентификатор сессии (обязательный).
+          - speaker: str — метка говорящего, например "agent" или "caller".
+          - text: str    — текст реплики (обязательный).
+          - ts: str      — ISO 8601 timestamp (опциональный, по умолчанию now).
+
+        Возвращает:
+          {session_id, transcript_count}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        speaker = str(params.get("speaker") or "unknown").strip()
+        text = str(params.get("text") or "").strip()
+        if not text:
+            raise ValueError("Параметр 'text' обязателен")
+        ts = params.get("ts") or None
+        if ts:
+            ts = str(ts).strip() or None
+
+        session = self._store.add_transcript(
+            session_id=session_id,
+            speaker=speaker,
+            text=text,
+            ts=ts,
+        )
+        return {"session_id": session.id, "transcript_count": len(session.transcript_history)}
+
+    def handle_call_session_end(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Завершает звонковую сессию: переводит в COMPLETED, вычисляет duration/cost.
+
+        Параметры:
+          - id: str — идентификатор сессии.
+          - reason: str — причина завершения (completed / no_answer / voicemail / opt_out / timeout).
+          - cost_usd: float — фактическая стоимость звонка в USD (по умолчанию 0.0).
+          - failed: bool — если True, переводит в FAILED вместо COMPLETED.
+
+        Возвращает:
+          {session_id, status, duration_sec, cost_usd, end_reason}
+        """
+        session_id = str(params.get("id") or "").strip()
+        if not session_id:
+            raise ValueError("Параметр 'id' обязателен")
+        reason = str(params.get("reason") or "completed").strip()
+        cost_usd = float(params.get("cost_usd") or 0.0)
+        failed = bool(params.get("failed", False))
+
+        if failed:
+            session = self._store.mark_failed(
+                session_id=session_id,
+                end_reason=reason,
+                cost_usd=cost_usd,
+            )
+        else:
+            session = self._store.mark_completed(
+                session_id=session_id,
+                end_reason=reason,
+                cost_usd=cost_usd,
+            )
+
+        return {
+            "session_id": session.id,
+            "status": session.status,
+            "duration_sec": session.duration_sec,
+            "cost_usd": session.cost_usd,
+            "end_reason": session.end_reason,
+        }
