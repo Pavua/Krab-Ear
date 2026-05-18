@@ -225,18 +225,17 @@ final class DiagnosticsTabViewController: NSViewController {
         btn.state = .on  // all active by default
         btn.translatesAutoresizingMaskIntoConstraints = false
 
-        // Build attributed title with colored dot + label text
-        let dotAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: SeverityColor.color(for: id),
-            .font: NSFont.systemFont(ofSize: 9, weight: .bold),
-        ]
-        let textAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-        ]
-        let attrStr = NSMutableAttributedString(string: "● ", attributes: dotAttrs)
-        attrStr.append(NSAttributedString(string: label, attributes: textAttrs))
-        btn.attributedTitle = attrStr
+        // Wave 67 (AGENT-J): use SF Symbol instead of `●` U+25CF to avoid TFPFont hang.
+        let dotColor = SeverityColor.color(for: id)
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [dotColor]))
+        if let dotImg = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(symConfig) {
+            btn.image = dotImg
+            btn.imagePosition = .imageLeft
+        }
+        btn.title = label
+        btn.font = NSFont.systemFont(ofSize: 13, weight: .medium)
 
         btn.bezelStyle = .rounded
         btn.identifier = NSUserInterfaceItemIdentifier("chip_\(id)")
