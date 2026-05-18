@@ -5606,8 +5606,12 @@ class IPCServer:
                 }
                 try:
                     conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-                except BrokenPipeError:
-                    logger.debug("Клиент закрыл соединение до получения invalid_json-ответа")
+                except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                    # Swift client disconnected before response sent — normal during
+                    # crash/quit mid-call.  Log at debug, not error.
+                    logger.debug(
+                        "IPC client disconnected before invalid_json response: %s", exc
+                    )
                 except Exception:
                     logger.exception("Ошибка отправки invalid_json-ответа")
                 return
@@ -5623,8 +5627,12 @@ class IPCServer:
                 }
             try:
                 conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-            except BrokenPipeError:
-                logger.debug("Клиент закрыл соединение до получения ответа")
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                # Swift client disconnected before response sent — common when the
+                # agent crashes or quits mid-call.  Log at debug, not error.
+                logger.debug(
+                    "IPC client disconnected before response: %s", exc
+                )
             except Exception:
                 logger.exception("Ошибка отправки ответа клиенту")
 
