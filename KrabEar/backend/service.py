@@ -773,6 +773,7 @@ class BackendService:
             "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
             "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
+            "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
             "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
             "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
@@ -3076,6 +3077,48 @@ class BackendService:
             "fallback_reason": result.fallback_reason,
             "latency_ms": result.latency_ms,
         }
+
+    def _handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Пакетное извлечение задач/решений/вопросов для нескольких item_id."""
+        item_ids = params.get("ids", [])
+        if not isinstance(item_ids, list):
+            raise RuntimeError("Параметр ids должен быть списком")
+        language = str(params.get("language", "ru")).lower()
+
+        if self._action_items_extractor is None:
+            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
+
+        with self.store._lock():
+            all_items = self.store._load_active_items_unlocked()
+        items_by_id = {it.id: it for it in all_items}
+
+        results = []
+        for item_id in item_ids:
+            item_id = str(item_id).strip()
+            target = items_by_id.get(item_id)
+            if target is None:
+                results.append({"id": item_id, "ok": False, "error": "not_found"})
+                continue
+            text = target.text or ""
+            result = self._action_items_extractor.extract(text, language=language)
+            if result.ok:
+                self.store.update_history_item_action_items(
+                    item_id=item_id,
+                    action_items=[ai.to_dict() for ai in result.action_items],
+                    decisions=result.decisions,
+                    questions=result.questions,
+                )
+            results.append({
+                "id": item_id,
+                "ok": result.ok,
+                "action_items": [ai.to_dict() for ai in result.action_items],
+                "decisions": result.decisions,
+                "questions": result.questions,
+                "fallback_reason": result.fallback_reason,
+                "latency_ms": result.latency_ms,
+            })
+
+        return {"results": results, "count": len(results)}
 
     def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает все items у которых action_items=None (ещё не анализировались).
