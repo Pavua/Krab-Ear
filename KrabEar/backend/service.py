@@ -2790,13 +2790,14 @@ class BackendService:
         return {"mode": mode, "summary": summary, "bullets": bullets}
 
     def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список моделей доступных в LM Studio через /v1/models.
+        """Возвращает список моделей доступных в LM Studio через /api/v1/models.
 
         Используется GUI для динамического заполнения dropdown'а выбора LLM-модели.
         При недоступности LM Studio возвращает пустой список с описанием ошибки.
         Таймаут 3 секунды — не блокирует UI.
         """
         try:
+            import re as _re
             import requests as _requests
             cached = self._settings_svc.cached_settings()
             base_url = str(cached.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
@@ -2804,8 +2805,12 @@ class BackendService:
             headers: dict[str, str] = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
+            # Wave 68 (LM Studio probe fix): /v1/models возвращает 200 но логирует ERROR
+            # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
+            # для llm_rewriter.py:1064 (passive_health_check).
+            _host = _re.sub(r"/v\d+$", "", base_url)
             resp = _requests.get(
-                f"{base_url}/models",
+                f"{_host}/api/v1/models",
                 headers=headers,
                 timeout=3,
             )
