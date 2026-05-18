@@ -4,6 +4,7 @@
 OpenAPI 3.0 документация доступна по адресу /api/docs.
 """
 
+import atexit
 import json
 import math
 import os
@@ -248,12 +249,31 @@ class TranscribeResponseSchema(Schema):
 
 # ---------------------------------------------------------------------------
 # Централизованная инициализация
-# Используем один AudioEngine для всех подсистем во избежание перегрузки VRAM
+# Используем один AudioEngine для всех подсистем во избежание перегрузки VRAM.
+#
+# Wave 69: skip_gigaam_warmup=True предотвращает дублирование GigaAM subprocess.
+# REST-сервер проксирует STT через BackendService IPC и не использует GigaAM напрямую.
+# Только BackendService (service.py) должен быть owner'ом GigaAM worker'а.
 # ---------------------------------------------------------------------------
 
-engine = AudioEngine()
+engine = AudioEngine(skip_gigaam_warmup=True)
 store = StateStore(settings.DATA_DIR)
 transcriber = Transcriber(engine=engine)
+
+
+def _rest_engine_cleanup() -> None:
+    """atexit cleanup — закрывает GigaAM адаптер если он был создан (graceful shutdown)."""
+    try:
+        if engine is not None and engine._router is not None:
+            adapter = engine._router.get_gigaam_adapter()
+            if adapter is not None and hasattr(adapter, "close"):
+                adapter.close()
+                logger.info("REST atexit: GigaAM адаптер закрыт")
+    except Exception as exc:
+        logger.debug("REST atexit cleanup error (non-critical): %s", exc)
+
+
+atexit.register(_rest_engine_cleanup)
 
 TEMP_DIR = settings.DATA_DIR / "temp_uploads"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)

@@ -317,6 +317,7 @@ class AudioEngine:
         self,
         llm_rewriter: Optional["LLMRewriter"] = None,
         settings_get: Optional[Callable[[str, Any], Any]] = None,
+        skip_gigaam_warmup: bool = False,
     ) -> None:
         """Инициализирует двигатель, загружая настройки из централизованного конфига.
 
@@ -325,6 +326,10 @@ class AudioEngine:
                           Если None — LLM hook отключён, работает как до D.10a.
             settings_get: callback (key, default) -> value для runtime toggle'ов.
                           Инжектируется из BackendService чтобы engine не знал про StateStore.
+            skip_gigaam_warmup: если True — фоновый warmup GigaAM subprocess пропускается.
+                          Используется REST-сервером, который проксирует STT через BackendService
+                          IPC и не нуждается в собственном GigaAM worker'е (предотвращает
+                          дублирование subprocess'а — Wave 69 fix).
         """
         self.current_model = settings.MODEL_BALANCED
         self.quality_profile = "balanced"
@@ -372,7 +377,9 @@ class AudioEngine:
 
         # Warmup GigaAM в background если enabled — избегаем cold-start latency
         # на первой диктовке (subprocess spawn + model load = ~30 сек).
-        if getattr(settings, "STT_GIGAAM_ENABLED", False):
+        # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
+        # subprocess'а — он проксирует через BackendService IPC (Wave 69).
+        if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
             import threading
 
             def _warmup_bg() -> None:
@@ -382,6 +389,8 @@ class AudioEngine:
                     logger.warning("GigaAM warmup в background failed: %s", exc)
             threading.Thread(target=_warmup_bg, name="GigaAM-warmup", daemon=True).start()
             logger.info("GigaAM warmup запущен в background thread")
+        elif getattr(settings, "STT_GIGAAM_ENABLED", False) and skip_gigaam_warmup:
+            logger.info("GigaAM warmup пропущен (skip_gigaam_warmup=True) — этот engine не spawn'ит worker")
 
     def warmup(self) -> dict[str, Any]:
         """Prewarm Whisper model to eliminate first-dictation cold-start latency.
