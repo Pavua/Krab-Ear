@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import os
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock
@@ -135,12 +136,25 @@ class TestRealtimePartialEmission(unittest.TestCase):
         session_id: str = "sess-abc",
     ) -> tuple[RealtimePartialTranscriber, MagicMock, MagicMock, MagicMock]:
         """Run the worker for just enough time to fire one interval tick."""
+        # Use an Event so we wait *deterministically* for the first emit instead
+        # of relying on a fixed sleep.  On loaded CI runners (pytest-xdist, slow
+        # Python 3.12 GIL scheduling) a 0.5 s sleep was not always enough.
+        emitted = threading.Event()
         bus = _make_bus()
+        _original_emit = bus.emit.side_effect
+
+        def _emit_and_signal(*args, **kwargs):
+            emitted.set()
+            if callable(_original_emit):
+                return _original_emit(*args, **kwargs)
+
+        bus.emit.side_effect = _emit_and_signal
+
         recorder = _make_recorder(duration_sec=duration_sec)
         transcriber = _make_transcriber(text=text)
 
         # Use a short interval so the test completes quickly.
-        # Must be >= 0.1 (module clamp) and sleep must be > 2*interval.
+        # Must be >= 0.1 (module clamp).
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
             recorder=recorder,
@@ -149,8 +163,8 @@ class TestRealtimePartialEmission(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id=session_id)
-        # Give the worker thread time to fire at least one tick.
-        time.sleep(0.5)
+        # Wait up to 3 s for the first emit, then stop.
+        emitted.wait(timeout=3.0)
         rpt.stop(timeout_sec=2.0)
         return rpt, bus, recorder, transcriber
 
