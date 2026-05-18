@@ -142,7 +142,7 @@ class DiskSpaceMonitor:
         except Exception:
             logger.exception("DiskSpaceMonitor: ошибка первой проверки")
 
-        interval_sec = self._settings.DISK_CHECK_INTERVAL_MIN * 60
+        interval_sec = float(self._settings.DISK_CHECK_INTERVAL_MIN or 5) * 60
 
         while not self._stop_event.wait(timeout=interval_sec):
             try:

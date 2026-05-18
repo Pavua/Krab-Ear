@@ -213,7 +213,7 @@ class TestWindowSize30DaysDefault(unittest.TestCase):
         items = [
             _item("хорошо", days_ago=1),    # в окне
             _item("отлично", days_ago=15),   # в окне
-            _item("нормально", days_ago=29), # в окне
+            _item("нормально", days_ago=29),  # в окне
             _item("плохо", days_ago=31),     # за окном
             _item("ужасно", days_ago=60),    # за окном
         ]
