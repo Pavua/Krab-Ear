@@ -998,6 +998,7 @@ class BackendService:
             # --- plugins ---
             "list_plugins": self._plugin_manager.handle_list_plugins,  # список обнаруженных плагинов
             "get_plugin_info": self._plugin_manager.handle_get_plugin_info,  # информация о конкретном плагине
+            "unload_plugin": self._plugin_manager.handle_unload_plugin,  # полная выгрузка плагина из памяти
             # --- feature flags ---
             "get_feature_flags": self._feature_flags.handle_get_feature_flags,  # получить все feature-флаги с описаниями
             "set_feature_flag": self._feature_flags.handle_set_feature_flag,  # установить значение feature-флага
