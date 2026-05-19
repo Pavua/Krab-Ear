@@ -506,92 +506,21 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
-    # ── Wave 78 (Wave 205): 5 production-discovered codes ────────────────────
-
-    # stt.gigaam_hf_cache_miss — GigaAM longform path requires pyannote/segmentation-3.0
-    # model from HuggingFace cache. When the model is not cached and network is
-    # unavailable (offline_strict mode) or gated (token missing), GigaAM transcription
-    # fails and falls back to Whisper. 306 production hits. Dedupe 600s — one toast
-    # per session to avoid spam on repeated recordings.
-    "stt.gigaam_hf_cache_miss": {
-        "user_msg_ru": "GigaAM: модель pyannote не в кеше — переключение на Whisper",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "warn",
-        "dedupe_seconds": 600,
-    },
-
-    # rewriter.model_unloaded — LM Studio returned HTTP 422 or 400 with body containing
-    # "Model has not started loading" or "model is not loaded". Indicates the user
-    # selected a model in LM Studio settings but did not load it. Action: open LM Studio
-    # so user can start the model. 36 production hits.
-    "rewriter.model_unloaded": {
-        "user_msg_ru": "LM Studio: модель не загружена. Запусти её в LM Studio.",
+    # rewriter.gpu_stream_error — LM Studio Metal CommandStream corrupted by
+    # concurrent MLX / GigaAM GPU pressure. Body contains:
+    #   "There is no Stream(gpu, N) in current thread"
+    #   "Metal command stream" corruption variants
+    # Root cause: Wave 167 / BACKEND-J Sentry issue (2026-05-18 ~21:41, 2 events).
+    # Was previously misclassified as rewriter.timeout (catch-all else branch).
+    # Circuit breaker correctly opens on 10 consecutive 400s, but the Sentry event
+    # was misleading — now splits into a distinct issue for proper triage.
+    # Action: open LM Studio to restart the model and clear the Metal context.
+    "rewriter.gpu_stream_error": {
+        "user_msg_ru": "LM Studio: ошибка GPU-потока. Попробуй перезапустить модель в LM Studio.",
         "actionable": True,
         "action_id": "open_lm_studio_settings",
         "action_label": "Открыть LM Studio",
         "severity": "error",
-        "dedupe_seconds": 120,
-    },
-
-    # rewriter.output_ratio_fallback — LLM output length ratio guard triggered:
-    # output was <35% or >300% of input length, indicating hallucination or chatbot
-    # behaviour. Original text used as fallback. Info-level breadcrumb only —
-    # the fallback is transparent to the user. 38 production hits.
-    "rewriter.output_ratio_fallback": {
-        "user_msg_ru": "Rewriter: соотношение длин вышло за границы — исходный текст сохранён",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "info",
-        "dedupe_seconds": 30,
-    },
-
-    # stt.mlx_watchdog_hang — MLXWatchdog detected that mlx_whisper.transcribe()
-    # did not finish within the configured timeout (MLX_TRANSCRIBE_TIMEOUT_SEC).
-    # Metal GPU is likely stuck. Backend remains alive (fallback chain continues).
-    # Critical severity so it surfaces immediately; dedupe 60s — one toast per hang.
-    # 5 production hits (rare, high-impact). No direct action available from UI —
-    # restart_backend action would require backend to be running to process it.
-    "stt.mlx_watchdog_hang": {
-        "user_msg_ru": "MLX watchdog: Metal GPU завис — переключаемся на fallback",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "critical",
-        "dedupe_seconds": 60,
-    },
-
-    # ipc.audio_device_poll_flood — list_audio_inputs / get_audio_devices called
-    # more than 10 times per second. Indicates a polling loop bug in Swift UI
-    # (e.g. audio device picker refreshing on every keystroke). Breadcrumb only —
-    # no user-facing toast, but surfaces in Sentry crash context. Aggressive dedupe
-    # 60s to suppress flood. 417 production hits.
-    "ipc.audio_device_poll_flood": {
-        "user_msg_ru": "IPC: слишком частые запросы списка аудиоустройств (>10/с)",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "warn",
-        "dedupe_seconds": 60,
-    },
-
-    # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────
-
-    # rewriter.lm_studio_stream_gpu_lost — LM Studio returned HTTP 500 with
-    # "Stream(gpu, N) in current thread" in the JSON error body. This is a
-    # transient Metal/MLX internal error (GPU stream context detached from the
-    # inference thread). The rewriter retries once after a 2s sleep before
-    # recording a circuit failure. Severity=warn (recoverable, circuit breaker
-    # handles escalation). Dedupe 180s — one toast per cluster of 12 hits.
-    # 12 production hits on 2026-05-18 21:41-21:49 during gemma-4-26b-a4b session.
-    "rewriter.lm_studio_stream_gpu_lost": {
-        "user_msg_ru": "LM Studio: потерян Metal GPU stream — повтор через 2s",
-        "actionable": False,
-        "action_id": None,
-        "action_label": "",
-        "severity": "warn",
-        "dedupe_seconds": 180,
+        "dedupe_seconds": 300,
     },
 }
