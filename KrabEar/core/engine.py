@@ -2090,8 +2090,11 @@ class AudioEngine:
                 raise RuntimeError("Parakeet вернул пустой результат")
             text = outputs[0] if isinstance(outputs[0], str) else str(outputs[0])
         finally:
-            if tmp_path and _os.path.exists(tmp_path):
-                _os.unlink(tmp_path)
+            if tmp_path:
+                try:
+                    _os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         logger.info("Parakeet готово: %d chars", len(text))
         return {

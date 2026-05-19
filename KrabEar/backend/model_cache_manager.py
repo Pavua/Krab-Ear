@@ -115,7 +115,7 @@ class ModelCacheManager:
         folder = self._model_folder_name(model_id)
         model_path = self._cache_dir / folder
         if model_path.exists():
-            shutil.rmtree(model_path)
+            shutil.rmtree(model_path, ignore_errors=True)
             return True
         return False
 
