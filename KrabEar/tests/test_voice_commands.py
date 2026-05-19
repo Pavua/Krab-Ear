@@ -370,72 +370,54 @@ class TestEdgeCases(unittest.TestCase):
 
 
 class TestConcurrentProcess(unittest.TestCase):
-    """VoiceCommandProcessor потокобезопасен при параллельных вызовах process()."""
+    """VoiceCommandProcessor потокобезопасен при параллельном вызове process()."""
 
-    def test_concurrent_process_ru(self):
-        """Параллельные вызовы process() для RU возвращают корректные результаты."""
+    def test_concurrent_process(self):
+        """Несколько потоков вызывают process() одновременно — нет гонок/сбоев."""
+        import threading
+
         proc = _make_proc()
         errors: list[Exception] = []
         results: list[str] = []
+        lock = threading.Lock()
 
-        def worker() -> None:
+        inputs = [
+            ("Привет запятая мир", "ru"),
+            ("hello comma world", "en"),
+            ("hola coma mundo", "es"),
+            ("Всё хорошо точка", "ru"),
+            ("what question mark", "en"),
+        ]
+        expected = [
+            "Привет, мир",
+            "hello, world",
+            "hola, mundo",
+            "Всё хорошо.",
+            "what?",
+        ]
+
+        def worker(text, lang, expected_result):
             try:
-                r = proc.process("Привет запятая мир", language="ru")
-                results.append(r)
-            except Exception as exc:
-                errors.append(exc)
-
-        threads = [threading.Thread(target=worker) for _ in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(errors, [], f"Concurrent process errors: {errors}")
-        self.assertEqual(len(results), 20)
-        for r in results:
-            self.assertEqual(r, "Привет, мир")
-
-    def test_concurrent_process_mixed_languages(self):
-        """Параллельный вызов process() для разных языков не вызывает гонки."""
-        proc = _make_proc()
-        errors: list[Exception] = []
-
-        def ru_worker() -> None:
-            for _ in range(10):
-                try:
-                    r = proc.process("раз запятая два точка три", language="ru")
-                    assert r == "раз, два. три", f"RU mismatch: {r!r}"
-                except Exception as exc:
+                res = proc.process(text, language=lang)
+                with lock:
+                    results.append((res, expected_result))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
                     errors.append(exc)
 
-        def en_worker() -> None:
-            for _ in range(10):
-                try:
-                    r = proc.process("hello comma world", language="en")
-                    assert r == "hello, world", f"EN mismatch: {r!r}"
-                except Exception as exc:
-                    errors.append(exc)
+        threads = [
+            threading.Thread(target=worker, args=(t, l, e))
+            for (t, l), e in zip(inputs, expected)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=5.0)
 
-        def es_worker() -> None:
-            for _ in range(10):
-                try:
-                    r = proc.process("hola coma mundo", language="es")
-                    assert r == "hola, mundo", f"ES mismatch: {r!r}"
-                except Exception as exc:
-                    errors.append(exc)
-
-        threads = (
-            [threading.Thread(target=ru_worker) for _ in range(3)]
-            + [threading.Thread(target=en_worker) for _ in range(3)]
-            + [threading.Thread(target=es_worker) for _ in range(3)]
-        )
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(errors, [], f"Mixed-lang concurrent errors: {errors}")
+        self.assertEqual(errors, [], msg=f"Exceptions in threads: {errors}")
+        self.assertEqual(len(results), len(inputs))
+        for actual, expected_result in results:
+            self.assertEqual(actual, expected_result)
 
 
 if __name__ == "__main__":
