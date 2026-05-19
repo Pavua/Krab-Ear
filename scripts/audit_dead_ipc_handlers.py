@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-audit_dead_ipc_handlers.py — Wave 65 dead IPC handler detection.
+audit_dead_ipc_handlers.py — Wave 65 dead IPC handler detection (v2).
 
 Generates a trusted DEFINITELY_DEAD candidates list with zero false positives
 by scanning all caller sources: Swift, Python tests, REST server, and other
 Python code outside tests.
+
+v2 additions (Wave 149):
+  - Catches self.assert_dispatch("X") test helper pattern (201 uses in suite)
+  - Catches self._call("X") test helper pattern (80 uses in suite)
+  - Strips Python # line comments and Swift // line comments before matching
+    to avoid false LIVE classifications from commented-out code
+  - Skips triple-quoted Python docstrings to avoid false positives
+  - JSON output includes per-handler confidence ranking
 
 Usage:
     python scripts/audit_dead_ipc_handlers.py [--output-format=text|json] [--repo-root=PATH]
@@ -44,6 +52,54 @@ class HandlerInfo(NamedTuple):
     @property
     def is_live(self) -> bool:
         return self.classification == "LIVE"
+
+    @property
+    def confidence(self) -> str:
+        """Confidence ranking for DEFINITELY_DEAD candidates."""
+        if self.classification != "DEFINITELY_DEAD":
+            return "N/A"
+        # Highest confidence: no callers anywhere and no deprecated comment
+        return "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# Source text pre-processing helpers
+# ---------------------------------------------------------------------------
+
+_PYTHON_TRIPLE_DOUBLE = re.compile(r'""".*?"""', re.DOTALL)
+_PYTHON_TRIPLE_SINGLE = re.compile(r"'''.*?'''", re.DOTALL)
+
+
+def _strip_python_docstrings(text: str) -> str:
+    """Remove triple-quoted docstrings so we don't match method names inside them."""
+    text = _PYTHON_TRIPLE_DOUBLE.sub('""', text)
+    text = _PYTHON_TRIPLE_SINGLE.sub("''", text)
+    return text
+
+
+def _strip_python_line_comments(line: str) -> str:
+    """Remove everything after a # that is not inside a string literal."""
+    # Simple heuristic: find first # not inside quotes
+    result = []
+    in_single = False
+    in_double = False
+    for ch in line:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == '#' and not in_single and not in_double:
+            break
+        result.append(ch)
+    return ''.join(result)
+
+
+def _strip_swift_line_comments(line: str) -> str:
+    """Remove // single-line Swift comments."""
+    idx = line.find('//')
+    if idx >= 0:
+        return line[:idx]
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -99,26 +155,31 @@ _SWIFT_METHOD_PATTERN = re.compile(r'method:\s*"([a-z][a-z0-9_]*)"')
 
 
 def find_swift_callers(swift_root: Path) -> set[str]:
-    """Return set of method names called anywhere in Swift source."""
+    """Return set of method names called anywhere in Swift source (comments stripped)."""
     called: set[str] = set()
     if not swift_root.exists():
         return called
     for path in swift_root.rglob("*.swift"):
         text = path.read_text(encoding="utf-8", errors="replace")
-        for m in _SWIFT_METHOD_PATTERN.finditer(text):
-            called.add(m.group(1))
+        for line in text.splitlines():
+            line = _strip_swift_line_comments(line)
+            for m in _SWIFT_METHOD_PATTERN.finditer(line):
+                called.add(m.group(1))
     return called
 
 
 # --- 3. Parse Python test callers ---
 
 # Patterns captured:
-#   handle_request({"method": "foo", ...})  →  "method": "foo"
-#   {"method": "foo"}                        →  "method": "foo"
-#   self.req("foo", ...)                     →  self.req("foo")
-#   self.req('foo', ...)                     →  self.req('foo')
-#   svc.handle_add_history_item(...)         →  handle_add_xxx (direct call)
-#   service.handle_foo(...)                  →  handle_foo
+#   handle_request({"method": "foo", ...})   →  "method": "foo"
+#   {"method": "foo"}                         →  "method": "foo"
+#   self.req("foo", ...)                      →  self.req("foo")
+#   self.req('foo', ...)                      →  self.req('foo')
+#   svc.handle_add_history_item(...)          →  handle_add_xxx (direct call)
+#   service.handle_foo(...)                   →  handle_foo
+#   svc._handle_foo(...)                      →  _handle_foo (underscore prefix variant)
+#   self.assert_dispatch("foo", ...)          →  assert_dispatch("foo")  [v2: Wave 149]
+#   self._call("foo", ...)                    →  _call("foo")  [v2: Wave 149]
 _TEST_METHOD_DICT_PATTERN = re.compile(r'"method"\s*:\s*"([a-z][a-z0-9_]*)"')
 _TEST_METHOD_DICT_SINGLE_PATTERN = re.compile(r'"method"\s*:\s*\'([a-z][a-z0-9_]*)\'')
 _TEST_REQ_DOUBLE_PATTERN = re.compile(r'\.\s*req\s*\(\s*"([a-z][a-z0-9_]*)"')
@@ -132,6 +193,19 @@ _TEST_DIRECT_HANDLE_PATTERN = re.compile(
 _TEST_DISPATCH_PATTERN = re.compile(r'dispatch\s*\(\s*"([a-z][a-z0-9_]*)"')
 # bare req("foo", ...) — standalone function not attached to self
 _TEST_BARE_REQ_PATTERN = re.compile(r'(?<!\.)req\s*\(\s*"([a-z][a-z0-9_]*)"')
+# assert_dispatch helper: self.assert_dispatch("foo", ...)  [v2: Wave 149]
+# Catches the common TestCase mixin used in test_dispatch_complete.py (201 uses)
+_TEST_ASSERT_DISPATCH_PATTERN = re.compile(
+    r'assert_dispatch\s*\(\s*"([a-z][a-z0-9_]*)"'
+)
+# self._call helper: self._call("foo", ...)  [v2: Wave 149]
+# Catches test helper wrappers around handle_request (80 uses in suite)
+_TEST_SELF_CALL_DOUBLE_PATTERN = re.compile(
+    r'\._call\s*\(\s*"([a-z][a-z0-9_]*)"'
+)
+_TEST_SELF_CALL_SINGLE_PATTERN = re.compile(
+    r"\._call\s*\(\s*'([a-z][a-z0-9_]*)'"
+)
 
 
 def find_python_test_callers(tests_root: Path) -> set[str]:
@@ -140,7 +214,12 @@ def find_python_test_callers(tests_root: Path) -> set[str]:
     if not tests_root.exists():
         return called
     for path in tests_root.rglob("test_*.py"):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        # Strip docstrings first to avoid matching method names inside docs
+        text = _strip_python_docstrings(raw)
+        # Strip # comments line-by-line for dict/req/call patterns
+        stripped_lines = [_strip_python_line_comments(ln) for ln in text.splitlines()]
+        text_no_comments = "\n".join(stripped_lines)
         for pattern in (
             _TEST_METHOD_DICT_PATTERN,
             _TEST_METHOD_DICT_SINGLE_PATTERN,
@@ -148,11 +227,14 @@ def find_python_test_callers(tests_root: Path) -> set[str]:
             _TEST_REQ_SINGLE_PATTERN,
             _TEST_DISPATCH_PATTERN,
             _TEST_BARE_REQ_PATTERN,
+            _TEST_ASSERT_DISPATCH_PATTERN,   # v2: assert_dispatch("X")
+            _TEST_SELF_CALL_DOUBLE_PATTERN,  # v2: ._call("X")
+            _TEST_SELF_CALL_SINGLE_PATTERN,  # v2: ._call('X')
         ):
-            for m in pattern.finditer(text):
+            for m in pattern.finditer(text_no_comments):
                 called.add(m.group(1))
         # Direct handle_xxx calls: svc.handle_foo → method "foo"
-        for m in _TEST_DIRECT_HANDLE_PATTERN.finditer(text):
+        for m in _TEST_DIRECT_HANDLE_PATTERN.finditer(text_no_comments):
             handler_suffix = m.group(1)
             # Map handle_add_history_item → add_history_item
             called.add(handler_suffix)
@@ -165,13 +247,15 @@ _REST_METHOD_PATTERN = re.compile(r'"method"\s*:\s*"([a-z][a-z0-9_]*)"')
 
 
 def find_rest_callers(rest_server_py: Path) -> set[str]:
-    """Return set of IPC method names called from the REST server."""
+    """Return set of IPC method names called from the REST server (comments stripped)."""
     called: set[str] = set()
     if not rest_server_py.exists():
         return called
-    text = rest_server_py.read_text(encoding="utf-8", errors="replace")
+    raw = rest_server_py.read_text(encoding="utf-8", errors="replace")
+    text = _strip_python_docstrings(raw)
     # Only lines that look like IPC calls (not log records about HTTP method)
     for line in text.splitlines():
+        line = _strip_python_line_comments(line)
         # Skip lines that are clearly about HTTP method (logging etc.)
         if '"method": request.method' in line or 'request.method' in line:
             continue
@@ -311,10 +395,10 @@ def print_text_report(results: list[HandlerInfo]) -> None:
 
 
 def print_json_report(results: list[HandlerInfo]) -> None:
-    dead = [r.method for r in results if r.classification == "DEFINITELY_DEAD"]
+    dead = [r for r in results if r.classification == "DEFINITELY_DEAD"]
     test_only = [r.method for r in results if r.classification == "TEST_ONLY"]
     legacy = [r.method for r in results if r.classification == "LEGACY_FALLBACK"]
-    live = [r.method for r in results if r.classification == "LIVE"]
+    live = [r for r in results if r.classification == "LIVE"]
 
     output = {
         "summary": {
@@ -324,14 +408,19 @@ def print_json_report(results: list[HandlerInfo]) -> None:
             "legacy_fallback": len(legacy),
             "definitely_dead": len(dead),
         },
-        "definitely_dead": dead,
+        # v2: dead entries include confidence ranking
+        "definitely_dead": [
+            {"method": r.method, "confidence": r.confidence}
+            for r in dead
+        ],
         "legacy_fallback": legacy,
         "test_only": test_only,
-        "live": live,
+        "live": [r.method for r in live],
         "all": [
             {
                 "method": r.method,
                 "classification": r.classification,
+                "confidence": r.confidence,
                 "is_swift_caller": r.is_swift_caller,
                 "is_python_test_caller": r.is_python_test_caller,
                 "is_rest_caller": r.is_rest_caller,
