@@ -1356,9 +1356,79 @@ class BackendService:
             ),
         }
 
+    # ------------------------------------------------------------------ #
+    #   _handle_stop_recording — thin orchestrator                        #
+    #   Delegates to 5 phase helpers; each is independently testable.     #
+    # ------------------------------------------------------------------ #
+
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Orchestrate the stop-recording pipeline via 5 phase helpers."""
+        settings = self._cached_settings()
+
+        # Phase A: finalize audio capture
+        phase_a = self._stop_recording_phase_a(params, settings)
+        if "early_return" in phase_a:
+            return phase_a["early_return"]
+
+        audio = phase_a["audio"]
+        duration_sec = phase_a["duration_sec"]
+        stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
+        _rt_session_id = phase_a["rt_session_id"]
+        sr = phase_a["sr"]
+
+        # Phase B: audio quality guards (silence + background)
+        phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
+        if "early_return" in phase_b:
+            return phase_b["early_return"]
+
+        silence_detected = phase_b["silence_detected"]
+        background_guard_rejected = phase_b["background_guard_rejected"]
+
+        # Phase C: STT execution
+        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
+        transcribe_payload = phase_c["transcribe_payload"]
+
+        # Phase D: post-processing (text extraction, retry, translation, diarization)
+        phase_d = self._stop_recording_phase_d(
+            transcribe_payload=transcribe_payload,
+            duration_sec=duration_sec,
+            sr=sr,
+            stop_tail_trim_ms=stop_tail_trim_ms,
+            silence_detected=silence_detected,
+            silence_guard_enabled=sr["silence_guard_enabled"],
+            background_guard_rejected=background_guard_rejected,
+        )
+        if "early_return" in phase_d:
+            return phase_d["early_return"]
+
+        # Phase E: history persistence + response assembly
+        return self._stop_recording_phase_e(
+            phase_d=phase_d,
+            sr=sr,
+            duration_sec=duration_sec,
+            stop_tail_trim_ms=stop_tail_trim_ms,
+            silence_detected=silence_detected,
+            silence_guard_enabled=sr["silence_guard_enabled"],
+            background_guard_rejected=background_guard_rejected,
+            rt_session_id=_rt_session_id,
+            settings=settings,
+        )
+
+    # ------------------------------------------------------------------ #
+    #   Phase A — audio capture finalization                              #
+    # ------------------------------------------------------------------ #
+
+    def _stop_recording_phase_a(
+        self, params: dict[str, Any], settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Stop preview worker, stop realtime partial, stop recorder.
+
+        Returns a dict that always contains either:
+          - ``{"early_return": <response dict>}`` — caller should return immediately, OR
+          - keys: audio, duration_sec, stop_tail_trim_ms, rt_session_id, sr
+        """
         self._stop_preview_worker()
-        _rt_session_id = self._rt_session_id
+        rt_session_id = self._rt_session_id
         if self._rt_partial is not None:
             try:
                 self._rt_partial.stop()
@@ -1366,7 +1436,7 @@ class BackendService:
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
             finally:
                 self._rt_partial = None
-        settings = self._cached_settings()
+
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
             default=180,
@@ -1380,11 +1450,13 @@ class BackendService:
                 preview_text = self._preview_text
                 preview_duration = self._preview_duration_sec
             return {
-                "status": "already_stopped",
-                "is_recording": False,
-                "duration_sec": preview_duration,
-                "preview_text": preview_text,
-                "stop_tail_trim_ms": stop_tail_trim_ms,
+                "early_return": {
+                    "status": "already_stopped",
+                    "is_recording": False,
+                    "duration_sec": preview_duration,
+                    "preview_text": preview_text,
+                    "stop_tail_trim_ms": stop_tail_trim_ms,
+                }
             }
 
         audio, duration_sec = stopped
@@ -1394,6 +1466,7 @@ class BackendService:
             level="info",
             data={"duration_sec": round(float(duration_sec), 2)},
         )
+
         # LM Studio brain pre-load: pre-warm к моменту когда user может открыть VA.
         # Fire-and-forget, не блокирует stop flow.
         try:
@@ -1405,97 +1478,138 @@ class BackendService:
                 load_model_async(base_url, brain_model)
         except Exception as exc:
             logger.debug("LM Studio brain preload hook failed: %s", exc)
+
         sr = self._load_stop_recording_settings(params, settings)
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-        lang_hint: str | None = sr["lang_hint"]
-        translation_mode = sr["translation_mode"]
-        translation_style = sr["translation_style"]
-        translation_glossary = sr["translation_glossary"]
-        translate_and_paste = sr["translate_and_paste"]
-        network_mode = sr["network_mode"]
-        silence_guard_enabled = sr["silence_guard_enabled"]
-        silence_rms_threshold = sr["silence_rms_threshold"]
-        silence_peak_threshold = sr["silence_peak_threshold"]
-        silence_active_ratio_threshold = sr["silence_active_ratio_threshold"]
-        background_guard_enabled = sr["background_guard_enabled"]
-        background_guard_min_peak = sr["background_guard_min_peak"]
-        background_guard_min_rms = sr["background_guard_min_rms"]
-        background_guard_uniform_frame_threshold = sr["background_guard_uniform_frame_threshold"]
-        background_guard_max_uniform_active_ratio = sr["background_guard_max_uniform_active_ratio"]
-        sample_rate = sr["sample_rate"]
 
         if getattr(audio, "size", 0) == 0:
-            return self._build_empty_audio_response(
-                duration_sec=duration_sec,
-                quality_profile=quality_profile,
-                cleanup_profile=cleanup_profile,
-                translation_mode=translation_mode,
-                translate_and_paste=translate_and_paste,
-                stop_tail_trim_ms=stop_tail_trim_ms,
-            )
+            return {
+                "early_return": self._build_empty_audio_response(
+                    duration_sec=duration_sec,
+                    quality_profile=sr["quality_profile"],
+                    cleanup_profile=sr["cleanup_profile"],
+                    translation_mode=sr["translation_mode"],
+                    translate_and_paste=sr["translate_and_paste"],
+                    stop_tail_trim_ms=stop_tail_trim_ms,
+                )
+            }
+
+        return {
+            "audio": audio,
+            "duration_sec": duration_sec,
+            "stop_tail_trim_ms": stop_tail_trim_ms,
+            "rt_session_id": rt_session_id,
+            "sr": sr,
+        }
+
+    # ------------------------------------------------------------------ #
+    #   Phase B — audio quality guards                                    #
+    # ------------------------------------------------------------------ #
+
+    def _stop_recording_phase_b(
+        self,
+        audio: Any,
+        duration_sec: float,
+        stop_tail_trim_ms: int,
+        sr: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run silence guard and background guard.
+
+        Returns a dict with either ``{"early_return": ...}`` or guard results.
+        """
+        quality_profile = sr["quality_profile"]
+        cleanup_profile = sr["cleanup_profile"]
+        translation_mode = sr["translation_mode"]
+        translate_and_paste = sr["translate_and_paste"]
+        sample_rate = sr["sample_rate"]
 
         silence_detected = False
-        if silence_guard_enabled:
+        if sr["silence_guard_enabled"]:
             silence_detected = self._looks_like_silence_audio(
                 audio=audio,
                 sample_rate=sample_rate,
-                rms_threshold=silence_rms_threshold,
-                peak_threshold=silence_peak_threshold,
-                active_ratio_threshold=silence_active_ratio_threshold,
+                rms_threshold=sr["silence_rms_threshold"],
+                peak_threshold=sr["silence_peak_threshold"],
+                active_ratio_threshold=sr["silence_active_ratio_threshold"],
             )
             if silence_detected:
                 logger.info(
                     "Silence guard: stop_recording классифицирован как тишина, STT пропущен",
                     extra={
                         "duration_sec": round(float(duration_sec), 3),
-                        "rms_threshold": silence_rms_threshold,
-                        "peak_threshold": silence_peak_threshold,
-                        "active_ratio_threshold": silence_active_ratio_threshold,
+                        "rms_threshold": sr["silence_rms_threshold"],
+                        "peak_threshold": sr["silence_peak_threshold"],
+                        "active_ratio_threshold": sr["silence_active_ratio_threshold"],
                     },
                 )
-                return self._build_empty_audio_response(
-                    duration_sec=duration_sec,
-                    quality_profile=quality_profile,
-                    cleanup_profile=cleanup_profile,
-                    translation_mode=translation_mode,
-                    translate_and_paste=translate_and_paste,
-                    stop_tail_trim_ms=stop_tail_trim_ms,
-                    silence_detected=True,
-                    silence_guard_enabled=True,
-                )
+                return {
+                    "early_return": self._build_empty_audio_response(
+                        duration_sec=duration_sec,
+                        quality_profile=quality_profile,
+                        cleanup_profile=cleanup_profile,
+                        translation_mode=translation_mode,
+                        translate_and_paste=translate_and_paste,
+                        stop_tail_trim_ms=stop_tail_trim_ms,
+                        silence_detected=True,
+                        silence_guard_enabled=True,
+                    )
+                }
 
         background_guard_rejected = False
-        if background_guard_enabled:
+        if sr["background_guard_enabled"]:
             background_guard_rejected = self._looks_like_distant_background_speech(
                 audio=audio,
                 sample_rate=sample_rate,
-                min_peak=background_guard_min_peak,
-                min_rms=background_guard_min_rms,
-                uniform_frame_threshold=background_guard_uniform_frame_threshold,
-                max_uniform_active_ratio=background_guard_max_uniform_active_ratio,
+                min_peak=sr["background_guard_min_peak"],
+                min_rms=sr["background_guard_min_rms"],
+                uniform_frame_threshold=sr["background_guard_uniform_frame_threshold"],
+                max_uniform_active_ratio=sr["background_guard_max_uniform_active_ratio"],
             )
             if background_guard_rejected:
                 logger.info(
                     "Background guard: stop_recording отклонен как фоновая речь",
                     extra={
                         "duration_sec": round(float(duration_sec), 3),
-                        "min_peak": background_guard_min_peak,
-                        "min_rms": background_guard_min_rms,
-                        "uniform_frame_threshold": background_guard_uniform_frame_threshold,
-                        "max_uniform_active_ratio": background_guard_max_uniform_active_ratio,
+                        "min_peak": sr["background_guard_min_peak"],
+                        "min_rms": sr["background_guard_min_rms"],
+                        "uniform_frame_threshold": sr["background_guard_uniform_frame_threshold"],
+                        "max_uniform_active_ratio": sr["background_guard_max_uniform_active_ratio"],
                     },
                 )
-                return self._build_empty_audio_response(
-                    duration_sec=duration_sec,
-                    quality_profile=quality_profile,
-                    cleanup_profile=cleanup_profile,
-                    translation_mode=translation_mode,
-                    translate_and_paste=translate_and_paste,
-                    stop_tail_trim_ms=stop_tail_trim_ms,
-                    silence_guard_enabled=silence_guard_enabled,
-                    background_guard_rejected=True,
-                )
+                return {
+                    "early_return": self._build_empty_audio_response(
+                        duration_sec=duration_sec,
+                        quality_profile=quality_profile,
+                        cleanup_profile=cleanup_profile,
+                        translation_mode=translation_mode,
+                        translate_and_paste=translate_and_paste,
+                        stop_tail_trim_ms=stop_tail_trim_ms,
+                        silence_guard_enabled=sr["silence_guard_enabled"],
+                        background_guard_rejected=True,
+                    )
+                }
+
+        return {
+            "silence_detected": silence_detected,
+            "background_guard_rejected": background_guard_rejected,
+        }
+
+    # ------------------------------------------------------------------ #
+    #   Phase C — STT execution                                           #
+    # ------------------------------------------------------------------ #
+
+    def _stop_recording_phase_c(
+        self,
+        audio: Any,
+        duration_sec: float,
+        sr: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Load vocabulary/context/glossary and run the transcriber.
+
+        Returns ``{"transcribe_payload": <raw transcriber result>}``.
+        """
+        quality_profile = sr["quality_profile"]
+        cleanup_profile = sr["cleanup_profile"]
+        lang_hint: str | None = sr["lang_hint"]
 
         # Загружаем пользовательский vocabulary для подсказок Whisper
         user_vocabulary = self.vocabulary.load() or []
@@ -1547,6 +1661,7 @@ class BackendService:
                 "auto_glossary_terms": len(_auto_glossary_terms),
             },
         )
+
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -1556,6 +1671,36 @@ class BackendService:
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
         )
+
+        return {"transcribe_payload": transcribe_payload}
+
+    # ------------------------------------------------------------------ #
+    #   Phase D — post-processing pipeline                                #
+    # ------------------------------------------------------------------ #
+
+    def _stop_recording_phase_d(
+        self,
+        transcribe_payload: Any,
+        duration_sec: float,
+        sr: dict[str, Any],
+        stop_tail_trim_ms: int,
+        silence_detected: bool,
+        silence_guard_enabled: bool,
+        background_guard_rejected: bool,
+    ) -> dict[str, Any]:
+        """Extract text, apply soft-cleanup retry, translate, diarize.
+
+        Returns either ``{"early_return": ...}`` (empty_text) or a dict with
+        processed text/translation/diarization fields ready for Phase E.
+        """
+        translation_mode = sr["translation_mode"]
+        translation_style = sr["translation_style"]
+        translation_glossary = sr["translation_glossary"]
+        translate_and_paste = sr["translate_and_paste"]
+        network_mode = sr["network_mode"]
+        quality_profile = sr["quality_profile"]
+        cleanup_profile = sr["cleanup_profile"]
+
         text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
         transcription_error = self._extract_transcribed_error(transcribe_payload)
 
@@ -1588,22 +1733,24 @@ class BackendService:
             if transcription_error:
                 event_bus.emit_typed(EventType.STT_FAILED, SttFailed(reason=transcription_error, duration_sec=duration_sec))
             return {
-                "status": "empty_text",
-                "duration_sec": duration_sec,
-                "quality_profile": quality_profile,
-                "cleanup_profile": cleanup_profile,
-                "translation_mode": translation_mode,
-                "translate_and_paste": translate_and_paste,
-                "text": "",
-                "original_text": "",
-                "translated_text": "",
-                "translation_status": "not_requested",
-                "history_id": None,
-                "transcription_error": transcription_error,
-                "stop_tail_trim_ms": stop_tail_trim_ms,
-                "silence_detected": silence_detected,
-                "silence_guard_enabled": silence_guard_enabled,
-                "background_guard_rejected": background_guard_rejected,
+                "early_return": {
+                    "status": "empty_text",
+                    "duration_sec": duration_sec,
+                    "quality_profile": quality_profile,
+                    "cleanup_profile": cleanup_profile,
+                    "translation_mode": translation_mode,
+                    "translate_and_paste": translate_and_paste,
+                    "text": "",
+                    "original_text": "",
+                    "translated_text": "",
+                    "translation_status": "not_requested",
+                    "history_id": None,
+                    "transcription_error": transcription_error,
+                    "stop_tail_trim_ms": stop_tail_trim_ms,
+                    "silence_detected": silence_detected,
+                    "silence_guard_enabled": silence_guard_enabled,
+                    "background_guard_rejected": background_guard_rejected,
+                }
             }
 
         translation = self.translator.translate(
@@ -1655,6 +1802,45 @@ class BackendService:
 
         # Format text with speaker labels if diarization produced multiple speakers
         display_text = self._format_text_with_speakers(final_text, diarization_data)
+
+        return {
+            "text": text,
+            "display_text": display_text,
+            "translated_text": translated_text,
+            "final_text": final_text,
+            "translation": translation,
+            "translation_status": translation_status,
+            "confidence": confidence,
+            "diarization_data": diarization_data,
+            "tp": tp,
+        }
+
+    # ------------------------------------------------------------------ #
+    #   Phase E — history persistence + response assembly                 #
+    # ------------------------------------------------------------------ #
+
+    def _stop_recording_phase_e(
+        self,
+        phase_d: dict[str, Any],
+        sr: dict[str, Any],
+        duration_sec: float,
+        stop_tail_trim_ms: int,
+        silence_detected: bool,
+        silence_guard_enabled: bool,
+        background_guard_rejected: bool,
+        rt_session_id: str | None,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist history item, update side-caches, build final result dict."""
+        text = phase_d["text"]
+        display_text = phase_d["display_text"]
+        translated_text = phase_d["translated_text"]
+        final_text = phase_d["final_text"]
+        translation = phase_d["translation"]
+        translation_status = phase_d["translation_status"]
+        confidence = phase_d["confidence"]
+        diarization_data = phase_d["diarization_data"]
+        tp = phase_d["tp"]
 
         item = self.store.add_history_item(
             text=display_text,
@@ -1712,11 +1898,11 @@ class BackendService:
         result_payload = {
             "status": "ok",
             "duration_sec": duration_sec,
-            "quality_profile": quality_profile,
-            "cleanup_profile": cleanup_profile,
+            "quality_profile": sr["quality_profile"],
+            "cleanup_profile": sr["cleanup_profile"],
             "translation_mode": translation.mode,
-            "translation_style": translation_style,
-            "translate_and_paste": translate_and_paste,
+            "translation_style": sr["translation_style"],
+            "translate_and_paste": sr["translate_and_paste"],
             "translation_status": translation_status,
             "source_lang": translation.source_lang,
             "target_lang": translation.target_lang,
@@ -1738,12 +1924,12 @@ class BackendService:
             language=tp.get("language"),
             confidence=tp.get("confidence"),
         ))
-        if _rt_session_id:
+        if rt_session_id:
             try:
                 event_bus.emit(
                     "realtime.final_transcript",
                     {
-                        "session_id": _rt_session_id,
+                        "session_id": rt_session_id,
                         "text": final_text,
                         "is_partial": False,
                         "ts": time.time(),
@@ -1770,22 +1956,6 @@ class BackendService:
             except Exception:
                 logger.exception("Не удалось автосохранить транскрибацию в .md")
 
-        _ai_s = self._cached_settings()
-        if self._coerce_bool(_ai_s.get("action_items_auto_extract", False), default=False):
-            _ai_min = float(_ai_s.get("action_items_min_duration_sec", 60.0))
-            if display_text.strip() and duration_sec is not None and duration_sec >= _ai_min:
-                self._trigger_auto_extract_action_items(item_id=item.id, text=display_text, language=(_ai_s.get("source_lang") or "ru"), duration_sec=duration_sec)
-        # Авто-извлечение action items (opt-in, fire-and-forget)
-        _ai_settings = self._cached_settings()
-        if self._coerce_bool(_ai_settings.get("action_items_auto_extract", False), default=False):
-            _ai_min = float(_ai_settings.get("action_items_min_duration_sec", 60.0))
-            if display_text.strip() and duration_sec is not None and duration_sec >= _ai_min:
-                self._trigger_auto_extract_action_items(
-                    item_id=item.id,
-                    text=display_text,
-                    language=(_ai_settings.get("source_lang") or "ru"),
-                    duration_sec=duration_sec,
-                )
         # Авто-извлечение задач/решений/вопросов (opt-in, только для длинных записей)
         if self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
             min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
