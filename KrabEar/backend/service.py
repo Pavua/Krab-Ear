@@ -879,6 +879,7 @@ class BackendService:
             "get_chain": self._chains.handle_get_chain,  # получить цепочку с деталями
             "list_chains": self._chains.handle_list_chains,  # список цепочек
             "merge_chain_text": self._chains.handle_merge_chain_text,  # объединённый текст цепочки
+            "unlink_recording_from_chain": self._chains.handle_unlink_recording_from_chain,  # убрать запись из цепочки
             "schedule_recording": self._recording_scheduler.handle_schedule_recording,  # запланировать запись на определённое время
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей

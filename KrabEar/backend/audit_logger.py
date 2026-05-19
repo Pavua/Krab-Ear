@@ -68,9 +68,11 @@ class AuditLogger:
         with self._lock:
             self._rotate_if_needed(today)
             try:
-                assert self._file_handle is not None
-                self._file_handle.write(line + "\n")
-                self._file_handle.flush()
+                if self._file_handle is None:
+                    logger.warning("audit log файл недоступен, запись пропущена: %s", method)
+                else:
+                    self._file_handle.write(line + "\n")
+                    self._file_handle.flush()
             except Exception:
                 logger.exception("Ошибка записи в audit log")
 
@@ -127,16 +129,29 @@ class AuditLogger:
         return self._data_dir / f"audit_{date}.ndjson"
 
     def _rotate_if_needed(self, today: str) -> None:
-        """Открывает новый файл при смене даты (вызывается под self._lock)."""
+        """Открывает новый файл при смене даты (вызывается под self._lock).
+
+        При PermissionError или любой OSError логирует предупреждение и пропускает
+        ротацию — текущий дескриптор остаётся без изменений, запись продолжается
+        в старый файл (или будет поймана в log_request).
+        """
         if today != self._current_date:
             if self._file_handle is not None:
                 try:
                     self._file_handle.close()
                 except Exception:
                     pass
+                self._file_handle = None
             path = self._audit_path(today)
-            self._file_handle = open(path, "a", encoding="utf-8")
-            self._current_date = today
+            try:
+                self._file_handle = open(path, "a", encoding="utf-8")
+                self._current_date = today
+            except (PermissionError, OSError) as exc:
+                logger.warning(
+                    "Не удалось открыть audit log файл %s: %s — ротация пропущена",
+                    path,
+                    exc,
+                )
 
     def _cleanup_old_files(self) -> None:
         """Удаляет файлы аудита старше _KEEP_DAYS дней."""
