@@ -140,5 +140,81 @@ class TestHandleEstimateCost(unittest.TestCase):
         self.assertEqual(result["result"]["destination"], "us")
 
 
+class TestWave185Requirements(unittest.TestCase):
+    """Additional tests required by Wave 185 task spec."""
+
+    def setUp(self) -> None:
+        self.est = CallCostEstimator()
+
+    def test_estimate_per_minute_basic(self) -> None:
+        """Basic per-minute cost estimation returns a positive float."""
+        rate = self.est.estimate_minute_cost("telnyx", "us")
+        self.assertIsInstance(rate, float)
+        self.assertGreater(rate, 0.0)
+
+    def test_includes_no_setup_fee(self) -> None:
+        """Module has no setup fee — cost is purely per-minute * duration."""
+        rate = self.est.estimate_minute_cost("telnyx", "us")
+        cost_30s = self.est.running_cost_usd(30, "telnyx", "us")
+        # Should equal exactly rate/2 (30 sec = 0.5 min)
+        self.assertAlmostEqual(cost_30s, rate * 0.5, places=6)
+
+    def test_unknown_destination_uses_default_rate(self) -> None:
+        """Destination 'xx' not in table → returns provider's 'default' rate."""
+        from backend.call_cost_estimator import _TELNYX_RATES
+        rate = self.est.estimate_minute_cost("telnyx", "xx")
+        self.assertAlmostEqual(rate, _TELNYX_RATES["default"])
+
+    def test_zero_duration_returns_zero(self) -> None:
+        """Running cost for 0 seconds is exactly 0.0."""
+        cost = self.est.running_cost_usd(0.0, "twilio", "gb")
+        self.assertAlmostEqual(cost, 0.0)
+
+    def test_unicode_destination_country(self) -> None:
+        """Unicode country codes with leading/trailing whitespace are handled."""
+        # Cyrillic-adjacent test: non-ASCII stripped country string → fallback default
+        rate_plain = self.est.estimate_minute_cost("telnyx", "  us  ")
+        rate_direct = self.est.estimate_minute_cost("telnyx", "us")
+        self.assertAlmostEqual(rate_plain, rate_direct)
+
+        # Emoji/non-ASCII country → falls back to default (no KeyError)
+        rate_emoji = self.est.estimate_minute_cost("telnyx", "\U0001F1FA\U0001F1F8")
+        from backend.call_cost_estimator import _TELNYX_RATES
+        self.assertAlmostEqual(rate_emoji, _TELNYX_RATES["default"])
+
+    def test_concurrent_estimate(self) -> None:
+        """Concurrent calls from multiple threads produce consistent results."""
+        import threading
+        results: list[float] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def _worker(provider: str, country: str) -> None:
+            try:
+                rate = self.est.estimate_minute_cost(provider, country)
+                with lock:
+                    results.append(rate)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_worker, args=("telnyx", "ru")),
+            threading.Thread(target=_worker, args=("twilio", "us")),
+            threading.Thread(target=_worker, args=("livekit", "de")),
+            threading.Thread(target=_worker, args=("telnyx", "zz")),
+            threading.Thread(target=_worker, args=("twilio", "cn")),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), 5)
+        for r in results:
+            self.assertGreater(r, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
