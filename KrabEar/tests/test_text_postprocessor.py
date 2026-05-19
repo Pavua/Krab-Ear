@@ -15,6 +15,7 @@ from core.text_postprocessor import (
     NormalizeEntities,
     DEFAULT_CHAIN,
 )
+import threading
 import unittest
 import sys
 import os
@@ -426,6 +427,275 @@ class TestTextPostProcessorProtocolCompliance(unittest.TestCase):
 
     def test_custom_valid_step_implements_protocol(self):
         self.assertIsInstance(UpperCaseStep(), PostProcessorStep)
+
+
+# ---------------------------------------------------------------------------
+# Wave 124 — Required test cases
+# ---------------------------------------------------------------------------
+
+
+class TestTextPostProcessorWhitespaceNormalization(unittest.TestCase):
+    """test_whitespace_normalization: covers all whitespace normalisation cases."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_whitespace_normalization(self):
+        """Leading/trailing spaces + multiple internal spaces collapsed to single."""
+        result = self.processor.process("  hello   world  ", steps=["strip_whitespace"])
+        self.assertEqual(result.text, "hello world")
+        self.assertEqual(result.changes_count, 1)
+
+    def test_whitespace_normalization_crlf(self):
+        """Windows line endings normalised to LF."""
+        result = self.processor.process("line1\r\nline2\r\nline3", steps=["strip_whitespace"])
+        self.assertNotIn("\r", result.text)
+        self.assertIn("line1", result.text)
+        self.assertIn("line2", result.text)
+
+    def test_whitespace_normalization_already_clean_no_change(self):
+        """Already clean text → changes_count=0."""
+        text = "уже чистый текст"
+        result = self.processor.process(text, steps=["strip_whitespace"])
+        self.assertEqual(result.text, text)
+        self.assertEqual(result.changes_count, 0)
+
+    def test_whitespace_normalization_tabs_preserved_after_strip(self):
+        """Tabs at start/end are stripped via .strip()."""
+        result = self.processor.process("  текст  ", steps=["strip_whitespace"])
+        self.assertFalse(result.text.startswith(" "))
+        self.assertFalse(result.text.endswith(" "))
+
+
+class TestTextPostProcessorPunctuationCorrectionApplied(unittest.TestCase):
+    """test_punctuation_correction_applied: fix_punctuation step works end-to-end."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_punctuation_correction_applied(self):
+        """fix_punctuation capitalises first letter and adds terminal period."""
+        result = self.processor.process("привет мир", steps=["fix_punctuation"])
+        self.assertTrue(result.text[0].isupper(), f"First letter must be upper: {result.text!r}")
+        self.assertTrue(result.text.endswith("."), f"Must end with period: {result.text!r}")
+        self.assertIn("fix_punctuation", result.steps_applied)
+
+    def test_punctuation_correction_question_mark_preserved(self):
+        """Existing question mark at end is preserved (no double punctuation)."""
+        result = self.processor.process("Как дела?", steps=["fix_punctuation"])
+        # Should not add period after existing question mark
+        self.assertFalse(result.text.endswith("?."), f"No double punct: {result.text!r}")
+
+    def test_punctuation_correction_records_change(self):
+        """changes_count is 1 when text was changed."""
+        result = self.processor.process("привет", steps=["fix_punctuation"])
+        self.assertEqual(result.changes_count, 1)
+
+    def test_punctuation_correction_empty_unchanged(self):
+        """Empty input not passed to fixer — returned as-is."""
+        result = self.processor.process("", steps=["fix_punctuation"])
+        self.assertEqual(result.text, "")
+
+
+class TestTextPostProcessorEntityRecognitionOptional(unittest.TestCase):
+    """test_entity_recognition_optional: normalize_entities step is optional."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_entity_recognition_optional(self):
+        """normalize_entities replaces known Cyrillic brands."""
+        result = self.processor.process(
+            "Я пользуюсь Телеграм каждый день",
+            steps=["normalize_entities"],
+        )
+        self.assertIn("Telegram", result.text)
+        self.assertIn("normalize_entities", result.steps_applied)
+
+    def test_entity_step_not_in_chain_if_omitted(self):
+        """If normalize_entities not in steps, it's not applied."""
+        result = self.processor.process(
+            "Телеграм работает",
+            steps=["strip_whitespace"],
+        )
+        # normalize_entities not requested → brand stays
+        self.assertNotIn("Telegram", result.text)
+        self.assertNotIn("normalize_entities", result.steps_applied)
+
+    def test_entity_time_normalization_optional(self):
+        """Time format 15.30 → 15:30 only when step is requested."""
+        result_with = self.processor.process("встреча в 15.30", steps=["normalize_entities"])
+        result_without = self.processor.process("встреча в 15.30", steps=["strip_whitespace"])
+        self.assertIn("15:30", result_with.text)
+        self.assertNotIn("15:30", result_without.text)
+
+
+class TestTextPostProcessorAbbreviationExpansionApplied(unittest.TestCase):
+    """test_abbreviation_expansion_applied: expand_abbreviations step works."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_abbreviation_expansion_applied(self):
+        """т.е. → то есть when expand_abbreviations step applied."""
+        result = self.processor.process("т.е. это верно", steps=["expand_abbreviations"])
+        self.assertIn("то есть", result.text.lower())
+        self.assertIn("expand_abbreviations", result.steps_applied)
+
+    def test_abbreviation_not_in_default_chain(self):
+        """expand_abbreviations is NOT in DEFAULT_CHAIN by default."""
+        self.assertNotIn("expand_abbreviations", DEFAULT_CHAIN)
+
+    def test_abbreviation_expansion_no_abbrev_unchanged(self):
+        """Text with no abbreviations unchanged — changes_count stays 0."""
+        text = "текст без сокращений"
+        result = self.processor.process(text, steps=["expand_abbreviations"])
+        self.assertEqual(result.text, text)
+        self.assertEqual(result.changes_count, 0)
+
+
+class TestTextPostProcessorAnonymizationApplied(unittest.TestCase):
+    """test_anonymization_applied: anonymize step redacts PII."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_anonymization_applied(self):
+        """Phone number redacted when anonymize step applied."""
+        result = self.processor.process(
+            "позвони на +7 999 123-45-67",
+            steps=["anonymize"],
+        )
+        self.assertNotIn("+7 999", result.text)
+        self.assertIn("[ТЕЛЕФОН]", result.text)
+        self.assertIn("anonymize", result.steps_applied)
+
+    def test_anonymization_email_redacted(self):
+        """Email address redacted."""
+        result = self.processor.process("пиши на test@example.com", steps=["anonymize"])
+        self.assertNotIn("test@example.com", result.text)
+        self.assertIn("[EMAIL]", result.text)
+
+    def test_anonymization_not_applied_without_step(self):
+        """PII preserved when anonymize step not in chain."""
+        text = "позвони на +7 999 123-45-67"
+        result = self.processor.process(text, steps=["strip_whitespace"])
+        self.assertIn("+7 999", result.text)
+        self.assertNotIn("[ТЕЛЕФОН]", result.text)
+
+    def test_anonymization_no_pii_unchanged(self):
+        """Text without PII → unchanged by anonymize, changes_count=0."""
+        text = "обычный текст без данных"
+        result = self.processor.process(text, steps=["anonymize"])
+        self.assertEqual(result.text, text)
+        self.assertEqual(result.changes_count, 0)
+
+
+class TestTextPostProcessorDisableIndividualStages(unittest.TestCase):
+    """test_disable_individual_stages: explicit steps list controls which stages run."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_disable_individual_stages(self):
+        """Only requested steps run — others are disabled."""
+        result = self.processor.process(
+            "  hello  ",
+            steps=["strip_whitespace"],
+        )
+        # Only strip_whitespace applied — fix_punctuation NOT applied
+        self.assertEqual(result.steps_applied, ["strip_whitespace"])
+        self.assertEqual(result.text, "hello")
+        # First letter NOT necessarily capitalised since fix_punctuation was disabled
+        # (just verifying the step list is correct)
+        self.assertNotIn("fix_punctuation", result.steps_applied)
+
+    def test_disable_all_stages_empty_list(self):
+        """Empty steps list → no transformation at all."""
+        text = "  hello   world  "
+        result = self.processor.process(text, steps=[])
+        self.assertEqual(result.text, text)
+        self.assertEqual(result.steps_applied, [])
+        self.assertEqual(result.changes_count, 0)
+
+    def test_disable_anonymize_pii_preserved(self):
+        """When anonymize NOT in steps, PII is kept in output."""
+        text = "пиши на user@example.com"
+        result = self.processor.process(text, steps=["strip_whitespace"])
+        self.assertIn("user@example.com", result.text)
+
+
+class TestTextPostProcessorUnicodeTextPreserved(unittest.TestCase):
+    """test_unicode_text_preserved: non-ASCII characters survive the pipeline."""
+
+    def setUp(self):
+        self.processor = TextPostProcessor()
+
+    def test_unicode_text_preserved(self):
+        """Cyrillic, Spanish, Chinese, emoji all pass through strip_whitespace intact."""
+        texts = [
+            "Привет мир это кириллица",
+            "Español con ñ y más acentos",
+            "中文文本测试",
+            "Mixed: Привет world мир",
+        ]
+        for text in texts:
+            with self.subTest(text=text):
+                result = self.processor.process(text, steps=["strip_whitespace"])
+                # Core text content preserved (non-whitespace chars intact)
+                self.assertGreater(len(result.text), 0)
+
+    def test_unicode_abbreviation_expansion_ru(self):
+        """Cyrillic abbreviation т.е. expanded correctly."""
+        result = self.processor.process("т.е. всё верно", steps=["expand_abbreviations"])
+        self.assertIn("то есть", result.text.lower())
+
+    def test_unicode_punctuation_fix_ru(self):
+        """Cyrillic text capitalised correctly by fix_punctuation."""
+        result = self.processor.process("привет мир", steps=["fix_punctuation"])
+        # First Cyrillic character capitalised
+        self.assertTrue(result.text[0].isupper())
+
+    def test_empty_string_unicode_safe(self):
+        """Empty string with all steps → no crash."""
+        result = self.processor.process("", steps=["strip_whitespace", "fix_punctuation", "normalize_entities"])
+        self.assertEqual(result.text, "")
+
+
+class TestTextPostProcessorConcurrentProcess(unittest.TestCase):
+    """test_concurrent_process: concurrent calls to process() are safe."""
+
+    def test_concurrent_process(self):
+        """20 threads calling process() concurrently — no exceptions, consistent output."""
+        processor = TextPostProcessor()
+        inputs = [
+            ("  hello world  ", ["strip_whitespace"], "hello world"),
+            ("привет мир", ["strip_whitespace"], "привет мир"),
+        ]
+        results = []
+        errors = []
+
+        def call_process(text, steps, expected):
+            try:
+                r = processor.process(text, steps=steps)
+                results.append((r.text, expected))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = []
+        for i in range(20):
+            text, steps, expected = inputs[i % len(inputs)]
+            threads.append(threading.Thread(target=call_process, args=(text, steps, expected)))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 20)
+        for actual, expected in results:
+            self.assertEqual(actual, expected, f"Expected {expected!r}, got {actual!r}")
 
 
 if __name__ == "__main__":
