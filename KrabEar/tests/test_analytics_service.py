@@ -1,14 +1,23 @@
+<<<<<<< HEAD
 """Unit tests — AnalyticsService (6 IPC handlers).
 
 Tests each handler directly against mocked collaborators, then an integration
 smoke-test exercises them via BackendService.handle_request dispatch.
 Extracted from BackendService Wave 392.
+=======
+"""Unit tests — AnalyticsService (8 IPC handlers).
+
+Tests each handler directly against mocked collaborators.
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
 """
 
 from __future__ import annotations
 
 import sys
+<<<<<<< HEAD
 import tempfile
+=======
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -43,6 +52,7 @@ class _FakeStore:
     def _load_active_items_unlocked(self):
         return list(self._items)
 
+<<<<<<< HEAD
     def _load_active_items_with_lock(self):
         return list(self._items)
 
@@ -97,20 +107,102 @@ class TestGetAnalyticsDashboard(unittest.TestCase):
         svc = _make_service(analytics_dashboard=dashboard)
 
         # days=9999 should be clamped to 365
+=======
+
+def _session_state():
+    return {
+        "session": {
+            "recording_active": False,
+            "preview_active": False,
+            "preview_text_length": 0,
+            "preview_duration_sec": 0.0,
+        },
+        "preview_loop": {"error_count": 0, "last_reset_ts": 0.0},
+        "llm_status": None,
+        "call_assist": {"active": False},
+        "import": {"active": False},
+    }
+
+
+def _settings():
+    return {
+        "llm_rewrite_enabled": False,
+        "llm_model": "test-model",
+        "quality_profile": "balanced",
+        "cleanup_profile": "soft",
+        "translation_mode": "off",
+        "diarization_enabled": False,
+        "network_mode": "offline_default",
+    }
+
+
+def _make_svc(**overrides) -> AnalyticsService:
+    defaults = dict(
+        analytics_dashboard=MagicMock(),
+        daily_digest=MagicMock(),
+        activity_calendar=MagicMock(),
+        recording_insights=MagicMock(),
+        sentiment_trends=MagicMock(),
+        keyword_cloud_gen=MagicMock(),
+        store=_FakeStore(),
+        get_session_state=_session_state,
+        get_settings=_settings,
+    )
+    defaults.update(overrides)
+    return AnalyticsService(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestHandleGetAnalyticsDashboard(unittest.TestCase):
+
+    def test_delegates_to_dashboard(self):
+        dashboard = MagicMock()
+        dashboard.get_full_dashboard.return_value = {"overview": {}}
+        svc = _make_svc(analytics_dashboard=dashboard, store=_FakeStore())
+        result = svc.handle_get_analytics_dashboard({"days": 14})
+        dashboard.get_full_dashboard.assert_called_once()
+        call_kwargs = dashboard.get_full_dashboard.call_args[1]
+        self.assertEqual(call_kwargs["days"], 14)
+        self.assertIn("overview", result)
+
+    def test_clamps_days_to_max_365(self):
+        dashboard = MagicMock()
+        dashboard.get_full_dashboard.return_value = {}
+        svc = _make_svc(analytics_dashboard=dashboard)
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
         svc.handle_get_analytics_dashboard({"days": 9999})
         call_kwargs = dashboard.get_full_dashboard.call_args[1]
         self.assertEqual(call_kwargs["days"], 365)
 
+<<<<<<< HEAD
     def test_default_days_is_30(self) -> None:
         dashboard = MagicMock()
         dashboard.get_full_dashboard.return_value = {}
         svc = _make_service(analytics_dashboard=dashboard)
 
+=======
+    def test_clamps_days_to_min_1(self):
+        dashboard = MagicMock()
+        dashboard.get_full_dashboard.return_value = {}
+        svc = _make_svc(analytics_dashboard=dashboard)
+        svc.handle_get_analytics_dashboard({"days": -5})
+        call_kwargs = dashboard.get_full_dashboard.call_args[1]
+        self.assertEqual(call_kwargs["days"], 1)
+
+    def test_default_days_is_30(self):
+        dashboard = MagicMock()
+        dashboard.get_full_dashboard.return_value = {}
+        svc = _make_svc(analytics_dashboard=dashboard)
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
         svc.handle_get_analytics_dashboard({})
         call_kwargs = dashboard.get_full_dashboard.call_args[1]
         self.assertEqual(call_kwargs["days"], 30)
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # handle_get_sentiment_trends
 # ---------------------------------------------------------------------------
@@ -183,11 +275,67 @@ class TestComparePeriods(unittest.TestCase):
         fake_period.duration_sec = 3600.0
         fake_period.words = 500
         fake_period.avg_confidence = 0.92
+=======
+class TestHandleGenerateDailyDigest(unittest.TestCase):
+
+    def _make_digest(self):
+        d = MagicMock()
+        d.date = "2026-05-19"
+        d.total_recordings = 5
+        d.total_duration_min = 12.5
+        d.total_words = 800
+        d.languages_used = ["ru"]
+        d.top_topics = ["test"]
+        d.highlights = []
+        d.formatted_markdown = "# Digest"
+        return d
+
+    def test_returns_all_fields(self):
+        daily_digest = MagicMock()
+        daily_digest.generate_digest.return_value = self._make_digest()
+        svc = _make_svc(daily_digest=daily_digest)
+        result = svc.handle_generate_daily_digest({"date": "2026-05-19"})
+        self.assertEqual(result["date"], "2026-05-19")
+        self.assertEqual(result["total_recordings"], 5)
+        self.assertIn("markdown", result)
+
+    def test_date_none_passes_through(self):
+        daily_digest = MagicMock()
+        daily_digest.generate_digest.return_value = self._make_digest()
+        svc = _make_svc(daily_digest=daily_digest)
+        svc.handle_generate_daily_digest({})
+        call_kwargs = daily_digest.generate_digest.call_args[1]
+        self.assertIsNone(call_kwargs["date_str"])
+
+
+class TestHandleComparePeriods(unittest.TestCase):
+
+    def test_raises_on_missing_params(self):
+        svc = _make_svc()
+        with self.assertRaises(ValueError):
+            svc.handle_compare_periods({})
+
+    def test_raises_on_partial_params(self):
+        svc = _make_svc()
+        with self.assertRaises(ValueError):
+            svc.handle_compare_periods({
+                "period1_start": "2026-01-01",
+                "period1_end": "2026-01-31",
+            })
+
+    def test_returns_comparison_structure(self):
+        fake_period = MagicMock()
+        fake_period.recordings = 3
+        fake_period.duration_sec = 120.0
+        fake_period.words = 200
+        fake_period.avg_confidence = 0.9
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
         fake_period.languages = ["ru"]
 
         fake_report = MagicMock()
         fake_report.period1 = fake_period
         fake_report.period2 = fake_period
+<<<<<<< HEAD
         fake_report.recordings_change_pct = 5.0
         fake_report.duration_change_pct = -2.0
         fake_report.confidence_change = 0.01
@@ -549,6 +697,183 @@ class TestAnalyticsServiceRegistration(unittest.TestCase):
             "_handle_get_analytics_dashboard",
         ):
             self.assertIn(stub, content, f"{stub} stub not found in service.py")
+=======
+        fake_report.recordings_change_pct = 0.0
+        fake_report.duration_change_pct = 0.0
+        fake_report.confidence_change = 0.0
+        fake_report.new_languages = []
+        fake_report.summary = "equal"
+
+        with patch("backend.analytics_service._compare_periods_fn", return_value=fake_report):
+            svc = _make_svc()
+            result = svc.handle_compare_periods({
+                "period1_start": "2026-01-01",
+                "period1_end": "2026-01-31",
+                "period2_start": "2026-02-01",
+                "period2_end": "2026-02-28",
+            })
+
+        self.assertIn("period1", result)
+        self.assertIn("period2", result)
+        self.assertIn("summary", result)
+        self.assertEqual(result["period1"]["recordings"], 3)
+
+
+class TestHandleGetActivityCalendar(unittest.TestCase):
+
+    def test_returns_calendar_dict(self):
+        cal = MagicMock()
+        fake_cal = MagicMock()
+        fake_cal.to_dict.return_value = {"weeks": [], "total_recordings": 0}
+        cal.generate_calendar.return_value = fake_cal
+        svc = _make_svc(activity_calendar=cal, store=_FakeStore())
+        result = svc.handle_get_activity_calendar({"months": 3})
+        self.assertIn("weeks", result)
+
+    def test_clamps_months_to_1_24(self):
+        cal = MagicMock()
+        fake_cal = MagicMock()
+        fake_cal.to_dict.return_value = {}
+        cal.generate_calendar.return_value = fake_cal
+        svc = _make_svc(activity_calendar=cal, store=_FakeStore())
+        svc.handle_get_activity_calendar({"months": 100})
+        call_args = cal.generate_calendar.call_args
+        self.assertEqual(call_args[1]["months"], 24)
+
+    def test_include_svg_triggers_svg_generation(self):
+        cal = MagicMock()
+        fake_cal = MagicMock()
+        fake_cal.to_dict.return_value = {}
+        cal.generate_calendar.return_value = fake_cal
+        cal.generate_calendar_svg.return_value = "<svg/>"
+        svc = _make_svc(activity_calendar=cal, store=_FakeStore())
+        result = svc.handle_get_activity_calendar({"include_svg": True})
+        cal.generate_calendar_svg.assert_called_once()
+        self.assertEqual(result["svg"], "<svg/>")
+
+    def test_no_svg_by_default(self):
+        cal = MagicMock()
+        fake_cal = MagicMock()
+        fake_cal.to_dict.return_value = {}
+        cal.generate_calendar.return_value = fake_cal
+        svc = _make_svc(activity_calendar=cal, store=_FakeStore())
+        result = svc.handle_get_activity_calendar({})
+        cal.generate_calendar_svg.assert_not_called()
+        self.assertNotIn("svg", result)
+
+
+class TestHandleGetRecordingInsights(unittest.TestCase):
+
+    def test_returns_insights_list(self):
+        ri = MagicMock()
+        fake_insight = MagicMock()
+        fake_insight.to_dict.return_value = {"type": "info", "message": "test"}
+        ri.generate_insights.return_value = [fake_insight]
+        svc = _make_svc(recording_insights=ri, store=_FakeStore())
+        result = svc.handle_get_recording_insights({"days": 7})
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["days"], 7)
+        self.assertEqual(len(result["insights"]), 1)
+
+    def test_empty_store_returns_empty_insights(self):
+        ri = MagicMock()
+        ri.generate_insights.return_value = []
+        svc = _make_svc(recording_insights=ri, store=_FakeStore())
+        result = svc.handle_get_recording_insights({})
+        self.assertEqual(result["count"], 0)
+
+
+class TestHandleGetSentimentTrends(unittest.TestCase):
+
+    def test_delegates_to_sentiment_analyzer(self):
+        st = MagicMock()
+        fake_report = MagicMock()
+        st.analyze_sentiment_trends.return_value = fake_report
+        st.to_dict.return_value = {"trend": "stable", "daily": []}
+        svc = _make_svc(sentiment_trends=st, store=_FakeStore())
+        result = svc.handle_get_sentiment_trends({"days": 14})
+        st.analyze_sentiment_trends.assert_called_once()
+        st.to_dict.assert_called_once_with(fake_report)
+        self.assertIn("trend", result)
+
+    def test_default_days_is_30(self):
+        st = MagicMock()
+        st.analyze_sentiment_trends.return_value = MagicMock()
+        st.to_dict.return_value = {}
+        svc = _make_svc(sentiment_trends=st, store=_FakeStore())
+        svc.handle_get_sentiment_trends({})
+        call_kwargs = st.analyze_sentiment_trends.call_args[1]
+        self.assertEqual(call_kwargs["days"], 30)
+
+
+class TestHandleGetKeywordCloud(unittest.TestCase):
+
+    def _make_word(self, word, count=5, weight=0.5, font_size=14):
+        w = MagicMock()
+        w.word = word
+        w.count = count
+        w.weight = weight
+        w.font_size = font_size
+        return w
+
+    def test_returns_words_list(self):
+        kg = MagicMock()
+        kg.generate_cloud.return_value = [self._make_word("краб")]
+        svc = _make_svc(keyword_cloud_gen=kg, store=_FakeStore())
+        result = svc.handle_get_keyword_cloud({"max_words": 50})
+        self.assertEqual(len(result["words"]), 1)
+        self.assertEqual(result["words"][0]["word"], "краб")
+        self.assertIn("count", result["words"][0])
+        self.assertIn("weight", result["words"][0])
+        self.assertIn("font_size", result["words"][0])
+
+    def test_passes_language_param(self):
+        kg = MagicMock()
+        kg.generate_cloud.return_value = []
+        svc = _make_svc(keyword_cloud_gen=kg, store=_FakeStore())
+        svc.handle_get_keyword_cloud({"language": "ru"})
+        call_kwargs = kg.generate_cloud.call_args[1]
+        self.assertEqual(call_kwargs["language"], "ru")
+
+    def test_default_max_words_100(self):
+        kg = MagicMock()
+        kg.generate_cloud.return_value = []
+        svc = _make_svc(keyword_cloud_gen=kg, store=_FakeStore())
+        svc.handle_get_keyword_cloud({})
+        call_kwargs = kg.generate_cloud.call_args[1]
+        self.assertEqual(call_kwargs["max_words"], 100)
+
+    def test_empty_store_returns_empty_cloud(self):
+        kg = MagicMock()
+        kg.generate_cloud.return_value = []
+        svc = _make_svc(keyword_cloud_gen=kg, store=_FakeStore())
+        result = svc.handle_get_keyword_cloud({})
+        self.assertEqual(result["words"], [])
+
+
+class TestHandleGetMetricsDashboard(unittest.TestCase):
+
+    def test_returns_expected_top_level_keys(self):
+        svc = _make_svc()
+        result = svc.handle_get_metrics_dashboard({})
+        self.assertIn("session", result)
+        self.assertIn("preview_loop", result)
+        self.assertIn("llm", result)
+        self.assertIn("call_assist", result)
+        self.assertIn("config_snapshot", result)
+
+    def test_settings_populate_config_snapshot(self):
+        svc = _make_svc()
+        result = svc.handle_get_metrics_dashboard({})
+        snap = result["config_snapshot"]
+        self.assertEqual(snap["quality"], "balanced")
+        self.assertEqual(snap["translation_mode"], "off")
+
+    def test_llm_model_from_settings(self):
+        svc = _make_svc()
+        result = svc.handle_get_metrics_dashboard({})
+        self.assertEqual(result["llm"]["model"], "test-model")
+>>>>>>> 170a59e3 (refactor(wave174): extract AnalyticsService (8 handlers from service.py))
 
 
 if __name__ == "__main__":
