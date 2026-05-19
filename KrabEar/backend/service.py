@@ -25,7 +25,6 @@ from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
 from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
 from backend.playback_tracker import PlaybackTracker
-from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.sentiment_trends import SentimentTrendAnalyzer
 from backend.transcription_queue import TranscriptionQueue
@@ -33,7 +32,6 @@ from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
-from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
@@ -45,11 +43,9 @@ from backend.sharing_manager import SharingManager
 from backend.realtime_partial import RealtimePartialTranscriber
 from backend.semantic_search import SemanticSearcher, keyword_fallback_search
 from core.word_timing import WordTimingAnalyzer
-from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
 from core.abbreviation_expander import AbbreviationExpander
 from core.audio_fingerprint import AudioFingerprinter
-from core.hallucination_manager import HallucinationManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from backend.webhook_manager import WebhookManager
 from backend.stats_report import StatsReportGenerator
@@ -128,7 +124,6 @@ from backend.observability import (
     init_sentry,
     install_signal_handlers,
 )
-from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
@@ -388,11 +383,9 @@ class BackendService:
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
-        self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
-        self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
         self._readability_scorer = ReadabilityScorer()
@@ -400,7 +393,6 @@ class BackendService:
         self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
         self._transcription_scorer = TranscriptionScorer()
-        self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
@@ -424,7 +416,6 @@ class BackendService:
             data_dir=self.store.data_dir,
             enabled=settings.PASTE_APP_MEMORY_ENABLED,
         )
-        self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
@@ -506,9 +497,6 @@ class BackendService:
 
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
-        self._calendar_linker = CalendarLinker(
-            cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
-        )
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
