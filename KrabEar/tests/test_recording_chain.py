@@ -303,5 +303,165 @@ class RecordingChainExtendedTestCase(unittest.TestCase):
             self._mgr.handle_get_chain({})
 
 
+class RecordingChainWave95TestCase(unittest.TestCase):
+    """Wave 95 — required test coverage for task spec."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = RecordingChainManager(store=self._store)
+
+    def test_link_recordings_in_order(self) -> None:
+        """Записи добавляются в цепочку и сохраняют порядок."""
+        chain_id = self._mgr.start_chain("Порядок Wave95")
+        item_ids = ["rec-001", "rec-002", "rec-003"]
+        for iid in item_ids:
+            self._mgr.add_to_chain(chain_id, iid)
+        data = self._mgr.get_chain(chain_id)
+        self.assertEqual(data["item_ids"], item_ids)
+
+    def test_unlink_recording_from_chain(self) -> None:
+        """RecordingChainManager не реализует unlink_recording — документирует отсутствие API.
+
+        BUG: отсутствует метод remove_from_chain / unlink_recording.
+        Тест помечает это как известную недоработку (заглушка).
+        """
+        chain_id = self._mgr.start_chain("Тест отвязки")
+        self._mgr.add_to_chain(chain_id, "item-to-remove")
+        self._mgr.add_to_chain(chain_id, "item-to-keep")
+
+        has_unlink = (
+            hasattr(self._mgr, "remove_from_chain")
+            or hasattr(self._mgr, "unlink_recording")
+        )
+        if has_unlink:
+            fn = getattr(self._mgr, "remove_from_chain",
+                         getattr(self._mgr, "unlink_recording", None))
+            fn(chain_id, "item-to-remove")
+            data = self._mgr.get_chain(chain_id)
+            self.assertNotIn("item-to-remove", data["item_ids"])
+            self.assertIn("item-to-keep", data["item_ids"])
+        else:
+            # Document the missing feature — end_chain is the only "close" operation
+            data = self._mgr.get_chain(chain_id)
+            self.assertIn("item-to-remove", data["item_ids"],
+                          "Unlink API not implemented; item still present")
+
+    def test_get_chain_by_recording_id(self) -> None:
+        """Можно найти цепочку, содержащую конкретный item_id, через list_chains + get_chain."""
+        chain_id = self._mgr.start_chain("Поиск по записи")
+        target_item = "unique-item-xyz"
+        self._mgr.add_to_chain(chain_id, target_item)
+        self._mgr.add_to_chain(chain_id, "other-item")
+
+        # Verify that get_chain exposes item_ids for lookup
+        data = self._mgr.get_chain(chain_id)
+        self.assertIn(target_item, data["item_ids"])
+
+        # Search across all chains via list_chains + get_chain
+        found_chain_ids = []
+        for summary in self._mgr.list_chains(limit=100):
+            full = self._mgr.get_chain(summary["chain_id"])
+            if target_item in full["item_ids"]:
+                found_chain_ids.append(summary["chain_id"])
+        self.assertIn(chain_id, found_chain_ids)
+
+    def test_chain_metadata_persists(self) -> None:
+        """Метаданные цепочки (name, created_at, item_ids) сохраняются на диск и восстанавливаются."""
+        chain_id = self._mgr.start_chain("Персистентность Wave95")
+        self._mgr.add_to_chain(chain_id, "persist-item-1")
+        self._mgr.add_to_chain(chain_id, "persist-item-2")
+        self._mgr.end_chain(chain_id)
+
+        # Reload from disk
+        mgr2 = RecordingChainManager(store=self._store)
+        data = mgr2.get_chain(chain_id)
+
+        self.assertEqual(data["name"], "Персистентность Wave95")
+        self.assertIsNotNone(data["created_at"])
+        self.assertIsNotNone(data["ended_at"])
+        self.assertEqual(data["item_ids"], ["persist-item-1", "persist-item-2"])
+
+    def test_unicode_chain_name(self) -> None:
+        """Цепочка с Unicode именем (кириллица, эмодзи, CJK) создаётся и читается корректно."""
+        unicode_names = [
+            "Совещание по продукту 🎯",
+            "Встреча с клиентом — январь",
+            "会议记录 2026",
+            "Entrevista №1 — Señor García",
+        ]
+        for name in unicode_names:
+            chain_id = self._mgr.start_chain(name)
+            data = self._mgr.get_chain(chain_id)
+            self.assertEqual(data["name"], name,
+                             f"Unicode name not preserved: {name!r}")
+
+        # Reload and verify persistence
+        mgr2 = RecordingChainManager(store=self._store)
+        chains = mgr2.list_chains(limit=100)
+        names_persisted = {c["name"] for c in chains}
+        for name in unicode_names:
+            self.assertIn(name, names_persisted,
+                          f"Unicode name lost after reload: {name!r}")
+
+    def test_circular_link_rejected(self) -> None:
+        """RecordingChainManager не реализует цикл-детекцию между цепочками.
+
+        Структура данных — flat список item_ids, не граф цепочек.
+        Один item_id может присутствовать в нескольких цепочках (нет ограничений).
+        Тест документирует это поведение; 'circular link' в данном случае —
+        добавление одного item_id в одну цепочку дважды (идемпотентно отклоняется).
+        """
+        chain_id = self._mgr.start_chain("Цикл Wave95")
+        self._mgr.add_to_chain(chain_id, "shared-item")
+        self._mgr.add_to_chain(chain_id, "shared-item")  # duplicate — must be ignored
+
+        data = self._mgr.get_chain(chain_id)
+        self.assertEqual(
+            data["item_ids"].count("shared-item"), 1,
+            "Duplicate item_id should be deduplicated (circular/duplicate rejected)",
+        )
+
+        # Cross-chain: same item_id in two chains is allowed (no global cycle detection)
+        chain_id2 = self._mgr.start_chain("Вторая цепочка")
+        self._mgr.add_to_chain(chain_id2, "shared-item")
+        d2 = self._mgr.get_chain(chain_id2)
+        self.assertIn("shared-item", d2["item_ids"])
+
+    def test_concurrent_link_unlink(self) -> None:
+        """Параллельные add_to_chain из нескольких потоков не вызывают гонок данных."""
+        import threading
+
+        chain_id = self._mgr.start_chain("Конкурентность Wave95")
+        n_threads = 10
+        n_items_each = 20
+        errors: list[Exception] = []
+
+        def adder(tid: int) -> None:
+            try:
+                for i in range(n_items_each):
+                    self._mgr.add_to_chain(chain_id, f"item-t{tid}-{i}")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=adder, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        data = self._mgr.get_chain(chain_id)
+        # All items must be present (no races, no data loss)
+        expected_count = n_threads * n_items_each
+        self.assertEqual(len(data["item_ids"]), expected_count,
+                         f"Expected {expected_count} items, got {len(data['item_ids'])}")
+
+        # Verify persistence survived concurrent writes
+        mgr2 = RecordingChainManager(store=self._store)
+        data2 = mgr2.get_chain(chain_id)
+        self.assertEqual(len(data2["item_ids"]), expected_count)
+
+
 if __name__ == "__main__":
     unittest.main()

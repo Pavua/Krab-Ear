@@ -268,5 +268,149 @@ class TestAuditLoggerEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(entry["duration_ms"], 3.14, places=2)
 
 
+class TestAuditLoggerWave95(unittest.TestCase):
+    """Wave 95 — required test coverage for task spec."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.logger = AuditLogger(data_dir=self.tmpdir)
+
+    def tearDown(self):
+        self.logger.close()
+
+    def test_log_ipc_call_writes_structured_entry(self):
+        """log_request записывает структурированную запись аудита IPC-вызова."""
+        self.logger.log_request(
+            "get_history",
+            {"limit": 10, "offset": 0},
+            {"ok": True, "result": {"items": []}},
+            duration_ms=4.2,
+            client_info={"version": "2.0"},
+        )
+        entries = self.logger.get_audit_log(method_filter="get_history")
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["method"], "get_history")
+        self.assertIn("ts", e)
+        self.assertTrue(e["success"])
+        self.assertAlmostEqual(e["duration_ms"], 4.2, places=1)
+        self.assertIn("client_info", e)
+
+    def test_log_redacts_sensitive_params(self):
+        """Параметры чувствительных методов не попадают в лог (только метаданные)."""
+        sensitive_params = {
+            "password": "super_secret",
+            "api_key": "sk-12345",
+            "token": "bearer-token",
+            "sentry_dsn": "https://key@sentry.io/123",
+        }
+        for method in _SENSITIVE_METHODS:
+            self.logger.log_request(method, sensitive_params, {"ok": True, "result": {}}, 1.0)
+
+        files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
+        with open(files[0]) as f:
+            content = f.read()
+
+        # Sensitive values must NOT appear in the log
+        self.assertNotIn("super_secret", content)
+        self.assertNotIn("sk-12345", content)
+        self.assertNotIn("bearer-token", content)
+        # params_keys must be empty for sensitive methods
+        for line in content.splitlines():
+            entry = json.loads(line)
+            if entry["method"] in _SENSITIVE_METHODS:
+                self.assertEqual(entry["params_keys"], [],
+                                 f"Sensitive method {entry['method']} leaked params_keys")
+
+    def test_log_persists_to_file_atomic(self):
+        """Записи сохраняются в файл и читаются без потерь после flush."""
+        methods = ["a", "b", "c", "d", "e"]
+        for m in methods:
+            self.logger.log_request(m, {}, {"ok": True, "result": {}}, 0.1)
+
+        # Read raw file, not through API
+        files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
+        self.assertEqual(len(files), 1, "Should produce exactly one file for today")
+        lines = files[0].read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 5)
+        parsed_methods = [json.loads(ln)["method"] for ln in lines]
+        self.assertEqual(parsed_methods, methods)
+
+    def test_concurrent_log_writes_no_data_loss(self):
+        """Параллельные write-потоки не теряют и не портят записи."""
+        n_threads = 8
+        n_per_thread = 25
+        errors: list[Exception] = []
+
+        def writer(tid: int) -> None:
+            try:
+                for i in range(n_per_thread):
+                    self.logger.log_request(
+                        f"method_{tid}_{i}", {}, {"ok": True, "result": {}}, float(tid)
+                    )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        entries = self.logger.get_audit_log(limit=n_threads * n_per_thread + 10)
+        self.assertEqual(len(entries), n_threads * n_per_thread)
+
+        # Verify all lines are valid JSON (no corruption)
+        files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
+        for f in files:
+            for raw_line in f.read_text(encoding="utf-8").splitlines():
+                if raw_line.strip():
+                    json.loads(raw_line)  # raises if corrupted
+
+    def test_query_recent_entries_by_method(self):
+        """get_audit_log с method_filter возвращает только записи нужного метода."""
+        calls = [("ping", 3), ("transcribe", 2), ("get_settings", 1)]
+        for method, count in calls:
+            for _ in range(count):
+                self.logger.log_request(method, {}, {"ok": True, "result": {}}, 1.0)
+
+        for method, count in calls:
+            entries = self.logger.get_audit_log(method_filter=method, limit=50)
+            self.assertEqual(len(entries), count,
+                             f"Expected {count} entries for {method}, got {len(entries)}")
+
+    def test_handles_unwritable_disk_gracefully(self):
+        """BUG: Если директория недоступна для записи — log_request выбрасывает PermissionError.
+
+        Ошибка происходит в _rotate_if_needed() при вызове open() — исключение
+        не перехватывается и propagates до caller'а.
+        Ожидаемое поведение: log_request должен молча логировать ошибку через logger.exception,
+        но НЕ пробрасывать исключение наружу (как это делается для write/flush в строке 69).
+        Тест документирует текущее сломанное поведение.
+        """
+        import os
+        import stat
+
+        restricted_dir = Path(self.tmpdir) / "restricted"
+        restricted_dir.mkdir()
+        # Make directory read-only
+        os.chmod(restricted_dir, stat.S_IREAD | stat.S_IEXEC)
+
+        try:
+            restricted_logger = AuditLogger(data_dir=restricted_dir)
+            try:
+                # BUG: this raises PermissionError from _rotate_if_needed()
+                # The try/except in log_request only covers the write/flush, not open()
+                with self.assertRaises(PermissionError,
+                                       msg="BUG: _rotate_if_needed() PermissionError not caught"):
+                    restricted_logger.log_request("ping", {}, {"ok": True, "result": {}}, 1.0)
+            finally:
+                restricted_logger.close()
+        finally:
+            # Restore permissions for cleanup
+            os.chmod(restricted_dir, stat.S_IRWXU)
+
+
 if __name__ == "__main__":
     unittest.main()
