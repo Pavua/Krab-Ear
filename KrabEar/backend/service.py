@@ -267,6 +267,13 @@ class BackendService:
         if self.transcriber is not None:
             self.transcriber._error_bus = self._error_bus
 
+        # Wire error_bus into mlx_subprocess module for stt.mlx_watchdog_hang push
+        try:
+            import core.mlx_subprocess as _mlx_sub  # noqa: PLC0415
+            _mlx_sub._error_bus = self._error_bus
+        except Exception:  # noqa: BLE001
+            pass
+
         self._llm_probe: LLMHttpProbe | None = None
         if self._llm_rewriter is not None:
             _settings_dict = self._settings_svc.cached_settings()
@@ -3254,6 +3261,43 @@ class BackendService:
 
     def _handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств."""
+        # Poll-flood detection: >10 calls/sec → push ipc.audio_device_poll_flood breadcrumb.
+        # Uses a simple sliding 1-second window tracked via _audio_device_call_times deque.
+        _now = time.monotonic()
+        _call_times = getattr(self, "_audio_device_call_times", None)
+        if _call_times is None:
+            import collections  # noqa: PLC0415
+            _call_times = collections.deque()
+            self._audio_device_call_times: "collections.deque[float]" = _call_times
+        _call_times.append(_now)
+        # Drop entries older than 1 second
+        while _call_times and (_now - _call_times[0]) > 1.0:
+            _call_times.popleft()
+        if len(_call_times) > 10:
+            _bus = getattr(self, "_error_bus", None)
+            if _bus is not None:
+                try:
+                    from backend.error_bus import KrabError  # noqa: PLC0415
+                    from backend.error_codes import ERROR_REGISTRY  # noqa: PLC0415
+                    from datetime import datetime, timezone  # noqa: PLC0415
+                    _entry = ERROR_REGISTRY.get("ipc.audio_device_poll_flood", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="ipc",
+                        code="ipc.audio_device_poll_flood",
+                        message_user=_entry.get("user_msg_ru", "IPC: audio device poll flood"),
+                        message_debug=(
+                            f"list_audio_inputs called {len(_call_times)}× in last 1s "
+                            "(poll flood — check Swift audio device picker refresh rate)"
+                        ),
+                        timestamp=datetime.now(timezone.utc),
+                        context={"calls_per_sec": len(_call_times)},
+                        actionable=_entry.get("actionable", False),
+                        action_id=_entry.get("action_id"),
+                    )
+                    _bus.push(_err)
+                except Exception:  # noqa: BLE001
+                    pass
         items = self._list_audio_inputs()
         default_input_id = None
         for item in items:
