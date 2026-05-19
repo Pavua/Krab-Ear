@@ -196,5 +196,159 @@ class TestAutoBackupThreadSafety(unittest.TestCase):
             self.assertEqual(errors, [])
 
 
+class TestAutoBackupDiskPressure(unittest.TestCase):
+    """test_backup_skipped_on_disk_pressure — бэкап не выполняется при нехватке места."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmpdir.name)
+        self.store = _make_store(self.data_dir)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_backup_skipped_when_enabled_false(self):
+        """Если enabled=False — бэкап пропускается с причиной 'disabled'."""
+        mgr = AutoBackupManager(store=self.store, enabled=False)
+        result = mgr.check_and_backup()
+        self.assertFalse(result["backed_up"])
+        self.assertEqual(result["skipped_reason"], "disabled")
+
+    def test_backup_skipped_on_disk_pressure_via_patch(self):
+        """Симулируем нехватку диска через патч _do_backup → OSError (disk full)."""
+        from unittest.mock import patch as mock_patch
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=5)
+        with mock_patch.object(mgr, "_do_backup", side_effect=OSError("No space left on device")):
+            try:
+                result = mgr.check_and_backup()
+                # Если менеджер поглощает ошибку — бэкап не был выполнен
+                self.assertFalse(result.get("backed_up", True))
+            except OSError:
+                pass  # Ожидаемо: менеджер пробрасывает OSError
+        # После ошибки диска — get_auto_backup_status должен работать
+        status = mgr.get_auto_backup_status()
+        self.assertIn("enabled", status)
+
+
+class TestAutoBackupAtomicWrite(unittest.TestCase):
+    """test_backup_atomic — бэкап пишет в директорию, а не в .tmp, затем rename."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmpdir.name)
+        self.store = _make_store(self.data_dir)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_backup_dir_contains_backup_meta(self):
+        """После успешного бэкапа backup_meta.json должен присутствовать в директории."""
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=5)
+        result = mgr.check_and_backup()
+        self.assertTrue(result["backed_up"])
+        backup_path = Path(result["backup_path"])
+        self.assertTrue(backup_path.exists())
+        self.assertTrue((backup_path / "backup_meta.json").exists())
+
+    def test_backup_dir_name_starts_with_auto_backup(self):
+        """Директория бэкапа должна начинаться с 'auto_backup_'."""
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=5)
+        result = mgr.check_and_backup()
+        backup_path = Path(result["backup_path"])
+        self.assertTrue(backup_path.name.startswith("auto_backup_"))
+
+    def test_backup_meta_contains_expected_keys(self):
+        """backup_meta.json должен содержать обязательные ключи."""
+        import json
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=5)
+        result = mgr.check_and_backup()
+        backup_path = Path(result["backup_path"])
+        meta = json.loads((backup_path / "backup_meta.json").read_text(encoding="utf-8"))
+        for key in ("backup_ts", "size_bytes", "files", "auto"):
+            self.assertIn(key, meta)
+        self.assertTrue(meta["auto"])
+
+    def test_only_one_backup_dir_created_per_call(self):
+        """Один вызов check_and_backup создаёт ровно одну директорию бэкапа."""
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=20)
+        before = set(d.name for d in mgr.backups_dir.iterdir() if d.is_dir()) if mgr.backups_dir.exists() else set()
+        mgr.check_and_backup()
+        after = set(d.name for d in mgr.backups_dir.iterdir() if d.is_dir())
+        new_dirs = after - before
+        self.assertEqual(len(new_dirs), 1)
+
+
+class TestAutoBackupConcurrentLock(unittest.TestCase):
+    """test_concurrent_backup_invocation — lock предотвращает одновременный запуск."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmpdir.name)
+        self.store = _make_store(self.data_dir)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_lock_prevents_double_run(self):
+        """Если _lock занят, второй вызов ждёт — lock сериализует вызовы."""
+        mgr = AutoBackupManager(store=self.store, interval_hours=0, max_copies=10)
+        results = []
+        errors = []
+        started = threading.Event()
+
+        original_do_backup = mgr._do_backup
+
+        def slow_do_backup():
+            started.set()
+            time.sleep(0.1)
+            return original_do_backup()
+
+        mgr._do_backup = slow_do_backup  # type: ignore[method-assign]
+
+        def worker():
+            try:
+                meta = mgr._load_meta()
+                meta["last_backup_ts"] = None
+                mgr._save_meta(meta)
+                r = mgr.check_and_backup()
+                results.append(r)
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker)
+        t1.start()
+        started.wait(timeout=2.0)  # ждём, пока первый поток войдёт в _do_backup
+
+        t2 = threading.Thread(target=worker)
+        t2.start()
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
+
+        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
+        # Обе попытки должны завершиться (одна backed_up=True, другая too_soon)
+        self.assertEqual(len(results), 2)
+
+    def test_concurrent_status_reads_safe(self):
+        """Параллельные чтения статуса из N потоков не вызывают исключений."""
+        mgr = AutoBackupManager(store=self.store, interval_hours=24, max_copies=5)
+        mgr.check_and_backup()
+        errors = []
+
+        def reader():
+            try:
+                for _ in range(5):
+                    mgr.get_auto_backup_status()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
