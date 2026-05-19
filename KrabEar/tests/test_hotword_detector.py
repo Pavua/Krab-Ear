@@ -306,5 +306,83 @@ class TestHotwordDetectorUnicode(unittest.TestCase):
         self.assertEqual(text[matches[0].position:matches[0].position + 3], "мир")
 
 
+class TestHotwordDetectorWave92(unittest.TestCase):
+    """Wave 92 required test names with explicit task-spec identifiers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.detector = HotwordDetector(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simple_word_match(self):
+        """Simple hotword found verbatim in text."""
+        self.detector.add_hotword("краб")
+        matches = self.detector.check_text("Это краб.")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].word, "краб")
+
+    def test_word_boundary(self):
+        """Hotword 'test' does NOT match inside 'contest' (word boundary enforced)."""
+        self.detector.add_hotword("test")
+        matches = self.detector.check_text("The contest continues.")
+        self.assertEqual(len(matches), 0)
+        matches2 = self.detector.check_text("Run the test now.")
+        self.assertEqual(len(matches2), 1)
+
+    def test_unicode_hotword(self):
+        """Unicode hotwords (Cyrillic + emoji label) are matched correctly."""
+        self.detector.add_hotword("ошибка", category="error")
+        # Emoji in category label is fine; word itself is pure Cyrillic
+        matches = self.detector.check_text("Критическая ошибка системы.")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].word, "ошибка")
+        self.assertEqual(matches[0].category, "error")
+
+    def test_case_insensitive(self):
+        """Default matching ignores case for ASCII and Cyrillic."""
+        self.detector.add_hotword("Warning")
+        for variant in ("warning", "WARNING", "Warning", "WaRnInG"):
+            matches = self.detector.check_text(f"A {variant} was issued.")
+            self.assertEqual(len(matches), 1, f"Failed for variant: {variant!r}")
+
+    def test_multiple_hotwords_in_text(self):
+        """All registered hotwords are detected in a single scan."""
+        self.detector.add_hotword("alpha")
+        self.detector.add_hotword("beta")
+        self.detector.add_hotword("gamma")
+        text = "alpha beta gamma"
+        matches = self.detector.check_text(text)
+        self.assertEqual(len(matches), 3)
+        found = {m.word for m in matches}
+        self.assertEqual(found, {"alpha", "beta", "gamma"})
+
+    def test_empty_transcript(self):
+        """Empty string produces zero matches without error."""
+        self.detector.add_hotword("anything")
+        self.assertEqual(self.detector.check_text(""), [])
+        # Also verify IPC wrapper handles empty
+        result = self.detector.handle_check_hotwords({"text": ""})
+        self.assertEqual(result["count"], 0)
+
+    def test_hotword_list_reload(self):
+        """Hotwords registered at runtime persist and are reloaded from file."""
+        self.detector.add_hotword("volatile", category="runtime")
+        self.detector.add_hotword("persistent", category="store")
+
+        # Simulate reload (same data_dir, new instance)
+        detector2 = HotwordDetector(data_dir=self.tmp.name)
+        words = {w["word"] for w in detector2.get_hotwords()}
+        self.assertIn("volatile", words)
+        self.assertIn("persistent", words)
+
+        # Runtime add on new instance also works
+        detector2.add_hotword("live_add", category="live")
+        matches = detector2.check_text("live_add detected here")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].word, "live_add")
+
+
 if __name__ == "__main__":
     unittest.main()

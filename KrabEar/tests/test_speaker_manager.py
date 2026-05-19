@@ -359,5 +359,308 @@ class TestSpeakerManagerEdgeCases(unittest.TestCase):
         self.assertEqual(len(aliases), 5)
 
 
+class TestSpeakerManagerWave92(unittest.TestCase):
+    """Wave 92 required test names + fingerprint / register_speaker coverage."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.mgr = SpeakerManager(data_dir=self.tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Required: test_create_speaker_profile
+    # ------------------------------------------------------------------
+
+    def test_create_speaker_profile(self):
+        """Создание профиля спикера: set_alias + get_alias возвращает имя."""
+        self.mgr.set_alias("SPEAKER_00", "Иван")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Иван")
+        aliases = self.mgr.get_all_aliases()
+        self.assertIn("SPEAKER_00", aliases)
+
+    # ------------------------------------------------------------------
+    # Required: test_rename_speaker
+    # ------------------------------------------------------------------
+
+    def test_rename_speaker(self):
+        """Переименование спикера: старый псевдоним заменяется новым (только сессия)."""
+        self.mgr.set_alias("SPEAKER_00", "Старое_имя")
+        self.mgr.set_alias("SPEAKER_00", "Новое_имя")
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Новое_имя")
+
+    # ------------------------------------------------------------------
+    # Required: test_merge_speakers
+    # ------------------------------------------------------------------
+
+    def test_merge_speakers(self):
+        """Слияние спикеров: SPEAKER_01 удаляется, SPEAKER_00 сохраняет своё имя.
+        voice fingerprints сохраняются под merged speaker_id."""
+        import numpy as np
+
+        self.mgr.set_alias("SPEAKER_00", "Главный")
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+
+        # Register fingerprints for both
+        emb0 = np.ones(512, dtype=np.float32)
+        emb1 = np.ones(512, dtype=np.float32) * 0.5
+        self.mgr._fingerprints["SPEAKER_00"] = emb0.tolist()
+        self.mgr._fingerprints["SPEAKER_01"] = emb1.tolist()
+        self.mgr._save_fingerprints()
+
+        # Perform merge: remove the duplicate speaker
+        self.mgr.remove_alias("SPEAKER_01")
+        self.mgr.delete_fingerprint("SPEAKER_01")
+
+        # Only SPEAKER_00 should remain
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Главный")
+        self.assertIsNone(self.mgr.get_alias("SPEAKER_01"))
+        fps = self.mgr.get_all_fingerprints()
+        self.assertIn("SPEAKER_00", fps)
+        self.assertNotIn("SPEAKER_01", fps)
+
+    # ------------------------------------------------------------------
+    # Required: test_persist_reload
+    # ------------------------------------------------------------------
+
+    def test_persist_reload(self):
+        """JSON roundtrip: псевдонимы и фингерпринты переживают reload."""
+        import numpy as np
+
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        emb = np.random.rand(512).astype(np.float32)
+        self.mgr._fingerprints["SPEAKER_00"] = emb.tolist()
+        self.mgr._save_fingerprints()
+
+        mgr2 = SpeakerManager(data_dir=self.tmpdir)
+        self.assertEqual(mgr2.get_alias("SPEAKER_00"), "Паша")
+        fps = mgr2.get_all_fingerprints()
+        self.assertIn("SPEAKER_00", fps)
+        self.assertEqual(len(fps["SPEAKER_00"]), 512)
+
+    # ------------------------------------------------------------------
+    # Required: test_concurrent_rename
+    # ------------------------------------------------------------------
+
+    def test_concurrent_rename(self):
+        """Атомарность: параллельные rename (set_alias) не вызывают race condition."""
+        import threading
+
+        errors: list[Exception] = []
+
+        def rename_worker(spk: str, name: str) -> None:
+            try:
+                for _ in range(30):
+                    self.mgr.set_alias(spk, name)
+                    _ = self.mgr.get_alias(spk)  # concurrent read
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=rename_worker, args=("SPEAKER_00", f"Name{i}"))
+            for i in range(6)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        # Final alias should be one of the valid names (not None/corrupt)
+        alias = self.mgr.get_alias("SPEAKER_00")
+        self.assertIsNotNone(alias)
+
+    # ------------------------------------------------------------------
+    # Required: test_unicode_speaker_name
+    # ------------------------------------------------------------------
+
+    def test_unicode_speaker_name(self):
+        """Псевдонимы с unicode (кириллица, эмодзи, иероглифы) сохраняются корректно."""
+        names = {
+            "SPEAKER_00": "Александра 🎙",
+            "SPEAKER_01": "Иван Петрович",
+            "SPEAKER_02": "田中さん",
+            "SPEAKER_03": "María José",
+        }
+        for spk, name in names.items():
+            self.mgr.set_alias(spk, name)
+
+        # Verify in memory
+        for spk, name in names.items():
+            self.assertEqual(self.mgr.get_alias(spk), name)
+
+        # Verify roundtrip via JSON
+        mgr2 = SpeakerManager(data_dir=self.tmpdir)
+        for spk, name in names.items():
+            self.assertEqual(mgr2.get_alias(spk), name)
+
+        # Verify apply_aliases works with unicode names
+        text = "[SPEAKER_00] Привет [SPEAKER_02] こんにちは"
+        result = self.mgr.apply_aliases(text)
+        self.assertIn("Александра 🎙", result)
+        self.assertIn("田中さん", result)
+
+    # ------------------------------------------------------------------
+    # Required: test_delete_speaker_unmerges_history
+    # ------------------------------------------------------------------
+
+    def test_delete_speaker_unmerges_history(self):
+        """Удаление псевдонима спикера: apply_aliases возвращает raw SPEAKER_XX тег
+        (тексты истории не затрагиваются, теги 'отмёрживаются' обратно в дефолт)."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        self.mgr.set_alias("SPEAKER_01", "Маша")
+
+        # Before deletion
+        text = "[SPEAKER_00] Привет\n[SPEAKER_01] Пока"
+        result_before = self.mgr.apply_aliases(text)
+        self.assertEqual(result_before, "[Паша] Привет\n[Маша] Пока")
+
+        # Delete SPEAKER_01 alias (simulates "unmerge" — remove custom label)
+        self.mgr.remove_alias("SPEAKER_01")
+
+        # After deletion: SPEAKER_01 reverts to raw tag, SPEAKER_00 unchanged
+        result_after = self.mgr.apply_aliases(text)
+        self.assertEqual(result_after, "[Паша] Привет\n[SPEAKER_01] Пока")
+
+        # Full removal of SPEAKER_00 reverts both
+        self.mgr.remove_alias("SPEAKER_00")
+        result_clean = self.mgr.apply_aliases(text)
+        self.assertEqual(result_clean, "[SPEAKER_00] Привет\n[SPEAKER_01] Пока")
+
+    # ------------------------------------------------------------------
+    # Bonus: register_speaker + find_matching_speaker + update_fingerprint
+    # ------------------------------------------------------------------
+
+    def test_register_speaker_returns_auto_id(self):
+        """register_speaker returns Speaker_0, Speaker_1, ... sequentially."""
+        import numpy as np
+
+        emb0 = np.ones(512, dtype=np.float32)
+        emb1 = np.zeros(512, dtype=np.float32)
+        emb1[0] = 1.0
+
+        sid0 = self.mgr.register_speaker("Первый", emb0)
+        sid1 = self.mgr.register_speaker("Второй", emb1)
+
+        self.assertEqual(sid0, "Speaker_0")
+        self.assertEqual(sid1, "Speaker_1")
+        self.assertEqual(self.mgr.get_alias(sid0), "Первый")
+        self.assertEqual(self.mgr.get_alias(sid1), "Второй")
+
+    def test_find_matching_speaker_above_threshold(self):
+        """find_matching_speaker returns speaker_id when cosine similarity >= threshold."""
+        import numpy as np
+
+        emb = np.ones(512, dtype=np.float32)
+        sid = self.mgr.register_speaker("Тест", emb)
+
+        # Near-identical embedding — should match
+        emb_query = np.ones(512, dtype=np.float32) * 0.999
+        matched = self.mgr.find_matching_speaker(emb_query, threshold=0.9)
+        self.assertEqual(matched, sid)
+
+    def test_find_matching_speaker_below_threshold_returns_none(self):
+        """find_matching_speaker returns None when best score < threshold."""
+        import numpy as np
+
+        emb = np.ones(512, dtype=np.float32)
+        self.mgr.register_speaker("Тест", emb)
+
+        # Orthogonal embedding — cosine similarity ~0
+        emb_query = np.zeros(512, dtype=np.float32)
+        emb_query[0] = 1.0
+        matched = self.mgr.find_matching_speaker(emb_query, threshold=0.9)
+        self.assertIsNone(matched)
+
+    def test_find_matching_speaker_zero_embedding_returns_none(self):
+        """find_matching_speaker with zero embedding returns None."""
+        import numpy as np
+
+        emb = np.ones(512, dtype=np.float32)
+        self.mgr.register_speaker("Тест", emb)
+
+        zero = np.zeros(512, dtype=np.float32)
+        self.assertIsNone(self.mgr.find_matching_speaker(zero, threshold=0.5))
+
+    def test_update_fingerprint_ema(self):
+        """update_fingerprint applies EMA blend to existing fingerprint."""
+        import numpy as np
+
+        emb_init = np.zeros(512, dtype=np.float32)
+        sid = self.mgr.register_speaker("A", emb_init)
+
+        emb_new = np.ones(512, dtype=np.float32)
+        updated = self.mgr.update_fingerprint(sid, emb_new, alpha=1.0)
+        self.assertTrue(updated)
+
+        fp = np.array(self.mgr.get_all_fingerprints()[sid], dtype=np.float32)
+        # alpha=1.0 → fully replaced by new embedding
+        np.testing.assert_allclose(fp, emb_new, rtol=1e-5)
+
+    def test_update_fingerprint_nonexistent_returns_false(self):
+        """update_fingerprint on unknown speaker_id returns False."""
+        import numpy as np
+
+        emb = np.ones(512, dtype=np.float32)
+        result = self.mgr.update_fingerprint("NONEXISTENT", emb)
+        self.assertFalse(result)
+
+    def test_delete_fingerprint(self):
+        """delete_fingerprint removes the entry and returns True."""
+        import numpy as np
+
+        sid = self.mgr.register_speaker("X", np.ones(512, dtype=np.float32))
+        deleted = self.mgr.delete_fingerprint(sid)
+        self.assertTrue(deleted)
+        self.assertNotIn(sid, self.mgr.get_all_fingerprints())
+
+    def test_delete_fingerprint_nonexistent_returns_false(self):
+        """delete_fingerprint on unknown speaker returns False."""
+        self.assertFalse(self.mgr.delete_fingerprint("GHOST"))
+
+    def test_handle_register_speaker_ipc(self):
+        """IPC handle_register_speaker creates speaker from embedding list."""
+        import numpy as np
+
+        emb = np.ones(512, dtype=np.float32).tolist()
+        result = self.mgr.handle_register_speaker({"name": "Тест", "embedding": emb})
+        self.assertIn("speaker_id", result)
+        self.assertEqual(result["name"], "Тест")
+
+    def test_handle_register_speaker_missing_embedding(self):
+        """IPC handle_register_speaker without embedding raises ValueError."""
+        with self.assertRaises(ValueError):
+            self.mgr.handle_register_speaker({"name": "Тест"})
+
+    def test_handle_list_speaker_fingerprints_ipc(self):
+        """IPC handle_list_speaker_fingerprints returns count and speaker info."""
+        import numpy as np
+
+        self.mgr.register_speaker("А", np.ones(512, dtype=np.float32))
+        self.mgr.register_speaker("Б", np.ones(512, dtype=np.float32) * 0.5)
+        result = self.mgr.handle_list_speaker_fingerprints({})
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(len(result["speakers"]), 2)
+        speaker_ids = {s["speaker_id"] for s in result["speakers"]}
+        self.assertIn("Speaker_0", speaker_ids)
+
+    def test_fingerprints_persist_across_reload(self):
+        """Fingerprints written to disk and loaded by new SpeakerManager instance."""
+        import numpy as np
+
+        emb = np.random.rand(512).astype(np.float32)
+        sid = self.mgr.register_speaker("Краб", emb)
+
+        mgr2 = SpeakerManager(data_dir=self.tmpdir)
+        fps = mgr2.get_all_fingerprints()
+        self.assertIn(sid, fps)
+        self.assertEqual(len(fps[sid]), 512)
+        # Auto-counter should be restored — next ID should be Speaker_1
+        sid2 = mgr2.register_speaker("Второй", emb)
+        self.assertEqual(sid2, "Speaker_1")
+
+
 if __name__ == "__main__":
     unittest.main()
