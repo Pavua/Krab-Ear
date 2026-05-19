@@ -169,7 +169,8 @@ class AnalyticsDashboard:
             if item_dt is not None and item_dt >= cutoff and item_date_str:
                 if conf is not None:
                     try:
-                        daily_conf.setdefault(item_date_str, []).append(float(conf))
+                        conf_f2 = float(conf)
+                        daily_conf.setdefault(item_date_str, []).append(conf_f2)
                     except (TypeError, ValueError):
                         pass
                 daily_durations[item_date_str] = daily_durations.get(item_date_str, 0.0) + dur

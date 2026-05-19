@@ -738,5 +738,321 @@ class TestStateStoreConfidenceAndDuration(unittest.TestCase):
         self.assertAlmostEqual(result["overview"]["total_hours"], round(180.0 / 3600, 3), places=3)
 
 
+# ---------------------------------------------------------------------------
+# Wave 93: additional required test cases
+# ---------------------------------------------------------------------------
+
+class TestAggregateAllMetricsPresent(unittest.TestCase):
+    """test_aggregate_all_metrics_present — all 8 sections populated with data."""
+
+    def setUp(self):
+        self.dashboard = AnalyticsDashboard()
+
+    def test_all_sections_non_empty_with_items(self):
+        """With items present, all top-level sections have non-default values."""
+        items = [
+            _make_item(days_ago=0, confidence=0.85, audio_duration_sec=60.0,
+                       text="тест один два три", source_lang="ru",
+                       translated_text="test", translation_status="ok",
+                       llm_applied=True),
+            _make_item(days_ago=1, confidence=0.65, audio_duration_sec=30.0,
+                       text="another test", source_lang="en",
+                       translated_text="", translation_status="not_requested",
+                       llm_applied=False),
+        ]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+
+        # overview — non-zero
+        self.assertGreater(result["overview"]["total_recordings"], 0)
+        self.assertGreater(result["overview"]["total_words"], 0)
+
+        # quality — actual confidence computed
+        self.assertGreater(result["quality"]["avg_confidence"], 0.0)
+
+        # languages — at least one language detected
+        self.assertGreater(len(result["languages"]["distribution"]), 0)
+
+        # engagement — peak_hour detected
+        self.assertIsNotNone(result["engagement"]["peak_hour"])
+
+        # trends section exists with all three keys
+        self.assertIn("confidence_trend", result["trends"])
+        self.assertIn("volume_trend", result["trends"])
+        self.assertIn("pace_trend", result["trends"])
+
+    def test_overview_avg_daily_correct(self):
+        """avg_daily = total_recordings / days."""
+        items = [_make_item(days_ago=i) for i in range(6)]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertAlmostEqual(result["overview"]["avg_daily"], round(6 / 30, 2), places=2)
+
+    def test_quality_llm_rewrite_rate_present(self):
+        """llm_rewrite_rate key present and accurate."""
+        items = [
+            _make_item(llm_applied=True),
+            _make_item(llm_applied=False),
+        ]
+        store = _make_store(items)
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertAlmostEqual(result["quality"]["llm_rewrite_rate"], 0.5, places=2)
+
+
+class TestPartialMetricsMissing(unittest.TestCase):
+    """test_partial_metrics_missing — graceful handling when store or metrics error."""
+
+    def setUp(self):
+        self.dashboard = AnalyticsDashboard()
+
+    def test_store_exception_in_load_returns_empty_overview(self):
+        """When store._load_active_items_unlocked raises, overview.total_recordings == 0."""
+        store = MagicMock()
+        store.data_dir = Path(tempfile.mkdtemp())
+        store.history_path = store.data_dir / "history.ndjson"
+        store.history_path.touch()
+
+        lock_ctx = MagicMock()
+        lock_ctx.__enter__ = MagicMock(return_value=None)
+        lock_ctx.__exit__ = MagicMock(return_value=False)
+        store._lock = MagicMock(return_value=lock_ctx)
+        store._load_active_items_unlocked = MagicMock(
+            side_effect=RuntimeError("simulated storage failure")
+        )
+
+        result = self.dashboard.get_full_dashboard(store, days=30)
+
+        # Must not raise; must return a valid dict
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["overview"]["total_recordings"], 0)
+        self.assertEqual(result["quality"]["avg_confidence"], 0.0)
+
+    def test_items_with_missing_confidence_field_not_crash(self):
+        """Items that have no confidence attribute at all are handled."""
+        class BareBones:
+            ts = datetime.now(timezone.utc).isoformat()
+            audio_duration_sec = 60.0
+            text = "bare bones item"
+            source_lang = "ru"
+            translated_text = ""
+            translation_status = "not_requested"
+            llm_applied = False
+            # No confidence attribute — getattr must return None
+
+        store = _make_store([BareBones()])
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertEqual(result["overview"]["total_recordings"], 1)
+        self.assertEqual(result["quality"]["avg_confidence"], 0.0)
+
+    def test_items_with_missing_source_lang_field(self):
+        """Items without source_lang do not pollute language distribution."""
+
+        class NoLang:
+            ts = datetime.now(timezone.utc).isoformat()
+            audio_duration_sec = 30.0
+            text = "no lang"
+            source_lang = ""
+            translated_text = ""
+            translation_status = "not_requested"
+            llm_applied = False
+            confidence = 0.9
+
+        store = _make_store([NoLang()])
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        # Empty string lang must not appear in distribution
+        self.assertNotIn("", result["languages"]["distribution"])
+
+    def test_items_with_invalid_confidence_type_skipped(self):
+        """Items with non-numeric confidence (string) do not crash and are excluded."""
+
+        class BadConf:
+            ts = datetime.now(timezone.utc).isoformat()
+            audio_duration_sec = 30.0
+            text = "bad conf"
+            source_lang = "ru"
+            translated_text = ""
+            translation_status = "not_requested"
+            llm_applied = False
+            confidence = "not-a-number"
+
+        store = _make_store([BadConf()])
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        # Confidence count = 0 → avg_confidence = 0.0, not an exception
+        self.assertEqual(result["quality"]["avg_confidence"], 0.0)
+
+    def test_performance_section_survives_import_error(self):
+        """If metrics_collector import fails, performance returns zeros — no crash."""
+        import sys
+
+        # Temporarily break metrics_collector availability
+        original = sys.modules.get("backend.metrics_collector")
+        sys.modules["backend.metrics_collector"] = None  # type: ignore[assignment]
+        try:
+            # Need a fresh AnalyticsDashboard to avoid cached import
+            from backend.analytics_dashboard import _build_performance_info
+            result = _build_performance_info()
+            self.assertIn("avg_stt_latency_ms", result)
+            self.assertIn("p95_latency_ms", result)
+        finally:
+            if original is None:
+                del sys.modules["backend.metrics_collector"]
+            else:
+                sys.modules["backend.metrics_collector"] = original
+
+
+class TestCacheInvalidationOnHistoryUpdate(unittest.TestCase):
+    """test_cache_invalidation_on_history_update — invalidate_cache clears stale data."""
+
+    def setUp(self):
+        self.dashboard = AnalyticsDashboard()
+
+    def test_invalidate_cache_triggers_reload(self):
+        """After invalidate_cache(), next get_full_dashboard re-queries store."""
+        store = _make_store([_make_item()])
+        self.dashboard.get_full_dashboard(store, days=30)
+        # First call loaded
+        self.assertEqual(store._load_active_items_unlocked.call_count, 1)
+
+        self.dashboard.invalidate_cache()
+
+        # Add new items (simulate history update)
+        store._load_active_items_unlocked.return_value = [
+            _make_item(), _make_item(), _make_item(),
+        ]
+        result = self.dashboard.get_full_dashboard(store, days=30)
+        # Must have re-queried
+        self.assertEqual(store._load_active_items_unlocked.call_count, 2)
+        self.assertEqual(result["overview"]["total_recordings"], 3)
+
+    def test_stale_cache_returns_old_count(self):
+        """Without invalidate, second call returns cached (old) value."""
+        store = _make_store([_make_item()])
+        r1 = self.dashboard.get_full_dashboard(store, days=30)
+        self.assertEqual(r1["overview"]["total_recordings"], 1)
+
+        # Update underlying store data but do NOT invalidate
+        store._load_active_items_unlocked.return_value = [
+            _make_item(), _make_item(),
+        ]
+        r2 = self.dashboard.get_full_dashboard(store, days=30)
+        # Cache still returns old value
+        self.assertEqual(r2["overview"]["total_recordings"], 1)
+
+    def test_invalidate_clears_all_days_keys(self):
+        """invalidate_cache() removes all per-days cache entries."""
+        store = _make_store([_make_item()])
+        self.dashboard.get_full_dashboard(store, days=7)
+        self.dashboard.get_full_dashboard(store, days=30)
+        self.assertEqual(store._load_active_items_unlocked.call_count, 2)
+
+        self.dashboard.invalidate_cache()
+
+        self.dashboard.get_full_dashboard(store, days=7)
+        self.dashboard.get_full_dashboard(store, days=30)
+        # Two more loads after invalidation
+        self.assertEqual(store._load_active_items_unlocked.call_count, 4)
+
+    def test_invalidate_on_fresh_dashboard_no_error(self):
+        """Calling invalidate_cache() on a brand-new instance does not raise."""
+        fresh = AnalyticsDashboard()
+        try:
+            fresh.invalidate_cache()
+        except Exception as exc:
+            self.fail(f"invalidate_cache() raised unexpectedly: {exc}")
+
+
+class TestThreadSafetyAggregate(unittest.TestCase):
+    """test_thread_safety_aggregate — concurrent reads + write do not crash."""
+
+    def setUp(self):
+        self.dashboard = AnalyticsDashboard()
+
+    def test_concurrent_reads_no_exception(self):
+        """10 threads reading get_full_dashboard concurrently produce no errors."""
+        import threading
+
+        store = _make_store([_make_item(days_ago=i % 5) for i in range(20)])
+        errors: list[Exception] = []
+
+        def _read():
+            try:
+                self.dashboard.get_full_dashboard(store, days=30)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_read) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent reads raised: {errors}")
+
+    def test_concurrent_reads_plus_invalidate(self):
+        """Readers + invalidator running concurrently do not cause data corruption."""
+        import threading
+
+        store = _make_store([_make_item(days_ago=i % 3) for i in range(10)])
+        errors: list[Exception] = []
+
+        def _reader():
+            for _ in range(5):
+                try:
+                    self.dashboard.get_full_dashboard(store, days=30)
+                except Exception as exc:
+                    errors.append(exc)
+
+        def _invalidator():
+            for _ in range(3):
+                try:
+                    self.dashboard.invalidate_cache()
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=_reader) for _ in range(5)]
+        threads.append(threading.Thread(target=_invalidator))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent read+invalidate raised: {errors}")
+
+    def test_concurrent_different_days_no_cross_contamination(self):
+        """Concurrent calls with different days values return correct results."""
+        import threading
+
+        store7 = _make_store([_make_item(days_ago=i) for i in range(3)])
+        store30 = _make_store([_make_item(days_ago=i) for i in range(7)])
+
+        results: list[dict] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def _call(s, days):
+            try:
+                r = AnalyticsDashboard().get_full_dashboard(s, days=days)
+                with lock:
+                    results.append((days, r["overview"]["total_recordings"]))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = (
+            [threading.Thread(target=_call, args=(store7, 7)) for _ in range(5)]
+            + [threading.Thread(target=_call, args=(store30, 30)) for _ in range(5)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        for days, count in results:
+            if days == 7:
+                self.assertEqual(count, 3)
+            else:
+                self.assertEqual(count, 7)
+
+
 if __name__ == "__main__":
     unittest.main()
