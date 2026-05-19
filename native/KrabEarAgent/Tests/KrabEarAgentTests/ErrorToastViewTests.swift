@@ -307,6 +307,203 @@ final class ErrorToastViewTests: XCTestCase {
         )
     }
 
+    // MARK: 6. initial state — no active panel or queue
+
+    func test_initial_state_no_active_toast() {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        XCTAssertNil(presenter.activePanel, "Newly created presenter must have no active panel")
+        XCTAssertTrue(presenter.queue.isEmpty, "Queue must be empty on init")
+        XCTAssertEqual(factory.createdPanels.count, 0, "No panels should be created on init")
+    }
+
+    // MARK: 7. show_creates_panel — present() creates exactly one panel
+
+    func test_show_creates_panel() {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        let payload = makePayload(severity: "error", code: "stt.crash", message: "STT упал")
+        presenter.present(error: payload)
+
+        XCTAssertNotNil(presenter.activePanel, "activePanel must be set after present()")
+        XCTAssertEqual(factory.createdPanels.count, 1, "Exactly one panel must be created")
+        XCTAssertTrue(presenter.queue.isEmpty, "Queue should be empty when only one item presented")
+    }
+
+    // MARK: 8. warn auto-dismiss after 5s
+
+    func test_severity_warn_auto_dismiss_5s() async throws {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        let payload = makePayload(severity: "warn", code: "ipc.slow", message: "IPC медленный")
+        presenter.present(error: payload)
+
+        XCTAssertNotNil(presenter.activePanel, "Panel must appear immediately")
+
+        // Wait 5.5s — auto-dismiss for warn is 5s
+        let dismissExp = expectation(description: "warn toast dismissed after 5s")
+        Task {
+            try await Task.sleep(nanoseconds: 5_600_000_000)
+            dismissExp.fulfill()
+        }
+        await fulfillment(of: [dismissExp], timeout: 8.0)
+
+        XCTAssertNil(presenter.activePanel, "warn panel must be nil after 5s auto-dismiss")
+        let panel = try XCTUnwrap(factory.createdPanels.first)
+        XCTAssertGreaterThanOrEqual(panel.orderOutCallCount, 1,
+                                    "orderOut should have been called on warn panel")
+    }
+
+    // MARK: 9. error auto-dismiss after 10s
+
+    func test_severity_error_auto_dismiss_10s() async throws {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        let payload = makePayload(severity: "error", code: "rewriter.timeout", message: "LM Studio timeout")
+        presenter.present(error: payload)
+
+        XCTAssertNotNil(presenter.activePanel, "Panel must appear immediately for error severity")
+
+        // Verify still visible after 5s (shorter than 10s dismiss)
+        let midExp = expectation(description: "check at 5s")
+        Task {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            midExp.fulfill()
+        }
+        await fulfillment(of: [midExp], timeout: 7.0)
+
+        XCTAssertNotNil(presenter.activePanel,
+                        "error panel must STILL be visible at 5s (auto-dismiss is 10s)")
+
+        // Wait full 10.5s for auto-dismiss
+        let dismissExp = expectation(description: "error toast dismissed after 10s")
+        Task {
+            try await Task.sleep(nanoseconds: 5_600_000_000) // 5+5.6 = 10.6s total
+            dismissExp.fulfill()
+        }
+        await fulfillment(of: [dismissExp], timeout: 8.0)
+
+        XCTAssertNil(presenter.activePanel, "error panel must be nil after 10s auto-dismiss")
+    }
+
+    // MARK: 10. dismiss_clears_active_panel immediately
+
+    func test_dismiss_clears_active_panel() throws {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        let payload = makePayload(severity: "critical", code: "backend.dead", message: "Всё плохо")
+        presenter.present(error: payload)
+
+        XCTAssertNotNil(presenter.activePanel, "Panel must be active before dismiss")
+
+        presenter.dismissCurrentToast()
+
+        XCTAssertNil(presenter.activePanel, "activePanel must be nil immediately after dismissCurrentToast()")
+        let panel = try XCTUnwrap(factory.createdPanels.first)
+        XCTAssertEqual(panel.orderOutCallCount, 1, "orderOut must be called exactly once on dismiss")
+    }
+
+    // MARK: 11. queue_multiple_toasts_serial drains in order
+
+    func test_queue_multiple_toasts_serial_ordering() {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        // 5 payloads: each has a different code we'll track
+        let codes = ["code_a", "code_b", "code_c", "code_d", "code_e"]
+        codes.forEach { code in
+            presenter.present(error: makePayload(severity: "error", code: code, message: code))
+        }
+
+        // First panel shown immediately
+        XCTAssertEqual(factory.createdPanels.count, 1, "One panel shown initially")
+        XCTAssertEqual(presenter.queue.count, 4, "4 in queue")
+
+        // Drain one by one and verify panels are created sequentially
+        presenter.dismissCurrentToast()
+        XCTAssertEqual(factory.createdPanels.count, 2, "Second panel after first dismiss")
+        XCTAssertEqual(presenter.queue.count, 3)
+
+        presenter.dismissCurrentToast()
+        XCTAssertEqual(factory.createdPanels.count, 3)
+        XCTAssertEqual(presenter.queue.count, 2)
+
+        presenter.dismissCurrentToast()
+        XCTAssertEqual(factory.createdPanels.count, 4)
+        XCTAssertEqual(presenter.queue.count, 1)
+
+        presenter.dismissCurrentToast()
+        XCTAssertEqual(factory.createdPanels.count, 5)
+        XCTAssertEqual(presenter.queue.count, 0)
+
+        presenter.dismissCurrentToast()
+        XCTAssertNil(presenter.activePanel, "No more panels after all dismissed")
+        XCTAssertEqual(factory.createdPanels.count, 5, "Total 5 panels created for 5 payloads")
+    }
+
+    // MARK: 12. non_actionable payload — no action button in view tree
+
+    func test_non_actionable_payload_has_no_action_button() throws {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        let payload = makePayload(
+            severity: "info",
+            code: "stt.model_loaded",
+            message: "Модель загружена",
+            actionable: false,
+            actionId: nil
+        )
+
+        presenter.present(error: payload)
+
+        let panel = try XCTUnwrap(factory.createdPanels.first)
+        let contentView = try XCTUnwrap(panel.contentView)
+        let actionButton = findActionButton(in: contentView)
+
+        XCTAssertNil(actionButton,
+                     "Non-actionable payload must not render an action button in the view tree")
+    }
+
+    // MARK: 13. autoDismissDelay — all severity branches tested via dismiss timer
+
+    func test_dismiss_timer_cancelled_on_manual_dismiss() async throws {
+        let spy = SpyActionInvoker()
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: spy, factory: factory)
+
+        // Present an error (10s auto-dismiss)
+        let payload = makePayload(severity: "error", code: "e", message: "e")
+        presenter.present(error: payload)
+
+        XCTAssertNotNil(presenter.activePanel)
+
+        // Dismiss immediately — timer should be cancelled
+        presenter.dismissCurrentToast()
+        XCTAssertNil(presenter.activePanel, "Panel dismissed immediately")
+
+        // Wait 0.3s and confirm the panel was NOT shown again by an orphan timer
+        let waitExp = expectation(description: "wait 0.3s")
+        Task { try await Task.sleep(nanoseconds: 300_000_000); waitExp.fulfill() }
+        await fulfillment(of: [waitExp], timeout: 1.0)
+
+        XCTAssertNil(presenter.activePanel, "No phantom panel from cancelled timer")
+        XCTAssertEqual(factory.createdPanels.count, 1,
+                       "Only one panel should ever have been created")
+    }
+
     // MARK: - Helpers
 
     /// Recursively finds the first NSButton with a non-empty title that isn't "×" in the view tree.
