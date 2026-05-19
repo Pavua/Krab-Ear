@@ -197,4 +197,39 @@ final class SystemAudioDuckingServiceTests: XCTestCase {
         svc.restoreAfterRecording()
         XCTAssertNil(svc.snapshot, "После restore snapshot должен быть nil")
     }
+
+    // MARK: - No audio device (nil readings)
+
+    /// Если осциллятор не может прочитать состояние (stubbedVolume/Muted = nil),
+    /// duck() не должен падать и snapshot остаётся nil.
+    func test_handles_no_audio_device() {
+        let svc = SystemAudioDuckingServiceTestable()
+        svc.stubbedMuted = nil
+        svc.stubbedVolume = nil
+
+        svc.duckForRecording(enabled: true, duckPercent: 50)
+
+        XCTAssertFalse(svc.isDucked, "Без доступа к audio device isDucked должен остаться false")
+        XCTAssertNil(svc.snapshot, "Без доступа к audio device snapshot должен остаться nil")
+        XCTAssertEqual(svc.runScriptCallCount, 0, "Без доступа к audio device osascript вызываться не должен")
+    }
+
+    // MARK: - Concurrent duck + restore safe
+
+    /// Параллельные duck + restore не должны вызывать data race или crash.
+    /// SystemAudioDuckingServiceTestable — non-actor, поэтому тест просто
+    /// убеждается, что sequential duck→restore→duck→restore не ломает инварианты.
+    func test_concurrent_duck_restore_sequential_invariant() {
+        let svc = SystemAudioDuckingServiceTestable()
+        svc.stubbedMuted = false
+        svc.stubbedVolume = 60
+
+        for _ in 0..<5 {
+            svc.duckForRecording(enabled: true, duckPercent: 50)
+            svc.restoreAfterRecording()
+        }
+
+        XCTAssertFalse(svc.isDucked, "После N duck/restore циклов isDucked должен быть false")
+        XCTAssertNil(svc.snapshot, "После N duck/restore циклов snapshot должен быть nil")
+    }
 }
