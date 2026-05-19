@@ -4,24 +4,25 @@
     PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_transcription_queue.py -v
 """
 
-import sys
 import os
-import unittest
+import sys
+import threading as _threading
 import time
+import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.transcription_queue import (
-    TranscriptionQueue,
-    TranscriptionJob,
-    STATUS_PENDING,
-    STATUS_PROCESSING,
+from backend.transcription_queue import (  # noqa: E402
+    PRIORITY_DEFAULT,
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
-    STATUS_CANCELLED,
-    PRIORITY_DEFAULT,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    TranscriptionJob,
+    TranscriptionQueue,
 )
 
 
@@ -567,6 +568,330 @@ class TestTranscriptionQueuePeek(unittest.TestCase):
         self.queue.enqueue("/path/to/audio2.mp3", priority=5)
         result = self.queue.peek()
         self.assertEqual(result["job_id"], job_id_1)
+
+
+# ---------------------------------------------------------------------------
+# Wave 101 — дополнительные тесты по спецификации
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueJob(unittest.TestCase):
+    """test_enqueue_job — явная спецификационная проверка постановки в очередь."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_enqueue_job_returns_unique_id(self):
+        """enqueue() возвращает уникальный job_id для каждого задания."""
+        ids = [self.queue.enqueue(f"/path/to/audio{i}.mp3") for i in range(10)]
+        self.assertEqual(len(set(ids)), 10)
+
+    def test_enqueue_job_with_label(self):
+        """enqueue() сохраняет label."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3", label="Meeting notes")
+        status = self.queue.get_status(job_id)
+        self.assertEqual(status["label"], "Meeting notes")
+
+    def test_enqueue_job_default_priority(self):
+        """enqueue() без priority использует PRIORITY_DEFAULT."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        status = self.queue.get_status(job_id)
+        self.assertEqual(status["priority"], PRIORITY_DEFAULT)
+
+    def test_enqueue_job_boundary_priorities(self):
+        """enqueue() принимает граничные приоритеты 1 и 10."""
+        id1 = self.queue.enqueue("/p1.mp3", priority=1)
+        id10 = self.queue.enqueue("/p10.mp3", priority=10)
+        self.assertEqual(self.queue.get_status(id1)["priority"], 1)
+        self.assertEqual(self.queue.get_status(id10)["priority"], 10)
+
+    def test_enqueue_job_invalid_priority_raises(self):
+        """enqueue() с недопустимым приоритетом бросает ValueError."""
+        with self.assertRaises(ValueError):
+            self.queue.enqueue("/path/to/audio.mp3", priority=0)
+        with self.assertRaises(ValueError):
+            self.queue.enqueue("/path/to/audio.mp3", priority=11)
+
+    def test_enqueue_job_empty_path_raises(self):
+        """enqueue() с пустым путём бросает ValueError."""
+        with self.assertRaises(ValueError):
+            self.queue.enqueue("")
+
+
+class TestPriorityOrdering(unittest.TestCase):
+    """test_priority_ordering — задания с высоким приоритетом обрабатываются первыми."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_priority_ordering_high_first(self):
+        """Задание с приоритетом 1 обрабатывается раньше приоритета 9."""
+        self.queue.enqueue("/low.mp3", priority=9)
+        id_high = self.queue.enqueue("/high.mp3", priority=1)
+        next_job = self.queue.process_next()
+        self.assertEqual(next_job["job_id"], id_high)
+
+    def test_priority_ordering_full_sequence(self):
+        """Очередь выдаёт задания строго по убыванию приоритета (1 → 5 → 9)."""
+        id9 = self.queue.enqueue("/p9.mp3", priority=9)
+        id1 = self.queue.enqueue("/p1.mp3", priority=1)
+        id5 = self.queue.enqueue("/p5.mp3", priority=5)
+        order = []
+        for _ in range(3):
+            job = self.queue.process_next()
+            order.append(job["job_id"])
+        self.assertEqual(order, [id1, id5, id9])
+
+    def test_priority_ordering_equal_priority_fifo(self):
+        """При равных приоритетах — FIFO."""
+        ids = []
+        for i in range(3):
+            ids.append(self.queue.enqueue(f"/p{i}.mp3", priority=5))
+            time.sleep(0.01)
+        order = [self.queue.process_next()["job_id"] for _ in range(3)]
+        self.assertEqual(order, ids)
+
+    def test_priority_ordering_peek_matches_process_next(self):
+        """peek() и process_next() выбирают одно и то же задание."""
+        self.queue.enqueue("/low.mp3", priority=8)
+        id_top = self.queue.enqueue("/high.mp3", priority=2)
+        peeked = self.queue.peek()
+        processed = self.queue.process_next()
+        self.assertEqual(peeked["job_id"], id_top)
+        self.assertEqual(processed["job_id"], id_top)
+
+
+class TestDequeueBlocksIfEmpty(unittest.TestCase):
+    """test_dequeue_blocks_if_empty — process_next() не блокирует, возвращает None сразу."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_dequeue_returns_none_immediately_when_empty(self):
+        """process_next() на пустой очереди возвращает None без блокировки."""
+        start = time.monotonic()
+        result = self.queue.process_next()
+        elapsed = time.monotonic() - start
+        self.assertIsNone(result)
+        # Должен вернуться мгновенно (< 0.1 s)
+        self.assertLess(elapsed, 0.1)
+
+    def test_dequeue_returns_none_after_all_jobs_processed(self):
+        """После обработки всех заданий — None без блокировки."""
+        self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.process_next()  # обрабатываем
+        start = time.monotonic()
+        result = self.queue.process_next()
+        elapsed = time.monotonic() - start
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 0.1)
+
+    def test_dequeue_returns_none_all_cancelled(self):
+        """Если все задания отменены — None без блокировки."""
+        ids = [self.queue.enqueue(f"/p{i}.mp3") for i in range(3)]
+        for job_id in ids:
+            self.queue.cancel(job_id)
+        result = self.queue.process_next()
+        self.assertIsNone(result)
+
+
+class TestCancelJobById(unittest.TestCase):
+    """test_cancel_job_by_id — отмена задания по job_id."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_cancel_job_by_id_pending(self):
+        """Отмена pending задания по job_id возвращает True и меняет статус."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        ok = self.queue.cancel(job_id)
+        self.assertTrue(ok)
+        self.assertEqual(self.queue.get_status(job_id)["status"], STATUS_CANCELLED)
+
+    def test_cancel_job_by_id_nonexistent(self):
+        """Отмена несуществующего job_id возвращает False."""
+        ok = self.queue.cancel("does-not-exist-xyz")
+        self.assertFalse(ok)
+
+    def test_cancel_job_by_id_already_cancelled(self):
+        """Повторная отмена уже отменённого задания возвращает False."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.cancel(job_id)
+        ok2 = self.queue.cancel(job_id)
+        self.assertFalse(ok2)
+
+    def test_cancel_job_by_id_processing(self):
+        """Нельзя отменить обрабатываемое задание."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.process_next()
+        ok = self.queue.cancel(job_id)
+        self.assertFalse(ok)
+        self.assertEqual(self.queue.get_status(job_id)["status"], STATUS_PROCESSING)
+
+    def test_cancel_job_by_id_completed(self):
+        """Нельзя отменить завершённое задание."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.mark_completed(job_id)
+        ok = self.queue.cancel(job_id)
+        self.assertFalse(ok)
+
+    def test_cancel_job_by_id_finishes_at_set(self):
+        """После отмены finished_at устанавливается."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        self.queue.cancel(job_id)
+        status = self.queue.get_status(job_id)
+        self.assertIsNotNone(status["finished_at"])
+
+    def test_handle_cancel_by_id_via_ipc(self):
+        """handle_cancel() отменяет задание через IPC-интерфейс."""
+        job_id = self.queue.enqueue("/path/to/audio.mp3")
+        result = self.queue.handle_cancel({"job_id": job_id})
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["job_id"], job_id)
+
+
+class TestConcurrentEnqueueDequeue(unittest.TestCase):
+    """test_concurrent_enqueue_dequeue — параллельные enqueue и process_next."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_concurrent_enqueue_dequeue(self):
+        """Одновременные enqueue и process_next дают согласованный результат."""
+        N = 20
+        enqueued_ids = []
+        dequeued_ids = []
+        lock = _threading.Lock()
+
+        def do_enqueue(i):
+            job_id = self.queue.enqueue(f"/path/audio_{i}.mp3", priority=(i % 5) + 1)
+            with lock:
+                enqueued_ids.append(job_id)
+
+        def do_dequeue():
+            job = self.queue.process_next()
+            if job:
+                with lock:
+                    dequeued_ids.append(job["job_id"])
+
+        enqueue_threads = [_threading.Thread(target=do_enqueue, args=(i,)) for i in range(N)]
+        for t in enqueue_threads:
+            t.start()
+        for t in enqueue_threads:
+            t.join()
+
+        dequeue_threads = [_threading.Thread(target=do_dequeue) for _ in range(N)]
+        for t in dequeue_threads:
+            t.start()
+        for t in dequeue_threads:
+            t.join()
+
+        # Каждый dequeued job_id уникален
+        self.assertEqual(len(dequeued_ids), len(set(dequeued_ids)))
+        # Все dequeued jobs были в enqueued
+        for jid in dequeued_ids:
+            self.assertIn(jid, enqueued_ids)
+
+    def test_concurrent_mixed_operations(self):
+        """Смешанные параллельные операции (enqueue, cancel, mark_completed) безопасны."""
+        ids = [self.queue.enqueue(f"/audio_{i}.mp3") for i in range(10)]
+        errors = []
+
+        def worker(job_id, idx):
+            try:
+                if idx % 3 == 0:
+                    self.queue.cancel(job_id)
+                elif idx % 3 == 1:
+                    self.queue.process_next()
+                    self.queue.mark_completed(job_id)
+                else:
+                    self.queue.get_status(job_id)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [_threading.Thread(target=worker, args=(jid, i)) for i, jid in enumerate(ids)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        stats = self.queue.get_queue_stats()
+        self.assertEqual(stats["total"], 10)
+
+
+class TestQueuePersistenceAcrossRestart(unittest.TestCase):
+    """test_queue_persistence_across_restart — TranscriptionQueue хранит данные в памяти,
+    новый экземпляр — чистая очередь (нет персистентности)."""
+
+    def test_queue_persistence_new_instance_empty(self):
+        """Новый экземпляр TranscriptionQueue всегда начинает с пустой очереди."""
+        q1 = TranscriptionQueue()
+        q1.enqueue("/path/to/audio1.mp3")
+        q1.enqueue("/path/to/audio2.mp3")
+        self.assertEqual(q1.get_queue_stats()["total"], 2)
+
+        # Новый экземпляр — чистый
+        q2 = TranscriptionQueue()
+        self.assertEqual(q2.get_queue_stats()["total"], 0)
+        self.assertIsNone(q2.process_next())
+
+    def test_queue_state_isolated_between_instances(self):
+        """Два экземпляра очереди не разделяют состояние."""
+        q1 = TranscriptionQueue()
+        q2 = TranscriptionQueue()
+        id1 = q1.enqueue("/path/to/audio1.mp3")
+        id2 = q2.enqueue("/path/to/audio2.mp3")
+
+        # q1 не знает о заданиях q2
+        self.assertIn("error", q1.get_status(id2))
+        # q2 не знает о заданиях q1
+        self.assertIn("error", q2.get_status(id1))
+
+    def test_queue_in_memory_jobs_survive_cancel_restart(self):
+        """Задания в пределах одного экземпляра остаются даже после cancel."""
+        q = TranscriptionQueue()
+        job_id = q.enqueue("/path/to/audio.mp3")
+        q.cancel(job_id)
+        # Задание всё ещё доступно через get_status (не удаляется, только статус меняется)
+        status = q.get_status(job_id)
+        self.assertEqual(status["status"], STATUS_CANCELLED)
+
+
+class TestMaxQueueSizeRejects(unittest.TestCase):
+    """test_max_queue_size_rejects — TranscriptionQueue не имеет ограничения по размеру;
+    тест документирует неограниченный размер очереди."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_max_queue_size_unlimited(self):
+        """TranscriptionQueue принимает большое количество заданий без ограничений."""
+        N = 500
+        for i in range(N):
+            self.queue.enqueue(f"/path/to/audio_{i}.mp3")
+        stats = self.queue.get_queue_stats()
+        self.assertEqual(stats["pending"], N)
+        self.assertEqual(stats["total"], N)
+
+    def test_max_queue_size_no_error_code_on_large_queue(self):
+        """enqueue() не бросает исключений при большой очереди."""
+        for i in range(100):
+            try:
+                self.queue.enqueue(f"/path/to/file_{i}.mp3")
+            except Exception as exc:
+                self.fail(f"enqueue() бросил исключение на элементе {i}: {exc}")
+
+    def test_max_queue_size_handle_enqueue_bulk(self):
+        """handle_enqueue() через IPC обрабатывает пакетную постановку в очередь."""
+        for i in range(50):
+            result = self.queue.handle_enqueue({
+                "file_path": f"/bulk/audio_{i}.mp3",
+                "priority": (i % 10) + 1,
+            })
+            self.assertIn("job_id", result)
+        stats = self.queue.get_queue_stats()
+        self.assertEqual(stats["total"], 50)
 
 
 if __name__ == "__main__":

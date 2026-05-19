@@ -9,15 +9,17 @@
 """
 
 from __future__ import annotations
-from backend.plugin_system import PluginInfo, PluginManager
 
 import json
 import sys
 import tempfile
 import textwrap
+import threading as _threading
 import unittest
 from pathlib import Path
 from typing import Any
+
+from backend.plugin_system import HOOK_ON_PASTE, HOOK_ON_TRANSCRIBE, PluginInfo, PluginManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -439,9 +441,6 @@ class TestPluginInfoDataclass(unittest.TestCase):
         self.assertIsInstance(info.plugin_dir, Path)
 
 
-from backend.plugin_system import HOOK_ON_TRANSCRIBE, HOOK_ON_PASTE
-
-
 # ---------------------------------------------------------------------------
 # 7. enable_plugin / disable_plugin
 # ---------------------------------------------------------------------------
@@ -652,6 +651,425 @@ class TestCallHook(unittest.TestCase):
         self.assertEqual(len(results), 3)
         names = {r["name"] for r in results}
         self.assertEqual(names, {"paste_a", "paste_b", "paste_c"})
+
+
+# ---------------------------------------------------------------------------
+# 9. Wave 101 — дополнительные тесты по спецификации
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPluginFromDirectory(unittest.TestCase):
+    """test_load_plugin_from_directory — явная проверка загрузки плагина из директории."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_load_plugin_from_directory(self) -> None:
+        """Плагин обнаруживается и загружается из произвольной директории."""
+        _make_plugin_dir(self._plugins_dir, name="dir_plugin", version="1.5.0")
+        mgr = PluginManager()
+        discovered = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(len(discovered), 1)
+        plugin = mgr.load_plugin("dir_plugin")
+        self.assertEqual(plugin.name, "dir_plugin")
+        self.assertEqual(plugin.version, "1.5.0")
+        # Статус должен быть loaded
+        info = mgr.get_plugin_info("dir_plugin")
+        self.assertEqual(info["status"], "loaded")
+
+    def test_load_plugin_from_nested_directory(self) -> None:
+        """Плагин в поддиректории plugins/ загружается корректно."""
+        _make_plugin_dir(self._plugins_dir, name="nested_plugin")
+        mgr = PluginManager(data_dir=self._base)
+        mgr.discover_plugins()
+        plugin = mgr.load_plugin("nested_plugin")
+        self.assertIsNotNone(plugin)
+        self.assertTrue(hasattr(plugin, "get_ipc_methods"))
+
+
+class TestSkipInvalidPluginManifest(unittest.TestCase):
+    """test_skip_invalid_plugin_manifest — подробная проверка всех сценариев пропуска."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_skip_invalid_plugin_manifest_no_json(self) -> None:
+        """Плагин со сломанным JSON-манифестом не загружается и не вызывает исключения."""
+        bad_dir = self._plugins_dir / "bad_json"
+        bad_dir.mkdir()
+        (bad_dir / "plugin.json").write_text("{NOT VALID", encoding="utf-8")
+        mgr = PluginManager()
+        result = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(result, [])
+
+    def test_skip_invalid_plugin_manifest_empty_name(self) -> None:
+        """Манифест с пустым name пропускается."""
+        bad_dir = self._plugins_dir / "empty_name"
+        bad_dir.mkdir()
+        (bad_dir / "plugin.json").write_text(
+            json.dumps({"name": "", "version": "1.0", "entry_point": "main.py"}),
+            encoding="utf-8",
+        )
+        mgr = PluginManager()
+        result = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(result, [])
+
+    def test_skip_invalid_plugin_manifest_missing_version(self) -> None:
+        """Манифест без version пропускается."""
+        bad_dir = self._plugins_dir / "no_version"
+        bad_dir.mkdir()
+        (bad_dir / "plugin.json").write_text(
+            json.dumps({"name": "no_ver", "entry_point": "main.py"}),
+            encoding="utf-8",
+        )
+        mgr = PluginManager()
+        result = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(result, [])
+
+    def test_valid_and_invalid_coexist(self) -> None:
+        """Один валидный плагин рядом с невалидным — только валидный возвращается."""
+        _make_plugin_dir(self._plugins_dir, name="good_plugin")
+        bad_dir = self._plugins_dir / "bad_plugin"
+        bad_dir.mkdir()
+        (bad_dir / "plugin.json").write_text("NOT JSON", encoding="utf-8")
+        mgr = PluginManager()
+        result = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].name, "good_plugin")
+
+
+class TestPluginHookInvocation(unittest.TestCase):
+    """test_plugin_hook_invocation — явная проверка вызова хуков."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_plugin_hook_invocation_on_transcribe(self) -> None:
+        """on_transcribe хук вызывается с правильным payload."""
+        code = textwrap.dedent("""\
+            class Plugin:
+                name = "invocation_plugin"
+                version = "1.0"
+                invoked_with = None
+
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {}
+                def on_transcribe(self, payload):
+                    Plugin.invoked_with = payload
+                    return {"invoked": True}
+        """)
+        _make_plugin_dir(self._plugins_dir, name="invocation_plugin", plugin_code=code)
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        plugin = mgr.load_plugin("invocation_plugin")
+        payload = {"text": "Привет мир", "confidence": 0.9}
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, payload)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["invoked"])
+        # Класс сохранил payload в class variable
+        self.assertEqual(plugin.__class__.invoked_with, payload)
+
+    def test_plugin_hook_invocation_returns_all_results(self) -> None:
+        """call_hook возвращает все возвращаемые значения от всех плагинов."""
+        for i in range(3):
+            code = textwrap.dedent(f"""\
+                class Plugin:
+                    name = "hook_ret_{i}"
+                    version = "1.0"
+                    def initialize(self, service): pass
+                    def get_ipc_methods(self): return {{}}
+                    def on_transcribe(self, payload):
+                        return {{"plugin_index": {i}}}
+            """)
+            _make_plugin_dir(self._plugins_dir, name=f"hook_ret_{i}", plugin_code=code)
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        for i in range(3):
+            mgr.load_plugin(f"hook_ret_{i}")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {})
+        self.assertEqual(len(results), 3)
+        indices = {r["plugin_index"] for r in results}
+        self.assertEqual(indices, {0, 1, 2})
+
+
+class TestUnloadPlugin(unittest.TestCase):
+    """test_unload_plugin — PluginManager не имеет метода unload;
+    тест документирует, что повторная загрузка через новый Manager работает."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_unload_plugin_via_disable(self) -> None:
+        """disable_plugin() эффективно 'выгружает' плагин из хуков."""
+        _make_hook_plugin(self._plugins_dir, "unload_via_disable", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("unload_via_disable")
+        # Хук работает
+        r1 = mgr.call_hook(HOOK_ON_TRANSCRIBE, {})
+        self.assertEqual(len(r1), 1)
+        # После disable — хук не вызывается
+        mgr.disable_plugin("unload_via_disable")
+        r2 = mgr.call_hook(HOOK_ON_TRANSCRIBE, {})
+        self.assertEqual(len(r2), 0)
+
+    def test_unload_plugin_new_manager_reloads(self) -> None:
+        """Новый PluginManager может заново загрузить тот же плагин."""
+        _make_plugin_dir(self._plugins_dir, name="reload_me")
+        mgr1 = PluginManager()
+        mgr1.discover_plugins(self._plugins_dir)
+        plugin1 = mgr1.load_plugin("reload_me")
+
+        # Новый Manager — свежий экземпляр
+        mgr2 = PluginManager()
+        mgr2.discover_plugins(self._plugins_dir)
+        plugin2 = mgr2.load_plugin("reload_me")
+
+        # Это разные экземпляры PluginManager, но оба загрузили плагин
+        self.assertEqual(plugin1.name, plugin2.name)
+        self.assertIsNot(mgr1, mgr2)
+
+    def test_unload_no_unload_method_exists(self) -> None:
+        """PluginManager не имеет метода unload_plugin — это ожидаемое поведение."""
+        mgr = PluginManager()
+        self.assertFalse(hasattr(mgr, "unload_plugin"))
+
+
+class TestConcurrentLoadUnload(unittest.TestCase):
+    """test_concurrent_load_unload — параллельная загрузка и disable плагинов."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_concurrent_load_unload(self) -> None:
+        """Параллельная загрузка разных плагинов безопасна."""
+        names = [f"concurrent_plugin_{i}" for i in range(5)]
+        for name in names:
+            _make_plugin_dir(self._plugins_dir, name=name)
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+
+        loaded_names = []
+        lock = _threading.Lock()
+        errors = []
+
+        def load_and_record(name: str) -> None:
+            try:
+                plugin = mgr.load_plugin(name)
+                with lock:
+                    loaded_names.append(plugin.name)
+            except Exception as exc:
+                with lock:
+                    errors.append(str(exc))
+
+        threads = [_threading.Thread(target=load_and_record, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки при параллельной загрузке: {errors}")
+        self.assertEqual(len(loaded_names), 5)
+
+    def test_concurrent_disable_while_loading(self) -> None:
+        """Disable во время загрузки не приводит к сбоям."""
+        for i in range(4):
+            _make_hook_plugin(self._plugins_dir, f"tog_{i}", [HOOK_ON_TRANSCRIBE])
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        # Загружаем все сначала
+        for i in range(4):
+            mgr.load_plugin(f"tog_{i}")
+
+        errors = []
+
+        def toggle(name: str) -> None:
+            try:
+                mgr.disable_plugin(name)
+                mgr.enable_plugin(name)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [_threading.Thread(target=toggle, args=(f"tog_{i}",)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        # Все плагины должны быть enabled после toggle
+        for p in mgr.list_plugins():
+            self.assertTrue(p["enabled"], f"Плагин {p['name']} должен быть enabled")
+
+
+class TestUnicodePluginName(unittest.TestCase):
+    """test_unicode_plugin_name — поддержка Unicode в именах и описаниях."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_unicode_plugin_name(self) -> None:
+        """Плагин с Unicode-именем корректно обнаруживается и загружается."""
+        unicode_name = "plugin_краб"
+        code = textwrap.dedent(f"""\
+            class Plugin:
+                name = "{unicode_name}"
+                version = "1.0"
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {{}}
+        """)
+        _make_plugin_dir(
+            self._plugins_dir,
+            name=unicode_name,
+            description="Плагин с кириллическим именем",
+            author="Краб",
+            plugin_code=code,
+        )
+        mgr = PluginManager()
+        discovered = mgr.discover_plugins(self._plugins_dir)
+        self.assertEqual(len(discovered), 1)
+        self.assertEqual(discovered[0].name, unicode_name)
+        self.assertEqual(discovered[0].description, "Плагин с кириллическим именем")
+        plugin = mgr.load_plugin(unicode_name)
+        self.assertEqual(plugin.name, unicode_name)
+
+    def test_unicode_plugin_description_and_author(self) -> None:
+        """Unicode в description и author сохраняется корректно."""
+        _make_plugin_dir(
+            self._plugins_dir,
+            name="uni_meta",
+            description="Описание на 日本語",
+            author="作者",
+        )
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        info = mgr.get_plugin_info("uni_meta")
+        self.assertEqual(info["description"], "Описание на 日本語")
+        self.assertEqual(info["author"], "作者")
+
+
+class TestPluginIsolation(unittest.TestCase):
+    """test_plugin_isolation — краш одного плагина не мешает остальным."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmp.name)
+        self._plugins_dir = self._base / "plugins"
+        self._plugins_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_plugin_isolation_hook_crash(self) -> None:
+        """RuntimeError в хуке одного плагина изолирован — другие вызываются."""
+        crash_code = textwrap.dedent("""\
+            class Plugin:
+                name = "crash_plugin"
+                version = "1.0"
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {}
+                def on_transcribe(self, payload):
+                    raise RuntimeError("CRASH")
+        """)
+        ok_code = textwrap.dedent("""\
+            class Plugin:
+                name = "ok_plugin"
+                version = "1.0"
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {}
+                def on_transcribe(self, payload):
+                    return {"ok": True}
+        """)
+        _make_plugin_dir(self._plugins_dir, name="crash_plugin", plugin_code=crash_code)
+        _make_plugin_dir(self._plugins_dir, name="ok_plugin", plugin_code=ok_code)
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("crash_plugin")
+        mgr.load_plugin("ok_plugin")
+        # Вызов не должен бросить исключение, ok_plugin должен вернуть результат
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {"text": "test"})
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["ok"])
+
+    def test_plugin_isolation_exception_type_preserved(self) -> None:
+        """Тип ошибки в хуке не просачивается — только логируется."""
+        crash_code = textwrap.dedent("""\
+            class Plugin:
+                name = "typed_crash"
+                version = "1.0"
+                def initialize(self, service): pass
+                def get_ipc_methods(self): return {}
+                def on_paste(self, payload):
+                    raise ValueError("bad paste data")
+        """)
+        _make_plugin_dir(self._plugins_dir, name="typed_crash", plugin_code=crash_code)
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        mgr.load_plugin("typed_crash")
+        # Не должно бросать ValueError
+        try:
+            results = mgr.call_hook(HOOK_ON_PASTE, {})
+            self.assertEqual(results, [])
+        except ValueError:
+            self.fail("call_hook не должен пробрасывать исключения из плагинов")
+
+    def test_plugin_isolation_multiple_crashes(self) -> None:
+        """Несколько падающих плагинов — ни один результат не возвращается, исключений нет."""
+        for i in range(3):
+            crash_code = textwrap.dedent(f"""\
+                class Plugin:
+                    name = "multi_crash_{i}"
+                    version = "1.0"
+                    def initialize(self, service): pass
+                    def get_ipc_methods(self): return {{}}
+                    def on_transcribe(self, payload):
+                        raise Exception("crash {i}")
+            """)
+            _make_plugin_dir(
+                self._plugins_dir, name=f"multi_crash_{i}", plugin_code=crash_code
+            )
+        mgr = PluginManager()
+        mgr.discover_plugins(self._plugins_dir)
+        for i in range(3):
+            mgr.load_plugin(f"multi_crash_{i}")
+        results = mgr.call_hook(HOOK_ON_TRANSCRIBE, {})
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":
