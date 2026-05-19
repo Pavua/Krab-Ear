@@ -1091,6 +1091,12 @@ class AudioEngine:
             }
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
+            # Wave 77: push stt.critical_recognition_error (68 occurrences in production logs)
+            self._push_error(
+                "stt.critical_recognition_error",
+                f"broad except in transcribe(): {type(exc).__name__}: {exc}",
+                severity="critical",
+            )
             return {"text": "", "error": str(exc), "status": "error"}
         finally:
             # Cleanup iCloud temp copy
