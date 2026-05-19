@@ -688,6 +688,23 @@ class AudioEngine:
         start_time = time.time()
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
+        try:
+            from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+            _add_bc(
+                category="transcription",
+                message="transcribe_start",
+                level="info",
+                data={
+                    "cleanup_profile": cleanup_profile,
+                    "is_preview": is_preview,
+                    "domain": domain,
+                    "lang_hint": lang_hint or "auto",
+                    "diarize": diarize,
+                },
+            )
+        except Exception:
+            pass  # telemetry must never break transcription
+
         # 1. Формирование динамического промпта.
         # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
         # провоцируют whisper на "leakage" initial_prompt'а в output как
@@ -999,6 +1016,24 @@ class AudioEngine:
                 calibrated_score.calibrated,
                 resolved_lang or "auto",
             )
+
+            try:
+                from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+                _add_bc(
+                    category="transcription",
+                    message="transcribe_finish",
+                    level="info",
+                    data={
+                        "duration_ms": int(duration * 1000),
+                        "confidence": round(calibrated_score.calibrated, 3),
+                        "language": result.get("language", resolved_lang) or "auto",
+                        "engine": result.get("engine", "mlx-whisper"),
+                        "llm_applied": bool(llm_result is not None and llm_result.ok),
+                        "is_preview": is_preview,
+                    },
+                )
+            except Exception:
+                pass  # telemetry must never break transcription
 
             return {
                 "text": text,
