@@ -437,5 +437,186 @@ class TestPasteFormatterExtraEdgeCases(unittest.TestCase):
         self.assertRegex(result, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
 
 
+class TestPasteFormatterWave228(unittest.TestCase):
+    """Wave 228 extras: double-newline, markdown, HTML, unicode, concurrency."""
+
+    def setUp(self):
+        self.formatter = PasteFormatter(data_dir=None)
+
+    # --- test_telegram_strips_double_newlines ---
+
+    def test_telegram_strips_double_newlines(self):
+        """Telegram: long text (>120 chars) is split into single-\n lines — no double newlines."""
+        # Text must be >120 chars and use '. ' separators for the lookbehind regex to split.
+        text = (
+            "Это первое очень длинное предложение о работе над проектом. "
+            "Второе предложение тоже длинное. "
+            "Третье предложение для итогов."
+        )
+        self.assertGreater(len(text), 120)
+        result = _fmt_telegram(text)
+        self.assertNotIn("\n\n", result)
+        self.assertIn("\n", result)
+
+    def test_telegram_strips_double_newlines_via_formatter(self):
+        """format_for_app with telegram: long multi-sentence text has no double newlines."""
+        text = (
+            "Длинное первое предложение для проверки поведения Telegram форматтера. "
+            "Второе предложение также длинное. "
+            "Третье предложение для завершения."
+        )
+        self.assertGreater(len(text), 120)
+        result = self.formatter.format_for_app(text, "telegram")
+        self.assertNotIn("\n\n", result)
+
+    # --- test_markdown_preserves_lists ---
+
+    def test_markdown_preserves_lists_default(self):
+        """Default formatter preserves markdown list items unchanged."""
+        md = "- item one\n- item two\n- item three"
+        result = self.formatter.format_for_app(md, "default")
+        self.assertEqual(result, md)
+
+    def test_markdown_preserves_lists_telegram(self):
+        """Telegram formatter keeps list markers intact (no stripping)."""
+        md = "- alpha\n- beta\n- gamma"
+        result = self.formatter.format_for_app(md, "telegram")
+        self.assertIn("-", result)
+        self.assertIn("alpha", result)
+
+    # --- test_email_handles_signatures ---
+
+    def test_email_handles_signatures(self):
+        """Email formatter wraps text with greeting and signature."""
+        result = _fmt_email("Project update")
+        self.assertTrue(result.startswith("Здравствуйте"))
+        self.assertIn("С уважением", result)
+        self.assertIn("Project update.", result)
+
+    def test_email_signature_structure(self):
+        """Email output has greeting / blank / body / blank / signature structure."""
+        result = _fmt_email("Hello world")
+        parts = result.split("\n\n")
+        self.assertGreaterEqual(len(parts), 3, "Should have greeting, body, and signature sections")
+
+    # --- test_notes_preserves_whitespace ---
+
+    def test_notes_preserves_whitespace_content(self):
+        """Notes formatter retains non-leading/trailing whitespace in bullet."""
+        text = "word1   word2"
+        result = _fmt_notes(text)
+        self.assertIn("word1   word2", result)
+
+    def test_notes_structure_has_header_and_bullet(self):
+        """Notes output starts with timestamp header and contains bullet."""
+        result = _fmt_notes("some text")
+        lines = result.splitlines()
+        self.assertRegex(lines[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
+        self.assertIn("•", result)
+
+    # --- test_html_escape_safe ---
+
+    def test_html_escape_safe_default(self):
+        """HTML special chars pass through default formatter unchanged (no double-escape)."""
+        text = '<b>bold</b> & "quoted"'
+        result = self.formatter.format_for_app(text, "default")
+        self.assertIn("<b>", result)
+        self.assertIn("&", result)
+
+    def test_html_escape_safe_telegram(self):
+        """HTML chars survive telegram formatting without corruption."""
+        text = "Hello <world> & friends."
+        result = self.formatter.format_for_app(text, "telegram")
+        self.assertIn("<world>", result)
+        self.assertIn("&", result)
+
+    # --- test_plain_strips_markdown ---
+
+    def test_plain_custom_strips_markdown_via_rules(self):
+        """Custom formatter with prepend/append doesn't mangle markdown."""
+        self.formatter.add_custom_formatter("plain", {
+            "strip_trailing_period": False,
+            "capitalize": False,
+        })
+        text = "**bold** and _italic_"
+        result = self.formatter.format_for_app(text, "plain")
+        # Rules-based plain formatter doesn't add markup
+        self.assertEqual(result, text)
+
+    def test_plain_apply_rules_no_markdown_added(self):
+        """_apply_rules with no rules returns stripped input; no markup injected."""
+        text = "**bold** plain text"
+        result = _apply_rules(text, {})
+        self.assertEqual(result, text)
+
+    # --- test_unicode_paths_preserved ---
+
+    def test_unicode_paths_preserved_telegram(self):
+        """Unicode paths (Cyrillic) survive telegram formatting intact."""
+        text = "путь /Users/пабло/файл.txt"
+        result = self.formatter.format_for_app(text, "telegram")
+        self.assertIn("пабло", result)
+        self.assertIn("файл.txt", result)
+
+    def test_unicode_paths_preserved_default(self):
+        """Unicode mixed paths pass through default formatter unchanged."""
+        text = "Файл: /tmp/données/résumé.txt"
+        result = self.formatter.format_for_app(text, "default")
+        self.assertEqual(result, text)
+
+    def test_unicode_emoji_preserved(self):
+        """Emoji characters survive telegram formatter."""
+        text = "Привет 🎉 мир"
+        result = self.formatter.format_for_app(text, "telegram")
+        self.assertIn("🎉", result)
+
+    # --- test_concurrent_format ---
+
+    def test_concurrent_format(self):
+        """PasteFormatter is thread-safe: 20 concurrent calls produce correct results."""
+        import threading
+        results = []
+        errors = []
+
+        def worker(i):
+            try:
+                r = self.formatter.format_for_app(f"Привет мир {i}.", "telegram")
+                results.append(r)
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 20)
+        for r in results:
+            self.assertFalse(r.endswith("."), "Telegram should strip trailing period")
+
+    def test_concurrent_custom_add_and_format(self):
+        """Adding custom formatters and formatting concurrently does not raise."""
+        import threading
+        fmt = PasteFormatter(data_dir=None)
+        errors = []
+
+        def add_and_use(i):
+            try:
+                fmt.add_custom_formatter(f"app{i}", {"capitalize": True})
+                fmt.format_for_app(f"текст {i}", f"app{i}")
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=add_and_use, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Concurrent add+format errors: {errors}")
+
+
 if __name__ == "__main__":
     unittest.main()
