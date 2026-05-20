@@ -22,7 +22,7 @@ import unittest
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
 
-_SKIP_BENCH = bool(os.environ.get("SKIP_BENCH"))
+_SKIP_BENCH = bool(os.environ.get("SKIP_BENCH")) or os.environ.get("CI") == "true"
 
 # ---------------------------------------------------------------------------
 # Timing helpers
