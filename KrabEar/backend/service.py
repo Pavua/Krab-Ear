@@ -815,8 +815,6 @@ class BackendService:
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
-            "get_disk_status": self._handle_get_disk_status,  # текущий статус дискового пространства
-            "get_storage_breakdown": self._handle_get_storage_breakdown,  # разбивка использования диска по компонентам
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
             "get_auto_backup_status": lambda p: self._auto_backup.get_auto_backup_status(),  # статус авто-резервного копирования
@@ -924,8 +922,6 @@ class BackendService:
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
-            "extract_learning_vocabulary": self._handle_extract_learning_vocabulary,  # режим изучения языков: извлечение словаря из двуязычных транскрипций
-            "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
@@ -967,7 +963,6 @@ class BackendService:
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
             "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
-            "export_timeline": self._handle_export_timeline,  # экспорт временной шкалы записей в SVG, JSON или iCal
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
@@ -3310,14 +3305,6 @@ class BackendService:
             "default_input_id": default_input_id,
         }
 
-    def _handle_get_disk_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий статус дискового пространства (немедленная проверка)."""
-        return self._disk_monitor.check_now()
-
-    def _handle_get_storage_breakdown(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает разбивку использования диска по компонентам (NDJSON, transcripts, audio)."""
-        return self.store.get_storage_breakdown()
-
     def _handle_get_audio_devices(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств (обёртка для GUI)."""
         return {"devices": self._list_audio_inputs()}
@@ -5165,58 +5152,6 @@ end tell'''
 
         return result
 
-    # ── Timeline export ──────────────────────────────────────────────────────
-
-    def _handle_export_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Экспортирует временную шкалу записей в SVG, JSON или iCalendar.
-
-        Параметры:
-          - format: str — формат экспорта: "svg", "json", "ical" (по умолчанию "json").
-          - group_by: str — гранулярность блоков: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - svg_width: int — ширина SVG в пикселях (по умолчанию 1200, только для format=svg).
-          - svg_height: int — высота SVG в пикселях (по умолчанию 400, только для format=svg).
-
-        Ответ:
-          - content: str — экспортированный контент.
-          - format: str — фактический формат экспорта.
-          - total_blocks: int — количество блоков.
-          - mime_type: str — MIME-тип контента.
-        """
-        fmt = str(params.get("format", "json")).strip().lower()
-        if fmt not in ("svg", "json", "ical"):
-            raise ValueError(
-                f"Неизвестный формат экспорта: {fmt!r}. Допустимые: svg, json, ical"
-            )
-
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        blocks_dicts = [b.to_dict() for b in blocks]
-
-        if fmt == "svg":
-            svg_width = max(200, int(params.get("svg_width", 1200)))
-            svg_height = max(100, int(params.get("svg_height", 400)))
-            content = self._timeline_exporter.export_svg(
-                blocks_dicts, width=svg_width, height=svg_height
-            )
-            mime_type = "image/svg+xml"
-        elif fmt == "ical":
-            content = self._timeline_exporter.export_ical(blocks_dicts)
-            mime_type = "text/calendar"
-        else:
-            content = self._timeline_exporter.export_json(blocks_dicts)
-            mime_type = "application/json"
-
-        return {
-            "content": content,
-            "format": fmt,
-            "total_blocks": len(blocks_dicts),
-            "mime_type": mime_type,
-        }
-
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует автоматический заголовок для транскрибации.
 
@@ -5256,18 +5191,6 @@ end tell'''
             title = self._auto_title_generator.generate_title(text, max_length=max_length)
 
         return {"title": title}
-
-    def _handle_extract_learning_vocabulary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: extract_learning_vocabulary — извлечение словаря из двуязычных транскрипций."""
-        params_with_store = dict(params)
-        params_with_store.setdefault("store", self.store)
-        return self._language_learning.handle_extract_learning_vocabulary(params_with_store)
-
-    def _handle_generate_flashcards(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: generate_flashcards — генерация флеш-карточек для изучения языка."""
-        params_with_store = dict(params)
-        params_with_store.setdefault("store", self.store)
-        return self._language_learning.handle_generate_flashcards(params_with_store)
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
