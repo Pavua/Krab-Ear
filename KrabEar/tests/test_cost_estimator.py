@@ -275,5 +275,125 @@ class TestGetDailyCostSummary(unittest.TestCase):
         self.assertLessEqual(summary["relative_cost"], 1.0)
 
 
+class TestCostEstimatorExtras(unittest.TestCase):
+    """Wave 207 extra coverage: CPU/memory/disk per-minute, missing metadata,
+    unicode fields, concurrency, and batch aggregation."""
+
+    def setUp(self):
+        self.estimator = CostEstimator()
+
+    # test_estimate_cpu_cost_per_minute
+    def test_estimate_cpu_cost_per_minute(self):
+        """1 minute of balanced audio → stt = 0.3 * 60 = 18.0 s compute."""
+        est = self.estimator.estimate_cost(duration_sec=60.0, quality="balanced")
+        self.assertAlmostEqual(est.features_cost["stt"], 18.0, places=4)
+        # compute_time_sec should equal stt when no extras enabled
+        self.assertAlmostEqual(est.compute_time_sec, 18.0, places=4)
+
+    # test_estimate_memory_cost
+    def test_estimate_memory_cost(self):
+        """Memory baseline is 900 MB for balanced; 1800 MB for max."""
+        est_bal = self.estimator.estimate_cost(10.0, "balanced")
+        self.assertAlmostEqual(est_bal.memory_mb, 900.0, places=2)
+
+        est_max = self.estimator.estimate_cost(10.0, "max")
+        self.assertAlmostEqual(est_max.memory_mb, 1800.0, places=2)
+
+        est_remote = self.estimator.estimate_cost(10.0, "remote")
+        self.assertAlmostEqual(est_remote.memory_mb, 200.0, places=2)
+
+    # test_estimate_disk_cost
+    def test_estimate_disk_cost(self):
+        """Disk cost scales linearly: 1 min → ~0.05 MB, 5 min → ~0.25 MB."""
+        est_1m = self.estimator.estimate_cost(60.0)
+        self.assertAlmostEqual(est_1m.disk_mb, 0.05, places=4)
+
+        est_5m = self.estimator.estimate_cost(300.0)
+        self.assertAlmostEqual(est_5m.disk_mb, 0.25, places=4)
+
+        # Zero duration → zero disk
+        est_zero = self.estimator.estimate_cost(0.0)
+        self.assertEqual(est_zero.disk_mb, 0.0)
+
+    # test_handles_missing_metadata (batch with incomplete dicts)
+    def test_handles_missing_metadata(self):
+        """Batch items with absent keys should not raise, just use defaults."""
+        files = [
+            {},                                          # fully empty (uses defaults)
+            {"quality": "balanced"},                     # no duration → 0.0 default
+            {"duration_sec": 30.0},                      # no quality → "balanced" default
+            {"features": {}},                            # empty features dict
+            {"duration_sec": 10.0, "features": None},    # None features → {} default
+        ]
+        result = self.estimator.estimate_batch_cost(files)
+        self.assertEqual(result["file_count"], 5)
+        self.assertGreaterEqual(result["total_compute_time_sec"], 0.0)
+        for entry in result["estimates"]:
+            self.assertIn("compute_time_sec", entry)
+            self.assertGreaterEqual(entry["compute_time_sec"], 0.0)
+
+    # test_unicode_metadata_fields (quality with unicode falls back gracefully)
+    def test_unicode_metadata_fields(self):
+        """Unicode quality string unknown → balanced fallback, no crash."""
+        est = self.estimator.estimate_cost(30.0, quality="высокое качество")
+        est_balanced = self.estimator.estimate_cost(30.0, quality="balanced")
+        self.assertAlmostEqual(est.compute_time_sec, est_balanced.compute_time_sec, places=4)
+
+    # test_concurrent_estimate
+    def test_concurrent_estimate(self):
+        """Concurrent calls from multiple threads must all return consistent results."""
+        import threading
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                est = self.estimator.estimate_cost(
+                    duration_sec=120.0,
+                    quality="balanced",
+                    features={"diarization": True, "llm": True},
+                )
+                results.append(est.compute_time_sec)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Errors in threads: {errors}")
+        self.assertEqual(len(results), 10)
+        # All results should be identical (pure computation, no shared state)
+        self.assertEqual(len(set(results)), 1, "Concurrent calls returned different results")
+
+    # test_aggregates_over_recordings
+    def test_aggregates_over_recordings(self):
+        """estimate_batch_cost correctly aggregates totals over multiple recordings."""
+        files = [
+            {"duration_sec": 30.0, "quality": "balanced"},
+            {"duration_sec": 60.0, "quality": "max", "features": {"diarization": True}},
+            {"duration_sec": 90.0, "quality": "remote", "features": {"translation": True}},
+        ]
+        result = self.estimator.estimate_batch_cost(files)
+
+        # Recompute expected totals manually
+        e0 = self.estimator.estimate_cost(30.0, "balanced")
+        e1 = self.estimator.estimate_cost(60.0, "max", {"diarization": True})
+        e2 = self.estimator.estimate_cost(90.0, "remote", {"translation": True})
+
+        expected_compute = round(e0.compute_time_sec + e1.compute_time_sec + e2.compute_time_sec, 4)
+        expected_disk = round(e0.disk_mb + e1.disk_mb + e2.disk_mb, 6)
+        expected_peak_mem = round(max(e0.memory_mb, e1.memory_mb, e2.memory_mb), 2)
+
+        self.assertAlmostEqual(result["total_compute_time_sec"], expected_compute, places=4)
+        self.assertAlmostEqual(result["total_disk_mb"], expected_disk, places=6)
+        self.assertAlmostEqual(result["total_memory_mb"], expected_peak_mem, places=2)
+        self.assertEqual(result["file_count"], 3)
+        self.assertEqual(len(result["estimates"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
