@@ -377,7 +377,13 @@ class LLMRewriter:
                 action_id=entry.get("action_id"),
             )
             error_bus.push(err)
-        except Exception:  # never raise from rewriter
+        except Exception as e:  # noqa: BLE001  # never raise from rewriter
+            # Wave 222: surface push failures to Sentry instead of silent swallow
+            try:
+                from backend.observability import capture_exception
+                capture_exception(e, "_push_error_internal")
+            except Exception:
+                pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
     def _postprocess(self, content: str) -> str:
