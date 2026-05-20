@@ -318,5 +318,71 @@ class ReadabilityScorerExplicitRequirementsTestCase(unittest.TestCase):
         self.assertLessEqual(report.flesch_score, 100.0)
 
 
+class ReadabilityScorerWave238SpecTestCase(unittest.TestCase):
+    """Explicit named tests required by Wave 238 spec."""
+
+    def setUp(self) -> None:
+        self.scorer = ReadabilityScorer()
+
+    def test_unicode_text_scored(self) -> None:
+        """Unicode text (emoji, mixed scripts) is processed without error."""
+        texts = [
+            "Тест 🎤 эмодзи в тексте.",
+            "café résumé naïve.",
+            "日本語 mixed with русским текстом.",
+            "Ñoño español con tildes áéíóú.",
+        ]
+        for text in texts:
+            report = self.scorer.score(text)
+            self.assertIsInstance(report, ReadabilityReport)
+            self.assertGreaterEqual(report.flesch_score, 0.0)
+            self.assertLessEqual(report.flesch_score, 100.0)
+
+    def test_ru_text_scored(self) -> None:
+        """Russian text produces non-trivial ReadabilityReport."""
+        text = "Сегодня хорошая погода. Мы идём гулять в парк. Дети играют на площадке."
+        report = self.scorer.score(text)
+        self.assertIsInstance(report, ReadabilityReport)
+        self.assertEqual(report.sentence_count, 3)
+        self.assertGreater(report.word_count, 0)
+        self.assertGreater(report.flesch_score, 0.0)
+        self.assertIn(report.vocabulary_level, ("simple", "moderate", "complex"))
+
+    def test_concurrent_score(self) -> None:
+        """ReadabilityScorer is safe for concurrent use from multiple threads."""
+        import threading
+
+        scorer = ReadabilityScorer()
+        results = []
+        errors = []
+
+        texts = [
+            "Привет мир. Это тест.",
+            "Нейронные сети обрабатывают данные.",
+            "Short text.",
+            "Длинное предложение с множеством слов для проверки многопоточности.",
+            "Hola mundo. Esto es una prueba.",
+        ]
+
+        def worker(idx: int) -> None:
+            try:
+                r = scorer.score(texts[idx % len(texts)])
+                results.append(r)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(errors, [], msg=f"Thread errors: {errors}")
+        self.assertEqual(len(results), 20)
+        for r in results:
+            self.assertGreaterEqual(r.flesch_score, 0.0)
+            self.assertLessEqual(r.flesch_score, 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()
