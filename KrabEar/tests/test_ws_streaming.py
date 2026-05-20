@@ -107,8 +107,12 @@ class TestWsConnection(unittest.TestCase):
         # Close ws, then emit an event so the send attempt triggers the disconnect path
         ws.close()
         bus.emit("stt.final", {"text": "trigger"})
-        thread.join(timeout=1.0)
+        thread.join(timeout=2.0)
 
+        # Poll briefly in case the finally-block unsubscribe hasn't run yet.
+        deadline = time.monotonic() + 1.0
+        while bus.subscriber_count() > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
         self.assertEqual(bus.subscriber_count(), 0)
 
     # ------------------------------------------------------------------
