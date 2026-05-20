@@ -6,6 +6,7 @@
 
 import sys
 import os
+import threading
 import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -366,6 +367,75 @@ class TestEdgeCases(unittest.TestCase):
         result = proc.process("один два удалить последнее слово три", language="ru")
         # "один два" → delete "два" → "один" → continue " три" → "один три"
         self.assertEqual(result, "один три")
+
+
+class TestConcurrentProcess(unittest.TestCase):
+    """VoiceCommandProcessor потокобезопасен при параллельных вызовах process()."""
+
+    def test_concurrent_process_ru(self):
+        """Параллельные вызовы process() для RU возвращают корректные результаты."""
+        proc = _make_proc()
+        errors: list[Exception] = []
+        results: list[str] = []
+
+        def worker() -> None:
+            try:
+                r = proc.process("Привет запятая мир", language="ru")
+                results.append(r)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent process errors: {errors}")
+        self.assertEqual(len(results), 20)
+        for r in results:
+            self.assertEqual(r, "Привет, мир")
+
+    def test_concurrent_process_mixed_languages(self):
+        """Параллельный вызов process() для разных языков не вызывает гонки."""
+        proc = _make_proc()
+        errors: list[Exception] = []
+
+        def ru_worker() -> None:
+            for _ in range(10):
+                try:
+                    r = proc.process("раз запятая два точка три", language="ru")
+                    assert r == "раз, два. три", f"RU mismatch: {r!r}"
+                except Exception as exc:
+                    errors.append(exc)
+
+        def en_worker() -> None:
+            for _ in range(10):
+                try:
+                    r = proc.process("hello comma world", language="en")
+                    assert r == "hello, world", f"EN mismatch: {r!r}"
+                except Exception as exc:
+                    errors.append(exc)
+
+        def es_worker() -> None:
+            for _ in range(10):
+                try:
+                    r = proc.process("hola coma mundo", language="es")
+                    assert r == "hola, mundo", f"ES mismatch: {r!r}"
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = (
+            [threading.Thread(target=ru_worker) for _ in range(3)]
+            + [threading.Thread(target=en_worker) for _ in range(3)]
+            + [threading.Thread(target=es_worker) for _ in range(3)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Mixed-lang concurrent errors: {errors}")
 
 
 if __name__ == "__main__":
