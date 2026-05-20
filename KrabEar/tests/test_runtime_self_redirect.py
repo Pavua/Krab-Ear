@@ -324,7 +324,6 @@ exit 0
             root = os.path.dirname(os.path.dirname(os.path.dirname(exe)))
             return os.path.join(root, "Krab Ear.app", "Contents", "MacOS", "KrabEarAgent")
 
-
         # Note: os.path.realpath may resolve symlinks on this machine, so we test
         # with a tempdir path that has no symlinks to control for that.
         td = tempfile.mkdtemp(prefix="krab_bundle_path_test_")

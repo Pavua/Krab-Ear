@@ -212,6 +212,7 @@ class TestParakeetMLXTranscribe(unittest.TestCase):
             def __enter__(self):
                 entered.append(True)
                 return self
+
             def __exit__(self, *args):
                 exited.append(True)
 

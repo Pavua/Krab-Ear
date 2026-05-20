@@ -177,7 +177,8 @@ class TestExportGlossaryCsv(unittest.TestCase):
         result = svc._handle_export_glossary_csv({})
         self.assertTrue(result["ok"])
         # The CSV should be parseable back
-        import csv, io
+        import csv
+        import io
         reader = csv.reader(io.StringIO(result["csv"]))
         rows = list(reader)
         data_rows = [r for r in rows if r and r[0] != "source"]
