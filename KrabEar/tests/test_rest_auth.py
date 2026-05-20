@@ -237,7 +237,7 @@ class TestAuthDisabled(unittest.TestCase):
 class TestAuthEnabled401(unittest.TestCase):
     """Когда REST_API_KEY задан — защищённые эндпоинты возвращают 401 без токена."""
 
-    _TEST_KEY = "test-secret-key-abc"
+    _TEST_KEY = "test-fake-restkey-abc"
 
     def setUp(self):
         self._orig_key = settings.REST_API_KEY
@@ -272,7 +272,7 @@ class TestAuthEnabled401(unittest.TestCase):
 class TestAuthEnabledCorrectKey(unittest.TestCase):
     """Когда REST_API_KEY задан — защищённые эндпоинты работают с правильным токеном."""
 
-    _TEST_KEY = "test-secret-key-abc"
+    _TEST_KEY = "test-fake-restkey-abc"
 
     def setUp(self):
         self._orig_key = settings.REST_API_KEY
@@ -356,14 +356,14 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         """Correct token returns 200; wrong-but-same-length token returns 401.
         Both code paths exercised — behaviour is correct after hmac fix."""
         orig = settings.REST_API_KEY
-        settings.REST_API_KEY = "secret-key-32ch-abcdefghijklmn"
+        settings.REST_API_KEY = "test-fake-key-32ch-aabbccddeeff"
         client = app.test_client()
         try:
             # Correct token
-            good = client.get("/metrics", headers={"Authorization": "Bearer secret-key-32ch-abcdefghijklmn"})
+            good = client.get("/metrics", headers={"Authorization": "Bearer test-fake-key-32ch-aabbccddeeff"})
             self.assertNotEqual(good.status_code, 401)
             # Wrong token of identical length (would leak timing with plain ==)
-            bad = client.get("/metrics", headers={"Authorization": "Bearer XXXXXX-key-32ch-abcdefghijklmn"})
+            bad = client.get("/metrics", headers={"Authorization": "Bearer test-WRONG-key-32ch-aabbccddee"})
             self.assertEqual(bad.status_code, 401)
         finally:
             settings.REST_API_KEY = orig
