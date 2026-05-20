@@ -110,6 +110,11 @@ class TestAudioEngineWarmup(unittest.TestCase):
         engine = self._make_engine()
         model_name = engine.current_model
 
+        # Reset mock after engine construction to ignore any background init calls
+        # that may fire before warmup() in CI (e.g. lang-id or other lazy init).
+        mock_mlx.reset_mock()
+        mock_mlx.transcribe.return_value = {"text": ""}
+
         result = engine.warmup()
 
         self.assertTrue(result["loaded"])
