@@ -3,7 +3,7 @@
 Покрывает:
 - Российские номера телефонов (различные форматы)
 - Email-адреса
-- Номера банковских карт
+- Номера банковских карт (с Luhn-валидацией, Wave 214)
 - Паспортные данные
 - Даты рождения
 - ИНН, СНИЛС
@@ -97,22 +97,85 @@ class TestTextAnonymizerEmail(unittest.TestCase):
 
 
 class TestTextAnonymizerCreditCard(unittest.TestCase):
-    """Тесты анонимизации номеров банковских карт."""
+    """Тесты анонимизации номеров банковских карт (с Luhn-валидацией, Wave 214)."""
+
+    # Real Visa test card — passes Luhn
+    VISA_CARD = "4532015112830366"
+    VISA_SPACED = "4532 0151 1283 0366"
+    VISA_DASHED = "4532-0151-1283-0366"
 
     def setUp(self) -> None:
         self.a = TextAnonymizer()
 
     def test_credit_card_spaces(self) -> None:
-        """Номер карты с пробелами: 1234 5678 9012 3456."""
-        result = self.a.anonymize("Карта: 1234 5678 9012 3456")
+        """Номер карты с пробелами (Luhn-valid Visa test card)."""
+        result = self.a.anonymize(f"Карта: {self.VISA_SPACED}")
         self.assertIn("[КАРТА]", result.anonymized_text)
-        self.assertNotIn("1234 5678", result.anonymized_text)
+        self.assertNotIn("4532", result.anonymized_text)
         self.assertEqual(result.redaction_count, 1)
         self.assertEqual(result.redactions[0].category, "credit_card")
 
     def test_credit_card_dashes(self) -> None:
-        """Номер карты через дефисы: 1234-5678-9012-3456."""
-        result = self.a.anonymize("Номер карты: 1234-5678-9012-3456")
+        """Номер карты через дефисы (Luhn-valid Visa test card)."""
+        result = self.a.anonymize(f"Номер карты: {self.VISA_DASHED}")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    # ── Wave 214: Luhn validation tests ─────────────────────────────────────
+
+    def test_luhn_valid_card_redacted(self) -> None:
+        """4532015112830366 (Visa test card) passes Luhn → redacted."""
+        result = self.a.anonymize(f"Оплата картой {self.VISA_CARD}")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertNotIn(self.VISA_CARD, result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_luhn_invalid_16_digits_kept(self) -> None:
+        """1234567890123456 fails Luhn → NOT redacted (false positive prevention)."""
+        result = self.a.anonymize("Code: 1234567890123456 end")
+        self.assertNotIn("[КАРТА]", result.anonymized_text)
+        self.assertIn("1234567890123456", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_credit_card_with_spaces_handled(self) -> None:
+        """Card with spaces: digits extracted for Luhn check."""
+        result = self.a.anonymize(f"Card: {self.VISA_SPACED} valid")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_credit_card_with_dashes_handled(self) -> None:
+        """Card with dashes: digits extracted for Luhn check."""
+        result = self.a.anonymize(f"Card: {self.VISA_DASHED} valid")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_random_16_digit_number_kept(self) -> None:
+        """Random 16-digit number that fails Luhn is NOT redacted."""
+        # 1111111111111111 fails Luhn (checksum = 8, not 0)
+        result = self.a.anonymize("Timestamp ref: 2026051912345678 note")
+        self.assertNotIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_back_compat_existing_tests_still_pass(self) -> None:
+        """Backward compat: non-PII numbers no longer falsely redacted (Wave 214 improvement)."""
+        # Before Wave 214: 1234567890123456 was wrongly redacted
+        # After Wave 214: correctly kept (fails Luhn)
+        result = self.a.anonymize("Value: 1234567890123456")
+        # The number should NOT be redacted — this is the Wave 214 improvement
+        self.assertEqual(result.redaction_count, 0)
+        self.assertIn("1234567890123456", result.anonymized_text)
+
+    def test_luhn_mastercard_redacted(self) -> None:
+        """5500005555555559 (Mastercard test) passes Luhn → redacted."""
+        mc = "5500005555555559"
+        result = self.a.anonymize(f"MC card: {mc}")
+        self.assertIn("[КАРТА]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_luhn_visa_spaced_second_card(self) -> None:
+        """4111111111111111 (Visa test 2) passes Luhn → redacted."""
+        visa2 = "4111111111111111"
+        result = self.a.anonymize(f"Visa: {visa2}")
         self.assertIn("[КАРТА]", result.anonymized_text)
         self.assertEqual(result.redaction_count, 1)
 
@@ -223,8 +286,9 @@ class TestTextAnonymizerEdgeCases(unittest.TestCase):
         self.assertIsInstance(result.redactions[0], Redaction)
 
     def test_multiple_categories_mixed_text(self) -> None:
-        """Текст с несколькими категориями ПДн."""
-        text = "Тел: +79001234567, email: foo@bar.ru, карта: 1234 5678 9012 3456"
+        """Текст с несколькими категориями ПДн (Luhn-valid card)."""
+        # 4532 0151 1283 0366 = Visa test card, passes Luhn
+        text = "Тел: +79001234567, email: foo@bar.ru, карта: 4532 0151 1283 0366"
         result = self.a.anonymize(text)
         categories = {r.category for r in result.redactions}
         self.assertIn("phone", categories)
@@ -267,8 +331,9 @@ class TestTextAnonymizerMultilingual(unittest.TestCase):
         self.assertEqual(result.redaction_count, 1)
 
     def test_credit_card_no_spaces_16_digits(self) -> None:
-        """16-digit card number without separators is redacted."""
-        result = self.a.anonymize("Número de tarjeta: 1234567890123456")
+        """16-digit Luhn-valid card number without separators is redacted."""
+        # 4532015112830366 = Visa test card, passes Luhn
+        result = self.a.anonymize("Número de tarjeta: 4532015112830366")
         self.assertIn("[КАРТА]", result.anonymized_text)
         self.assertEqual(result.redaction_count, 1)
 
