@@ -16,7 +16,7 @@ for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
         sys.path.insert(0, p)
 
 from backend.state_store import StateStore
-from backend.ipc_throttle import HEAVY_METHODS, MEDIUM_METHODS
+from backend.ipc_throttle import MEDIUM_METHODS
 
 
 def _make_store(tmp_dir: Path) -> StateStore:

@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "KrabEar") not in sys.path:
@@ -155,7 +155,7 @@ class TestSentryBlockLog(unittest.TestCase):
 
     def test_sentry_blocked_logs_entry(self):
         """init_sentry с privacy_mode_enabled=True и dsn → log category=sentry action=blocked."""
-        from backend.privacy_audit import PrivacyAuditLogger, get_privacy_audit_logger
+        from backend.privacy_audit import PrivacyAuditLogger
 
         # Подменяем singleton
         test_logger = PrivacyAuditLogger(log_path=self.log_path)

@@ -15,7 +15,7 @@ import sys
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 # Path setup — стандартный паттерн для test files в Krab Ear
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
