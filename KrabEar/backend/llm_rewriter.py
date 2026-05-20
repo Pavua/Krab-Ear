@@ -628,6 +628,16 @@ class LLMRewriter:
                     f"HTTP 500 HTML body: {body_preview}",
                     severity="error",
                 )
+            elif response.status_code in (400, 422) and any(
+                kw in body_preview.lower()
+                for kw in ("model has not started loading", "model is not loaded",
+                           "not started loading", "model not loaded")
+            ):
+                self._push_error(
+                    "rewriter.model_unloaded",
+                    f"HTTP {response.status_code}: {body_preview}",
+                    severity="error",
+                )
             else:
                 self._push_error("rewriter.timeout", f"http_{response.status_code}_after_retry")
             return LLMRewriteResult(
@@ -702,6 +712,11 @@ class LLMRewriter:
                     ratio * 100,
                 )
                 self._last_error = "output_too_short"
+                self._push_error(
+                    "rewriter.output_ratio_fallback",
+                    f"output_too_short: ratio={ratio:.2f} input_len={input_len} output_len={output_len}",
+                    severity="info",
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="output_too_short", latency_ms=latency_ms
                 )
@@ -711,6 +726,11 @@ class LLMRewriter:
                     ratio * 100,
                 )
                 self._last_error = "output_too_long"
+                self._push_error(
+                    "rewriter.output_ratio_fallback",
+                    f"output_too_long: ratio={ratio:.2f} input_len={input_len} output_len={output_len}",
+                    severity="info",
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="output_too_long", latency_ms=latency_ms
                 )

@@ -86,5 +86,13 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "mlx.semaphore_leak",
             "stt.empty_audio_warning",
             "system.malloc_env_leak",
+            # Added Wave 78 (Wave 205) — 5 production-discovered codes from Wave 202 audit:
+            # gigaam HF cache miss / rewriter model unloaded / output ratio fallback
+            # / MLX watchdog hang / audio device poll flood
+            "stt.gigaam_hf_cache_miss",
+            "rewriter.model_unloaded",
+            "rewriter.output_ratio_fallback",
+            "stt.mlx_watchdog_hang",
+            "ipc.audio_device_poll_flood",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

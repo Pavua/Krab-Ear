@@ -2460,6 +2460,20 @@ class AudioEngine:
                 "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
                 duration_sec, use_longform, str(exc)[:200],
             )
+            # Detect HF cache miss: huggingface_hub raises LocalEntryNotFoundError /
+            # RepositoryNotFoundError / ConnectionError when model not cached offline.
+            exc_str = str(exc).lower()
+            _hf_cache_miss_keywords = (
+                "localentrynotfound", "repositorynotfound", "connection error",
+                "not found in cache", "gated repo", "access to model",
+                "cannot find the requested files",
+            )
+            if any(kw in exc_str for kw in _hf_cache_miss_keywords):
+                self._push_error(
+                    "stt.gigaam_hf_cache_miss",
+                    f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
+                    severity="warn",
+                )
             return {
                 "text": "",
                 "confidence": 0.0,
