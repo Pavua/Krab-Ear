@@ -159,13 +159,13 @@ class TestSilenceDetection(unittest.TestCase):
         recorder = FakeRecorder(audio)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.02,
             "rt_silence_window_sec": 30.0,
             "rt_silence_max_sec": max_silence_sec,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(0.5)
         return rsf.stop()
 
     def test_detects_long_silence(self):
