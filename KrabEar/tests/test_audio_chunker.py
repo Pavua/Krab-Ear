@@ -445,5 +445,70 @@ class TestChunkAndMergeIntegration(unittest.TestCase):
         self.assertAlmostEqual(merged["end_sec"], total_sec, delta=1.0)
 
 
+# ---------------------------------------------------------------------------
+# Wave 359 — regression tests for GigaAM padding bugs
+# ---------------------------------------------------------------------------
+
+class TestWave359ChunkerMicroAdvance(unittest.TestCase):
+    """Regression: silence region starting before cursor must not cause micro-advance.
+
+    Bug: _compute_split_points iterated ALL silence regions. A region with
+    start_sec < cursor but mid > cursor would produce:
+      cut = start_sec + 0.05 < cursor → clamped to cursor + 0.01
+    Each iteration advanced cursor by only 0.01 s, producing 100s of 10 ms chunks.
+
+    Fix: skip regions whose start_sec < cursor at the top of the for-loop.
+    """
+
+    def setUp(self):
+        from core.silence_detector import SilenceRegion as _SR
+        self._SR = _SR
+        self.chunker = AudioChunker()
+
+    def test_stale_silence_region_no_micro_advance(self):
+        """Silence region starting before cursor must produce hard cut, not micro-advance.
+
+        Setup: total=50s, max_chunk=20s → first hard cut at 20.0, cursor=20.0.
+        Stale region: start=5.0, end=40.0 → start_sec(5.0) < cursor(20.0).
+        Pre-fix: mid=22.5 in window → cut=5.05 → clamped to 20.01 → micro-advance.
+        Post-fix: region skipped → hard cut at 40.0.
+        """
+        regions = [
+            self._SR(start_sec=5.0, end_sec=40.0, duration_sec=35.0),
+        ]
+        points = self.chunker._compute_split_points(
+            total_sec=50.0,
+            max_chunk_sec=20.0,
+            usable_silences=regions,
+        )
+        # With fix: stale region skipped → 2 hard cuts at [20.0, 40.0]
+        # Without fix: cursor micro-advances 0.01s per iteration → hundreds of points
+        self.assertLessEqual(
+            len(points), 5,
+            f"Expected ≤5 split points, got {len(points)} — micro-advance loop detected",
+        )
+        # Second cut must be far from cursor (not micro-advance at ~20.01)
+        if len(points) >= 2:
+            self.assertGreater(
+                points[1], 20.5,
+                f"Second split point {points[1]:.3f}s too close to cursor 20.0 — micro-advance",
+            )
+
+    def test_silence_at_cursor_boundary_not_skipped(self):
+        """Silence starting exactly at cursor (not before) must NOT be skipped."""
+        regions = [
+            # starts at cursor=0.0 → start_sec(0.0) < cursor(0.0) is False → keep
+            self._SR(start_sec=0.0, end_sec=2.0, duration_sec=2.0),
+        ]
+        points = self.chunker._compute_split_points(
+            total_sec=25.0,
+            max_chunk_sec=20.0,
+            usable_silences=regions,
+        )
+        # The region should be considered (mid=1.0 is in window [0, 20])
+        # Result: cut at 0.05 (start + offset) → 1 split point
+        self.assertGreater(len(points), 0, "Region at cursor boundary должен быть использован")
+
+
 if __name__ == "__main__":
     unittest.main()

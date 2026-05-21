@@ -2412,10 +2412,10 @@ class AudioEngine:
         #   2. transcribe_longform() (fallback): pyannote VAD — требует HF token
         #      + принятие TOS на huggingface.co/pyannote/segmentation-3.0.
         #      Используется только если AudioChunker недоступен.
-        # Threshold 24s консервативный (gigaam падает на ~26s+).
+        # Threshold 30s: GigaAM shortform limit ~30s. Clips 24-30s stay shortform.
         _GIGAAM_MAX_CHUNK_SEC = 20.0  # с 5s запасом до hard limit ~25s
         duration_sec = len(audio_data_np) / 16000.0
-        use_longform = duration_sec > 24.0
+        use_longform = duration_sec > 30.0
         hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
 
         try:
