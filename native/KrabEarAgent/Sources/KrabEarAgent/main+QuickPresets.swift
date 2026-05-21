@@ -34,13 +34,24 @@ extension AgentAppDelegate {
     }
 
     func applyRecordingPreset(_ presetId: String, source: String = "menu") {
-        do {
-            _ = try callWithRecovery(method: "apply_profile_preset", params: ["profile": presetId])
-            UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
-            refreshStatusItemTitle()
-            rebuildStatusMenu()
-        } catch {
-            logger.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
+        // Offload IPC call off the main thread to prevent >2s AppHang
+        // (AGENT-3 pattern: sync callWithRecovery on main thread blocks runloop).
+        // Wave 188 fix: mirror the Task.detached pattern from main+HotkeyRecording.swift.
+        // UI updates (UserDefaults, refreshStatusItemTitle, rebuildStatusMenu) hop back
+        // to MainActor after the IPC call completes.
+        let ipc = self.ipcClient
+        let log = self.logger
+        Task.detached { [weak self] in
+            do {
+                _ = try await ipc.callAsync(method: "apply_profile_preset", params: ["profile": presetId])
+                await MainActor.run {
+                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
+                    self?.refreshStatusItemTitle()
+                    self?.rebuildStatusMenu()
+                }
+            } catch {
+                log.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
+            }
         }
     }
 
