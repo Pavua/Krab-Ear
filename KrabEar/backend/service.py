@@ -893,9 +893,9 @@ class BackendService:
 
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
-            "start_recording": self._recording_core_svc.handle_start_recording,  # VERIFIED: called from Swift (main)
-            "stop_recording": self._recording_core_svc.handle_stop_recording,  # VERIFIED: called from Swift (main)
-            "get_recording_state": self._recording_core_svc.handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
+            "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
+            "get_recording_state": self._handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
             "start_call_assist": self._call_assist.handle_start,  # VERIFIED: called from Swift (HistoryPanel)
             "stop_call_assist": self._call_assist.handle_stop,  # VERIFIED: called from Swift (HistoryPanel)
             "get_call_assist_state": self._call_assist.handle_get_state,  # VERIFIED: called from Swift (HistoryPanel)
@@ -910,7 +910,7 @@ class BackendService:
             "call_assist_timeline_export": self._call_assist.handle_timeline_export,  # VERIFIED: called from Swift (HistoryPanel)
             "call_assist_timeline_clear": self._call_assist.handle_timeline_clear,  # VERIFIED: called from Swift (HistoryPanel)
             "call_assist_timeline_to_history": self._call_assist.handle_timeline_to_history,  # VERIFIED: called from Swift (HistoryPanel)
-            "list_audio_inputs": self._recording_core_svc.handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
+            "list_audio_inputs": self._handle_list_audio_inputs,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_page": self._history.handle_get_history_page,  # VERIFIED: called from Swift (HistoryPanel)
             "search_history": self._history.handle_search_history,  # VERIFIED: called from Swift (HistoryPanel)
             "fuzzy_search": self._history.handle_fuzzy_search,  # нечёткий поиск по истории транскрипций
@@ -922,11 +922,11 @@ class BackendService:
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "transcribe_paths": self._recording_core_svc.handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
-            "transcribe_paths_async": self._recording_core_svc.handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
-            "get_transcribe_progress": self._recording_core_svc.handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
-            "cancel_transcribe_job": self._recording_core_svc.handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
-            "preview_transcribe_paths": self._recording_core_svc.handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
+            "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
+            "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
+            "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "translate_selection": self._translation.handle_translate_selection,  # Phase 2A: selection-translate workflow
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
@@ -998,7 +998,7 @@ class BackendService:
             "list_app_profiles": self._paste_app_memory.handle_list_app_profiles,  # список сохранённых профилей по приложениям
             "delete_app_profile": self._paste_app_memory.handle_delete_app_profile,  # удалить профиль приложения
             "cleanup_stale_app_profiles": self._paste_app_memory.handle_cleanup_stale_app_profiles,  # удалить устаревшие записи
-            "get_audio_devices": self._recording_core_svc.handle_get_audio_devices,  # список доступных аудиовходов для GUI
+            "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
             "list_summary_profiles": self._history.handle_list_summary_profiles,  # список профилей резюмирования
