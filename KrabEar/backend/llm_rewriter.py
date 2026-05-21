@@ -569,6 +569,37 @@ class LLMRewriter:
             latency_ms = int((time.monotonic() - start) * 1000)
             self._last_latency_ms = latency_ms
 
+        # 5b. LM Studio Metal GPU stream context lost: HTTP 500 with
+        # "Stream(gpu, N) in current thread" in body. This is a transient
+        # Metal/MLX internal error that resolves after a brief pause — retry
+        # once with 2s delay before recording a circuit failure.
+        if response.status_code == 500 and "stream(gpu" in response.text.lower():
+            logger.warning(
+                "LM Studio Stream(gpu) context lost (transient Metal error), "
+                "sleeping 2s and retrying once model=%s base_url=%s",
+                self._model, self._base_url,
+            )
+            time.sleep(2)
+            start = time.monotonic()
+            try:
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                latency_ms = int((time.monotonic() - start) * 1000)
+                self._last_latency_ms = latency_ms
+            except (requests.Timeout, requests.ConnectionError, requests.RequestException):
+                pass
+            if response.status_code == 500 and "stream(gpu" in response.text.lower():
+                self._push_error(
+                    "rewriter.lm_studio_stream_gpu_lost",
+                    "Stream(gpu, N) context persists after retry — Metal GPU stream lost",
+                    severity="warn",
+                )
+
         # 5a. mlx_lm 0.31.3 bundled bug: HTTP 500 with UnboundLocalError on 'token'
         if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
             logger.warning(
@@ -625,6 +656,14 @@ class LLMRewriter:
                 self._push_error(
                     "rewriter.channel_error",
                     f"http_{response.status_code}: {body_preview}",
+                )
+            elif response.status_code == 500 and "stream(gpu" in body_preview.lower():
+                # Metal GPU stream context lost — already retried once in step 5b;
+                # push dedicated code (not rewriter.timeout) so Sentry can dedupe correctly.
+                self._push_error(
+                    "rewriter.lm_studio_stream_gpu_lost",
+                    f"HTTP 500 Stream(gpu) context lost: {body_preview}",
+                    severity="warn",
                 )
             elif response.status_code == 500 and (
                 "<html" in body_preview.lower() or "<!doctype" in body_preview.lower()

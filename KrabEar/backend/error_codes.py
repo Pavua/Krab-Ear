@@ -576,4 +576,22 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 60,
     },
+
+    # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────
+
+    # rewriter.lm_studio_stream_gpu_lost — LM Studio returned HTTP 500 with
+    # "Stream(gpu, N) in current thread" in the JSON error body. This is a
+    # transient Metal/MLX internal error (GPU stream context detached from the
+    # inference thread). The rewriter retries once after a 2s sleep before
+    # recording a circuit failure. Severity=warn (recoverable, circuit breaker
+    # handles escalation). Dedupe 180s — one toast per cluster of 12 hits.
+    # 12 production hits on 2026-05-18 21:41-21:49 during gemma-4-26b-a4b session.
+    "rewriter.lm_studio_stream_gpu_lost": {
+        "user_msg_ru": "LM Studio: потерян Metal GPU stream — повтор через 2s",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 180,
+    },
 }
