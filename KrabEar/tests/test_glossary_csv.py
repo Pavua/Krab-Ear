@@ -9,7 +9,7 @@ KRAB_EAR_ROOT = os.path.join(PROJECT_ROOT, "KrabEar")
 if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 def _make_service_with_glossary(glossary: dict):

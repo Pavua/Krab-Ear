@@ -9,7 +9,7 @@ pyperclip
 flask
 flask-smorest
 flask-sock>=0.7.0
-marshmallow
+marshmallow>=3.18,<5
 pyobjc-framework-Cocoa; sys_platform == "darwin"
 pyobjc-framework-Vision; sys_platform == "darwin"
 websockets>=12.0

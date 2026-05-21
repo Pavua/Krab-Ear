@@ -162,7 +162,6 @@ class SttEmptyTextCallSiteTests(unittest.TestCase):
         # Simulate the guard condition directly by calling _push_error (call site test):
         import numpy as np
         audio = np.zeros(16000 * 3, dtype=np.float32)  # 3 seconds
-        audio_dur = len(audio) / 16000.0  # 3.0s
 
         # Simulate the guard: empty text, not preview, audio > 2s
         raw_text = ""
@@ -219,8 +218,6 @@ class SttEmptyTextCallSiteTests(unittest.TestCase):
         """Even with empty text + long audio, preview mode suppresses the push."""
         engine = _make_engine_stub()
 
-        import numpy as np
-        audio = np.zeros(16000 * 5, dtype=np.float32)  # 5 seconds
         raw_text = ""
         is_preview = True  # preview — should suppress
 
@@ -307,8 +304,6 @@ class MlxOomCallSiteTests(unittest.TestCase):
         """RuntimeError with 'allocate' in message pushes mlx.oom."""
         engine = _make_engine_stub()
 
-        import numpy as np
-        audio = np.zeros(16000, dtype=np.float32)
         oom_err = RuntimeError("Metal: failed to allocate buffer of size 4096MB")
 
         # Simulate the guard in _transcribe_model

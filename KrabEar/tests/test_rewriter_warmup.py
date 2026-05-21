@@ -23,7 +23,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.llm_rewriter import LLMRewriter, CircuitBreaker, CircuitState
+from backend.llm_rewriter import LLMRewriter, CircuitState
 
 
 def _make_rewriter(**kwargs) -> LLMRewriter:
@@ -136,7 +136,6 @@ class TestWarmupRespectsTimeout(unittest.TestCase):
     """warmup_probe() передаёт timeout_sec в HTTP запрос."""
 
     def test_warmup_uses_custom_timeout_sec(self):
-        import requests as req
         rewriter = _make_rewriter(timeout_sec=5.0)
         mock_response = MagicMock()
         mock_response.status_code = 200

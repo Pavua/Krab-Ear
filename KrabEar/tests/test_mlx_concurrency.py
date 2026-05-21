@@ -218,8 +218,6 @@ class MLXLockSmokeCheckAudioLangIdTests(unittest.TestCase):
                 # Verify by checking that _run_detect (the caller) contains 'with mlx_lock'
                 # This is a structural check: the function _detect_with_mlx should only
                 # be called from within a mlx_lock context in _run_detect.
-                context_start = max(0, i - 30)
-                context = "\n".join(lines[context_start : i + 1])
                 # The inference calls are inside _detect_with_mlx, called from _run_detect
                 # under mlx_lock. Verify the file still has that pattern.
                 self.assertIn(

@@ -311,8 +311,6 @@ class TestIPCUnknownMethodChaos(unittest.TestCase):
     @chaos
     def test_ipc_unknown_method_returns_error(self):
         """100 unknown methods in a row — server stays responsive throughout."""
-        from unittest.mock import MagicMock, patch
-
         # We test BackendService.handle_request directly with unknown methods.
         # This avoids needing a running IPC socket for the chaos variant.
         try:
@@ -368,11 +366,11 @@ class TestIPCOversizedRequestHandled(unittest.TestCase):
             # add_history_item should either succeed (writing to disk) or raise
             # a sane exception — but NOT hang or segfault.
             try:
-                item = store.add_history_item(text=huge_text)
+                store.add_history_item(text=huge_text)
                 # If it succeeded, verify it's readable back
                 page, _ = store.get_history_page(cursor=None, limit=10)
                 self.assertGreater(len(page), 0)
-            except (OSError, MemoryError) as exc:
+            except (OSError, MemoryError):
                 # Acceptable: disk-full or OOM raised cleanly
                 pass
             except Exception as exc:
@@ -442,7 +440,7 @@ class TestHistoryItemUnicodeEmojiPreserved(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = _make_store(tmp)
-            item = store.add_history_item(text=exotic)
+            store.add_history_item(text=exotic)
 
             # Read back via get_history_page
             page, _ = store.get_history_page(cursor=None, limit=10)
@@ -594,7 +592,7 @@ class TestEventBusSubscriberExceptionIsolated(unittest.TestCase):
 
         # Simulate a crashing consumer: the queue received the item; consumer crashes
         def crashing_consumer(q):
-            event = q.get_nowait()
+            q.get_nowait()
             raise RuntimeError("consumer exploded intentionally")
 
         bus_crash = EventBus()
@@ -622,7 +620,7 @@ class TestEventBusSubscriberExceptionIsolated(unittest.TestCase):
         from backend.event_bus import _QUEUE_MAXSIZE
         bus = EventBus()
 
-        q_slow = bus.subscribe()
+        _q_slow = bus.subscribe()  # noqa: F841 — subscription creates queue on bus; value unused
         q_fast = bus.subscribe()
 
         # Fill the slow queue to capacity

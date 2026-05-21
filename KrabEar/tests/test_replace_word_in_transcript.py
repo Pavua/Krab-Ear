@@ -36,7 +36,6 @@ class _FakeService:
 
     def _handle_replace_word_in_last_transcript(self, params: dict) -> dict:
         # Импортируем и вызываем реальный метод через bound-method trick.
-        import importlib.util
         # Прямо вызываем логику — метод не зависит от других атрибутов сервиса.
         import re
 
@@ -111,7 +110,7 @@ class ReplaceWordInTranscriptTestCase(unittest.TestCase):
 
     def test_replace_word_boundaries(self) -> None:
         """Граница слова: «кота» НЕ должна быть заменена при замене «кот»."""
-        item_id = self._add_item("Это кота и кот на улице")
+        self._add_item("Это кота и кот на улице")
         result = self.svc._handle_replace_word_in_last_transcript(
             {"old_word": "кот", "new_word": "код"}
         )

@@ -199,9 +199,6 @@ class TestRecommendedModels(unittest.TestCase):
 
     def test_recommended_models_starts_with_qwen3(self):
         """Mock /v1/models endpoint — recommended_models[0] must be qwen3-4b-abliterated."""
-        import requests as _requests
-        import json
-
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
