@@ -71,9 +71,8 @@ from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
 from backend.recorder import AudioRecorder
-from contracts.translation_events import TranslationCompleted, TranslationFailed
 from contracts.registry import EventType
-from contracts.stt_events import SttFailed, SttFinal, SttPartial
+from contracts.stt_events import SttPartial
 from backend.models import DEFAULT_SETTINGS
 from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
@@ -96,7 +95,7 @@ from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
-from backend.text_processing_service import TextProcessingService
+from backend.recording_core_service import RecordingCoreService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -506,6 +505,39 @@ class BackendService:
 
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
+
+        # Wave 331: RecordingCoreService — recording lifecycle + batch transcribe.
+        # Preview state (text + duration) is exposed via a closure so the service
+        # always sees BackendService's current values (written by _preview_loop).
+        def _get_preview_state() -> tuple[str, float]:
+            """Returns (preview_text, preview_duration_sec) under lock."""
+            with self._preview_lock:
+                return self._preview_text, self._preview_duration_sec
+
+        self._recording_core_svc = RecordingCoreService(
+            recorder=self.recorder,
+            transcriber=self.transcriber,
+            translator=self.translator,
+            store=self.store,
+            vocabulary=self.vocabulary,
+            job_tracker=self._job_tracker,
+            settings_svc=self._settings_svc,
+            auto_glossary=self._auto_glossary,
+            context_memory=self._context_memory,
+            semantic_searcher=self._semantic_searcher,
+            auto_backup=self._auto_backup,
+            action_items_extractor=self._action_items_extractor,
+            transcript_writer_cls=TranscriptWriter,
+            clipboard_history=self._clipboard_history,  # shared list object
+            get_preview_state_fn=_get_preview_state,
+            start_preview_fn=self._start_preview_worker,
+            stop_preview_fn=self._stop_preview_worker,
+            reset_preview_fn=self._reset_preview_state,
+            cached_settings_fn=self._cached_settings,
+            get_runtime_setting_fn=self._get_runtime_setting,
+            generate_summary_fn=self._generate_summary,
+            format_text_with_speakers_fn=self._format_text_with_speakers,
+        )
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
@@ -514,6 +546,77 @@ class BackendService:
             self._auto_backup.check_and_backup()
         except Exception:
             pass
+
+    # Wave 331: backward-compat property forwarders for tests / external callers.
+    # Guards on _recording_core_svc existence handle the __init__ bootstrap window
+    # where these properties are set before _recording_core_svc is created.
+
+    @property
+    def _clipboard_history(self) -> list:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            return svc._clipboard_history
+        return self.__dict__.get("_clipboard_history_init", [])
+
+    @_clipboard_history.setter
+    def _clipboard_history(self, value: list) -> None:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc._clipboard_history = value
+        else:
+            self.__dict__["_clipboard_history_init"] = value
+
+    @property
+    def _rt_partial(self) -> Any:
+        svc = self.__dict__.get("_recording_core_svc")
+        return svc._rt_partial if svc is not None else self.__dict__.get("_rt_partial_init")
+
+    @_rt_partial.setter
+    def _rt_partial(self, value: Any) -> None:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc._rt_partial = value
+        else:
+            self.__dict__["_rt_partial_init"] = value
+
+    @property
+    def _rt_session_id(self) -> str:
+        svc = self.__dict__.get("_recording_core_svc")
+        return svc._rt_session_id if svc is not None else self.__dict__.get("_rt_session_id_init", "")
+
+    @_rt_session_id.setter
+    def _rt_session_id(self, value: str) -> None:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc._rt_session_id = value
+        else:
+            self.__dict__["_rt_session_id_init"] = value
+
+    @property
+    def _last_stt_engine(self) -> Any:
+        svc = self.__dict__.get("_recording_core_svc")
+        return svc._last_stt_engine if svc is not None else self.__dict__.get("_last_stt_engine_init")
+
+    @_last_stt_engine.setter
+    def _last_stt_engine(self, value: Any) -> None:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc._last_stt_engine = value
+        else:
+            self.__dict__["_last_stt_engine_init"] = value
+
+    @property
+    def _transcription_counter(self) -> int:
+        svc = self.__dict__.get("_recording_core_svc")
+        return svc._transcription_counter if svc is not None else self.__dict__.get("_transcription_counter_init", 0)
+
+    @_transcription_counter.setter
+    def _transcription_counter(self, value: int) -> None:
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc._transcription_counter = value
+        else:
+            self.__dict__["_transcription_counter_init"] = value
 
         # Диагностика при старте
         from backend.startup_diagnostics import StartupDiagnostics
@@ -746,9 +849,9 @@ class BackendService:
 
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
-            "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
-            "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
-            "get_recording_state": self._handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "start_recording": self._recording_core_svc.handle_start_recording,  # Wave 331: delegated to RecordingCoreService
+            "stop_recording": self._recording_core_svc.handle_stop_recording,  # Wave 331: delegated to RecordingCoreService
+            "get_recording_state": self._recording_core_svc.handle_get_recording_state,  # Wave 331: delegated to RecordingCoreService
             "start_call_assist": self._call_assist.handle_start,  # VERIFIED: called from Swift (HistoryPanel)
             "stop_call_assist": self._call_assist.handle_stop,  # VERIFIED: called from Swift (HistoryPanel)
             "get_call_assist_state": self._call_assist.handle_get_state,  # VERIFIED: called from Swift (HistoryPanel)
@@ -776,10 +879,10 @@ class BackendService:
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
-            "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
-            "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
-            "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
-            "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
+            "transcribe_paths_async": self._recording_core_svc.handle_transcribe_paths_async,  # Wave 331: delegated
+            "get_transcribe_progress": self._recording_core_svc.handle_get_transcribe_progress,  # Wave 331: delegated
+            "cancel_transcribe_job": self._recording_core_svc.handle_cancel_transcribe_job,  # Wave 331: delegated
+            "preview_transcribe_paths": self._recording_core_svc.handle_preview_transcribe_paths,  # Wave 331: delegated
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "translate_selection": self._translation.handle_translate_selection,  # Phase 2A: selection-translate workflow
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
@@ -1221,65 +1324,8 @@ class BackendService:
         }
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        started = self.recorder.start()
-        if not started:
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
-            # Идемпотентный контракт: повторный start не считается ошибкой.
-            return {
-                "status": "already_recording",
-                "is_recording": True,
-                "duration_sec": preview_duration,
-                "preview_text": preview_text,
-            }
-        self._reset_preview_state()
-        settings = self._cached_settings()
-        # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
-        # Fire-and-forget, не блокирует start_recording flow (timeout 1.5 сек).
-        # См. backend/lm_studio_lifecycle.py.
-        try:
-            brain_model = str(settings.get("llm_brain_model", "")).strip()
-            unload_enabled = bool(settings.get("llm_brain_unload_on_recording", True))
-            if brain_model and unload_enabled:
-                from backend.lm_studio_lifecycle import unload_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                unload_model_async(base_url, brain_model)
-        except Exception as exc:
-            logger.debug("LM Studio brain unload hook failed: %s", exc)
-        add_breadcrumb(
-            category="recording",
-            message="started",
-            level="info",
-            data={"quality_profile": str(settings.get("quality_profile", "balanced"))},
-        )
-        if bool(settings.get("realtime_preview_enabled", True)):
-            quality_profile = str(settings.get("quality_profile", "balanced"))
-            self._start_preview_worker(quality_profile=quality_profile)
-        if bool(settings.get("realtime_partial_enabled", True)):
-            import uuid as _uuid
-            self._rt_session_id = _uuid.uuid4().hex
-            _interval = float(settings.get("rt_partial_interval_sec", 3.0))
-            _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
-            _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
-            try:
-                self._rt_partial = RealtimePartialTranscriber(
-                    transcriber=self.transcriber,
-                    recorder=self.recorder,
-                    event_bus=event_bus,
-                    interval_sec=_interval,
-                    buffer_sec=_buffer,
-                )
-                self._rt_partial.start(
-                    session_id=self._rt_session_id,
-                    sample_rate=_sample_rate,
-                )
-            except Exception:
-                logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                self._rt_partial = None
-        return {"status": "recording"}
-
-    @staticmethod
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_start_recording(params)
     def _safe_callback(fn: Callable | None, *args: Any) -> None:
         """Вызывает опциональный callback, подавляя исключения (не должны ломать основной поток)."""
         if fn is not None:
@@ -1300,227 +1346,27 @@ class BackendService:
         silence_guard_enabled: bool = False,
         background_guard_rejected: bool = False,
     ) -> dict[str, Any]:
-        """Helper to build canonical empty_audio response dict."""
-        return {
-            "status": "empty_audio",
-            "duration_sec": duration_sec,
-            "quality_profile": quality_profile,
-            "cleanup_profile": cleanup_profile,
-            "translation_mode": translation_mode,
-            "translate_and_paste": translate_and_paste,
-            "text": "",
-            "original_text": "",
-            "translated_text": "",
-            "translation_status": "not_requested",
-            "history_id": None,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "silence_detected": silence_detected,
-            "silence_guard_enabled": silence_guard_enabled,
-            "background_guard_rejected": background_guard_rejected,
-        }
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._build_empty_audio_response(
+            duration_sec=duration_sec, quality_profile=quality_profile,
+            cleanup_profile=cleanup_profile, translation_mode=translation_mode,
+            translate_and_paste=translate_and_paste, stop_tail_trim_ms=stop_tail_trim_ms,
+            silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled,
+            background_guard_rejected=background_guard_rejected,
+        )
     def _load_stop_recording_settings(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
-        """Читает и нормализует все параметры stop_recording из params + settings."""
-        return {
-            "quality_profile": str(params.get("quality_profile") or settings.get("quality_profile", "balanced")),
-            "cleanup_profile": str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft")),
-            "lang_hint": params.get("lang_hint") or None,
-            "translation_mode": str(params.get("translation_mode") or settings.get("translation_mode", "off")),
-            "translation_style": str(params.get("translation_style") or settings.get("translation_style", "neutral")),
-            "translation_glossary": settings.get("translation_glossary", {}),
-            "translate_and_paste": bool(
-                params.get("translate_and_paste")
-                if "translate_and_paste" in params
-                else settings.get("translate_and_paste", False)
-            ),
-            "network_mode": str(settings.get("network_mode", "offline_default")),
-            "silence_guard_enabled": self._coerce_bool(settings.get("silence_guard_enabled", True), default=True),
-            "silence_rms_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_rms_threshold", 0.0020),
-                default=0.0020, min_value=0.0003, max_value=0.05,
-            ),
-            "silence_peak_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_peak_threshold", 0.0120),
-                default=0.0120, min_value=0.001, max_value=0.2,
-            ),
-            "silence_active_ratio_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_active_ratio_threshold", 0.015),
-                default=0.015, min_value=0.001, max_value=0.30,
-            ),
-            "background_guard_enabled": self._coerce_bool(settings.get("background_guard_enabled", True), default=True),
-            "background_guard_min_peak": self._coerce_bounded(
-                value=settings.get("background_guard_min_peak", 0.025),
-                default=0.025, min_value=0.003, max_value=0.25,
-            ),
-            "background_guard_min_rms": self._coerce_bounded(
-                value=settings.get("background_guard_min_rms", 0.0040),
-                default=0.0040, min_value=0.0008, max_value=0.08,
-            ),
-            "background_guard_uniform_frame_threshold": self._coerce_bounded(
-                value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
-                default=0.0060, min_value=0.001, max_value=0.20,
-            ),
-            "background_guard_max_uniform_active_ratio": self._coerce_bounded(
-                value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
-                default=0.92, min_value=0.40, max_value=0.99,
-            ),
-            "sample_rate": self._coerce_bounded(
-                value=getattr(self.recorder, "sample_rate", 16000),
-                default=16000, min_value=8000, max_value=192000,
-            ),
-        }
-
-    # ------------------------------------------------------------------ #
-    #   _handle_stop_recording — thin orchestrator                        #
-    #   Delegates to 5 phase helpers; each is independently testable.     #
-    # ------------------------------------------------------------------ #
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._load_stop_recording_settings(params, settings)
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Orchestrate the stop-recording pipeline via 5 phase helpers."""
-        settings = self._cached_settings()
-
-        # Phase A: finalize audio capture
-        phase_a = self._stop_recording_phase_a(params, settings)
-        if "early_return" in phase_a:
-            return phase_a["early_return"]
-
-        audio = phase_a["audio"]
-        duration_sec = phase_a["duration_sec"]
-        stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
-        _rt_session_id = phase_a["rt_session_id"]
-        sr = phase_a["sr"]
-
-        # Phase B: audio quality guards (silence + background)
-        phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
-        if "early_return" in phase_b:
-            return phase_b["early_return"]
-
-        silence_detected = phase_b["silence_detected"]
-        background_guard_rejected = phase_b["background_guard_rejected"]
-
-        # Phase C: STT execution
-        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
-        transcribe_payload = phase_c["transcribe_payload"]
-
-        # Phase D: post-processing (text extraction, retry, translation, diarization)
-        phase_d = self._stop_recording_phase_d(
-            transcribe_payload=transcribe_payload,
-            duration_sec=duration_sec,
-            sr=sr,
-            stop_tail_trim_ms=stop_tail_trim_ms,
-            silence_detected=silence_detected,
-            silence_guard_enabled=sr["silence_guard_enabled"],
-            background_guard_rejected=background_guard_rejected,
-        )
-        if "early_return" in phase_d:
-            return phase_d["early_return"]
-
-        # Phase E: history persistence + response assembly
-        return self._stop_recording_phase_e(
-            phase_d=phase_d,
-            sr=sr,
-            duration_sec=duration_sec,
-            stop_tail_trim_ms=stop_tail_trim_ms,
-            silence_detected=silence_detected,
-            silence_guard_enabled=sr["silence_guard_enabled"],
-            background_guard_rejected=background_guard_rejected,
-            rt_session_id=_rt_session_id,
-            settings=settings,
-        )
-
-    # ------------------------------------------------------------------ #
-    #   Phase A — audio capture finalization                              #
-    # ------------------------------------------------------------------ #
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_stop_recording(params)
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
-        """Stop preview worker, stop realtime partial, stop recorder.
-
-        Returns a dict that always contains either:
-          - ``{"early_return": <response dict>}`` — caller should return immediately, OR
-          - keys: audio, duration_sec, stop_tail_trim_ms, rt_session_id, sr
-        """
-        self._stop_preview_worker()
-        rt_session_id = self._rt_session_id
-        if self._rt_partial is not None:
-            try:
-                self._rt_partial.stop()
-            except Exception:
-                logger.exception("Ошибка при остановке RealtimePartialTranscriber")
-            finally:
-                self._rt_partial = None
-
-        stop_tail_trim_ms = self._coerce_bounded(
-            value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
-            default=180,
-            min_value=0,
-            max_value=1200,
-        )
-        stopped = self._stop_recorder_guarded(stop_tail_trim_ms=stop_tail_trim_ms)
-        if stopped is None:
-            # Идемпотентный контракт: повторный stop не считается ошибкой.
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
-            return {
-                "early_return": {
-                    "status": "already_stopped",
-                    "is_recording": False,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                }
-            }
-
-        audio, duration_sec = stopped
-        add_breadcrumb(
-            category="recording",
-            message="stopped",
-            level="info",
-            data={"duration_sec": round(float(duration_sec), 2)},
-        )
-
-        # LM Studio brain pre-load: pre-warm к моменту когда user может открыть VA.
-        # Fire-and-forget, не блокирует stop flow.
-        try:
-            brain_model = str(settings.get("llm_brain_model", "")).strip()
-            preload_enabled = bool(settings.get("llm_brain_preload_on_stop", True))
-            if brain_model and preload_enabled:
-                from backend.lm_studio_lifecycle import load_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                load_model_async(base_url, brain_model)
-        except Exception as exc:
-            logger.debug("LM Studio brain preload hook failed: %s", exc)
-
-        sr = self._load_stop_recording_settings(params, settings)
-
-        if getattr(audio, "size", 0) == 0:
-            return {
-                "early_return": self._build_empty_audio_response(
-                    duration_sec=duration_sec,
-                    quality_profile=sr["quality_profile"],
-                    cleanup_profile=sr["cleanup_profile"],
-                    translation_mode=sr["translation_mode"],
-                    translate_and_paste=sr["translate_and_paste"],
-                    stop_tail_trim_ms=stop_tail_trim_ms,
-                )
-            }
-
-        return {
-            "audio": audio,
-            "duration_sec": duration_sec,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "rt_session_id": rt_session_id,
-            "sr": sr,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase B — audio quality guards                                    #
-    # ------------------------------------------------------------------ #
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._stop_recording_phase_a(params, settings)
     def _stop_recording_phase_b(
         self,
         audio: Any,
@@ -1528,172 +1374,16 @@ class BackendService:
         stop_tail_trim_ms: int,
         sr: dict[str, Any],
     ) -> dict[str, Any]:
-        """Run silence guard and background guard.
-
-        Returns a dict with either ``{"early_return": ...}`` or guard results.
-        """
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-        translation_mode = sr["translation_mode"]
-        translate_and_paste = sr["translate_and_paste"]
-        sample_rate = sr["sample_rate"]
-
-        silence_detected = False
-        if sr["silence_guard_enabled"]:
-            silence_detected = self._looks_like_silence_audio(
-                audio=audio,
-                sample_rate=sample_rate,
-                rms_threshold=sr["silence_rms_threshold"],
-                peak_threshold=sr["silence_peak_threshold"],
-                active_ratio_threshold=sr["silence_active_ratio_threshold"],
-            )
-            if silence_detected:
-                logger.info(
-                    "Silence guard: stop_recording классифицирован как тишина, STT пропущен",
-                    extra={
-                        "duration_sec": round(float(duration_sec), 3),
-                        "rms_threshold": sr["silence_rms_threshold"],
-                        "peak_threshold": sr["silence_peak_threshold"],
-                        "active_ratio_threshold": sr["silence_active_ratio_threshold"],
-                    },
-                )
-                return {
-                    "early_return": self._build_empty_audio_response(
-                        duration_sec=duration_sec,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        translation_mode=translation_mode,
-                        translate_and_paste=translate_and_paste,
-                        stop_tail_trim_ms=stop_tail_trim_ms,
-                        silence_detected=True,
-                        silence_guard_enabled=True,
-                    )
-                }
-
-        background_guard_rejected = False
-        if sr["background_guard_enabled"]:
-            background_guard_rejected = self._looks_like_distant_background_speech(
-                audio=audio,
-                sample_rate=sample_rate,
-                min_peak=sr["background_guard_min_peak"],
-                min_rms=sr["background_guard_min_rms"],
-                uniform_frame_threshold=sr["background_guard_uniform_frame_threshold"],
-                max_uniform_active_ratio=sr["background_guard_max_uniform_active_ratio"],
-            )
-            if background_guard_rejected:
-                logger.info(
-                    "Background guard: stop_recording отклонен как фоновая речь",
-                    extra={
-                        "duration_sec": round(float(duration_sec), 3),
-                        "min_peak": sr["background_guard_min_peak"],
-                        "min_rms": sr["background_guard_min_rms"],
-                        "uniform_frame_threshold": sr["background_guard_uniform_frame_threshold"],
-                        "max_uniform_active_ratio": sr["background_guard_max_uniform_active_ratio"],
-                    },
-                )
-                return {
-                    "early_return": self._build_empty_audio_response(
-                        duration_sec=duration_sec,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        translation_mode=translation_mode,
-                        translate_and_paste=translate_and_paste,
-                        stop_tail_trim_ms=stop_tail_trim_ms,
-                        silence_guard_enabled=sr["silence_guard_enabled"],
-                        background_guard_rejected=True,
-                    )
-                }
-
-        return {
-            "silence_detected": silence_detected,
-            "background_guard_rejected": background_guard_rejected,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase C — STT execution                                           #
-    # ------------------------------------------------------------------ #
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
     def _stop_recording_phase_c(
         self,
         audio: Any,
         duration_sec: float,
         sr: dict[str, Any],
     ) -> dict[str, Any]:
-        """Load vocabulary/context/glossary and run the transcriber.
-
-        Returns ``{"transcribe_payload": <raw transcriber result>}``.
-        """
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-        lang_hint: str | None = sr["lang_hint"]
-
-        # Загружаем пользовательский vocabulary для подсказок Whisper
-        user_vocabulary = self.vocabulary.load() or []
-
-        # Загружаем контекст из последних 10 записей истории и STT hotwords.
-        # Контекст передаётся в AudioEngine для построения initial_prompt Whisper
-        # (точность непрерывной диктовки +10-15%).
-        _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
-        _cached_settings_hw = self._settings_svc.cached_settings()
-        _stt_hotwords_enabled = bool(_cached_settings_hw.get("stt_hotwords_enabled", True))
-        _stt_hotwords: list[str] = (
-            _cached_settings_hw.get("stt_hotwords", []) if _stt_hotwords_enabled else []
-        )
-
-        # Авто-глоссарий из истории: обогащаем initial_prompt именами и терминами.
-        # Результат кэшируется 6 часов; при disabled — пустой список.
-        _auto_glossary_terms: list[str] = []
-        _cached_settings_ag = self._settings_svc.cached_settings()
-        _ag_window_days = int(_cached_settings_ag.get("auto_glossary_window_days", DEFAULT_SETTINGS.get("auto_glossary_window_days", 7)))
-        _ag_top_n = int(_cached_settings_ag.get("auto_glossary_top_n", DEFAULT_SETTINGS.get("auto_glossary_top_n", 30)))
-        if _cached_settings_ag.get("auto_glossary_enabled", DEFAULT_SETTINGS.get("auto_glossary_enabled", True)):
-            try:
-                _auto_glossary_terms = self._auto_glossary.build(
-                    window_days=_ag_window_days, top_n=_ag_top_n
-                )
-            except Exception as _ag_exc:
-                logger.warning("auto_glossary: ошибка при построении глоссария: %s", _ag_exc)
-
-        # Объединяем пользовательские hotwords и авто-глоссарий с дедупликацией.
-        _combined_hotwords: list[str] | None = None
-        if _stt_hotwords or _auto_glossary_terms:
-            _seen_hw: set[str] = set()
-            _combined_hw: list[str] = []
-            for _w in list(_stt_hotwords) + list(_auto_glossary_terms):
-                _w = _w.strip()
-                if _w and _w.lower() not in _seen_hw:
-                    _seen_hw.add(_w.lower())
-                    _combined_hw.append(_w)
-            _combined_hotwords = _combined_hw if _combined_hw else None
-
-        add_breadcrumb(
-            category="transcription",
-            message="transcribe_start",
-            level="info",
-            data={
-                "quality_profile": quality_profile,
-                "audio_len_sec": round(float(duration_sec), 2),
-                "lang_hint": lang_hint or "auto",
-                "auto_glossary_terms": len(_auto_glossary_terms),
-            },
-        )
-
-        transcribe_payload = self.transcriber.transcribe(
-            audio,
-            quality_profile=quality_profile,
-            cleanup_profile=cleanup_profile,
-            lang_hint=lang_hint,
-            extra_vocabulary=user_vocabulary if user_vocabulary else None,
-            history_context=_recent_history if _recent_history else None,
-            stt_hotwords=_combined_hotwords,
-        )
-
-        return {"transcribe_payload": transcribe_payload}
-
-    # ------------------------------------------------------------------ #
-    #   Phase D — post-processing pipeline                                #
-    # ------------------------------------------------------------------ #
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._stop_recording_phase_c(audio, duration_sec, sr)
     def _stop_recording_phase_d(
         self,
         transcribe_payload: Any,
@@ -1704,137 +1394,13 @@ class BackendService:
         silence_guard_enabled: bool,
         background_guard_rejected: bool,
     ) -> dict[str, Any]:
-        """Extract text, apply soft-cleanup retry, translate, diarize.
-
-        Returns either ``{"early_return": ...}`` (empty_text) or a dict with
-        processed text/translation/diarization fields ready for Phase E.
-        """
-        translation_mode = sr["translation_mode"]
-        translation_style = sr["translation_style"]
-        translation_glossary = sr["translation_glossary"]
-        translate_and_paste = sr["translate_and_paste"]
-        network_mode = sr["network_mode"]
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-
-        text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
-        transcription_error = self._extract_transcribed_error(transcribe_payload)
-
-        # Retry с soft cleanup если текст обнулился post-processing'ом, но raw STT
-        # был не пустой и confidence высокий. На длинных записях (>20s, >100 chars
-        # raw) postprocess может ошибочно срабатывать как looping/echo фильтр.
-        # См. backend.log 2026-04-26 18:04:12: STT confidence 0.87, но empty_text
-        # → fallback в preview взял только последние 12s (начало срезалось).
-        if not text and not transcription_error:
-            raw_text = str(self._extract_transcribed_text(transcribe_payload) or "").strip()
-            if len(raw_text) >= 30 and duration_sec >= 8.0:
-                logger.warning(
-                    "Retry transcribe с soft cleanup: raw_text len=%d, duration=%.1fs (post-process drop'нул весь текст)",
-                    len(raw_text), duration_sec,
-                )
-                # Возврат raw text без postprocess фильтров, минимальный cleanup.
-                text = TextUtils.normalize_phrase(raw_text).strip()
-                # Лёгкая нормализация пунктуации/пробелов без drop-условий.
-                text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-                text = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", text)
-                text = re.sub(r"\s+", " ", text).strip()
-                if text:
-                    first_alpha = next((i for i, c in enumerate(text) if c.isalpha()), -1)
-                    if first_alpha >= 0:
-                        text = text[:first_alpha] + text[first_alpha].upper() + text[first_alpha + 1:]
-                    if not re.search(r"[.!?…]$", text):
-                        text = f"{text}."
-
-        if not text:
-            if transcription_error:
-                event_bus.emit_typed(EventType.STT_FAILED, SttFailed(reason=transcription_error, duration_sec=duration_sec))
-            return {
-                "early_return": {
-                    "status": "empty_text",
-                    "duration_sec": duration_sec,
-                    "quality_profile": quality_profile,
-                    "cleanup_profile": cleanup_profile,
-                    "translation_mode": translation_mode,
-                    "translate_and_paste": translate_and_paste,
-                    "text": "",
-                    "original_text": "",
-                    "translated_text": "",
-                    "translation_status": "not_requested",
-                    "history_id": None,
-                    "transcription_error": transcription_error,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                    "silence_detected": silence_detected,
-                    "silence_guard_enabled": silence_guard_enabled,
-                    "background_guard_rejected": background_guard_rejected,
-                }
-            }
-
-        translation = self.translator.translate(
-            text=text,
-            mode=translation_mode,
-            network_mode=network_mode,
-            translation_style=translation_style,
-            glossary=translation_glossary,
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._stop_recording_phase_d(
+            transcribe_payload=transcribe_payload, duration_sec=duration_sec,
+            sr=sr, stop_tail_trim_ms=stop_tail_trim_ms,
+            silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled,
+            background_guard_rejected=background_guard_rejected,
         )
-        translated_text = translation.text.strip() if translation.ok else ""
-        final_text = translated_text if (translate_and_paste and translated_text) else text
-        translation_status = translation.status
-        if translation.ok and translated_text:
-            event_bus.emit_typed(EventType.TRANSLATION_COMPLETED, TranslationCompleted(
-                history_id="",  # будет обновлено ниже после сохранения в store
-                source_text=text,
-                translated_text=translated_text,
-                source_lang=translation.source_lang or "",
-                target_lang=translation.target_lang or "",
-                engine=translation.engine or "",
-                mode=translation.mode or "",
-            ))
-        elif not translation.ok and translation_status not in ("not_requested", "off"):
-            event_bus.emit_typed(EventType.TRANSLATION_FAILED, TranslationFailed(
-                history_id=None,
-                source_text=text,
-                reason=translation.status or "unknown",
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-            ))
-
-        tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
-        # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
-        if tp.get("engine"):
-            self._last_stt_engine = str(tp["engine"])
-        confidence = tp.get("confidence", 0.0)
-        add_breadcrumb(
-            category="transcription",
-            message="transcribe_complete",
-            level="info",
-            data={
-                "confidence": round(float(confidence), 3),
-                "word_count": len(text.split()) if text else 0,
-            },
-        )
-        if confidence < 0.4 and text:
-            logger.warning("Низкая уверенность STT: %.2f — возможна ошибка распознавания", confidence)
-        diarization_data = tp.get("diarization")
-
-        # Format text with speaker labels if diarization produced multiple speakers
-        display_text = self._format_text_with_speakers(final_text, diarization_data)
-
-        return {
-            "text": text,
-            "display_text": display_text,
-            "translated_text": translated_text,
-            "final_text": final_text,
-            "translation": translation,
-            "translation_status": translation_status,
-            "confidence": confidence,
-            "diarization_data": diarization_data,
-            "tp": tp,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase E — history persistence + response assembly                 #
-    # ------------------------------------------------------------------ #
-
     def _stop_recording_phase_e(
         self,
         phase_d: dict[str, Any],
@@ -1847,178 +1413,17 @@ class BackendService:
         rt_session_id: str | None,
         settings: dict[str, Any],
     ) -> dict[str, Any]:
-        """Persist history item, update side-caches, build final result dict."""
-        text = phase_d["text"]
-        display_text = phase_d["display_text"]
-        translated_text = phase_d["translated_text"]
-        final_text = phase_d["final_text"]
-        translation = phase_d["translation"]
-        translation_status = phase_d["translation_status"]
-        confidence = phase_d["confidence"]
-        diarization_data = phase_d["diarization_data"]
-        tp = phase_d["tp"]
-
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc._stop_recording_phase_e(
+            phase_d=phase_d, sr=sr, duration_sec=duration_sec,
+            stop_tail_trim_ms=stop_tail_trim_ms, silence_detected=silence_detected,
+            silence_guard_enabled=silence_guard_enabled,
+            background_guard_rejected=background_guard_rejected,
+            rt_session_id=rt_session_id, settings=settings,
         )
-        self._clipboard_history.append({
-            "text": final_text,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "history_id": item.id,
-        })
-        if len(self._clipboard_history) > 20:
-            self._clipboard_history = self._clipboard_history[-20:]
-
-        # Обновляем контекстную память для улучшения следующего STT
-        try:
-            self._context_memory.update(text)
-        except Exception:
-            pass
-
-        # Авто-индексация для семантического поиска (фоновый поток, opt-in)
-        if self._semantic_searcher.is_enabled and settings.SEMANTIC_SEARCH_AUTO_INDEX:
-            _index_text = display_text or text
-            _index_id = item.id
-            threading.Thread(
-                target=self._semantic_searcher.index_item,
-                args=(_index_id, _index_text),
-                daemon=True,
-                name="semantic-index",
-            ).start()
-
-        # Авто-бэкап каждые 100 транскрибаций
-        self._transcription_counter += 1
-        if self._transcription_counter % 100 == 0:
-            try:
-                self._auto_backup.check_and_backup()
-            except Exception:
-                pass
-
-        result_payload = {
-            "status": "ok",
-            "duration_sec": duration_sec,
-            "quality_profile": sr["quality_profile"],
-            "cleanup_profile": sr["cleanup_profile"],
-            "translation_mode": translation.mode,
-            "translation_style": sr["translation_style"],
-            "translate_and_paste": sr["translate_and_paste"],
-            "translation_status": translation_status,
-            "source_lang": translation.source_lang,
-            "target_lang": translation.target_lang,
-            "translation_engine": translation.engine,
-            "text": display_text,
-            "original_text": text,
-            "translated_text": translated_text,
-            "history_id": item.id,
-            "ts": item.ts,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "silence_detected": silence_detected,
-            "silence_guard_enabled": silence_guard_enabled,
-            "background_guard_rejected": background_guard_rejected,
-        }
-        event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
-            history_id=item.id,
-            text=final_text,
-            duration_sec=duration_sec,
-            language=tp.get("language"),
-            confidence=tp.get("confidence"),
-        ))
-        if rt_session_id:
-            try:
-                event_bus.emit(
-                    "realtime.final_transcript",
-                    {
-                        "session_id": rt_session_id,
-                        "text": final_text,
-                        "is_partial": False,
-                        "ts": time.time(),
-                    },
-                )
-            except Exception:
-                logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
-
-        # Автосохранение транскрибации в .md файл
-        if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
-            try:
-                transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                item_dict = {
-                    "text": display_text,
-                    "ts": item.ts,
-                    "audio_duration_sec": duration_sec,
-                    "confidence": tp.get("confidence"),
-                    "translated_text": translated_text,
-                    "translation_status": translation_status,
-                    "diarization": diarization_data,
-                }
-                saved_path = TranscriptWriter.write_transcript(item_dict, transcripts_dir)
-                result_payload["transcript_file"] = str(saved_path)
-            except Exception:
-                logger.exception("Не удалось автосохранить транскрибацию в .md")
-
-        # Авто-извлечение задач/решений/вопросов (opt-in, только для длинных записей)
-        if self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
-            min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
-            if self._action_items_extractor is not None and (duration_sec or 0.0) >= min_dur:
-                try:
-                    lang = str(tp.get("language", "ru") or "ru").lower()[:2]
-                    ai_result = self._action_items_extractor.extract(display_text, language=lang)
-                    if ai_result.ok:
-                        self.store.update_history_item_action_items(
-                            item_id=item.id,
-                            action_items=[ai.to_dict() for ai in ai_result.action_items],
-                            decisions=ai_result.decisions,
-                            questions=ai_result.questions,
-                        )
-                        result_payload["action_items_extracted"] = True
-                        result_payload["action_items_count"] = len(ai_result.action_items)
-                except Exception:
-                    logger.exception("Авто-извлечение action items провалилось для %s", item.id)
-
-        return result_payload
-
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
-        with self._preview_lock:
-            preview_text = self._preview_text
-            preview_duration = self._preview_duration_sec
-        audio_rms = (
-            self.recorder.snapshot_rms()
-            if hasattr(self.recorder, "snapshot_rms")
-            else 0.0
-        )
-        active_session = self._session_tracker._active_session
-        session_id = (active_session.get("session_id", "__live__") if active_session else "__live__")
-        elapsed_sec = 0.0
-        if hasattr(self.recorder, "get_duration_sec"):
-            try:
-                elapsed_sec = float(self.recorder.get_duration_sec() or 0.0)
-            except Exception:
-                elapsed_sec = preview_duration or 0.0
-        return {
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
-            "duration_sec": preview_duration,
-            "preview_text": preview_text,
-            "audio_rms": audio_rms,
-            "elapsed_sec": elapsed_sec,
-            "session_id": session_id,
-        }
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_get_recording_state(params)
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
 
@@ -3505,256 +2910,17 @@ class BackendService:
         }
 
     def _handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу.
-
-        Запускает фоновый worker-поток, прогресс доступен через
-        `get_transcribe_progress(job_id)`. Отмена — `cancel_transcribe_job`.
-        Полный контракт — см. /tmp/krab-ear-async/API_CONTRACT.md.
-        """
-        raw_paths = params.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raise RuntimeError("Параметр paths должен быть массивом")
-        # Валидируем/предсчитываем список аудио-путей заранее, чтобы
-        # total_files в прогрессе соответствовал реально обрабатываемым файлам.
-        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
-        allowed_roots = [
-            r.resolve()
-            for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
-        ]
-        selected: list[str] = []
-        for p in selected_raw:
-            resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
-                selected.append(str(resolved))
-        try:
-            audio_paths = self._collect_audio_paths(selected) if selected else []
-        except Exception:
-            audio_paths = []
-        total_files = len(audio_paths)
-
-        job_id = self._job_tracker.create_job(total_files=total_files)
-
-        # Копия параметров (params mutable — защищаемся от побочных мутаций).
-        job_params = dict(params)
-
-        def _emit_status(
-            op: str,
-            stage: str = "",
-            progress: float | None = None,
-            current_file: str | None = None,
-            file_index: int | None = None,
-        ) -> None:
-            payload: dict[str, Any] = {
-                "op": op,
-                "stage": stage,
-                "total_files": total_files,
-                "ts": time.time(),
-            }
-            if progress is not None:
-                payload["progress"] = progress
-            if current_file is not None:
-                payload["current_file"] = current_file
-            if file_index is not None:
-                payload["file_index"] = file_index
-            event_bus.emit("app.status", payload)
-
-        def _on_file_start(index: int, audio_path: str) -> None:
-            self._job_tracker.update(
-                job_id,
-                status="running",
-                current_file=Path(audio_path).name,
-                current_stage="idle",
-                file_index=index + 1,
-            )
-            _emit_status(
-                "transcribe_job",
-                stage="idle",
-                progress=index / total_files if total_files else 0.0,
-                current_file=Path(audio_path).name,
-                file_index=index + 1,
-            )
-
-        def _on_file_done(
-            index: int,
-            item: dict[str, Any] | None,
-            err: str | None,
-        ) -> None:
-            state = self._job_tracker.get(job_id) or {}
-            new_items = list(state.get("items") or [])
-            new_errors = list(state.get("errors") or [])
-            if item is not None:
-                new_items.append(item)
-            if err is not None:
-                new_errors.append(err)
-            self._job_tracker.update(
-                job_id,
-                items=new_items,
-                errors=new_errors,
-                processed=len(new_items),
-            )
-            _emit_status(
-                "transcribe_job",
-                stage="idle",
-                progress=(index + 1) / total_files if total_files else 1.0,
-                file_index=index + 1,
-            )
-
-        def _progress_callback(stage: str) -> None:
-            self._job_tracker.update(job_id, current_stage=str(stage))
-            state = self._job_tracker.get(job_id) or {}
-            fi = state.get("file_index") or 0
-            _emit_status(
-                "transcribe_job",
-                stage=str(stage),
-                progress=max(0, fi - 1) / total_files if total_files else 0.0,
-                file_index=fi,
-            )
-
-        def _cancel_check() -> bool:
-            state = self._job_tracker.get(job_id)
-            return bool(state and state.get("cancel_requested"))
-
-        def _worker() -> None:
-            try:
-                self._job_tracker.update(job_id, status="running")
-                _emit_status("transcribe_job", stage="started", progress=0.0)
-                result = self._transcribe_paths_core(
-                    job_params,
-                    progress_callback=_progress_callback,
-                    cancel_check=_cancel_check,
-                    on_file_start=_on_file_start,
-                    on_file_done=_on_file_done,
-                )
-                # Финальное состояние: cancelled | done.
-                state = self._job_tracker.get(job_id) or {}
-                if state.get("cancel_requested"):
-                    _emit_status("idle", stage="", progress=1.0)
-                    self._job_tracker.update(
-                        job_id,
-                        status="cancelled",
-                        items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
-                        processed=len(result.get("items") or []),
-                        current_stage="idle",
-                        finished_at=time.monotonic(),
-                    )
-                else:
-                    _emit_status("idle", stage="", progress=1.0)
-                    self._job_tracker.mark_done(
-                        job_id,
-                        items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
-                    )
-            except Exception as exc:
-                logger.exception("Async transcribe job %s упал", job_id)
-                _emit_status("idle", stage="", progress=1.0)
-                self._job_tracker.mark_failed(job_id, str(exc))
-
-        thread = threading.Thread(
-            target=_worker,
-            name=f"transcribe-{job_id}",
-            daemon=True,
-        )
-        thread.start()
-        return {"job_id": job_id}
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_transcribe_paths_async(params)
     def _handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущее состояние async-job'а.
-
-        См. схему ответа в API_CONTRACT.md. Поле `items` заполнено только
-        после `status == "done"`, но private-накопление ведётся по мере обработки.
-        """
-        job_id = str(params.get("job_id") or "").strip()
-        if not job_id:
-            raise RuntimeError("Параметр job_id обязателен")
-        state = self._job_tracker.get(job_id)
-        if state is None:
-            raise RuntimeError(f"Неизвестный job_id: {job_id}")
-
-        status = str(state.get("status") or "queued")
-        items_raw = list(state.get("items") or [])
-        # Контракт: items отдаём только когда job завершён.
-        items_out = items_raw if status in ("done", "failed", "cancelled") else []
-
-        # ETA: грубая оценка при наличии audio_duration_sec у последнего item'а
-        # (при отсутствии движковой метрики). 10× реалтайм для max-профиля.
-        elapsed_sec = float(state.get("elapsed_sec") or 0.0)
-        eta_sec: float | None = None
-        total_audio = 0.0
-        for it in items_raw:
-            dur = it.get("audio_duration_sec") if isinstance(it, dict) else None
-            if isinstance(dur, (int, float)):
-                total_audio += float(dur)
-        if total_audio > 0:
-            eta_sec = max(0.0, total_audio * 10.0 - elapsed_sec)
-
-        return {
-            "status": status,
-            "current_file": str(state.get("current_file") or ""),
-            "current_stage": str(state.get("current_stage") or "idle"),
-            "file_index": int(state.get("file_index") or 0),
-            "total_files": int(state.get("total_files") or 0),
-            "elapsed_sec": round(elapsed_sec, 3),
-            "eta_sec": round(eta_sec, 3) if eta_sec is not None else None,
-            "processed": int(state.get("processed") or 0),
-            "errors": list(state.get("errors") or []),
-            "items": items_out,
-        }
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_get_transcribe_progress(params)
     def _handle_cancel_transcribe_job(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сигнализирует воркеру об отмене job'а.
-
-        Статус реально меняется на 'cancelled' после завершения текущего файла —
-        мид-файл прерываний не делаем, чтобы STT не оставался в inconsistent state.
-        """
-        job_id = str(params.get("job_id") or "").strip()
-        if not job_id:
-            raise RuntimeError("Параметр job_id обязателен")
-        cancelled = self._job_tracker.cancel(job_id)
-        return {"cancelled": bool(cancelled)}
-
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_cancel_transcribe_job(params)
     def _handle_preview_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Быстрый предпросмотр импорта: считает аудиофайлы без транскрибации."""
-        raw_paths = params.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raise RuntimeError("Параметр paths должен быть массивом")
-
-        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
-        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
-        selected: list[str] = []
-        for p in selected_raw:
-            resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
-                selected.append(str(resolved))
-            else:
-                return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
-        audio_paths = self._collect_audio_paths(selected)
-        sample_limit = int(params.get("sample_limit", 5) or 5)
-        safe_sample_limit = max(1, min(sample_limit, 50))
-        by_ext: dict[str, int] = {}
-        total_bytes = 0
-        # Группировка по родительской папке для отображения структуры.
-        by_folder: dict[str, int] = {}
-        for audio_path in audio_paths:
-            suffix = Path(audio_path).suffix.lower() or "<none>"
-            by_ext[suffix] = by_ext.get(suffix, 0) + 1
-            folder = str(Path(audio_path).parent)
-            by_folder[folder] = by_folder.get(folder, 0) + 1
-            try:
-                total_bytes += Path(audio_path).stat().st_size
-            except FileNotFoundError:
-                continue
-        return {
-            "input_count": len(selected),
-            "audio_count": len(audio_paths),
-            "folder_count": len(by_folder),
-            "by_folder": by_folder,
-            "sample": audio_paths[:safe_sample_limit],
-            "by_ext": by_ext,
-            "total_bytes": total_bytes,
-        }
-
-    @staticmethod
+        # Wave 331: delegated to RecordingCoreService
+        return self._recording_core_svc.handle_preview_transcribe_paths(params)
     def _collect_audio_paths(paths: list[str]) -> list[str]:
         audio_ext = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".m4b", ".aif", ".aiff"}
         result: list[str] = []
