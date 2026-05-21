@@ -849,9 +849,9 @@ class BackendService:
 
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
-            "start_recording": self._recording_core_svc.handle_start_recording,  # Wave 331: delegated to RecordingCoreService
-            "stop_recording": self._recording_core_svc.handle_stop_recording,  # Wave 331: delegated to RecordingCoreService
-            "get_recording_state": self._recording_core_svc.handle_get_recording_state,  # Wave 331: delegated to RecordingCoreService
+            "start_recording": self._handle_start_recording,  # Wave 331: delegated to RecordingCoreService
+            "stop_recording": self._handle_stop_recording,  # Wave 331: delegated to RecordingCoreService
+            "get_recording_state": self._handle_get_recording_state,  # Wave 331: delegated to RecordingCoreService
             "start_call_assist": self._call_assist.handle_start,  # VERIFIED: called from Swift (HistoryPanel)
             "stop_call_assist": self._call_assist.handle_stop,  # VERIFIED: called from Swift (HistoryPanel)
             "get_call_assist_state": self._call_assist.handle_get_state,  # VERIFIED: called from Swift (HistoryPanel)
@@ -879,10 +879,10 @@ class BackendService:
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
             "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
-            "transcribe_paths_async": self._recording_core_svc.handle_transcribe_paths_async,  # Wave 331: delegated
-            "get_transcribe_progress": self._recording_core_svc.handle_get_transcribe_progress,  # Wave 331: delegated
-            "cancel_transcribe_job": self._recording_core_svc.handle_cancel_transcribe_job,  # Wave 331: delegated
-            "preview_transcribe_paths": self._recording_core_svc.handle_preview_transcribe_paths,  # Wave 331: delegated
+            "transcribe_paths_async": self._handle_transcribe_paths_async,  # Wave 331: delegated
+            "get_transcribe_progress": self._handle_get_transcribe_progress,  # Wave 331: delegated
+            "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # Wave 331: delegated
+            "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # Wave 331: delegated
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "translate_selection": self._translation.handle_translate_selection,  # Phase 2A: selection-translate workflow
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
@@ -1326,6 +1326,7 @@ class BackendService:
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_start_recording(params)
+
     def _safe_callback(fn: Callable | None, *args: Any) -> None:
         """Вызывает опциональный callback, подавляя исключения (не должны ломать основной поток)."""
         if fn is not None:
@@ -1359,14 +1360,17 @@ class BackendService:
     ) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc._load_stop_recording_settings(params, settings)
+
     def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_stop_recording(params)
+
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc._stop_recording_phase_a(params, settings)
+
     def _stop_recording_phase_b(
         self,
         audio: Any,
@@ -1376,6 +1380,7 @@ class BackendService:
     ) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
+
     def _stop_recording_phase_c(
         self,
         audio: Any,
@@ -1384,6 +1389,7 @@ class BackendService:
     ) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc._stop_recording_phase_c(audio, duration_sec, sr)
+
     def _stop_recording_phase_d(
         self,
         transcribe_payload: Any,
@@ -1401,6 +1407,7 @@ class BackendService:
             silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled,
             background_guard_rejected=background_guard_rejected,
         )
+
     def _stop_recording_phase_e(
         self,
         phase_d: dict[str, Any],
@@ -1421,9 +1428,11 @@ class BackendService:
             background_guard_rejected=background_guard_rejected,
             rt_session_id=rt_session_id, settings=settings,
         )
+
     def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_get_recording_state(params)
+
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
 
@@ -2912,15 +2921,19 @@ class BackendService:
     def _handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_transcribe_paths_async(params)
+
     def _handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_get_transcribe_progress(params)
+
     def _handle_cancel_transcribe_job(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_cancel_transcribe_job(params)
+
     def _handle_preview_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
         # Wave 331: delegated to RecordingCoreService
         return self._recording_core_svc.handle_preview_transcribe_paths(params)
+
     def _collect_audio_paths(paths: list[str]) -> list[str]:
         audio_ext = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".m4b", ".aif", ".aiff"}
         result: list[str] = []
