@@ -914,7 +914,7 @@ class BackendService:
             "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
             "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
-            "score_transcription": self._text_processing_svc.handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
+            "score_transcription": self._handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
