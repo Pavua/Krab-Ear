@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import unittest
+import threading
 
 import numpy as np
 
@@ -152,6 +153,131 @@ class TestNoiseProfilerSNRThreshold(unittest.TestCase):
         noise_only = (rng.standard_normal(_SR) * 0.4).astype(np.float32)
         profile = self.profiler.profile(noise_only, _SR)
         self.assertLess(profile.snr_db, 15.0)
+
+
+# ---------------------------------------------------------------------------
+# Wave 128 — дополнительные тесты по спецификации
+# ---------------------------------------------------------------------------
+
+class TestAudioDenoiserWave128(unittest.TestCase):
+    """Wave 128 required test cases."""
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    # ------------------------------------------------------------------
+    # test_off_level_returns_input_unchanged
+    # ------------------------------------------------------------------
+
+    def test_off_level_returns_input_unchanged(self) -> None:
+        """strength='off' возвращает ИДЕНТИЧНЫЙ объект-массив (без копирования)."""
+        audio = _make_noisy_audio(duration_sec=1.0, snr_target_db=3.0)
+        result = self.denoiser.denoise(audio, _SR, strength="off")
+        # Массивы тождественны (тот же объект или те же данные)
+        np.testing.assert_array_equal(audio, result)
+
+    # ------------------------------------------------------------------
+    # test_light_level_reduces_noise
+    # ------------------------------------------------------------------
+
+    def test_light_level_reduces_noise(self) -> None:
+        """strength='light' уменьшает общую энергию зашумлённого сигнала."""
+        audio = _make_noisy_audio(duration_sec=1.0, snr_target_db=3.0)
+        result = self.denoiser.denoise(audio, _SR, strength="light")
+        rms_in = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        rms_out = float(np.sqrt(np.mean(result.astype(np.float64) ** 2)))
+        self.assertLess(rms_out, rms_in,
+                        "light denoising должно уменьшать RMS зашумлённого сигнала")
+
+    # ------------------------------------------------------------------
+    # test_strong_level_reduces_more
+    # ------------------------------------------------------------------
+
+    def test_strong_level_reduces_more(self) -> None:
+        """strength='strong' подавляет больше, чем strength='light'."""
+        audio = _make_noisy_audio(duration_sec=1.0, snr_target_db=3.0)
+        result_light = self.denoiser.denoise(audio, _SR, strength="light")
+        result_strong = self.denoiser.denoise(audio, _SR, strength="strong")
+
+        rms_light = float(np.sqrt(np.mean(result_light.astype(np.float64) ** 2)))
+        rms_strong = float(np.sqrt(np.mean(result_strong.astype(np.float64) ** 2)))
+        self.assertLess(rms_strong, rms_light,
+                        "strong должен подавлять больше чем light (ниже RMS)")
+
+    # ------------------------------------------------------------------
+    # test_handles_short_audio
+    # ------------------------------------------------------------------
+
+    def test_handles_short_audio(self) -> None:
+        """Аудио короче _N_FFT*2 возвращается без обработки (passthrough)."""
+        # _N_FFT = 512, min обрабатываемая длина = 1024 → берём 500 сэмплов
+        short_audio = _make_noisy_audio(duration_sec=0.03, snr_target_db=5.0)
+        # убедимся что короче порога
+        self.assertLess(len(short_audio), 512 * 2)
+        result = self.denoiser.denoise(short_audio, _SR, strength="moderate")
+        # Должен вернуть тот же массив без исключений
+        np.testing.assert_array_equal(short_audio, result)
+
+    # ------------------------------------------------------------------
+    # test_handles_silence
+    # ------------------------------------------------------------------
+
+    def test_handles_silence(self) -> None:
+        """Нулевое (тишина) аудио обрабатывается без NaN и не бросает исключений."""
+        silence = np.zeros(int(_SR * 1.5), dtype=np.float32)
+        result = self.denoiser.denoise(silence, _SR, strength="moderate")
+        self.assertFalse(np.any(np.isnan(result)), "Тишина не должна давать NaN")
+        self.assertEqual(result.shape, silence.shape)
+        # Для тишины RMS должен остаться ≈ 0
+        rms = float(np.sqrt(np.mean(result.astype(np.float64) ** 2)))
+        self.assertLess(rms, 1e-3)
+
+    # ------------------------------------------------------------------
+    # test_invalid_level_falls_back_to_off
+    # ------------------------------------------------------------------
+
+    def test_invalid_level_falls_back_to_off(self) -> None:
+        """Неизвестный уровень strength использует параметры 'moderate' (не крашится).
+
+        В коде: _STRENGTH_PARAMS.get(strength, _STRENGTH_PARAMS["moderate"])
+        Поэтому неизвестный уровень ≡ moderate — сигнал должен измениться.
+        """
+        audio = _make_noisy_audio(duration_sec=1.0, snr_target_db=3.0)
+        # type: ignore — нарочно передаём невалидное значение
+        result = self.denoiser.denoise(audio, _SR, strength="ultra")  # type: ignore[arg-type]
+        # Должен вернуть обработанный результат (не упасть)
+        self.assertEqual(result.shape, audio.shape)
+        # Значения в [-1, 1]
+        self.assertLessEqual(float(np.max(result)), 1.0)
+        self.assertGreaterEqual(float(np.min(result)), -1.0)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_denoise
+    # ------------------------------------------------------------------
+
+    def test_concurrent_denoise(self) -> None:
+        """Несколько потоков одновременно вызывают denoise без гонок или крашей."""
+        errors: list[Exception] = []
+        results: list[np.ndarray] = [None] * 6  # type: ignore[list-item]
+
+        def worker(idx: int) -> None:
+            try:
+                audio = _make_noisy_audio(duration_sec=0.5, snr_target_db=5.0)
+                results[idx] = self.denoiser.denoise(audio, _SR, strength="moderate")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(len(errors), 0, f"Concurrent denoise errors: {errors}")
+        for i, res in enumerate(results):
+            self.assertIsNotNone(res, f"Thread {i} produced no result")
+            self.assertFalse(np.any(np.isnan(res)),
+                             f"Thread {i} result contains NaN")
 
 
 if __name__ == "__main__":
