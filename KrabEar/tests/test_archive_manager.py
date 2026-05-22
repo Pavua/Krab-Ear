@@ -6,7 +6,9 @@ from backend.archive_manager import ArchiveManager, ArchiveResult
 import json
 import sys
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -376,6 +378,148 @@ class ArchiveManagerPersistenceTestCase(unittest.TestCase):
         result = mgr.archive_items(item_ids=["path-check"])
         expected = str(Path(self._tmpdir) / "archive" / "archive.ndjson")
         self.assertEqual(result.archive_path, expected)
+
+
+class ArchiveManagerWave138TestCase(unittest.TestCase):
+    """Wave 138 — дополнительные тесты по спецификации задачи."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = ArchiveManager(store=self._store)
+
+    # ------------------------------------------------------------------
+    # test_archive_items_older_than_days
+    # ArchiveManager не имеет встроенного date-фильтра, поэтому тест
+    # проверяет ручной отбор записей по ts и передачу в archive_items.
+    # ------------------------------------------------------------------
+
+    def test_archive_items_older_than_days(self) -> None:
+        """Записи старше N дней архивируются, остальные — нет."""
+        # old item: ts 100 дней назад
+        from datetime import timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        new_ts = datetime.now(timezone.utc).isoformat()
+
+        self._store.add_fake_item("old-item", "Старая запись", ts=old_ts)
+        self._store.add_fake_item("new-item", "Новая запись", ts=new_ts)
+
+        # Архивируем только старую запись
+        result = self._mgr.archive_items(item_ids=["old-item"])
+        self.assertEqual(result.archived_count, 1)
+
+        archived = self._mgr.list_archived()
+        ids = {item["id"] for item in archived}
+        self.assertIn("old-item", ids)
+        self.assertNotIn("new-item", ids)
+
+    def test_recent_items_kept_in_main(self) -> None:
+        """Новые записи остаются в активной истории после архивирования старых."""
+        from datetime import timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+
+        self._store.add_fake_item("keep-1", "Оставить 1")
+        self._store.add_fake_item("keep-2", "Оставить 2")
+        self._store.add_fake_item("archive-1", "Архивировать", ts=old_ts)
+
+        self._mgr.archive_items(item_ids=["archive-1"])
+
+        # Новые записи не были затронуты
+        self.assertNotIn("keep-1", self._store._deleted)
+        self.assertNotIn("keep-2", self._store._deleted)
+        # Старая запись удалена из активного хранилища
+        self.assertIn("archive-1", self._store._deleted)
+
+    def test_restore_from_archive(self) -> None:
+        """Запись восстанавливается из архива и доступна через store."""
+        self._store.add_fake_item("restore-me", "Восстановить из архива")
+        self._mgr.archive_items(item_ids=["restore-me"])
+
+        # Убеждаемся, что запись в архиве
+        archived = self._mgr.list_archived()
+        self.assertTrue(any(item["id"] == "restore-me" for item in archived))
+
+        # Восстанавливаем
+        result = self._mgr.unarchive_items(item_ids=["restore-me"])
+        self.assertEqual(result["unarchived_count"], 1)
+        self.assertEqual(result["not_found"], [])
+
+        # После восстановления запись удалена из архива
+        archived_after = self._mgr.list_archived()
+        self.assertFalse(any(item["id"] == "restore-me" for item in archived_after))
+
+        # store.add_history_item был вызван
+        self.assertEqual(len(self._store._added), 1)
+
+    def test_unicode_text_preserved(self) -> None:
+        """Юникод (кириллица, CJK, emoji) корректно сохраняется и читается из архива."""
+        unicode_text = "Привет мир 你好世界 🎉 ñoño"
+        self._store.add_fake_item("uni-1", unicode_text)
+        self._mgr.archive_items(item_ids=["uni-1"])
+
+        archived = self._mgr.list_archived()
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(archived[0]["text"], unicode_text)
+
+        # Также проверяем сырой файл
+        archive_file = Path(self._tmpdir) / "archive" / "archive.ndjson"
+        raw = archive_file.read_text(encoding="utf-8")
+        self.assertIn("Привет мир", raw)
+        self.assertIn("你好世界", raw)
+        self.assertIn("🎉", raw)
+
+    def test_concurrent_archive_safe(self) -> None:
+        """Параллельное архивирование разных записей не теряет данные."""
+        num_items = 20
+        for i in range(num_items):
+            self._store.add_fake_item(f"conc-{i}", f"Параллельная запись {i}")
+
+        errors: list[Exception] = []
+
+        def archive_one(item_id: str) -> None:
+            try:
+                self._mgr.archive_items(item_ids=[item_id])
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=archive_one, args=(f"conc-{i}",))
+            for i in range(num_items)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(errors, [], f"Exceptions during concurrent archive: {errors}")
+        # Все записи должны быть заархивированы
+        archived = self._mgr.list_archived(limit=500)
+        self.assertEqual(len(archived), num_items)
+
+    def test_handles_corrupted_archive(self) -> None:
+        """Повреждённые строки в archive.ndjson пропускаются без исключения."""
+        archive_file = Path(self._tmpdir) / "archive" / "archive.ndjson"
+
+        # Записываем валидную запись + мусор + ещё одну валидную
+        valid1 = json.dumps({"id": "good-1", "text": "Хорошая 1", "archived_at": "2026-01-01T10:00:00"})
+        valid2 = json.dumps({"id": "good-2", "text": "Хорошая 2", "archived_at": "2026-01-02T10:00:00"})
+        corrupt = "{не валидный json"
+        archive_file.write_text(
+            valid1 + "\n" + corrupt + "\n" + valid2 + "\n",
+            encoding="utf-8",
+        )
+
+        # Чтение не должно падать
+        archived = self._mgr.list_archived()
+        # Две валидные строки прочитаны
+        self.assertEqual(len(archived), 2)
+        ids = {item["id"] for item in archived}
+        self.assertIn("good-1", ids)
+        self.assertIn("good-2", ids)
+
+        # Статистика тоже работает корректно
+        stats = self._mgr.get_archive_stats()
+        self.assertEqual(stats["total_archived"], 2)
 
 
 if __name__ == "__main__":
