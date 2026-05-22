@@ -10,6 +10,7 @@ import importlib.util
 import json
 import logging
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -52,6 +53,7 @@ _STATUS_DISCOVERED = "discovered"
 _STATUS_LOADED = "loaded"
 _STATUS_ERROR = "error"
 _STATUS_DISABLED = "disabled"
+_STATUS_UNLOADED = "unloaded"
 
 # Имена поддерживаемых хуков.
 HOOK_ON_TRANSCRIBE = "on_transcribe"
@@ -69,12 +71,14 @@ class PluginManager:
         self._discovered: dict[str, PluginInfo] = {}
         # Загруженные экземпляры плагинов.
         self._loaded: dict[str, Plugin] = {}
-        # Статусы (discovered / loaded / error / disabled).
+        # Статусы (discovered / loaded / error / disabled / unloaded).
         self._statuses: dict[str, str] = {}
         # Тексты ошибок загрузки.
         self._errors: dict[str, str] = {}
         # Отключённые вручную плагины.
         self._disabled: set[str] = set()
+        # Защита от конкурентных load/unload/disable.
+        self._lock: threading.Lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Обнаружение
@@ -296,6 +300,9 @@ class PluginManager:
     def disable_plugin(self, name: str) -> bool:
         """Отключает плагин (не выгружает из памяти, но хуки не вызываются).
 
+        Плагин остаётся в ``_loaded`` и может быть быстро включён снова через
+        :meth:`enable_plugin` без повторной загрузки модуля.
+
         Returns:
             True если плагин был включён и теперь отключён, False если уже был отключён.
 
@@ -309,6 +316,55 @@ class PluginManager:
         self._disabled.add(name)
         self._statuses[name] = _STATUS_DISABLED
         logger.info("Плагин '%s' отключён", name)
+        return True
+
+    def unload_plugin(self, name: str) -> bool:
+        """Полностью выгружает плагин, освобождая ресурсы.
+
+        В отличие от :meth:`disable_plugin`, которое лишь скрывает плагин от
+        диспатчера событий, этот метод:
+
+        1. Вызывает ``plugin.on_unload()`` (если хук определён) для
+           корректного завершения (закрытие файлов, потоков и т.д.).
+        2. Удаляет экземпляр из ``_loaded`` — плагин перестаёт занимать память.
+        3. Переводит статус в ``"unloaded"``.
+
+        Чтобы использовать плагин снова, нужно вызвать :meth:`load_plugin`.
+
+        Args:
+            name: имя плагина.
+
+        Returns:
+            True если плагин был загружен и успешно выгружен.
+            False если плагин не был загружен (не найден в ``_loaded``).
+        """
+        with self._lock:
+            if name not in self._loaded:
+                return False
+            plugin = self._loaded[name]
+
+        # Вызываем on_unload() вне блокировки, чтобы не удерживать lock
+        # во время потенциально долгой очистки ресурсов.
+        on_unload = getattr(plugin, "on_unload", None)
+        if callable(on_unload):
+            try:
+                on_unload()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Ошибка в on_unload плагина '%s': %s — ресурс будет выгружен принудительно",
+                    name,
+                    exc,
+                )
+
+        with self._lock:
+            self._loaded.pop(name, None)
+            self._disabled.discard(name)
+            if name in self._discovered:
+                self._statuses[name] = _STATUS_UNLOADED
+            else:
+                self._statuses.pop(name, None)
+
+        logger.info("Плагин '%s' выгружен", name)
         return True
 
     # ------------------------------------------------------------------
@@ -359,3 +415,27 @@ class PluginManager:
         if not name:
             raise ValueError("Параметр 'name' обязателен")
         return self.get_plugin_info(name)
+
+    def handle_unload_plugin(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC-обработчик unload_plugin — полная выгрузка плагина из памяти.
+
+        Вызывает ``on_unload()`` хук плагина (если определён) и удаляет
+        экземпляр из реестра. Для повторного использования плагина нужен
+        вызов ``load_plugin``.
+
+        Params:
+            name (str): имя плагина.
+
+        Returns:
+            ``{"unloaded": true, "name": "<name>"}`` при успехе.
+            ``{"unloaded": false, "name": "<name>", "reason": "not_loaded"}``
+            если плагин не был загружен.
+        """
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен")
+        unloaded = self.unload_plugin(name)
+        result: dict[str, Any] = {"unloaded": unloaded, "name": name}
+        if not unloaded:
+            result["reason"] = "not_loaded"
+        return result
