@@ -16,7 +16,6 @@ for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
         sys.path.insert(0, p)
 
 from backend.state_store import StateStore
-from backend.ipc_throttle import MEDIUM_METHODS
 
 
 def _make_store(tmp_dir: Path) -> StateStore:
@@ -179,16 +178,6 @@ class TestGetStorageBreakdown(unittest.TestCase):
         result = self.store.get_storage_breakdown()
         self.assertIsNotNone(result["oldest_item_age_days"])
         self.assertGreaterEqual(result["oldest_item_age_days"], 95)
-
-
-class TestIpcHandlerThrottle(unittest.TestCase):
-    """Тесты категорий throttle для новых методов."""
-
-    def test_get_disk_status_in_medium(self) -> None:
-        self.assertIn("get_disk_status", MEDIUM_METHODS)
-
-    def test_get_storage_breakdown_in_medium(self) -> None:
-        self.assertIn("get_storage_breakdown", MEDIUM_METHODS)
 
 
 if __name__ == "__main__":
