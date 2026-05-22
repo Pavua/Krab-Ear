@@ -330,7 +330,7 @@ class MlxOomCallSiteTests(unittest.TestCase):
         if isinstance(err, MemoryError):
             engine._push_error(
                 "mlx.oom",
-                f"MemoryError in transcribe_model",
+                "MemoryError in transcribe_model",
                 severity="critical",
             )
 

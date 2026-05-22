@@ -547,6 +547,7 @@ class TestExecutorRunWithStages(unittest.TestCase):
             name = "text_cleanup"
             cacheable = False
             def should_run(self, ctx): return True
+
             def process(self, ctx):
                 ctx.cleaned_text = ctx.raw_text.strip().capitalize()
                 return ctx
@@ -669,6 +670,7 @@ class TestExecutorWithCache(unittest.TestCase):
             name = "stt"
             cacheable = True
             def should_run(self, ctx): return True
+
             def process(self, ctx):
                 ctx.raw_text = "partial"
                 ctx.errors.append("stt: model failed")

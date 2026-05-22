@@ -59,7 +59,8 @@ class TestImageEncoding(unittest.TestCase):
 
     def test_encode_png_returns_base64_and_mime(self):
         """Корректный PNG файл → base64 string + 'image/png'."""
-        import tempfile, base64
+        import tempfile
+        import base64
         from backend.va_multimodal import MultimodalVAClient
 
         # minimal valid PNG (1×1 px transparent)

@@ -196,7 +196,6 @@ class TestFindPythonTestCallers(unittest.TestCase):
         self.assertIn("warmup_rewriter", result)
         self.assertIn("probe_llm_http", result)
 
-
     def test_finds_dispatch_helper_pattern(self):
         f = self.tmp / "test_dispatch.py"
         _write(f, """\

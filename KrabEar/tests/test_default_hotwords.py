@@ -41,7 +41,7 @@ class TestDefaultHotwordsList(unittest.TestCase):
         """Нет пустых строк."""
         for w in DEFAULT_DEV_HOTWORDS:
             with self.subTest(word=w):
-                self.assertTrue(w.strip(), f"Пустая строка в DEFAULT_DEV_HOTWORDS")
+                self.assertTrue(w.strip(), "Пустая строка в DEFAULT_DEV_HOTWORDS")
 
 
 class TestCategories(unittest.TestCase):

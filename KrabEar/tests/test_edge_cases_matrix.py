@@ -593,7 +593,6 @@ class MixedEncodingEdgeCases(EdgeCaseMatrixBase):
         r = self.req("add_history_item", {"text": rtl_text})
         self.assertTrue(r["ok"], f"RTL-текст должен сохраняться: {r}")
 
-
     def test_score_readability_mixed_encoding(self):
         """score_readability с Latin-1 и Кириллицей — не падает."""
         mixed = "Résumé написан на Python — хорошая идея."
