@@ -924,6 +924,7 @@ class BackendService:
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
+            "revoke_share_link": self._sharing.handle_revoke_share_link,  # отозвать пакет шаринга по токену (Wave 158)
             "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
