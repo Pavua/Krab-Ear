@@ -433,6 +433,8 @@ class LLMRewriter:
 
     def _rewrite_impl(self, text: str) -> LLMRewriteResult:
         """Внутренняя реализация rewrite() — обёрнута профайлером в rewrite()."""
+        from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular at import
+
         # 1. Валидация входа
         cleaned_input = (text or "").strip()
         if not cleaned_input:
@@ -440,8 +442,25 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="empty_input", latency_ms=None
             )
 
+        _add_bc(
+            category="rewriter",
+            message="rewrite_start",
+            level="debug",
+            data={
+                "circuit_state": self._circuit.state,
+                "model": self._model,
+                "input_chars": len(cleaned_input),
+            },
+        )
+
         # 2. Circuit breaker check
         if not self._circuit.allow_request():
+            _add_bc(
+                category="rewriter",
+                message="rewrite_skipped",
+                level="info",
+                data={"reason": "circuit_open", "circuit_state": self._circuit.state},
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
@@ -742,6 +761,18 @@ class LLMRewriter:
                     marker,
                 )
                 self._last_error = "chatbot_response"
+                _add_bc(
+                    category="rewriter",
+                    message="rewrite_finish",
+                    level="warning",
+                    data={
+                        "ok": False,
+                        "fallback_reason": "chatbot_response",
+                        "latency_ms": latency_ms,
+                        "circuit_state": self._circuit.state,
+                        "model": self._model,
+                    },
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="chatbot_response", latency_ms=latency_ms
                 )
@@ -783,6 +814,17 @@ class LLMRewriter:
         # 10. Success
         self._circuit.record_success()
         self._last_error = None
+        _add_bc(
+            category="rewriter",
+            message="rewrite_finish",
+            level="info",
+            data={
+                "ok": True,
+                "latency_ms": latency_ms,
+                "circuit_state": self._circuit.state,
+                "model": self._model,
+            },
+        )
         return LLMRewriteResult(
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )
