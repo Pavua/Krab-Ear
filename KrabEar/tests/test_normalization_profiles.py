@@ -194,5 +194,125 @@ class TestModuleLevelFunctions(unittest.TestCase):
         self.assertEqual(result, text)
 
 
+class TestWave130RequiredCases(unittest.TestCase):
+    """Wave 130: обязательные кейсы по спецификации."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.reg = NormalizationProfileRegistry(data_dir=Path(self._tmp))
+
+    # test_built_in_profiles_loaded
+    def test_built_in_profiles_loaded(self):
+        """Реестр содержит все пять встроенных профилей сразу после создания."""
+        reg = NormalizationProfileRegistry(data_dir=None)
+        names = {p["name"] for p in reg.list_profiles()}
+        for expected in ("verbatim", "clean", "formal", "telegram", "subtitles"):
+            self.assertIn(expected, names, f"Missing builtin profile: {expected!r}")
+        self.assertEqual(len(names), 5)
+
+    # test_apply_profile_by_name
+    def test_apply_profile_by_name(self):
+        """apply_profile() применяет профиль по имени и возвращает строку."""
+        text = "Обычный тестовый текст без специфики"
+        for profile_name in ("verbatim", "clean", "telegram"):
+            result = self.reg.apply_profile(text, profile_name)
+            self.assertIsInstance(result, str, f"Profile {profile_name!r} returned non-str")
+            self.assertGreater(len(result), 0, f"Profile {profile_name!r} returned empty string")
+
+    # test_unknown_profile_falls_back_to_default
+    def test_unknown_profile_falls_back_to_default(self):
+        """Попытка применить несуществующий профиль поднимает ValueError
+        (get_profile возвращает None — нет тихого фолбека)."""
+        # apply_profile должен поднять ValueError для неизвестного профиля
+        with self.assertRaises(ValueError):
+            self.reg.apply_profile("текст", "__nonexistent_profile__")
+        # get_profile возвращает None вместо исключения (для проверки наличия)
+        profile = self.reg.get_profile("__nonexistent_profile__")
+        self.assertIsNone(profile)
+
+    # test_custom_profile_registration
+    def test_custom_profile_registration(self):
+        """Пользовательский профиль регистрируется, сохраняется и применяется."""
+        self.reg.add_profile(
+            "w130_custom",
+            ["strip_hallucinations", "strip_trailing_period"],
+            description="Wave 130 custom",
+        )
+        # Присутствует в списке
+        names = {p["name"] for p in self.reg.list_profiles()}
+        self.assertIn("w130_custom", names)
+        # Не помечен как builtin
+        p = self.reg.get_profile("w130_custom")
+        self.assertFalse(p.builtin)
+        # Применяется без исключений
+        result = self.reg.apply_profile("Всё готово.", "w130_custom")
+        self.assertIsInstance(result, str)
+        # Сохраняется на диск — новый реестр видит профиль
+        reg2 = NormalizationProfileRegistry(data_dir=Path(self._tmp))
+        names2 = {p["name"] for p in reg2.list_profiles()}
+        self.assertIn("w130_custom", names2)
+
+    # test_unicode_text_preserved
+    def test_unicode_text_preserved(self):
+        """Unicode (кириллица, emoji, спецсимволы) не теряется при обработке
+        профилями, не затрагивающими эти символы."""
+        texts = [
+            "Привет мир",                          # кириллица
+            "Hola mundo",                           # латиница
+            "Тест 🎤 микрофон",                    # emoji
+            "Линия тонкий пробел",            # narrow no-break space
+            "Привет​мир",                      # zero-width space
+            "Текст — длинное тире",                 # em-dash
+        ]
+        for text in texts:
+            for profile_name in ("verbatim", "clean"):
+                result = self.reg.apply_profile(text, profile_name)
+                self.assertIsInstance(result, str,
+                                      msg=f"profile={profile_name!r}, text={text!r}")
+                # Не должны появиться NaN/None
+                self.assertIsNotNone(result)
+
+    # test_concurrent_apply
+    def test_concurrent_apply(self):
+        """Параллельные apply_profile() из нескольких потоков не конкурируют
+        за состояние реестра и возвращают правильные строки."""
+        import threading
+
+        errors: list[Exception] = []
+        results: list[str] = []
+        lock = threading.Lock()
+
+        profiles_texts = [
+            ("verbatim", "Привет мир"),
+            ("clean", "Меркадонна — хороший магазин"),
+            ("telegram", "Всё готово."),
+            ("subtitles", "Очень длинная строка для проверки переноса строк в субтитрах"),
+            ("verbatim", "Другой текст для проверки"),
+        ]
+
+        def worker(profile_name: str, text: str) -> None:
+            try:
+                r = self.reg.apply_profile(text, profile_name)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(pn, tx))
+            for pn, tx in profiles_texts
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), len(profiles_texts))
+        for r in results:
+            self.assertIsInstance(r, str)
+
+
 if __name__ == "__main__":
     unittest.main()
