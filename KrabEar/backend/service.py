@@ -96,6 +96,7 @@ from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -431,6 +432,16 @@ class BackendService:
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
+        self._text_processing_svc = TextProcessingService(
+            readability_scorer=self._readability_scorer,
+            transcription_scorer=self._transcription_scorer,
+            emotion_detector=self._emotion_detector,
+            text_comparator=self._text_comparator,
+            abbreviation_expander=self._abbreviation_expander,
+            text_postprocessor=self._text_postprocessor,
+            store=self.store,
+            llm_rewriter=self._llm_rewriter,
+        )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
@@ -791,8 +802,8 @@ class BackendService:
             "list_all_tags": self._history.handle_list_all_tags,
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
-            "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
-            "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
+            "summarize_text": self._text_processing_svc.handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
+            "summarize_item": self._text_processing_svc.handle_summarize_item,  # LLM summary для элемента истории по ID
             "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
             "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
             "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
@@ -900,9 +911,9 @@ class BackendService:
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
             "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
-            "compare_texts": self._handle_compare_texts,  # сравнение двух текстов/транскрипций
+            "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
-            "score_readability": self._handle_score_readability,  # оценка читабельности текста транскрибации
+            "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
             "score_transcription": self._handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
@@ -936,14 +947,14 @@ class BackendService:
             "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
             "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
             "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
-            "detect_emotion": self._handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
+            "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
-            "expand_abbreviations": self._handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
-            "remove_abbreviation": self._handle_remove_abbreviation,  # удалить аббревиатуру
-            "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
+            "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
+            "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
+            "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
             "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
             "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
             "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
@@ -954,8 +965,8 @@ class BackendService:
             "get_playback_stats": self._playback_tracker.handle_get_playback_stats,
             "get_most_replayed": self._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
             # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
-            "post_process_text": self._handle_post_process_text,
-            "list_post_process_steps": self._handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
+            "post_process_text": self._text_processing_svc.handle_post_process_text,
+            "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
             "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
@@ -2834,49 +2845,6 @@ class BackendService:
             },
         }
 
-    def _handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Локальный lightweight-summary для длинных заметок/транскриптов."""
-        text = str(params.get("text", "")).strip()
-        if not text:
-            raise RuntimeError("text обязателен")
-        mode = str(params.get("mode", "summary_short")).strip() or "summary_short"
-        max_points = int(params.get("max_points", 3) or 3)
-        max_points = max(1, min(max_points, 12))
-        summary = self._summarize_text_locally(text=text, mode=mode, max_points=max_points)
-        return {
-            "mode": summary["mode"],
-            "summary": summary["summary"],
-            "bullets": summary["bullets"],
-            "source_chars": len(text),
-        }
-
-    @staticmethod
-    def _summarize_text_locally(text: str, mode: str, max_points: int) -> dict[str, Any]:
-        """Простая эвристика summary без внешних зависимостей."""
-        normalized = " ".join(text.replace("\r", "\n").split())
-        if not normalized:
-            return {"mode": mode, "summary": "", "bullets": []}
-
-        chunks = []
-        for raw in re.split(r"(?<=[.!?])\s+", normalized):
-            sentence = raw.strip()
-            if sentence:
-                chunks.append(sentence)
-        if not chunks:
-            chunks = [normalized]
-
-        if mode == "summary_detailed":
-            bullets = chunks[:max_points]
-            summary = " ".join(chunks[: min(len(chunks), max_points + 1)])
-        else:
-            # Короткий summary: первая смысловая фраза + маркеры.
-            head = chunks[0]
-            bullets = chunks[1: 1 + max_points]
-            if not bullets:
-                bullets = chunks[:max_points]
-            summary = head
-        return {"mode": mode, "summary": summary, "bullets": bullets}
-
     def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список моделей доступных в LM Studio через /api/v1/models.
 
@@ -3078,60 +3046,6 @@ class BackendService:
         adapters.append(_make("whisper-mlx", set(), True))
 
         return adapters
-
-    def _generate_summary(self, text: str) -> str | None:
-        """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
-        if self._llm_rewriter is None:
-            return None
-        try:
-            result = self._llm_rewriter.summarize(text, max_sentences=3)
-            if result.ok and result.text:
-                logger.info("LLM summary сгенерировано (%d мс)", result.latency_ms or 0)
-                return result.text
-            logger.debug("LLM summary не удалось: %s", result.fallback_reason)
-            return None
-        except Exception as exc:
-            logger.warning("Ошибка генерации LLM summary: %s", exc)
-            return None
-
-    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует LLM-summary для элемента истории по ID."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        # Найти элемент в истории
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = None
-        for item in items:
-            if item.id == item_id:
-                target = item
-                break
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        if len(text) < 50:
-            raise RuntimeError("Текст слишком короткий для summary")
-
-        summary = self._generate_summary(text)
-        if summary is None:
-            # Fallback на локальный summary
-            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
-            return {
-                "id": item_id,
-                "summary": local["summary"],
-                "llm": False,
-                "source_chars": len(text),
-            }
-
-        return {
-            "id": item_id,
-            "summary": summary,
-            "llm": True,
-            "source_chars": len(text),
-        }
 
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
@@ -4639,29 +4553,6 @@ class BackendService:
             ]
         }
 
-    def _handle_compare_texts(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает два текста или две записи истории по ID."""
-        item_id_1 = params.get("item_id_1")
-        item_id_2 = params.get("item_id_2")
-        text1 = params.get("text1", "")
-        text2 = params.get("text2", "")
-
-        if item_id_1 and item_id_2:
-            result = self._text_comparator.compare_items(item_id_1, item_id_2, self.store)
-        else:
-            result = self._text_comparator.compare_texts(text1, text2)
-
-        return {
-            "similarity": result.similarity,
-            "text_1": result.text_1,
-            "text_2": result.text_2,
-            "common_phrases": result.common_phrases,
-            "unique_to_1": result.unique_to_1,
-            "unique_to_2": result.unique_to_2,
-            "word_count_diff": result.word_count_diff,
-            "summary": result.summary,
-        }
-
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние контекстной памяти STT.
 
@@ -4681,65 +4572,6 @@ class BackendService:
             "recent_topics": self._context_memory.get_recent_topics(last_n=last_n),
             "size": self._context_memory.size(),
             "window_size": 50,
-        }
-
-    def _handle_score_readability(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Оценивает читабельность текста транскрибации."""
-        text = params.get("text", "")
-        if not text:
-            return {
-                "flesch_score": 0.0,
-                "avg_sentence_length": 0.0,
-                "avg_word_length": 0.0,
-                "vocabulary_level": "simple",
-                "sentence_count": 0,
-                "word_count": 0,
-                "longest_sentence": "",
-                "shortest_sentence": "",
-            }
-        report = self._readability_scorer.score(text)
-        return {
-            "flesch_score": report.flesch_score,
-            "avg_sentence_length": report.avg_sentence_length,
-            "avg_word_length": report.avg_word_length,
-            "vocabulary_level": report.vocabulary_level,
-            "sentence_count": report.sentence_count,
-            "word_count": report.word_count,
-            "longest_sentence": report.longest_sentence,
-            "shortest_sentence": report.shortest_sentence,
-        }
-
-    def _handle_score_transcription(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Оценивает качество транскрибации и возвращает балл 0–100 с оценкой A–F.
-
-        Params:
-            text (str): транскрибированный текст.
-            confidence (float): уверенность STT-модели, 0.0–1.0.
-            duration_sec (float): длительность аудио в секундах.
-            has_diarization (bool, optional): была ли применена диаризация. Default False.
-            has_llm_enhancement (bool, optional): был ли применён LLM-рерайтер. Default False.
-
-        Returns:
-            Словарь с полями QualityScore: overall_score, grade, factors, recommendations.
-        """
-        text = params.get("text", "")
-        confidence = float(params.get("confidence", 0.0))
-        duration_sec = float(params.get("duration_sec", 0.0))
-        has_diarization = bool(params.get("has_diarization", False))
-        has_llm_enhancement = bool(params.get("has_llm_enhancement", False))
-
-        result = self._transcription_scorer.score(
-            text=text,
-            confidence=confidence,
-            duration_sec=duration_sec,
-            has_diarization=has_diarization,
-            has_llm_enhancement=has_llm_enhancement,
-        )
-        return {
-            "overall_score": result.overall_score,
-            "grade": result.grade,
-            "factors": result.factors,
-            "recommendations": result.recommendations,
         }
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -5322,29 +5154,6 @@ end tell'''
             "current_topic": current_topic,
         }
 
-    def _handle_detect_emotion(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: detect_emotion — эвристическое определение эмоции в тексте транскрипции.
-
-        Параметры:
-            text     (str) — исходный текст для анализа.
-            language (str) — язык текста ("ru", "es", "en"). По умолчанию "ru".
-
-        Возвращает:
-            primary_emotion, confidence, indicators, exclamation_count,
-            question_count, caps_ratio
-        """
-        text = str(params.get("text", ""))
-        language = str(params.get("language", "ru"))
-        result = self._emotion_detector.detect(text, language=language)
-        return {
-            "primary_emotion": result.primary_emotion,
-            "confidence": result.confidence,
-            "indicators": result.indicators,
-            "exclamation_count": result.exclamation_count,
-            "question_count": result.question_count,
-            "caps_ratio": result.caps_ratio,
-        }
-
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
 
@@ -5376,87 +5185,6 @@ end tell'''
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
-
-    def _handle_expand_abbreviations(self, params: dict) -> dict:
-        """IPC: expand_abbreviations — раскрыть аббревиатуры в тексте транскрипции.
-
-        Params:
-            text (str): Исходный текст.
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"expanded": str, "changed": bool}
-        """
-        text = str(params.get("text", ""))
-        language = str(params.get("language", "ru"))
-        expanded = self._abbreviation_expander.expand(text, language=language)
-        return {"expanded": expanded, "changed": expanded != text}
-
-    def _handle_remove_abbreviation(self, params: dict) -> dict:
-        """IPC: remove_abbreviation — удалить аббревиатуру.
-
-        Params:
-            abbr (str): Аббревиатура.
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"removed": bool}
-        """
-        abbr = str(params.get("abbr", "")).strip()
-        language = str(params.get("language", "ru"))
-        removed = self._abbreviation_expander.remove_abbreviation(abbr, language=language)
-        return {"removed": removed}
-
-    def _handle_list_abbreviations(self, params: dict) -> dict:
-        """IPC: list_abbreviations — список аббревиатур для языка.
-
-        Params:
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"abbreviations": list[dict], "language": str, "count": int}
-        """
-        language = str(params.get("language", "ru"))
-        abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
-        return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
-
-    # ── Text post-processing IPC handlers ──────────────────────────────────────
-
-    def _handle_post_process_text(self, params: dict) -> dict:
-        """IPC: post_process_text — прогнать текст через конвейер пост-обработки.
-
-        Params:
-            text  (str)       — исходный текст для обработки.
-            steps (list[str]) — список имён шагов в нужном порядке.
-                                Если не указан, применяется цепочка по умолчанию:
-                                [strip_whitespace, fix_punctuation, normalize_entities].
-
-        Возвращает:
-            text           — обработанный текст.
-            steps_applied  — список имён выполненных шагов.
-            changes_count  — число шагов, изменивших текст.
-        """
-        text = str(params.get("text", ""))
-        steps = params.get("steps")  # None → цепочка по умолчанию
-        if steps is not None and not isinstance(steps, list):
-            raise ValueError("Параметр 'steps' должен быть списком строк или null")
-        if steps is not None:
-            steps = [str(s) for s in steps]
-
-        result = self._text_postprocessor.process(text, steps=steps)
-        return {
-            "text": result.text,
-            "steps_applied": result.steps_applied,
-            "changes_count": result.changes_count,
-        }
-
-    def _handle_list_post_process_steps(self, params: dict) -> dict:
-        """IPC: list_post_process_steps — список доступных шагов пост-обработки.
-
-        Возвращает:
-            steps — список имён доступных шагов.
-        """
-        return {"steps": self._text_postprocessor.list_steps()}
 
     def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: select_model — умный выбор STT-модели на основе условий.
@@ -5550,6 +5278,10 @@ end tell'''
             dict: total_checked, duplicates_found, chars_saved, dedup_rate.
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
+
+    def _handle_score_transcription(self, params: dict) -> dict:
+        """Delegated to TextProcessingService."""
+        return self._text_processing_svc.handle_score_transcription(params)
 
 
 class IPCServer:
