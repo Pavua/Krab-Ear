@@ -270,6 +270,9 @@ class AudioChunker:
             # Предпочитаем максимально позднюю паузу в окне
             best_cut: Optional[float] = None
             for region in usable_silences:
+                # Skip silence regions that began before current cursor position
+                if region.start_sec < cursor:
+                    continue
                 mid = (region.start_sec + region.end_sec) / 2.0
                 if cursor < mid <= window_end:
                     # Режем в середину паузы (с отступом от края)
