@@ -95,6 +95,7 @@ from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
+from backend.analytics_service import AnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
@@ -465,6 +466,14 @@ class BackendService:
             quality_trends=self._quality_trends,
             audio_fingerprinter=self._audio_fingerprinter,
             word_timing_analyzer=self._word_timing_analyzer,
+            store=self.store,
+        )
+        self._analytics_svc = AnalyticsService(
+            analytics_dashboard=self._analytics_dashboard,
+            sentiment_trends=self._sentiment_trends,
+            activity_calendar=self._activity_calendar,
+            keyword_cloud_gen=self._keyword_cloud_gen,
+            timeline_view=self._timeline_view,
             store=self.store,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
@@ -901,10 +910,10 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
-            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
-            "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
+            "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
+            "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "get_sentiment_trends": self._analytics_svc.handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
@@ -920,7 +929,7 @@ class BackendService:
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._audio_analytics_svc.handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
-            "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
+            "get_keyword_cloud": self._analytics_svc.handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
@@ -935,7 +944,7 @@ class BackendService:
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
-            "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "get_analytics_dashboard": self._analytics_svc.handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
@@ -974,7 +983,7 @@ class BackendService:
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
-            "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
+            "get_timeline_view": self._analytics_svc.handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
@@ -4404,60 +4413,12 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов."""
-        p1_start = params.get("period1_start")
-        p1_end = params.get("period1_end")
-        p2_start = params.get("period2_start")
-        p2_end = params.get("period2_end")
-        if not all([p1_start, p1_end, p2_start, p2_end]):
-            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
-        report = _compare_periods_fn(
-            store=self.store,
-            period1_start=p1_start,
-            period1_end=p1_end,
-            period2_start=p2_start,
-            period2_end=p2_end,
-        )
-        return {
-            "period1": {
-                "recordings": report.period1.recordings,
-                "duration_sec": report.period1.duration_sec,
-                "words": report.period1.words,
-                "avg_confidence": report.period1.avg_confidence,
-                "languages": report.period1.languages,
-            },
-            "period2": {
-                "recordings": report.period2.recordings,
-                "duration_sec": report.period2.duration_sec,
-                "words": report.period2.words,
-                "avg_confidence": report.period2.avg_confidence,
-                "languages": report.period2.languages,
-            },
-            "recordings_change_pct": report.recordings_change_pct,
-            "duration_change_pct": report.duration_change_pct,
-            "confidence_change": report.confidence_change,
-            "new_languages": report.new_languages,
-            "summary": report.summary,
-        }
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_compare_periods(params)
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
-        months = int(params.get("months", 12))
-        months = max(1, min(months, 24))
-        include_svg = bool(params.get("include_svg", False))
-        cell_size = int(params.get("cell_size", 12))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        calendar = self._activity_calendar.generate_calendar(items, months=months)
-        result = calendar.to_dict()
-        if include_svg:
-            result["svg"] = self._activity_calendar.generate_calendar_svg(
-                items, months=months, cell_size=cell_size
-            )
-        return result
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_activity_calendar(params)
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -4475,15 +4436,8 @@ class BackendService:
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-        return self._sentiment_trends.to_dict(report)
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_sentiment_trends(params)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -4564,28 +4518,8 @@ class BackendService:
         }
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cloud_words = self._keyword_cloud_gen.generate_cloud(
-            items, max_words=max_words, language=language
-        )
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
-        }
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_keyword_cloud(params)
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
@@ -4959,32 +4893,8 @@ end tell'''
     # ── Timeline view ────────────────────────────────────────────────────────
 
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Группирует историю транскрипций по временным блокам (timeline).
-
-        Параметры:
-          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
-          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
-        """
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-        include_heatmap = bool(params.get("include_heatmap", False))
-        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        result: dict[str, Any] = {
-            "blocks": [b.to_dict() for b in blocks],
-            "total_blocks": len(blocks),
-            "group_by": group_by,
-        }
-
-        if include_heatmap:
-            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
-            result["activity_heatmap"] = heatmap
-
-        return result
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_timeline_view(params)
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует автоматический заголовок для транскрибации.
@@ -5033,16 +4943,8 @@ end tell'''
         return self._language_learning.handle_get_learning_stats(params_with_store)
 
     def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
-
-        Параметры:
-            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
-
-        Возвращает:
-            overview, today, trends, languages, quality, engagement, storage, performance
-        """
-        days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_analytics_dashboard(params)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
