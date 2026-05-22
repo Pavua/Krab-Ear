@@ -7,6 +7,7 @@ from __future__ import annotations
 from core.smart_silence_skipper import SmartSilenceSkipper, SkipResult
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -368,6 +369,100 @@ class TestBoundaryConditions(unittest.TestCase):
         self.assertAlmostEqual(skipper._min_silence_sec, 2.0)
         self.assertAlmostEqual(skipper._edge_keep_sec, 0.5)
         self.assertAlmostEqual(skipper._speech_pad_sec, 0.2)
+
+
+class TestConcurrentProcess(unittest.TestCase):
+    """test_concurrent_process: process() безопасен при параллельных вызовах."""
+
+    def test_concurrent_process(self):
+        """Множество потоков вызывают process() — нет исключений и все возвращают SkipResult."""
+        skipper = SmartSilenceSkipper()
+        results: list[SkipResult] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(idx: int) -> None:
+            try:
+                # чередуем тишину/речь чтобы часть потоков пропускала сегменты
+                if idx % 2 == 0:
+                    audio = _cat(_speech(0.5), _silence(2.0), _speech(0.5))
+                else:
+                    audio = _speech(1.0)
+                result = skipper.process(audio, SAMPLE_RATE)
+                with lock:
+                    results.append(result)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread exceptions: {errors}")
+        self.assertEqual(len(results), 16)
+        for r in results:
+            self.assertIsInstance(r, SkipResult)
+            self.assertGreaterEqual(r.time_saved_pct, 0.0)
+
+
+class TestAdaptiveThresholdViaHistory(unittest.TestCase):
+    """test_adaptive_threshold_via_history: кастомные параметры меняют поведение пропуска.
+
+    SmartSilenceSkipper не хранит историю, но конструктор принимает threshold_db
+    и min_silence_sec — имитируем «адаптацию» через изменение параметров.
+    """
+
+    def test_lower_threshold_db_skips_quiet_speech(self):
+        """При более высоком пороге (менее строгом) тихие сигналы тоже пропускаются."""
+        # Тихий синусоид amplitude=0.01 (~-40 dB) + стандартная речь
+        quiet = (0.01 * np.sin(2 * np.pi * 440 * np.linspace(0, 2.0, int(2.0 * SAMPLE_RATE)))).astype(np.float32)
+        loud_speech = _speech(0.5)
+        audio = _cat(loud_speech, quiet, loud_speech)
+
+        # Высокий порог (много считается тишиной)
+        skipper_sensitive = SmartSilenceSkipper(threshold_db=-20.0, min_silence_sec=0.5)
+        result_sensitive = skipper_sensitive.process(audio, SAMPLE_RATE)
+
+        # Низкий порог (только очень тихое считается тишиной)
+        skipper_strict = SmartSilenceSkipper(threshold_db=-60.0, min_silence_sec=0.5)
+        result_strict = skipper_strict.process(audio, SAMPLE_RATE)
+
+        # Чувствительный должен скипнуть больше (или не меньше) чем строгий
+        self.assertGreaterEqual(
+            result_sensitive.time_saved_sec,
+            result_strict.time_saved_sec,
+        )
+
+    def test_shorter_min_silence_more_segments_removed(self):
+        """Уменьшение min_silence_sec позволяет удалять более короткие паузы."""
+        # 0.8 с пауза — попадает под min_silence=0.5 но не под 1.0
+        audio = _cat(_speech(1.0), _silence(0.8), _speech(1.0))
+
+        skipper_loose = SmartSilenceSkipper(min_silence_sec=0.5)
+        skipper_strict = SmartSilenceSkipper(min_silence_sec=1.0)
+
+        result_loose = skipper_loose.process(audio, SAMPLE_RATE)
+        result_strict = skipper_strict.process(audio, SAMPLE_RATE)
+
+        # loose может удалить больше (0.8 >= 0.5), strict не удаляет (0.8 < 1.0)
+        self.assertGreaterEqual(
+            result_loose.time_saved_sec,
+            result_strict.time_saved_sec,
+        )
+
+    def test_repeated_calls_with_same_audio_give_same_result(self):
+        """Повторные вызовы для одного и того же аудио дают детерминированный результат."""
+        skipper = SmartSilenceSkipper()
+        audio = _cat(_speech(1.0), _silence(2.0), _speech(1.0))
+
+        result1 = skipper.process(audio, SAMPLE_RATE)
+        result2 = skipper.process(audio, SAMPLE_RATE)
+
+        self.assertAlmostEqual(result1.time_saved_sec, result2.time_saved_sec, places=4)
+        self.assertEqual(len(result1.skipped_segments), len(result2.skipped_segments))
 
 
 if __name__ == "__main__":
