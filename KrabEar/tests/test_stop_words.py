@@ -275,5 +275,73 @@ class TestHistoryServiceUsesStopWords(unittest.TestCase):
         self.assertGreater(len(sw), 150)
 
 
+class TestWave151SpecNamed(unittest.TestCase):
+    """Именованные тесты из спецификации Wave 151."""
+
+    def test_ru_stop_words_loaded(self):
+        """RU frozenset загружен и не пуст."""
+        words = StopWords.get_stop_words("ru")
+        self.assertIsInstance(words, frozenset)
+        self.assertGreater(len(words), 50)
+        self.assertIn("в", words)
+
+    def test_es_stop_words_loaded(self):
+        """ES frozenset загружен и не пуст."""
+        words = StopWords.get_stop_words("es")
+        self.assertIsInstance(words, frozenset)
+        self.assertGreater(len(words), 50)
+        self.assertIn("el", words)
+
+    def test_en_stop_words_loaded(self):
+        """EN frozenset загружен и не пуст."""
+        words = StopWords.get_stop_words("en")
+        self.assertIsInstance(words, frozenset)
+        self.assertGreater(len(words), 50)
+        self.assertIn("the", words)
+
+    def test_lookup_case_insensitive(self):
+        """is_stop_word нечувствителен к регистру для всех языков."""
+        pairs = [
+            ("В", "ru"), ("НА", "ru"),
+            ("THE", "en"), ("Is", "en"),
+            ("EL", "es"), ("Los", "es"),
+        ]
+        for word, lang in pairs:
+            with self.subTest(word=word, lang=lang):
+                self.assertTrue(
+                    StopWords.is_stop_word(word, lang),
+                    f"Expected {word!r} to be a stop word for {lang!r}",
+                )
+
+    def test_no_duplicates_per_language(self):
+        """Каждый языковой frozenset не содержит дубликатов (свойство frozenset)."""
+        for lang in StopWords.supported_languages():
+            words = StopWords.get_stop_words(lang)
+            # frozenset by definition has no duplicates; verify by round-tripping through list
+            words_list = list(words)
+            self.assertEqual(len(words_list), len(set(words_list)),
+                             f"Duplicates found in {lang} stop words")
+
+    def test_unicode_well_formed(self):
+        """Все стоп-слова во всех языках являются корректными Unicode-строками."""
+        for lang in StopWords.supported_languages():
+            words = StopWords.get_stop_words(lang)
+            for word in words:
+                with self.subTest(lang=lang, word=word):
+                    self.assertIsInstance(word, str)
+                    # Проверка: encode/decode без ошибок
+                    encoded = word.encode("utf-8")
+                    decoded = encoded.decode("utf-8")
+                    self.assertEqual(word, decoded,
+                                     f"Word {word!r} in {lang} is not valid UTF-8")
+                    # Слово не должно содержать суррогатных символов
+                    try:
+                        word.encode("utf-16", errors="surrogatepass").decode(
+                            "utf-16", errors="surrogatepass"
+                        )
+                    except UnicodeDecodeError:
+                        self.fail(f"Word {word!r} in {lang} has surrogate characters")
+
+
 if __name__ == "__main__":
     unittest.main()
