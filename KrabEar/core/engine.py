@@ -927,6 +927,18 @@ class AudioEngine:
             cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
             text = cleaned_text
 
+            # Wave 505 stt.postprocess_drop — fires when cleanup reduces non-empty
+            # raw_text to empty string (strict hallucination strip or repetition drop).
+            if raw_text and not cleaned_text and not is_preview:
+                logger.warning(
+                    "Post-process dropped transcript: raw_len=%d profile=%s",
+                    len(raw_text), cleanup_profile,
+                )
+                self._push_error(
+                    "stt.postprocess_drop",
+                    f"postprocess_drop: raw_len={len(raw_text)} profile={cleanup_profile}",
+                )
+
             # 4.3 Голосовые команды диктовки (opt-in, перед punctuation pass)
             # «запятая» → «,», «новый абзац» → «\n\n», «удалить последнее слово» и т.д.
             from core.voice_commands import VoiceCommandProcessor  # lazy — avoid circular
@@ -2525,11 +2537,22 @@ class AudioEngine:
                 "cannot find the requested files",
             )
             if any(kw in exc_str for kw in _hf_cache_miss_keywords):
-                self._push_error(
-                    "stt.gigaam_hf_cache_miss",
-                    f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
-                    severity="warn",
-                )
+                if use_longform:
+                    # Wave 505 stt.gigaam_longform_unavailable — combined dedup when
+                    # longform path fails due to pyannote VAD gated / HF cache miss.
+                    # Replaces the double-toast storm (padding_mismatch + hf_cache_miss)
+                    # that would fire back-to-back on the same long RU recording.
+                    self._push_error(
+                        "stt.gigaam_longform_unavailable",
+                        f"GigaAM longform unavailable (duration={duration_sec:.1f}s): {str(exc)[:300]}",
+                        severity="warn",
+                    )
+                else:
+                    self._push_error(
+                        "stt.gigaam_hf_cache_miss",
+                        f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
+                        severity="warn",
+                    )
             return {
                 "text": "",
                 "confidence": 0.0,

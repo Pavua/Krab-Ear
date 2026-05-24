@@ -660,4 +660,50 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 180,
     },
+
+    # ── Wave 505: Phase B Wave 82 remaining 3 medium-priority codes ──────────
+
+    # stt.postprocess_drop — transcript text becomes empty after cleanup_transcript()
+    # (strict-profile hallucination strip or repetition-loop text discarded in
+    # post-process). Different from stt.repetition_loop (which fires on raw text) —
+    # this fires when cleaned_text is empty while raw_text was non-empty.
+    # Dedupe 300s — one toast per 5-minute window (can happen on short homophones).
+    "stt.postprocess_drop": {
+        "user_msg_ru": "Постобработка отбросила транскрипцию (репетиция или галлюцинация). Retry с soft cleanup.",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 300,
+    },
+
+    # rewriter.circuit_cascade — CircuitBreaker transitions HALF_OPEN → OPEN
+    # (probe failed, cooldown doubled). Indicates LM Studio is chronically
+    # unstable — the circuit already opened once, the probe failed, and cooldown
+    # is now escalating exponentially. Dedupe 600s (10 min) to avoid spam during
+    # extended LM Studio outage; one toast per escalation cluster.
+    "rewriter.circuit_cascade": {
+        "user_msg_ru": "LLM rewriter circuit breaker эскалирует cooldown — LM Studio нестабилен.",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 600,
+    },
+
+    # stt.gigaam_longform_unavailable — combined dedup code for the double-toast
+    # storm where both stt.padding_mismatch AND stt.gigaam_hf_cache_miss would
+    # fire back-to-back on the same long RU recording (pyannote VAD gated +
+    # padding failure on same audio). Fires instead of the individual codes when
+    # both conditions are detected on the same transcription attempt.
+    # action_id=open_hf_token_setting — HF token fixes the gated issue.
+    # Dedupe 3600s (1 hour) — persistent env issue, no need to toast repeatedly.
+    "stt.gigaam_longform_unavailable": {
+        "user_msg_ru": "GigaAM longform недоступен (pyannote VAD gated). Длинные RU recordings → Whisper fallback.",
+        "actionable": True,
+        "action_id": "open_hf_token_setting",
+        "action_label": "Указать HF токен",
+        "severity": "warn",
+        "dedupe_seconds": 3600,
+    },
 }

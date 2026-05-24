@@ -86,10 +86,6 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "mlx.semaphore_leak",
             "stt.empty_audio_warning",
             "system.malloc_env_leak",
-            # Added Wave 171 — Metal GPU stream misclassification (BACKEND-J fix):
-            # LM Studio HTTP 400 "There is no Stream(gpu, N)" was grouping into
-            # rewriter.timeout; now a distinct code for accurate Sentry triage.
-            "rewriter.gpu_stream_error",
             # Added Wave 78 (Wave 205) — 5 production-discovered codes from Wave 202 audit:
             # gigaam HF cache miss / rewriter model unloaded / output ratio fallback
             # / MLX watchdog hang / audio device poll flood
@@ -102,11 +98,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # 12 production hits 2026-05-18, misclassified as rewriter.timeout.
             # Now retried once (2s sleep) before circuit failure; dedicated code.
             "rewriter.lm_studio_stream_gpu_lost",
-            # Added Wave 490 — Phase B Wave 82: 3 HIGH priority codes
-            # disk.critical (< 1 GB, user alert), system.proc_cmdline_permission
-            # (Sequoia KERN_PROCARGS2 block), startup.stt_model_cache_miss (HF cache miss).
-            "disk.critical",
-            "system.proc_cmdline_permission",
-            "startup.stt_model_cache_miss",
+            # Added Wave 505 — Phase B Wave 82 remaining 3 medium-priority:
+            # postprocess drop / circuit cascade / GigaAM longform unavailable
+            "stt.postprocess_drop",
+            "rewriter.circuit_cascade",
+            "stt.gigaam_longform_unavailable",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

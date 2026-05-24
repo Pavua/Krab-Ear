@@ -121,6 +121,13 @@ class CircuitBreaker:
                 self._current_reset_sec,
             )
             self._transition_to(CircuitState.OPEN)
+            # Wave 505 rewriter.circuit_cascade — HALF_OPEN probe failed; cooldown
+            # is now doubling (exponential escalation). Push error so UI surfaces
+            # the chronic LM Studio instability pattern. _push_error is a method
+            # on LLMRewriter (not CircuitBreaker), so we use a callback if set.
+            _cascade_cb = getattr(self, "_on_circuit_cascade", None)
+            if callable(_cascade_cb):
+                _cascade_cb(self._current_reset_sec)
             return
 
         if (
@@ -263,6 +270,10 @@ class LLMRewriter:
             initial_reset_sec=circuit_initial_reset_sec,
             max_reset_sec=circuit_max_reset_sec,
         )
+        # Wave 505 rewriter.circuit_cascade — callback wired into CircuitBreaker so
+        # HALF_OPEN→OPEN escalation surfaces as a user-visible error. The callback
+        # is set as a bound method reference; _push_error is safe to call post-init.
+        self._circuit._on_circuit_cascade = self._on_circuit_cascade_cb  # type: ignore[attr-defined]
         self._last_latency_ms: Optional[int] = None
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
@@ -385,6 +396,13 @@ class LLMRewriter:
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
+
+    def _on_circuit_cascade_cb(self, new_cooldown_sec: int) -> None:
+        """Wave 505: called by CircuitBreaker when HALF_OPEN→OPEN escalates cooldown."""
+        self._push_error(
+            "rewriter.circuit_cascade",
+            f"HALF_OPEN->OPEN probe failed; cooldown now {new_cooldown_sec}s",
+        )
 
     def _postprocess(self, content: str) -> str:
         """Убирает типичный мусор в ответе LLM (кавычки, префиксы, multi-paragraph)."""
