@@ -31,7 +31,7 @@ from backend.twilio_adapter import TwilioAdapter  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _telnyx(key: str = "tk_live_test_key") -> TelnyxAdapter:
+def _telnyx(key: str = "tk_test_fake_do_not_use_00000000") -> TelnyxAdapter:
     return TelnyxAdapter(
         api_key=key,
         connection_id="conn_test_123",
@@ -39,7 +39,7 @@ def _telnyx(key: str = "tk_live_test_key") -> TelnyxAdapter:
     )
 
 
-def _twilio(sid: str = "ACtest123456", token: str = "authtoken789") -> TwilioAdapter:
+def _twilio(sid: str = "AC00000000000000000000000000ffff", token: str = "test-fake-authtoken-do-not-use") -> TwilioAdapter:
     return TwilioAdapter(
         account_sid=sid,
         auth_token=token,
@@ -326,14 +326,14 @@ class TelnyxBearerAuthTestCase(unittest.TestCase):
 
     def test_bearer_auth_header_on_session(self) -> None:
         """Заголовок Authorization: Bearer <key> присутствует в сессии."""
-        adapter = _telnyx(key="KEY_super_secret_99")
+        adapter = _telnyx(key="tk_test_fake_do_not_use_00000000")
         session = adapter._get_session()
         auth_header = session.headers.get("Authorization", "")
         self.assertTrue(
             auth_header.startswith("Bearer "),
             f"Expected Bearer auth, got: {auth_header!r}",
         )
-        self.assertIn("KEY_super_secret_99", auth_header)
+        self.assertIn("tk_test_fake_do_not_use_00000000", auth_header)
 
     def test_bearer_content_type_json(self) -> None:
         """Telnyx использует Content-Type: application/json (не form-encoded)."""
@@ -371,11 +371,11 @@ class TwilioBasicAuthTestCase(unittest.TestCase):
     def test_basic_auth_credentials(self) -> None:
         """_auth() возвращает HTTPBasicAuth с правильными credentials."""
         from requests.auth import HTTPBasicAuth
-        adapter = _twilio(sid="ACsid_xyz", token="tok_abc")
+        adapter = _twilio(sid="AC00000000000000000000000000aaaa", token="test-fake-tok-do-not-use-bbbbbb")
         auth = adapter._auth()
         self.assertIsInstance(auth, HTTPBasicAuth)
-        self.assertEqual(auth.username, "ACsid_xyz")
-        self.assertEqual(auth.password, "tok_abc")
+        self.assertEqual(auth.username, "AC00000000000000000000000000aaaa")
+        self.assertEqual(auth.password, "test-fake-tok-do-not-use-bbbbbb")
 
     def test_basic_auth_content_type_form_encoded(self) -> None:
         """Twilio использует Content-Type: application/x-www-form-urlencoded."""
@@ -675,7 +675,7 @@ class BehavioralGapTestCase(unittest.TestCase):
 
     # Gap 1: auth scheme
     def test_gap1_telnyx_uses_bearer_twilio_uses_basic(self) -> None:
-        telnyx_session = _telnyx(key="MY_KEY").get_session() if hasattr(TelnyxAdapter, "get_session") else _telnyx(key="MY_KEY")._get_session()
+        telnyx_session = _telnyx(key="tk_test_fake_do_not_use_00000000").get_session() if hasattr(TelnyxAdapter, "get_session") else _telnyx(key="tk_test_fake_do_not_use_00000000")._get_session()
         twilio_adapter = _twilio()
         from requests.auth import HTTPBasicAuth
         auth = twilio_adapter._auth()
@@ -755,13 +755,13 @@ class BehavioralGapTestCase(unittest.TestCase):
     # Gap 8: is_configured condition
     def test_gap8_telnyx_configured_with_key_only(self) -> None:
         """Telnyx сконфигурирован если задан только api_key."""
-        adapter = TelnyxAdapter(api_key="some_key", connection_id="", from_number="")
+        adapter = TelnyxAdapter(api_key="tk_test_fake_do_not_use_00000000", connection_id="", from_number="")
         self.assertTrue(adapter.is_configured())
 
     def test_gap8_twilio_requires_both_sid_and_token(self) -> None:
         """Twilio НЕ сконфигурирован если задан только один из двух параметров."""
-        only_sid = TwilioAdapter(account_sid="ACxxx", auth_token="", from_number="")
-        only_token = TwilioAdapter(account_sid="", auth_token="tok", from_number="")
+        only_sid = TwilioAdapter(account_sid="AC00000000000000000000000000ffff", auth_token="", from_number="")
+        only_token = TwilioAdapter(account_sid="", auth_token="test-fake-tok-do-not-use", from_number="")
         self.assertFalse(only_sid.is_configured())
         self.assertFalse(only_token.is_configured())
 
