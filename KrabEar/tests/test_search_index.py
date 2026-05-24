@@ -3,6 +3,7 @@
 from core.search_index import SearchIndex, SearchResult, _stem_ru, _tokenize
 import sys
 import os
+import threading
 import unittest
 
 # Убедимся что модули core.* доступны при запуске напрямую
@@ -352,6 +353,129 @@ class TestSearchIndexExtra(unittest.TestCase):
         results = idx.search("привет")
         # one query token → score = 1
         self.assertEqual(results[0].score, 1)
+
+
+class TestSearchIndexWave111(unittest.TestCase):
+    """Wave 111 required tests: remove, concurrent, unicode, stop-words, phrase."""
+
+    def _make(self, item_id, text):
+        return {"id": item_id, "text": text, "source_text": "", "translated_text": ""}
+
+    # ------------------------------------------------------------------
+    # test_index_basic_text — базовое индексирование и поиск
+    # ------------------------------------------------------------------
+    def test_index_basic_text(self):
+        idx = SearchIndex()
+        idx.build_index([self._make("1", "Добрый день коллеги")])
+        results = idx.search("день")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].item_id, "1")
+
+    # ------------------------------------------------------------------
+    # test_search_returns_matching_doc_ids
+    # ------------------------------------------------------------------
+    def test_search_returns_matching_doc_ids(self):
+        idx = SearchIndex()
+        idx.build_index([
+            self._make("a", "утренняя встреча"),
+            self._make("b", "вечерняя встреча"),
+            self._make("c", "полдень"),
+        ])
+        results = idx.search("встреча")
+        ids = {r.item_id for r in results}
+        self.assertIn("a", ids)
+        self.assertIn("b", ids)
+        self.assertNotIn("c", ids)
+
+    # ------------------------------------------------------------------
+    # test_search_unicode_terms (Cyrillic)
+    # ------------------------------------------------------------------
+    def test_search_unicode_terms(self):
+        idx = SearchIndex()
+        idx.build_index([self._make("ru1", "ёжик бежал по лесу")])
+        # Кириллица «ё» в токенизаторе включена через [а-яё]
+        results = idx.search("лесу")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].item_id, "ru1")
+
+    # ------------------------------------------------------------------
+    # test_stop_words_filtered — строка из одних стоп-слов/пунктуации
+    # ------------------------------------------------------------------
+    def test_stop_words_filtered(self):
+        # Токенизатор отбрасывает пунктуацию и нелатинские/некириллические символы.
+        # Запрос состоящий только из знаков препинания — нет токенов → пустой результат.
+        idx = SearchIndex()
+        idx.build_index([self._make("1", "какой-то текст")])
+        results = idx.search("!!! ???")
+        self.assertEqual(results, [])
+
+    # ------------------------------------------------------------------
+    # test_remove_doc_from_index — пересборка без документа
+    # ------------------------------------------------------------------
+    def test_remove_doc_from_index(self):
+        items = [
+            self._make("x", "уникальный документ один"),
+            self._make("y", "другой документ два"),
+        ]
+        idx = SearchIndex()
+        idx.build_index(items)
+        # Убедимся что "x" находится
+        self.assertTrue(any(r.item_id == "x" for r in idx.search("уникальный")))
+        # Пересобираем без "x"
+        idx.build_index([self._make("y", "другой документ два")])
+        results = idx.search("уникальный")
+        self.assertEqual(results, [])
+
+    # ------------------------------------------------------------------
+    # test_concurrent_index_search — параллельные read-only поиски
+    # ------------------------------------------------------------------
+    def test_concurrent_index_search(self):
+        items = [self._make(str(i), f"слово{i} тест данные") for i in range(50)]
+        idx = SearchIndex()
+        idx.build_index(items)
+
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(20):
+                    results = idx.search("тест")
+                    assert isinstance(results, list)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent search raised: {errors}")
+
+    # ------------------------------------------------------------------
+    # test_empty_query_returns_empty
+    # ------------------------------------------------------------------
+    def test_empty_query_returns_empty(self):
+        idx = SearchIndex()
+        idx.build_index([self._make("1", "что-то тут")])
+        self.assertEqual(idx.search(""), [])
+        self.assertEqual(idx.search("   "), [])
+
+    # ------------------------------------------------------------------
+    # test_phrase_search — multi-word AND semantics
+    # ------------------------------------------------------------------
+    def test_phrase_search(self):
+        idx = SearchIndex()
+        idx.build_index([
+            self._make("hit", "машинное обучение нейросети"),
+            self._make("nohit1", "только машинное"),
+            self._make("nohit2", "только нейросети"),
+        ])
+        results = idx.search("машинное нейросети")
+        ids = {r.item_id for r in results}
+        self.assertIn("hit", ids)
+        self.assertNotIn("nohit1", ids)
+        self.assertNotIn("nohit2", ids)
 
 
 if __name__ == "__main__":
