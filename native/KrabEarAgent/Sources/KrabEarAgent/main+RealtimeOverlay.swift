@@ -350,7 +350,8 @@ extension AgentAppDelegate {
         return clean
     }
 
-    func normalizeForHeuristic(_ text: String) -> String {
+    // Wave 578: nonisolated for DispatchQueue.global call from sanitizePreviewFallbackText
+    nonisolated func normalizeForHeuristic(_ text: String) -> String {
         let lowered = text.lowercased()
         let allowed = lowered.map { char -> Character in
             if char.isLetter || char.isNumber || char == " " || char == "-" {
@@ -362,7 +363,8 @@ extension AgentAppDelegate {
         return compact.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func looksLikeLoopingFallback(tokens: [String]) -> Bool {
+    // Wave 578: nonisolated for DispatchQueue.global call from sanitizePreviewFallbackText
+    nonisolated func looksLikeLoopingFallback(tokens: [String]) -> Bool {
         guard tokens.count >= 6 else { return false }
 
         var frequency: [String: Int] = [:]
