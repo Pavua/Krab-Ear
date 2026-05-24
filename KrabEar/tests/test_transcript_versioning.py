@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -406,6 +407,108 @@ class TestTranscriptVersionManagerRevertPersistence(unittest.TestCase):
             self.assertEqual(latest["text"], "Original")
         finally:
             temp_dir.cleanup()
+
+
+class TestTranscriptVersionManagerWave103(unittest.TestCase):
+    """Wave 103 — обязательные test cases по спецификации задачи."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_save_initial_version(self) -> None:
+        """Первая версия получает version_num=1."""
+        result = self.manager.save_version("item_init", "Initial text", "stt_raw")
+        self.assertEqual(result["version_num"], 1)
+        self.assertEqual(result["item_id"], "item_init")
+        self.assertEqual(result["text"], "Initial text")
+        self.assertEqual(result["source"], "stt_raw")
+
+    def test_save_revision_increments_version(self) -> None:
+        """Каждая следующая версия увеличивает version_num на 1."""
+        v1 = self.manager.save_version("item_inc", "Text 1", "stt_raw")
+        v2 = self.manager.save_version("item_inc", "Text 2", "manual")
+        v3 = self.manager.save_version("item_inc", "Text 3", "llm_rewrite")
+        self.assertEqual(v1["version_num"], 1)
+        self.assertEqual(v2["version_num"], 2)
+        self.assertEqual(v3["version_num"], 3)
+
+    def test_get_version_by_id(self) -> None:
+        """get_version возвращает конкретную версию по (item_id, version_num)."""
+        self.manager.save_version("item_vid", "Version A", "stt_raw")
+        self.manager.save_version("item_vid", "Version B", "manual")
+        result = self.manager.get_version("item_vid", 1)
+        self.assertEqual(result["version_num"], 1)
+        self.assertEqual(result["text"], "Version A")
+        result2 = self.manager.get_version("item_vid", 2)
+        self.assertEqual(result2["version_num"], 2)
+        self.assertEqual(result2["text"], "Version B")
+
+    def test_diff_two_versions(self) -> None:
+        """diff_versions возвращает корректный diff между двумя версиями."""
+        self.manager.save_version("item_diff", "Hello world", "stt_raw")
+        self.manager.save_version("item_diff", "Hello beautiful world", "manual")
+        diff = self.manager.diff_versions("item_diff", 1, 2)
+        self.assertEqual(diff["item_id"], "item_diff")
+        self.assertEqual(diff["v1"], 1)
+        self.assertEqual(diff["v2"], 2)
+        self.assertEqual(diff["text_v1"], "Hello world")
+        self.assertEqual(diff["text_v2"], "Hello beautiful world")
+        self.assertIsInstance(diff["unified_diff"], list)
+        self.assertGreater(diff["added_lines"], 0)
+
+    def test_rollback_to_version(self) -> None:
+        """revert_to_version создаёт новую версию с текстом из целевой."""
+        self.manager.save_version("item_rb", "Original text", "stt_raw")
+        self.manager.save_version("item_rb", "Edited text", "manual")
+        self.manager.save_version("item_rb", "Further edited", "llm_rewrite")
+        reverted = self.manager.revert_to_version("item_rb", 1)
+        self.assertEqual(reverted["text"], "Original text")
+        self.assertEqual(reverted["version_num"], 4)
+        self.assertEqual(reverted["reverted_from"], 1)
+        # History не удалена — все 4 версии сохранены
+        all_versions = self.manager.get_versions("item_rb")
+        self.assertEqual(len(all_versions), 4)
+
+    def test_unicode_text_preserved(self) -> None:
+        """Юникод (кириллица, иероглифы, арабский, эмодзи) сохраняется без искажений."""
+        unicode_text = "Привет мир! 你好世界 مرحبا بالعالم 🌍🎉"
+        result = self.manager.save_version("item_uni", unicode_text, "manual")
+        self.assertEqual(result["text"], unicode_text)
+        retrieved = self.manager.get_version("item_uni", 1)
+        self.assertEqual(retrieved["text"], unicode_text)
+        # Персистентность: перезагружаем менеджер и проверяем
+        manager2 = TranscriptVersionManager(self.temp_dir.name)
+        versions = manager2.get_versions("item_uni")
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0]["text"], unicode_text)
+
+    def test_concurrent_save_no_lost_writes(self) -> None:
+        """Параллельные save_version не теряют записи и нумерация монотонна."""
+        errors: list[Exception] = []
+        num_threads = 10
+
+        def worker(idx: int) -> None:
+            try:
+                self.manager.save_version("item_conc", f"Text from thread {idx}", "manual")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки потоков: {errors}")
+        versions = self.manager.get_versions("item_conc")
+        self.assertEqual(len(versions), num_threads, "Все записи должны быть сохранены")
+        version_nums = sorted(v["version_num"] for v in versions)
+        self.assertEqual(version_nums, list(range(1, num_threads + 1)),
+                         "version_num должны быть монотонными без пропусков")
 
 
 if __name__ == "__main__":
