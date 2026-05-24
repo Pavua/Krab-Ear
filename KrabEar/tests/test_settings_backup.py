@@ -302,5 +302,86 @@ class TestSettingsServiceBackupIPC(unittest.TestCase):
         self.assertTrue(path.exists())
 
 
+# ---------------------------------------------------------------------------
+# Wave 104: additional coverage tests
+# ---------------------------------------------------------------------------
+
+class TestSettingsBackupAtomicWrite(unittest.TestCase):
+    """test_atomic_write: backup writes to .tmp file then renames atomically."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.backup = SettingsBackup(backup_dir=Path(self.tmp))
+
+    def test_atomic_write_no_partial_file_left(self):
+        """No .tmp residue should remain after a successful backup."""
+        self.backup.create_backup({"key": "value"}, reason="atomic_test")
+        tmp_files = list(Path(self.tmp).glob("*.tmp"))
+        self.assertEqual(tmp_files, [], "No .tmp residue should remain after backup")
+
+    def test_atomic_write_final_json_parseable(self):
+        """Written file must be valid JSON (not corrupted mid-write)."""
+        backup_id = self.backup.create_backup({"a": 1, "b": 2}, reason="integrity")
+        path = Path(self.tmp) / f"{backup_id}.json"
+        with path.open() as f:
+            data = json.load(f)
+        self.assertIsInstance(data, dict)
+
+
+class TestSettingsBackupUnicode(unittest.TestCase):
+    """test_unicode_in_settings: cyrillic/emoji values survive round-trip."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.backup = SettingsBackup(backup_dir=Path(self.tmp))
+
+    def test_unicode_round_trip(self):
+        data = {
+            "device_name": "Микрофон встроенный",
+            "label": "Краб Ухо 🦀",
+            "note": "日本語テスト",
+        }
+        backup_id = self.backup.create_backup(data, reason="unicode")
+        restored = self.backup.restore_backup(backup_id)
+        self.assertEqual(restored["device_name"], "Микрофон встроенный")
+        self.assertEqual(restored["label"], "Краб Ухо 🦀")
+        self.assertEqual(restored["note"], "日本語テスト")
+
+    def test_unicode_reason_sanitized(self):
+        """Unicode reason must not crash and must produce a valid backup_id."""
+        backup_id = self.backup.create_backup({"x": 1}, reason="перед_обновлением")
+        path = Path(self.tmp) / f"{backup_id}.json"
+        self.assertTrue(path.exists())
+
+
+class TestSettingsBackupConcurrent(unittest.TestCase):
+    """test_concurrent_backup_safe: multiple threads can call create_backup simultaneously."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.backup = SettingsBackup(backup_dir=Path(self.tmp))
+
+    def test_concurrent_backup_safe(self):
+        import threading
+        errors: list[Exception] = []
+
+        def _create(i: int) -> None:
+            try:
+                self.backup.create_backup({"i": i}, reason=f"thread{i}")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_create, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent backup raised: {errors}")
+        # After pruning, should have at most MAX_BACKUPS files
+        files = list(Path(self.tmp).glob("*.json"))
+        self.assertLessEqual(len(files), MAX_BACKUPS)
+
+
 if __name__ == "__main__":
     unittest.main()
