@@ -523,5 +523,91 @@ class TestPresetChangedEvent(unittest.TestCase):
                 self.assertEqual(saved_settings.get("active_preset"), preset_id)
 
 
+class TestBreadcrumbs(unittest.TestCase):
+    """Проверяет, что Sentry breadcrumbs отправляются из SettingsService."""
+
+    def _make_service(self) -> tuple[SettingsService, MagicMock]:
+        store = _make_store()
+        svc = SettingsService(store=store)
+        return svc, store
+
+    def test_set_settings_calls_add_breadcrumb(self):
+        """handle_set_settings должен вызвать add_breadcrumb с category='settings'."""
+        svc, _ = self._make_service()
+        with patch("backend.settings_service.add_breadcrumb") as mock_bc:
+            svc.handle_set_settings({"quality_profile": "max"})
+        mock_bc.assert_called_once()
+        call_kwargs = mock_bc.call_args
+        args, kwargs = call_kwargs
+        # может быть positional или keyword
+        category = kwargs.get("category") or (args[0] if args else None)
+        message = kwargs.get("message") or (args[1] if len(args) > 1 else None)
+        data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
+        self.assertEqual(category, "settings")
+        self.assertEqual(message, "set_settings")
+        self.assertIn("quality_profile", data.get("keys", []))
+
+    def test_set_settings_breadcrumb_no_secret_values(self):
+        """handle_set_settings breadcrumb не должен содержать значений настроек, только ключи."""
+        svc, _ = self._make_service()
+        with patch("backend.settings_service.add_breadcrumb") as mock_bc:
+            svc.handle_set_settings({"voice_gateway_api_key": "super_secret_token"})
+        _, kwargs = mock_bc.call_args
+        data = kwargs.get("data", {})
+        # значение не должно попасть в data
+        for v in data.values():
+            self.assertNotIn("super_secret_token", str(v))
+
+    def test_import_settings_calls_add_breadcrumb(self):
+        """handle_import_settings должен вызвать add_breadcrumb с imported/skipped counts."""
+        import json
+        import tempfile
+
+        svc, _ = self._make_service()
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as fh:
+            json.dump({"quality_profile": "max", "auto_paste": False}, fh)
+            tmp_path = fh.name
+
+        with patch("backend.settings_service.add_breadcrumb") as mock_bc:
+            svc.handle_import_settings({"file": tmp_path})
+
+        mock_bc.assert_called_once()
+        _, kwargs = mock_bc.call_args
+        self.assertEqual(kwargs.get("category"), "settings")
+        self.assertEqual(kwargs.get("message"), "import_settings")
+        data = kwargs.get("data", {})
+        self.assertIn("imported", data)
+        self.assertIn("skipped", data)
+        self.assertIn("error_count", data)
+
+    def test_apply_profile_preset_calls_add_breadcrumb(self):
+        """handle_apply_profile_preset должен вызвать add_breadcrumb с именем профиля."""
+        svc, _ = self._make_service()
+        with patch("backend.event_bus.bus"):
+            with patch("backend.settings_service.add_breadcrumb") as mock_bc:
+                svc.handle_apply_profile_preset({"profile": "meeting"})
+        mock_bc.assert_called_once()
+        _, kwargs = mock_bc.call_args
+        self.assertEqual(kwargs.get("category"), "settings")
+        self.assertEqual(kwargs.get("message"), "apply_profile_preset")
+        data = kwargs.get("data", {})
+        self.assertEqual(data.get("profile"), "meeting")
+        self.assertIn("keys_changed", data)
+
+    def test_apply_profile_preset_breadcrumb_contains_changed_keys(self):
+        """Breadcrumb для apply_profile_preset должен содержать список изменённых ключей."""
+        svc, _ = self._make_service()
+        with patch("backend.event_bus.bus"):
+            with patch("backend.settings_service.add_breadcrumb") as mock_bc:
+                svc.handle_apply_profile_preset({"profile": "translation"})
+        _, kwargs = mock_bc.call_args
+        data = kwargs.get("data", {})
+        keys_changed = data.get("keys_changed", [])
+        self.assertIsInstance(keys_changed, list)
+        self.assertGreater(len(keys_changed), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
