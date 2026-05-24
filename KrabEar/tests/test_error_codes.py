@@ -90,5 +90,17 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # LM Studio HTTP 400 "There is no Stream(gpu, N)" was grouping into
             # rewriter.timeout; now a distinct code for accurate Sentry triage.
             "rewriter.gpu_stream_error",
+            # Added Wave 78 (Wave 205) — 5 production-discovered codes from Wave 202 audit:
+            # gigaam HF cache miss / rewriter model unloaded / output ratio fallback
+            # / MLX watchdog hang / audio device poll flood
+            "stt.gigaam_hf_cache_miss",
+            "rewriter.model_unloaded",
+            "rewriter.output_ratio_fallback",
+            "stt.mlx_watchdog_hang",
+            "ipc.audio_device_poll_flood",
+            # Added Wave 306 — LM Studio Metal GPU stream context lost:
+            # 12 production hits 2026-05-18, misclassified as rewriter.timeout.
+            # Now retried once (2s sleep) before circuit failure; dedicated code.
+            "rewriter.lm_studio_stream_gpu_lost",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
