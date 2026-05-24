@@ -311,7 +311,10 @@ extension AgentAppDelegate {
         }
     }
 
-    func sanitizePreviewFallbackText(_ text: String) -> String {
+    // Wave 554: marked `nonisolated` so it can be called from the
+    // DispatchQueue.global(qos:.userInitiated) background queue without crossing
+    // MainActor boundary (pure-function text processing — no UI state touched).
+    nonisolated func sanitizePreviewFallbackText(_ text: String) -> String {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return "" }
 
