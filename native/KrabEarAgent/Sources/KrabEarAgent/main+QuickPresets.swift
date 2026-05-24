@@ -44,10 +44,13 @@ extension AgentAppDelegate {
         Task.detached { [weak self] in
             do {
                 _ = try await ipc.callAsync(method: "apply_profile_preset", params: ["profile": presetId])
-                await MainActor.run {
+                // Wave 554: bind `let self` inside MainActor.run to satisfy Swift 6 strict
+                // concurrency — captured `self?` cannot be reused across concurrent contexts.
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
                     UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
-                    self?.refreshStatusItemTitle()
-                    self?.rebuildStatusMenu()
+                    self.refreshStatusItemTitle()
+                    self.rebuildStatusMenu()
                 }
             } catch {
                 log.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
