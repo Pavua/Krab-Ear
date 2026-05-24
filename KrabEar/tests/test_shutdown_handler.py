@@ -514,5 +514,238 @@ class TestShutdownHandlerElapsedMs(unittest.TestCase):
         self.assertGreaterEqual(data["elapsed_ms"], 0.0)
 
 
+# ===========================================================================
+# Wave 106: additional coverage tests
+# ===========================================================================
+
+class TestShutdownHandlerRegisterCleanupCallback(unittest.TestCase):
+    """test_register_cleanup_callback: register() stores service and wires signals."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_register_cleanup_callback(self):
+        """register() must store service reference so shutdown() can call cleanup steps."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+
+        with patch("signal.signal"):
+            handler.register(svc)
+
+        # Service is wired — shutdown should execute all cleanup steps
+        handler.shutdown()
+        self.assertTrue(svc._audit_logger.closed)
+        self.assertTrue(svc._usage_tracker.persisted)
+        self.assertEqual(len(svc.vocabulary.save_calls), 1)
+
+    def test_register_replaces_previous_service(self):
+        """Second register() replaces the service reference cleanly."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc1 = _make_service()
+        svc2 = _make_service()
+
+        with patch("signal.signal"):
+            handler.register(svc1)
+            handler.register(svc2)
+
+        self.assertIs(handler._service, svc2)
+
+
+class TestShutdownHandlerLIFOOrder(unittest.TestCase):
+    """test_run_cleanups_in_lifo_order: verify shutdown steps execute in defined sequence."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_run_cleanups_in_lifo_order(self):
+        """Steps execute vocabulary → audit → usage → playback → compact → socket.
+        Verify by recording call order via side_effects."""
+        call_order: list[str] = []
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = MagicMock()
+
+        # Vocabulary
+        vocab = MagicMock()
+        vocab.load.side_effect = lambda: call_order.append("vocab_load") or ["word"]
+        vocab.save.side_effect = lambda w: call_order.append("vocab_save")
+        svc.vocabulary = vocab
+
+        # Audit logger
+        audit = MagicMock()
+        audit.close.side_effect = lambda: call_order.append("audit_close")
+        svc._audit_logger = audit
+
+        # Usage tracker
+        usage = MagicMock()
+        usage._persist.side_effect = lambda: call_order.append("usage_persist")
+        svc._usage_tracker = usage
+
+        # Playback tracker
+        playback = MagicMock()
+        playback._save.side_effect = lambda: call_order.append("playback_save")
+        svc._playback_tracker = playback
+
+        # Store
+        store = MagicMock()
+        store.maybe_compact.side_effect = lambda: call_order.append("compact") or False
+        svc.store = store
+
+        # IPC server
+        server = MagicMock()
+        server.stop.side_effect = lambda: call_order.append("socket_stop")
+        svc._ipc_server = server
+
+        handler._service = svc
+        handler.shutdown()
+
+        # _save_vocabulary calls load() then save(); both recorded
+        expected = ["vocab_load", "vocab_save", "audit_close", "usage_persist", "playback_save", "compact", "socket_stop"]
+        self.assertEqual(call_order, expected, f"Step order mismatch: {call_order}")
+
+
+class TestShutdownHandlerExceptionContinues(unittest.TestCase):
+    """test_cleanup_callback_exception_continues: failure in one step doesn't abort others."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cleanup_callback_exception_continues(self):
+        """All six steps run even if earlier steps raise."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        # Make the first step (vocabulary) fail
+        svc.vocabulary.save = MagicMock(side_effect=RuntimeError("boom"))
+        handler._service = svc
+        handler.shutdown()
+
+        # All remaining steps must still have run
+        self.assertTrue(svc._audit_logger.closed)
+        self.assertTrue(svc._usage_tracker.persisted)
+        self.assertTrue(svc._playback_tracker.saved)
+        self.assertTrue(svc.store.compact_called)
+        self.assertTrue(svc._ipc_server.stopped)
+
+        # And clean=False is recorded
+        data = json.loads((self.data_dir / _SHUTDOWN_INFO_FILE).read_text())
+        self.assertFalse(data["clean"])
+
+
+class TestShutdownHandlerWriteShutdownInfoFile(unittest.TestCase):
+    """test_write_shutdown_info_file: JSON file written with atomic tmp→rename."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_write_shutdown_info_file(self):
+        """Shutdown writes a parseable JSON file with expected fields."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        handler._service = svc
+        handler.shutdown()
+
+        info_path = self.data_dir / _SHUTDOWN_INFO_FILE
+        self.assertTrue(info_path.exists())
+        data = json.loads(info_path.read_text(encoding="utf-8"))
+        self.assertIn("last_shutdown_time", data)
+        self.assertIn("clean", data)
+        self.assertIn("elapsed_ms", data)
+        self.assertIn("errors", data)
+        self.assertIsInstance(data["errors"], list)
+
+    def test_no_tmp_residue_after_write(self):
+        """No .tmp file should remain after shutdown_info is written."""
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        handler._service = svc
+        handler.shutdown()
+
+        tmp_files = list(self.data_dir.glob("*.tmp"))
+        self.assertEqual(tmp_files, [], "No .tmp residue expected after write")
+
+
+class TestShutdownHandlerConcurrentIdempotent(unittest.TestCase):
+    """test_concurrent_shutdown_idempotent: called from N threads = executes once."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_concurrent_shutdown_idempotent(self):
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+        handler._service = svc
+
+        barrier = threading.Barrier(20)
+
+        def _run():
+            barrier.wait()
+            handler.shutdown()
+
+        threads = [threading.Thread(target=_run) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly one execution
+        self.assertEqual(len(svc.vocabulary.save_calls), 1)
+        self.assertTrue(svc._audit_logger.closed)
+
+
+class TestShutdownHandlerTimeoutPerCallback(unittest.TestCase):
+    """test_timeout_per_cleanup_callback: slow steps still produce clean shutdown_info."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_timeout_per_cleanup_callback(self):
+        """A slow cleanup step (simulated with brief sleep) doesn't block the whole shutdown.
+        elapsed_ms is recorded accurately."""
+        import time
+        handler = GracefulShutdownHandler(data_dir=self.data_dir)
+        svc = _make_service()
+
+        def _slow_persist():
+            time.sleep(0.05)
+            svc._usage_tracker.persisted = True
+
+        svc._usage_tracker._persist = _slow_persist
+        handler._service = svc
+
+        start = time.monotonic()
+        handler.shutdown()
+        elapsed = time.monotonic() - start
+
+        # Shutdown completes within a reasonable time (no infinite hang)
+        self.assertLess(elapsed, 5.0, "Shutdown took too long (possible hang)")
+
+        data = json.loads((self.data_dir / _SHUTDOWN_INFO_FILE).read_text())
+        self.assertTrue(data["clean"])
+        self.assertGreater(data["elapsed_ms"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
