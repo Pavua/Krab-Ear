@@ -306,5 +306,106 @@ class TestValidateFullSettings(unittest.TestCase):
         self.assertEqual(s["quality_profile"], "balanced")
 
 
+# ---------------------------------------------------------------------------
+# Wave 105: additional coverage tests
+# ---------------------------------------------------------------------------
+
+class TestValidateUnknownKeysPreserved(unittest.TestCase):
+    """test_unknown_keys_preserved: extra keys pass through unchanged."""
+
+    def setUp(self):
+        self.v = SettingsValidator()
+
+    def test_unknown_keys_preserved(self):
+        s = {"unknown_future_key": "value123", "quality_profile": "balanced"}
+        result = self.v.validate(s)
+        self.assertTrue(result.valid)
+        self.assertIn("unknown_future_key", result.fixed)
+        self.assertEqual(result.fixed["unknown_future_key"], "value123")
+
+    def test_unknown_keys_not_in_warnings(self):
+        """Unknown keys should NOT generate warnings — forward-compatible."""
+        s = {"totally_new_key": 42}
+        result = self.v.validate(s)
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
+        # No warning about the unknown key itself
+        unknown_warnings = [w for w in result.warnings if "totally_new_key" in w]
+        self.assertEqual(unknown_warnings, [])
+
+
+class TestValidateDefaultFilledForMissing(unittest.TestCase):
+    """test_default_filled_for_missing: absent known fields get defaults on migrate."""
+
+    def setUp(self):
+        self.v = SettingsValidator()
+
+    def test_default_filled_for_missing_after_migrate(self):
+        """After 1.0→2.0 migration, known new fields are populated with defaults."""
+        s = {}
+        result = self.v.migrate(s, "1.0", "2.0")
+        self.assertIn("overlay_opacity_percent", result)
+        self.assertEqual(result["overlay_opacity_percent"], 45)
+        self.assertIn("call_notify_default", result)
+        self.assertTrue(result["call_notify_default"])
+
+    def test_missing_field_not_touched_by_validate(self):
+        """validate() should NOT inject defaults for absent optional keys."""
+        s = {"quality_profile": "balanced"}
+        result = self.v.validate(s)
+        # history_page_size is absent — validate() must NOT add it
+        self.assertNotIn("history_page_size", result.fixed)
+
+
+class TestValidateConcurrentThreadSafe(unittest.TestCase):
+    """test_validate_concurrent_thread_safe: concurrent validate() calls are safe."""
+
+    def setUp(self):
+        self.v = SettingsValidator()
+
+    def test_validate_concurrent_thread_safe(self):
+        import threading
+        errors: list[Exception] = []
+        results: list = []
+
+        def _run(i: int) -> None:
+            try:
+                s = {"quality_profile": "balanced" if i % 2 == 0 else "bad_value"}
+                r = self.v.validate(s)
+                results.append(r.valid)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_run, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent validate raised: {errors}")
+        self.assertEqual(len(results), 20)
+        for valid in results:
+            self.assertIsInstance(valid, bool)
+
+    def test_migrate_concurrent_thread_safe(self):
+        import threading
+        errors: list[Exception] = []
+
+        def _run() -> None:
+            try:
+                s = {"history_limit": "unlimited"}
+                self.v.migrate(s, "1.0", "2.0")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_run) for _ in range(15)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent migrate raised: {errors}")
+
+
 if __name__ == "__main__":
     unittest.main()
