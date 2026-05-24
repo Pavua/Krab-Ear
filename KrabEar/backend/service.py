@@ -2842,49 +2842,6 @@ class BackendService:
         """Снимок метрик реального времени: сессия, LLM, call_assist, конфиг. Delegate → AnalyticsService."""
         return self._analytics_svc.handle_get_metrics_dashboard(params)
 
-    def _handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Локальный lightweight-summary для длинных заметок/транскриптов."""
-        text = str(params.get("text", "")).strip()
-        if not text:
-            raise RuntimeError("text обязателен")
-        mode = str(params.get("mode", "summary_short")).strip() or "summary_short"
-        max_points = int(params.get("max_points", 3) or 3)
-        max_points = max(1, min(max_points, 12))
-        summary = self._summarize_text_locally(text=text, mode=mode, max_points=max_points)
-        return {
-            "mode": summary["mode"],
-            "summary": summary["summary"],
-            "bullets": summary["bullets"],
-            "source_chars": len(text),
-        }
-
-    @staticmethod
-    def _summarize_text_locally(text: str, mode: str, max_points: int) -> dict[str, Any]:
-        """Простая эвристика summary без внешних зависимостей."""
-        normalized = " ".join(text.replace("\r", "\n").split())
-        if not normalized:
-            return {"mode": mode, "summary": "", "bullets": []}
-
-        chunks = []
-        for raw in re.split(r"(?<=[.!?])\s+", normalized):
-            sentence = raw.strip()
-            if sentence:
-                chunks.append(sentence)
-        if not chunks:
-            chunks = [normalized]
-
-        if mode == "summary_detailed":
-            bullets = chunks[:max_points]
-            summary = " ".join(chunks[: min(len(chunks), max_points + 1)])
-        else:
-            # Короткий summary: первая смысловая фраза + маркеры.
-            head = chunks[0]
-            bullets = chunks[1: 1 + max_points]
-            if not bullets:
-                bullets = chunks[:max_points]
-            summary = head
-        return {"mode": mode, "summary": summary, "bullets": bullets}
-
     def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список моделей доступных в LM Studio через /api/v1/models.
 
@@ -4420,10 +4377,6 @@ class BackendService:
     #           TermExtractor, TextComparator
     # ------------------------------------------------------------------
 
-    def _handle_generate_daily_digest(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_generate_daily_digest(params)
-
     def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует полный Markdown-отчёт статистики использования за период."""
         days = int(params.get("days", 30))
@@ -4434,22 +4387,6 @@ class BackendService:
         """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
         markdown = self._stats_report.generate_mini_report(store=self.store)
         return {"markdown": markdown}
-
-    def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_compare_periods(params)
-
-    def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_get_activity_calendar(params)
-
-    def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_get_recording_insights(params)
-
-    def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_get_sentiment_trends(params)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -4528,10 +4465,6 @@ class BackendService:
             "size": self._context_memory.size(),
             "window_size": 50,
         }
-
-    def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_get_keyword_cloud(params)
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
@@ -4977,10 +4910,6 @@ end tell'''
         params_with_store = dict(params)
         params_with_store.setdefault("store", self.store)
         return self._language_learning.handle_get_learning_stats(params_with_store)
-
-    def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegate → AnalyticsService."""
-        return self._analytics_svc.handle_get_analytics_dashboard(params)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.

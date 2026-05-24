@@ -387,10 +387,11 @@ class TestIPCDispatchInvariants(unittest.TestCase):
             )
 
     def test_get_recording_insights_alias_consistency(self):
-        """'get_recording_insights' in dispatch points to _handle_get_recording_stats,
-        NOT _handle_get_recording_insights.  This is either intentional aliasing or
-        a naming bug.  The test documents the situation: if the alias is intentional
-        this test passes; if the real method is later registered, update accordingly.
+        """'get_recording_insights' in dispatch must be correctly registered.
+
+        Wave 54 fix: was wrongly aliased to _handle_get_recording_stats.
+        Wave 174 (AnalyticsService extraction): dispatch now delegates directly to
+        _analytics_svc.handle_get_recording_insights (no _handle_ stub needed).
         """
         import re
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
@@ -405,17 +406,19 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         self.assertIn('"get_recording_insights"', dispatch_block,
                       "'get_recording_insights' is missing from dispatch table entirely")
 
-        # Document the current aliasing: key points to _handle_get_recording_stats
-        match = re.search(r'"get_recording_insights"\s*:\s*self\.(_handle_\w+)', dispatch_block)
-        self.assertIsNotNone(match, "Cannot parse 'get_recording_insights' dispatch entry")
-        actual_handler = match.group(1)
-
-        # Wave 54 fix: dispatch now correctly resolves to _handle_get_recording_insights
-        # (was wrongly aliased to _handle_get_recording_stats — silent semantic bug).
-        self.assertEqual(
-            actual_handler, "_handle_get_recording_insights",
-            f"'get_recording_insights' now points to {actual_handler!r}; "
-            f"expected '_handle_get_recording_insights' (Wave 54 alias fix)"
+        # Accept both: direct _handle_* form (pre-wave174) and service-delegation form (post-wave174)
+        match_direct = re.search(
+            r'"get_recording_insights"\s*:\s*self\._handle_get_recording_insights\b',
+            dispatch_block,
+        )
+        match_service = re.search(
+            r'"get_recording_insights"\s*:\s*self\._analytics_svc\.handle_get_recording_insights\b',
+            dispatch_block,
+        )
+        self.assertTrue(
+            match_direct or match_service,
+            "'get_recording_insights' dispatch entry not recognised — expected "
+            "self._handle_get_recording_insights or self._analytics_svc.handle_get_recording_insights",
         )
 
 
