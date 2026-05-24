@@ -62,6 +62,33 @@
 - [ ] Коммит: `git add -A && git commit -m "release: vYYYY-MM-DD"`
 - [ ] Тег: `git tag vYYYY-MM-DD && git push origin main --tags`
 
+## v2.0.5 Candidate — PRs для включения
+
+| PR | Wave | Описание |
+|----|------|----------|
+| #619 | W525 | Extract analysis module |
+| #622 | W545 | Backend hardening |
+| #624 | W547 | Test coverage |
+| #625 | W546 | Core fixes |
+| #623 | W554 | Backend service cleanup |
+| #628 | W568 | Error handling improvements |
+| #629 | W577-578 | Dual-wave stability patch |
+| #630 | W575 | Backend refactor |
+| #631 | W611 | Service extraction |
+| #632 | W632 | Test coverage sweep |
+| #634 | W635 | Dead handler audit (86 active verified) |
+
+### Шаги верификации перед тегом v2.0.5
+
+- [ ] Все PR из таблицы выше смержены в `codex/krab-ear-v2`
+- [ ] `PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/ -q` — 0 failures
+- [ ] `grep -c '"method"' KrabEar/backend/service.py` — сверить с 86 активными хендлерами
+- [ ] `swift build -c release` в `native/KrabEarAgent` — без ошибок
+- [ ] Smoke: hotkey → запись → транскрипция → вставка
+- [ ] `git tag v2.0.5 && git push origin v2.0.5`
+
+---
+
 ## 6. Пост-релиз
 
 - [ ] Агент запущен с нового тега — работает штатно
