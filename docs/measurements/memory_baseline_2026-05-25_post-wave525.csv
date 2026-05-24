@@ -1,0 +1,14 @@
+# Wave 552 memory baseline post-Wave 525 GigaAM dup kill
+# Sampled 2026-05-25 06:55 UTC, 3 samples × 8s = 24s window
+# Production state: service.py + rest_server.py + 1 gigaam_worker + Swift agent
+sample,timestamp,service_rss_mb,rest_rss_mb,gigaam_0_rss_mb,swift_agent_rss_mb,total_mb
+1,06:55:03,20.0,129.5,23.4,141.4,314.3
+2,06:55:11,20.0,129.5,23.4,141.3,314.2
+3,06:55:19,20.0,129.5,23.4,141.3,314.2
+# Findings:
+# - service.py: 20 MB (very low — fresh restart, no leak signal)
+# - rest_server.py: 129 MB steady (no creep)
+# - gigaam_worker: 23.4 MB, 1 instance only (Wave 525 singleton lock works)
+# - Swift agent: 141 MB steady
+# - Total: ~314 MB (vs goal <500 MB) — HEALTHY
+# - No dup worker (Wave 69 regression killed in Wave 525 via PID inspection)
