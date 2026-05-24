@@ -126,43 +126,80 @@ discovered.*
 
 ---
 
-## 🔴 P0 NEW (Wave 611) — LM Studio auto-reload after unload
+## 🔴 P0 CONFIRMED (Wave 632) — LM Studio Just-In-Time loading is the auto-reload culprit
 
-### Symptom
-User unloads the heavy Optiq 15+GB model in LM Studio, but the model
-reloads itself after some time → memory pressure → macOS auto-update
-+ reboot loop (8 reboots observed today).
+### Evidence
+2026-05-26 screenshot showed model loaded with these characteristics:
+- Status: Running, model READY
+- Idle TTL: 5 min (should auto-unload, but reloads on any HTTP request)
+- Log error: `Unexpected endpoint or method. (GET /v1/models). Returning 200 anyway`
 
-### Two causes identified
+A single GET request from ANY client (Krab Ear backend, sister Krab project, even LM Studio's own GUI health check) triggers JIT model load. The Idle TTL only counts INACTIVE time — every request resets the counter.
 
-**Cause 1: Sister Krab project watchdog plists** (FIXED 2026-05-26)
-The `Krab` (Telegram userbot) project installed two launchd plists in
-`~/Library/LaunchAgents/`:
-- `ai.krab.lmstudio-watch.plist` — runs `lm_studio_auto_recovery.py --once`
-  every 5 min; if LM Studio server probe fails, calls `lms server stop/start`
-  which RELOADS the configured default model.
-- `ai.krab.lmstudio-auto-unload.plist` — runs hourly to unload idle models.
+### Inline action taken (`lms server stop`)
+2026-05-26 08:18Z: ran `lms server stop` → port 1234 server stopped → memory recovered from 6 GB → 14.6 GB free. Model auto-unloaded by Idle TTL almost immediately.
 
-**Action taken inline (Wave 611)**:
+### Permanent fix — USER ACTION (GUI toggles)
+
+1. **Disable Just-In-Time loading**:
+   LM Studio GUI → Settings (⚙️) → **Developer → Local Server**:
+   - Toggle OFF **"Auto-evict previously loaded models"** (paradoxically: when this is ON, server reloads model on next request → unevicts → JIT cycle)
+   - Toggle OFF **"Just-In-Time Model Loading"** (the primary toggle — may be under "Advanced")
+
+2. **Stop server when not in use** (workaround if JIT toggle hidden):
+   ```bash
+   lms server stop   # alias for ad-hoc shutdown when LM not actively needed
+   ```
+
+3. **Remove server from launchd auto-start** (LM Studio app itself is launchd-managed):
+   - `launchctl bootout gui/$(id -u)/application.ai.elementlabs.lmstudio.222401065.371300673` (LM Studio CRT label may differ; check `launchctl list | grep lmstudio`)
+   - Or: System Settings → General → Login Items — remove LM Studio.
+
+### Verification (after toggling settings)
 ```bash
-launchctl bootout gui/$(id -u)/ai.krab.lmstudio-watch
-launchctl bootout gui/$(id -u)/ai.krab.lmstudio-auto-unload
+lms server start
+# Wait 30s — model should NOT auto-load
+lms ls   # expects "no models loaded"
+# Make a request, verify it FAILS with "model not loaded" rather than triggers load
+curl http://127.0.0.1:1234/v1/models   # expects empty list or 404, NOT model load
 ```
 
-To make permanent disable, delete the plist files OR set `KeepAlive=false` +
-`Disabled=true` in each.
+### Why this matters
+With JIT loading enabled + 15 GB model + LM Studio + parallel Claude Code agents + macOS Spotlight + memory pressure → kernel OOM panic → forced reboot. Documented 9 reboots today caused by this cycle.
 
-**Cause 2: LM Studio's own "Load last model on startup" setting** (USER ACTION)
-Inside LM Studio GUI:
-1. Settings (⚙️ icon) → Developer → Local Server
-2. Toggle OFF "Load a model on server start"
-3. Settings → User → Toggle OFF "Load most recent model on startup"
+---
 
-Alternatively, delete `~/.lmstudio/conversations/` and `~/.lmstudio/.cache/lm-studio-defaults`
-to clear any saved "default model" state.
+## 🔴 P0 CONFIRMED (Wave 632) — LM Studio Just-In-Time loading is the auto-reload culprit
+
+### Evidence
+2026-05-26 screenshot showed model loaded with these characteristics:
+- Status: Running, model READY
+- Idle TTL: 5 min (should auto-unload, but reloads on any HTTP request)
+- Log error: `Unexpected endpoint or method. (GET /v1/models). Returning 200 anyway`
+
+A single GET request from ANY client (Krab Ear backend, sister Krab project, even LM Studio's own GUI health check) triggers JIT model load. The Idle TTL only counts INACTIVE time — every request resets the counter.
+
+### Inline action taken (`lms server stop`)
+2026-05-26 08:18Z: ran `lms server stop` → port 1234 server stopped → memory recovered from 6 GB → 14.6 GB free. Model auto-unloaded by Idle TTL almost immediately.
+
+### Permanent fix — USER ACTION (GUI toggles)
+
+1. **Disable Just-In-Time loading**:
+   LM Studio GUI → Settings (⚙️) → **Developer → Local Server**:
+   - Toggle OFF **"Auto-evict previously loaded models"**
+   - Toggle OFF **"Just-In-Time Model Loading"**
+
+2. **Stop server when not in use**:
+   ```bash
+   lms server stop
+   ```
 
 ### Verification
-Watch over 30 min after toggling — model should remain unloaded:
 ```bash
-watch -n 60 "ps aux | grep -E 'lmstudio|mlx' | grep -v grep | head"
+lms server start
+# Wait 30s — model should NOT auto-load
+lms ls   # expects "no models loaded"
 ```
+
+### Why this matters
+With JIT loading enabled + 15 GB model + parallel Claude Code agents → kernel OOM panic → forced reboot. 9 reboots today caused by this cycle.
