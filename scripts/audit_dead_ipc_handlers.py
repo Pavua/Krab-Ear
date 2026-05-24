@@ -267,6 +267,8 @@ def find_rest_callers(rest_server_py: Path) -> set[str]:
 # --- 5. Parse other Python callers (outside backend/ and tests/) ---
 
 _OTHER_PY_METHOD_PATTERN = re.compile(r'"method"\s*:\s*"([a-z][a-z0-9_]*)"')
+# Catches _ipc_call("method_name", ...) pattern used in cli.py
+_OTHER_PY_IPC_CALL_PATTERN = re.compile(r'_ipc_call\s*\(\s*"([a-z][a-z0-9_]*)"')
 
 
 def find_other_python_callers(
@@ -275,6 +277,10 @@ def find_other_python_callers(
     """
     Return set of IPC method names from Python files outside
     KrabEar/backend/ and KrabEar/tests/.
+
+    Handles two call patterns:
+      1. {"method": "foo", ...}  — standard JSON-RPC dict literal
+      2. _ipc_call("foo", ...)   — cli.py helper function call  [v3: Wave 460]
     """
     called: set[str] = set()
     exclude_resolved = {p.resolve() for p in exclude_paths}
@@ -298,8 +304,9 @@ def find_other_python_callers(
             text = py_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for m in _OTHER_PY_METHOD_PATTERN.finditer(text):
-            called.add(m.group(1))
+        for pattern in (_OTHER_PY_METHOD_PATTERN, _OTHER_PY_IPC_CALL_PATTERN):
+            for m in pattern.finditer(text):
+                called.add(m.group(1))
 
     return called
 
