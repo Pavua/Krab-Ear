@@ -397,7 +397,7 @@ extension AgentAppDelegate {
         return containsRepeatedChunk(tokens: tokens, minRepeats: 3)
     }
 
-    func containsRepeatedChunk(tokens: [String], minRepeats: Int) -> Bool {
+    nonisolated func containsRepeatedChunk(tokens: [String], minRepeats: Int) -> Bool {
         let total = tokens.count
         guard total >= 6 else { return false }
 
