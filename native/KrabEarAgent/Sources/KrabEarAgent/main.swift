@@ -157,6 +157,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Wave 656: log bootstrap stage — app_launched.
+        AgentRecoveryLogger.shared.logStage("app_launched")
+
         // Phase C C.6: POSIX flock — race-free single-instance guard.
         // Должен быть ДО killOtherAgentInstances — если другой экземпляр уже держит lock,
         // немедленно завершаем этот процесс (не убивая старый экземпляр).
@@ -223,14 +226,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // оставшийся setup (UI, hotkey, history panel) выполняется по готовности backend.
         Task.detached { [weak self] in
             guard let self else { return }
+            // Wave 656: log IPC connect attempt.
+            AgentRecoveryLogger.shared.logStage("ipc_connect_attempt")
             do {
                 try await self.backendSupervisor.ensureBackendRunningAsync()
                 await MainActor.run {
+                    // Wave 656: log IPC connect success.
+                    AgentRecoveryLogger.shared.logStage("ipc_connect_success")
                     self.logger.info("Backend доступен и готов к IPC")
                     self.completeStartupAfterBackendReady()
                 }
             } catch {
                 await MainActor.run {
+                    // Wave 656: log IPC connect failure.
+                    AgentRecoveryLogger.shared.logFatal("ipc_connect_fail: \(error.localizedDescription)")
                     self.logger.error("Backend недоступен: \(error.localizedDescription)")
                     self.showFatalAndTerminate(
                         title: "Krab Ear: backend недоступен",
