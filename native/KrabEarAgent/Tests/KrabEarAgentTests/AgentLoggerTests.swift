@@ -126,6 +126,73 @@ final class AgentLoggerTests: XCTestCase {
         // Не пишем в shared — его logFile живёт в реальном Application Support
     }
 
+    // MARK: - Rotation tests
+
+    /// Когда объём лога превышает maxBytes, создаётся agent.log.1.
+    func test_rotation_createsBackupFile() {
+        let logger = AgentLogger(dataDirPath: tmpDir.path)
+        // Даём логгеру открыть хэндл.
+        Thread.sleep(forTimeInterval: 0.3)
+
+        // Записываем ~6 MB — должны превысить лимит 5 MB и вызвать ротацию.
+        let bigChunk = String(repeating: "X", count: 512)
+        for _ in 0..<12_000 {
+            logger.info(bigChunk)
+        }
+
+        let deadline = Date().addingTimeInterval(5.0)
+        let backup = tmpDir.appendingPathComponent("agent.log.1")
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: backup.path) { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path),
+                      "agent.log.1 должен появиться после превышения 5 MB")
+    }
+
+    /// После ротации основной файл agent.log продолжает существовать и принимает записи.
+    func test_rotation_mainFileRemainsWritable() {
+        let logger = AgentLogger(dataDirPath: tmpDir.path)
+        Thread.sleep(forTimeInterval: 0.3)
+
+        let bigChunk = String(repeating: "Y", count: 512)
+        for _ in 0..<12_000 {
+            logger.info(bigChunk)
+        }
+        // Пишем финальный маркер после ротации.
+        logger.info("POST_ROTATION_MARKER")
+
+        let deadline = Date().addingTimeInterval(5.0)
+        while Date() < deadline {
+            if let c = try? String(contentsOf: logFile, encoding: .utf8),
+               c.contains("POST_ROTATION_MARKER") { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logFile.path),
+                      "agent.log должен существовать после ротации")
+        let contents = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+        XCTAssertTrue(contents.contains("POST_ROTATION_MARKER"),
+                      "Новые записи должны попадать в agent.log после ротации")
+    }
+
+    /// Резервных файлов не должно быть больше backupCount (3).
+    func test_rotation_backupCountNotExceeded() {
+        let logger = AgentLogger(dataDirPath: tmpDir.path)
+        Thread.sleep(forTimeInterval: 0.3)
+
+        // Пишем ~30 MB, чтобы вызвать несколько ротаций.
+        let bigChunk = String(repeating: "Z", count: 512)
+        for _ in 0..<60_000 {
+            logger.info(bigChunk)
+        }
+
+        Thread.sleep(forTimeInterval: 3.0)
+
+        let backup4 = tmpDir.appendingPathComponent("agent.log.4")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup4.path),
+                       "agent.log.4 не должен существовать при backupCount=3")
+    }
+
     /// После удаления лог-файла (симуляция stale handle) логгер восстанавливается
     /// и продолжает писать без потери следующего сообщения.
     func test_resilience_afterLogFileRemoved() {

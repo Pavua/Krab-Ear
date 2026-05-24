@@ -87,6 +87,7 @@ from backend.usage_tracker import UsageTracker
 from backend.session_tracker import SessionTracker
 from backend.speaker_manager import SpeakerManager
 from backend.history_service import HistoryService
+from backend.apple_integration_service import AppleIntegrationService
 from backend.error_reporter import ErrorReporter
 from backend.recording_scheduler import RecordingScheduler
 from backend.recording_merger import RecordingMerger
@@ -494,6 +495,10 @@ class BackendService:
             timeout_sec=settings.TELEGRAM_BRIDGE_TIMEOUT_SEC,
             circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
             circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
+        )
+        # Apple integration service (Telegram bridge + osascript integrations).
+        self._apple_integration_svc = AppleIntegrationService(
+            telegram_bridge=self._telegram_bridge,
         )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
@@ -1033,17 +1038,13 @@ class BackendService:
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
-            # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
-            "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
-            # --- Apple Notes integration (Phase D.4) ---
-            "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
-            # --- Apple Reminders integration (Phase D.4) ---
-            "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
-            # --- Apple Calendar integration (Phase D.4) ---
-            "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
-            # --- iMessage integration (Phase D.4) ---
-            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
-            "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
+            # --- Apple / Telegram integrations (AppleIntegrationService) ---
+            "send_to_telegram": self._apple_integration_svc.handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            "create_apple_note": self._apple_integration_svc.handle_create_apple_note,  # создать заметку в Apple Notes через osascript
+            "create_apple_reminder": self._apple_integration_svc.handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
+            "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
+            "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._call_session_service.handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._call_session_service.handle_call_session_get,  # получить сессию по id
@@ -5372,9 +5373,15 @@ def configure_logging(data_dir: Path) -> None:
     else:
         formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
+    from logging.handlers import RotatingFileHandler as _RotatingFileHandler
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path, encoding="utf-8"),
+        _RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ]
     for h in handlers:
         h.setFormatter(formatter)
