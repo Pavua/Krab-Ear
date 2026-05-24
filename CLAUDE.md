@@ -355,6 +355,7 @@ make lint          # Flake8 on Python backend
 - `scripts/create_local_signing_identity.command` — create `Krab Ear Dev Local` self-signed identity for stable TCC grants (PR #235)
 - `scripts/build_distribution_dmg.command` — build distribution DMG for sharing (PR #229)
 - `scripts/install_agent_launchagent.command` — opt-in launchd KeepAlive for Swift agent (Wave 59 self-recovery)
+- **Wave 651 worktree cleanup**: pruned 141 stale worktrees (22 merged-branch + 119 >30d+lsof-empty); 439→298 worktrees; 112 GB → 103 GB freed 9 GB. Unlock-then-prune pattern required (git skips locked entries even after dir removed).
 
 ### Launch app
 ```bash
