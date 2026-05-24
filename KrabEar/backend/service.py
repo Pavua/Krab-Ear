@@ -96,6 +96,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
