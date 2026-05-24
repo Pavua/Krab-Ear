@@ -2400,7 +2400,14 @@ class BackendService:
         # proc_cmdline raises PermissionError → wrapped as SystemError by the
         # psutil C ext, which bubbles out before any inner try/except. Iterate
         # bare and fetch fields manually under a wide except.
-        for proc in psutil.process_iter():
+        try:
+            proc_iter = list(psutil.process_iter())
+        except (PermissionError, SystemError, OSError) as exc:
+            # Wave 490: Sequoia KERN_PROCARGS2 blocks process_iter at the top level.
+            # Push system.proc_cmdline_permission and return gracefully.
+            self._push_proc_cmdline_permission_error(exc)
+            return {"ok": True, "processes": []}
+        for proc in proc_iter:
             try:
                 cmd = " ".join(proc.cmdline() or [])
                 if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
@@ -2419,6 +2426,36 @@ class BackendService:
                 continue
 
         return {"ok": True, "processes": matches}
+
+    def _push_proc_cmdline_permission_error(self, exc: Exception) -> None:
+        """Push system.proc_cmdline_permission error to error_bus. Never raises.
+
+        Wave 490: Sequoia KERN_PROCARGS2 blocks psutil.process_iter() with
+        PermissionError/SystemError. Push once per hour (dedupe_seconds=3600).
+        """
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("system.proc_cmdline_permission", {})
+            err = KrabError(
+                severity="error",
+                component="system",
+                code="system.proc_cmdline_permission",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2).",
+                ),
+                message_debug=f"psutil.process_iter raised {type(exc).__name__}: {exc}",
+                timestamp=datetime.now(timezone.utc),
+                context={"exc_type": type(exc).__name__, "exc_msg": str(exc)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            if hasattr(self, "_error_bus") and self._error_bus is not None:
+                self._error_bus.push(err)
+        except Exception:
+            pass  # never raise from error reporting path
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
