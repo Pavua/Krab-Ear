@@ -18,12 +18,14 @@ from backend.template_manager import TemplateManager
 from backend.search_history import SearchHistoryManager
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
+from backend.timeline_export import TimelineExporter
 from backend.auto_deduplication import AutoDeduplicator
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
 from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
 from backend.playback_tracker import PlaybackTracker
+from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.sentiment_trends import SentimentTrendAnalyzer
 from backend.transcription_queue import TranscriptionQueue
@@ -31,6 +33,7 @@ from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
+from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
@@ -42,9 +45,11 @@ from backend.sharing_manager import SharingManager
 from backend.realtime_partial import RealtimePartialTranscriber
 from backend.semantic_search import SemanticSearcher, keyword_fallback_search
 from core.word_timing import WordTimingAnalyzer
+from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
 from core.abbreviation_expander import AbbreviationExpander
 from core.audio_fingerprint import AudioFingerprinter
+from core.hallucination_manager import HallucinationManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from backend.webhook_manager import WebhookManager
 from backend.stats_report import StatsReportGenerator
@@ -82,6 +87,7 @@ from backend.usage_tracker import UsageTracker
 from backend.session_tracker import SessionTracker
 from backend.speaker_manager import SpeakerManager
 from backend.history_service import HistoryService
+from backend.stt_management_service import STTManagementService
 from backend.apple_integration_service import AppleIntegrationService
 from backend.error_reporter import ErrorReporter
 from backend.recording_scheduler import RecordingScheduler
@@ -91,10 +97,8 @@ from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
-from backend.analytics_service import AnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.text_processing_service import TextProcessingService
-from backend.text_scoring_service import TextScoringService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -111,7 +115,6 @@ from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_silence_probe import CallSilenceProbe
 from backend.call_auto_end import CallAutoEnd
-from backend.health_check_service import HealthCheckService
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
@@ -124,9 +127,11 @@ from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
+    get_release_string,
     init_sentry,
     install_signal_handlers,
 )
+from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
@@ -212,6 +217,10 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
+        self._stt_mgmt_svc = STTManagementService(
+            settings_svc=self._settings_svc,
+            transcriber=self.transcriber,
+        )
         # Hot-propagate api_key changes to the running LLMRewriter without restart.
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:
@@ -386,9 +395,11 @@ class BackendService:
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
+        self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
+        self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
         self._readability_scorer = ReadabilityScorer()
@@ -396,6 +407,7 @@ class BackendService:
         self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
         self._transcription_scorer = TranscriptionScorer()
+        self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
@@ -419,6 +431,7 @@ class BackendService:
             data_dir=self.store.data_dir,
             enabled=settings.PASTE_APP_MEMORY_ENABLED,
         )
+        self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
@@ -436,12 +449,6 @@ class BackendService:
             store=self.store,
             llm_rewriter=self._llm_rewriter,
         )
-        self._text_scoring_svc = TextScoringService(
-            llm_rewriter=self._llm_rewriter,
-            term_extractor=self._term_extractor,
-            auto_title_generator=self._auto_title_generator,
-            get_runtime_setting=self._get_runtime_setting,
-        )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
@@ -450,6 +457,7 @@ class BackendService:
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
         self._metadata_enricher = MetadataEnricher()
+        self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
@@ -464,14 +472,6 @@ class BackendService:
             quality_trends=self._quality_trends,
             audio_fingerprinter=self._audio_fingerprinter,
             word_timing_analyzer=self._word_timing_analyzer,
-            store=self.store,
-        )
-        self._analytics_svc = AnalyticsService(
-            analytics_dashboard=self._analytics_dashboard,
-            sentiment_trends=self._sentiment_trends,
-            activity_calendar=self._activity_calendar,
-            keyword_cloud_gen=self._keyword_cloud_gen,
-            timeline_view=self._timeline_view,
             store=self.store,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
@@ -517,6 +517,9 @@ class BackendService:
 
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
+        self._calendar_linker = CalendarLinker(
+            cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
+        )
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -560,24 +563,6 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
-
-        # HealthCheckService — делегат диагностических IPC-методов.
-        # Использует уже инициализированные collaborators.
-        self._health_check_svc = HealthCheckService(
-            store=self.store,
-            health_checker=self._health_checker,
-            startup_diagnostics=self._startup_diagnostics,
-            integrity_checker=self._integrity_checker,
-            llm_probe=getattr(self, "_llm_probe", None),
-            metrics_collector=getattr(self, "_metrics_collector", None),
-            transcriber=self.transcriber,
-            llm_rewriter=self._llm_rewriter,
-            settings_svc=self._settings_svc,
-            start_time=self._start_time,
-            app_version=APP_VERSION,
-            recorder=self.recorder,
-            last_stt_engine_ref=[self._last_stt_engine or ""],
-        )
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -749,20 +734,6 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
-    def _handle_remove_from_semantic_index(self, params: dict) -> dict:
-        """Удаляет элемент из семантического индекса.
-
-        Params:
-            item_id — str, идентификатор элемента для удаления (обязателен)
-        Returns:
-            {"removed": bool}
-        """
-        item_id = (params.get("item_id") or "").strip()
-        if not item_id:
-            raise ValueError("item_id обязателен")
-        removed = self._semantic_searcher.remove_item(item_id)
-        return {"removed": removed}
-
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
@@ -815,6 +786,7 @@ class BackendService:
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
+            "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
             "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
             "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
@@ -906,8 +878,8 @@ class BackendService:
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
-            "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
-            "warmup_rewriter": self._handle_warmup_rewriter,  # → TextScoringService
+            "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
+            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
@@ -940,14 +912,14 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
-            "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
-            "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
+            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
+            "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_sentiment_trends": self._analytics_svc.handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
-            "extract_terms": self._handle_extract_terms,  # → TextScoringService
+            "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
             "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
             "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
@@ -959,7 +931,7 @@ class BackendService:
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._audio_analytics_svc.handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
-            "get_keyword_cloud": self._analytics_svc.handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
+            "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
@@ -967,14 +939,14 @@ class BackendService:
             "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
-            "generate_auto_title": self._handle_generate_auto_title,  # → TextScoringService
+            "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
             # форматирование текста под целевое приложение (telegram, notes, email и др.)
             "format_for_paste": self._paste_formatter.handle_format_for_paste,
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
-            "get_analytics_dashboard": self._analytics_svc.handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
@@ -1004,7 +976,7 @@ class BackendService:
             "post_process_text": self._text_processing_svc.handle_post_process_text,
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
-            "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
+            "select_model": self._stt_mgmt_svc.handle_select_model,  # умный выбор STT-модели на основе условий записи
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
             # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
@@ -1013,7 +985,7 @@ class BackendService:
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
-            "get_timeline_view": self._analytics_svc.handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
+            "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
@@ -1087,9 +1059,9 @@ class BackendService:
             "call_session_add_transcript": self._call_session_service.handle_call_session_add_transcript,  # добавить реплику в транскрипт
             "call_session_end": self._call_session_service.handle_call_session_end,  # завершить сессию: compute duration, total_cost
             # --- STT hotwords (initial_prompt boost) ---
-            "add_stt_hotword": self._handle_add_stt_hotword,  # добавить термин в STT hotwords список
-            "remove_stt_hotword": self._handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
-            "list_stt_hotwords": self._handle_list_stt_hotwords,  # получить весь список STT hotwords
+            "add_stt_hotword": self._stt_mgmt_svc.handle_add_stt_hotword,  # добавить термин в STT hotwords список
+            "remove_stt_hotword": self._stt_mgmt_svc.handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
+            "list_stt_hotwords": self._stt_mgmt_svc.handle_list_stt_hotwords,  # получить весь список STT hotwords
             # --- Recording bookmarks (Cmd+Shift+B) ---
             "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
             "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
@@ -1100,7 +1072,6 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
-            "remove_from_semantic_index": self._handle_remove_from_semantic_index,  # удалить элемент из семантического индекса
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
@@ -1109,7 +1080,7 @@ class BackendService:
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
-            "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
         }
 
@@ -1243,7 +1214,18 @@ class BackendService:
         )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._health_check_svc.handle_ping(params)
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+        return {
+            "status": "ok",
+            "service": "krabear-backend",
+            "version": APP_VERSION,
+            "uptime_sec": round(time.monotonic() - self._start_time, 1),
+            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
+            "history_count": history_count,
+        }
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         started = self.recorder.start()
@@ -1827,9 +1809,6 @@ class BackendService:
         # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
         if tp.get("engine"):
             self._last_stt_engine = str(tp["engine"])
-            # Синхронизируем shared ref для HealthCheckService.
-            if hasattr(self, "_health_check_svc"):
-                self._health_check_svc._last_stt_engine_ref[0] = self._last_stt_engine
         confidence = tp.get("confidence", 0.0)
         add_breadcrumb(
             category="transcription",
@@ -2299,11 +2278,60 @@ class BackendService:
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
-        return self._health_check_svc.handle_get_diagnostics(params)
+        try:
+            diarization_device = str(self.transcriber.engine._resolve_diarization_device())
+        except Exception:
+            diarization_device = "unknown"
+
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+
+        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
+        try:
+            profiler_report = performance_profiler.get_profile_report()
+        except Exception as exc:
+            logger = logging.getLogger("KrabEar.Backend.Service")
+            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
+            profiler_report = {
+                "methods": {},
+                "slowest_methods": [],
+                "total_profiled_time_sec": 0.0,
+                "error": str(exc),
+            }
+
+        return {
+            "system": {
+                "python_version": sys.version,
+                "platform": platform.platform(),
+                "uptime_sec": time.monotonic() - self._start_time,
+            },
+            "stt": {
+                "model_balanced": settings.MODEL_BALANCED,
+                "model_max": settings.MODEL_MAX_CANDIDATES,
+                "quality_profile": self.transcriber.engine.quality_profile,
+                "current_model": self.transcriber.engine.current_model,
+                "diarization_enabled": settings.DIARIZATION_ENABLED,
+                "diarization_device": diarization_device,
+                "last_engine": self._last_stt_engine,
+            },
+            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
+            "history": {
+                "total_items": history_count,
+                "data_dir": str(self.store.data_dir),
+                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
+            },
+            "settings_cache": {
+                "ttl_sec": self._settings_svc._cache_ttl,
+                "cached": self._settings_svc._cache is not None,
+            },
+            "profiler": profiler_report,
+        }
 
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
-        return self._health_check_svc.handle_health_check(params)
+        return self._health_checker.check_all()
 
     # ------------------------------------------------------------------
     # Phase B.1 — error bus + LLM probe handlers
@@ -2372,14 +2400,7 @@ class BackendService:
         # proc_cmdline raises PermissionError → wrapped as SystemError by the
         # psutil C ext, which bubbles out before any inner try/except. Iterate
         # bare and fetch fields manually under a wide except.
-        try:
-            proc_iter = list(psutil.process_iter())
-        except (PermissionError, SystemError, OSError) as exc:
-            # Wave 490: Sequoia KERN_PROCARGS2 blocks process_iter at the top level.
-            # Push system.proc_cmdline_permission and return gracefully.
-            self._push_proc_cmdline_permission_error(exc)
-            return {"ok": True, "processes": []}
-        for proc in proc_iter:
+        for proc in psutil.process_iter():
             try:
                 cmd = " ".join(proc.cmdline() or [])
                 if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
@@ -2398,36 +2419,6 @@ class BackendService:
                 continue
 
         return {"ok": True, "processes": matches}
-
-    def _push_proc_cmdline_permission_error(self, exc: Exception) -> None:
-        """Push system.proc_cmdline_permission error to error_bus. Never raises.
-
-        Wave 490: Sequoia KERN_PROCARGS2 blocks psutil.process_iter() with
-        PermissionError/SystemError. Push once per hour (dedupe_seconds=3600).
-        """
-        try:
-            from backend.error_bus import KrabError
-            from backend.error_codes import ERROR_REGISTRY
-            from datetime import datetime, timezone
-            entry = ERROR_REGISTRY.get("system.proc_cmdline_permission", {})
-            err = KrabError(
-                severity="error",
-                component="system",
-                code="system.proc_cmdline_permission",
-                message_user=entry.get(
-                    "user_msg_ru",
-                    "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2).",
-                ),
-                message_debug=f"psutil.process_iter raised {type(exc).__name__}: {exc}",
-                timestamp=datetime.now(timezone.utc),
-                context={"exc_type": type(exc).__name__, "exc_msg": str(exc)},
-                actionable=entry.get("actionable", False),
-                action_id=entry.get("action_id"),
-            )
-            if hasattr(self, "_error_bus") and self._error_bus is not None:
-                self._error_bus.push(err)
-        except Exception:
-            pass  # never raise from error reporting path
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
@@ -2670,30 +2661,39 @@ class BackendService:
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
-        return self._health_check_svc.handle_probe_llm_http(params)
+        if self._llm_rewriter is None:
+            return {"reachable": False, "latency_ms": 0, "model": None}
+        ok = self._llm_rewriter.warmup()
+        return {
+            "reachable": bool(ok),
+            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
+            "model": getattr(self._llm_rewriter, "_model", None),
+        }
 
-    def _handle_warmup_stt(self, params: dict) -> dict:
-        """Ручной запуск STT warmup — полезен после смены профиля или модели.
+    def _handle_warmup_rewriter(self, params: dict) -> dict:
+        """Ручной запуск LLM rewriter warmup probe.
 
-        Загружает текущую активную Whisper-модель через tiny (1s silent) inference.
-        Блокирующий вызов — выполняется в потоке IPC handler'а, возвращает
-        результат только после завершения warmup (или ошибки).
+        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
+        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
+
+        Params:
+            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
 
         Returns:
             {
-              "loaded": bool,      # True если warmup inference прошёл без ошибок
-              "latency_ms": int,   # время inference в мс
-              "model_name": str,   # имя прогретой модели
-              "error": str | None  # сообщение об ошибке (None если loaded=True)
+              "ok": bool,          # True если HTTP 200
+              "latency_ms": int,   # время ответа в мс
+              "error": str | None, # описание ошибки или None
+              "model": str | None  # имя используемой модели
             }
         """
-        if not hasattr(self.transcriber, "engine"):
-            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
-        return self.transcriber.engine.warmup()
-
-    def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Delegated to TextScoringService."""
-        return self._text_scoring_svc.handle_warmup_rewriter(params)
+        if self._llm_rewriter is None:
+            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
+        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
+        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
+        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
+        result["model"] = getattr(self._llm_rewriter, "_model", None)
+        return result
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
@@ -2706,7 +2706,8 @@ class BackendService:
 
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает результаты диагностики при старте бэкенда."""
-        return self._health_check_svc.handle_get_startup_diagnostics(params)
+        report = self._startup_diagnostics.run_all_checks()
+        return report.to_dict()
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -2961,76 +2962,6 @@ class BackendService:
         audit.clear()
         return {"ok": True}
 
-    # --- D.2.3: Scored STT routing decision ---
-
-    def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает результат scored STT adapter selection для отладки.
-
-        Параметры:
-            language         — ISO 639-1 код языка (например «ru», «en», «zh»).
-            audio_duration_s — длительность аудио в секундах (float, опционально).
-
-        Возвращает:
-            selected_engine — имя выбранного адаптера или null.
-            scores          — dict {engine_name: score} для всех доступных адаптеров.
-            language        — нормализованный код языка.
-            audio_duration_s — длительность из params или null.
-        """
-        from core.stt_router import score_adapters, select_adapter_scored
-
-        language = str(params.get("language", "")).strip().lower() or "und"
-        raw_dur = params.get("audio_duration_s")
-        audio_duration_s: Optional[float] = float(raw_dur) if raw_dur is not None else None
-
-        # Собираем доступные адаптеры из AudioEngine (если есть)
-        # Используем duck-typed stubs на основе настроек — без реального импорта адаптеров.
-        adapters = self._build_virtual_adapters_for_routing()
-        scores = score_adapters(adapters, language, audio_duration_s)
-        best = select_adapter_scored(language, audio_duration_s, adapters)
-        selected_name: Optional[str] = getattr(best, "name", None) if best is not None else None
-
-        return {
-            "selected_engine": selected_name,
-            "scores": scores,
-            "language": language,
-            "audio_duration_s": audio_duration_s,
-        }
-
-    def _build_virtual_adapters_for_routing(self) -> "list[Any]":
-        """Создаёт список виртуальных адаптеров для scored selection.
-
-        Не загружает реальные модели — только описывает возможности каждого
-        адаптера на основе настроек. Используется в IPC для отладки routing.
-        """
-        from types import SimpleNamespace
-
-        def _make(name: str, languages: "set[str]", enabled: bool) -> "Any":
-            ns = SimpleNamespace(
-                name=name,
-                supported_languages=languages,
-            )
-            ns.is_available = lambda: enabled  # type: ignore[attr-defined]
-            return ns
-
-        adapters = []
-
-        # GigaAM — RU-only specialist
-        gigaam_enabled = getattr(settings, "STT_GIGAAM_ENABLED", False)
-        adapters.append(_make("gigaam", {"ru", "uk"}, bool(gigaam_enabled)))
-
-        # Parakeet — EN-only specialist
-        parakeet_enabled = getattr(settings, "PARAKEET_ENABLED", False)
-        adapters.append(_make("parakeet", {"en"}, bool(parakeet_enabled)))
-
-        # SenseVoice — ZH/JA/KO/YUE specialist + decent EN/RU
-        sensevoice_enabled = getattr(settings, "SENSEVOICE_ENABLED", False)
-        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en", "ru"}, bool(sensevoice_enabled)))
-
-        # Whisper-MLX — multilingual generalist (empty set = multilingual)
-        adapters.append(_make("whisper-mlx", set(), True))
-
-        return adapters
-
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
         item_id = str(params.get("id", "")).strip()
@@ -3241,6 +3172,13 @@ class BackendService:
                 "error": str(exc),
                 "devices": self._list_audio_inputs(),
             }
+
+    def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Синхронная транскрибация списка файлов (CLI/legacy путь).
+
+        Делегирует в `_transcribe_paths_core` без progress/cancel коллбеков.
+        """
+        return self._transcribe_paths_core(params)
 
     def _transcribe_paths_core(
         self,
@@ -4384,12 +4322,60 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_compare_periods(params)
+        """Сравнивает статистику двух временных периодов."""
+        p1_start = params.get("period1_start")
+        p1_end = params.get("period1_end")
+        p2_start = params.get("period2_start")
+        p2_end = params.get("period2_end")
+        if not all([p1_start, p1_end, p2_start, p2_end]):
+            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
+        report = _compare_periods_fn(
+            store=self.store,
+            period1_start=p1_start,
+            period1_end=p1_end,
+            period2_start=p2_start,
+            period2_end=p2_end,
+        )
+        return {
+            "period1": {
+                "recordings": report.period1.recordings,
+                "duration_sec": report.period1.duration_sec,
+                "words": report.period1.words,
+                "avg_confidence": report.period1.avg_confidence,
+                "languages": report.period1.languages,
+            },
+            "period2": {
+                "recordings": report.period2.recordings,
+                "duration_sec": report.period2.duration_sec,
+                "words": report.period2.words,
+                "avg_confidence": report.period2.avg_confidence,
+                "languages": report.period2.languages,
+            },
+            "recordings_change_pct": report.recordings_change_pct,
+            "duration_change_pct": report.duration_change_pct,
+            "confidence_change": report.confidence_change,
+            "new_languages": report.new_languages,
+            "summary": report.summary,
+        }
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_get_activity_calendar(params)
+        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
+        months = int(params.get("months", 12))
+        months = max(1, min(months, 24))
+        include_svg = bool(params.get("include_svg", False))
+        cell_size = int(params.get("cell_size", 12))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        calendar = self._activity_calendar.generate_calendar(items, months=months)
+        result = calendar.to_dict()
+        if include_svg:
+            result["svg"] = self._activity_calendar.generate_calendar_svg(
+                items, months=months, cell_size=cell_size
+            )
+        return result
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -4407,8 +4393,15 @@ class BackendService:
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_get_sentiment_trends(params)
+        """Анализирует тренды тональности транскрипций за последние N дней."""
+        days = int(params.get("days", 30))
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
+        return self._sentiment_trends.to_dict(report)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -4420,7 +4413,22 @@ class BackendService:
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Проверяет целостность файлов данных Krab Ear."""
-        return self._health_check_svc.handle_check_integrity(params)
+        report = self._integrity_checker.check_integrity(self.store.data_dir)
+        return {
+            "status": report.status,
+            "total_items": report.total_items,
+            "orphaned_tombstones": report.orphaned_tombstones,
+            "invalid_json_lines": report.invalid_json_lines,
+            "checks": [
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "message": c.message,
+                    "auto_fixable": c.auto_fixable,
+                }
+                for c in report.checks
+            ],
+        }
 
     def _handle_repair_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Исправляет автоматически устраняемые проблемы целостности данных."""
@@ -4433,8 +4441,24 @@ class BackendService:
         }
 
     def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegated to TextScoringService."""
-        return self._text_scoring_svc.handle_extract_terms(params)
+        """Извлекает ключевые термины из текста."""
+        text = params.get("text", "")
+        language = params.get("language", "ru")
+        if not text:
+            return {"terms": []}
+        terms = self._term_extractor.extract_terms(text, language=language)
+        return {
+            "terms": [
+                {
+                    "term": t.term,
+                    "score": t.score,
+                    "frequency": t.frequency,
+                    "language": t.language,
+                    "category": t.category,
+                }
+                for t in terms
+            ]
+        }
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние контекстной памяти STT.
@@ -4458,389 +4482,130 @@ class BackendService:
         }
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_get_keyword_cloud(params)
+        """Генерирует данные облака ключевых слов из истории транскрипций."""
+        max_words = int(params.get("max_words", 100))
+        language = params.get("language")
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        cloud_words = self._keyword_cloud_gen.generate_cloud(
+            items, max_words=max_words, language=language
+        )
+        return {
+            "words": [
+                {
+                    "word": cw.word,
+                    "count": cw.count,
+                    "weight": cw.weight,
+                    "font_size": cw.font_size,
+                }
+                for cw in cloud_words
+            ]
+        }
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
     # ── Telegram Bridge ──────────────────────────────────────────────────────
 
+    # ── Apple / Telegram integrations — delegated to AppleIntegrationService ──
+
     def _handle_send_to_telegram(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Отправляет текст в Telegram через main Krab userbot.
-
-        Параметры:
-          - text: str — текст сообщения (обязательный, не пустой).
-          - chat_id: int | str — ID или username чата Telegram (обязательный).
-          - reply_to: int | None — ID сообщения для цитирования (опционально).
-
-        Возвращает:
-          {message_id, sent_at, chat_title}
-
-        Ошибки:
-          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
-          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
-          - "circuit_open" — если circuit breaker разомкнут после 3 ошибок подряд.
-        """
-        if not settings.TELEGRAM_BRIDGE_ENABLED:
-            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
-
-        text = str(params.get("text") or "").strip()
-        if not text:
-            raise ValueError("Параметр 'text' обязателен и не может быть пустым")
-
-        raw_chat_id = params.get("chat_id")
-        if raw_chat_id is None or str(raw_chat_id).strip() == "":
-            raise ValueError("Параметр 'chat_id' обязателен")
-        chat_id: int | str
-        try:
-            chat_id = int(raw_chat_id)
-        except (ValueError, TypeError):
-            chat_id = str(raw_chat_id).strip()
-
-        reply_to_raw = params.get("reply_to")
-        reply_to: int | None = None
-        if reply_to_raw is not None:
-            try:
-                reply_to = int(reply_to_raw)
-            except (ValueError, TypeError):
-                pass
-
-        try:
-            result = self._telegram_bridge.send_message(
-                text=text,
-                chat_id=chat_id,
-                reply_to=reply_to,
-            )
-        except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
-        except (Exception,) as exc:
-            msg = str(exc)
-            if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            # ConnectionError, Timeout и др. — оборачиваем в понятный код
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
-
-        return result
-
-    # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_send_to_telegram(params)
 
     def _handle_create_apple_note(self, params: dict) -> dict:
-        """Create Apple Note from text via osascript.
-
-        params: {"title": str, "body": str, "folder": str | None}
-        Returns: {"ok": bool, "note_id": str | None, "error": str | None}
-        """
-        import subprocess
-
-        title = params.get("title", "Krab Ear note").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
-        folder = params.get("folder", "") or ""
-
-        if folder:
-            folder_escaped = folder.replace('"', '\\"')
-            script = f'''
-tell application "Notes"
-    tell account "iCloud"
-        set targetFolder to folder "{folder_escaped}"
-        make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
-    end tell
-end tell
-'''
-        else:
-            script = f'''
-tell application "Notes"
-    make new note with properties {{name:"{title}", body:"{body}"}}
-end tell
-'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "note_id": result.stdout.strip(), "error": None}
-            return {"ok": False, "note_id": None, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "note_id": None, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "note_id": None, "error": str(exc)}
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_create_apple_note(params)
 
     def _handle_create_apple_reminder(self, params: dict) -> dict:
-        """Create Apple Reminder from text via osascript.
-
-        params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
-        list_name = params.get("list_name") or None
-        due_date = params.get("due_date") or None
-
-        # Build properties clause
-        properties = f'name:"{title}"'
-        if body:
-            properties += f', body:"{body}"'
-        if due_date:
-            due_date_escaped = due_date.replace('"', '\\"')
-            properties += f', due date:date "{due_date_escaped}"'
-
-        if list_name:
-            list_name_escaped = list_name.replace('"', '\\"')
-            script = f'''
-tell application "Reminders"
-    tell list "{list_name_escaped}"
-        make new reminder with properties {{{properties}}}
-    end tell
-end tell
-'''
-        else:
-            script = f'''
-tell application "Reminders"
-    make new reminder with properties {{{properties}}}
-end tell
-'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-
-    # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_create_apple_reminder(params)
 
     def _handle_create_calendar_event(self, params: dict) -> dict:
-        """Create Apple Calendar event via osascript.
-
-        params:
-          title: str (required)
-          notes: str (optional, default "")
-          start_date: str (required, ISO 8601 or AppleScript-parseable date string)
-          duration_minutes: int (optional, default 30)
-          calendar_name: str | None (optional, default first writable calendar)
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        title = params.get("title", "").strip()
-        if not title:
-            return {"ok": False, "error": "title is required"}
-
-        title_esc = title.replace('"', '\\"')
-        notes = params.get("notes", "") or ""
-        notes_esc = notes.replace('"', '\\"')
-        start_date = str(params.get("start_date", "")).strip()
-        if not start_date:
-            return {"ok": False, "error": "start_date is required"}
-        start_date_esc = start_date.replace('"', '\\"')
-        duration_minutes = int(params.get("duration_minutes", 30) or 30)
-        calendar_name = params.get("calendar_name") or None
-
-        event_block = f'''
-        set startDate to date "{start_date_esc}"
-        set endDate to startDate + ({duration_minutes} * minutes)
-        make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
-
-        if calendar_name:
-            cal_esc = calendar_name.replace('"', '\\"')
-            script = f'''tell application "Calendar"
-    tell calendar "{cal_esc}"{event_block}
-    end tell
-end tell'''
-        else:
-            script = f'''tell application "Calendar"
-    tell (first calendar whose writable is true){event_block}
-    end tell
-end tell'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=15,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-
-    # ── iMessage integration (Phase D.4) ────────────────────────────────────
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_create_calendar_event(params)
 
     def _handle_send_imessage(self, params: dict) -> dict:
-        """Send iMessage/SMS via Messages.app using osascript.
-
-        params:
-          recipient: str (required) — phone number, email, or contact name
-          body: str (required) — message text
-          service: str (optional, default "iMessage") — "iMessage" | "SMS"
-        Returns: {"ok": bool, "error": str | None}
-        """
-        import subprocess
-
-        recipient = params.get("recipient", "").strip()
-        if not recipient:
-            return {"ok": False, "error": "recipient is required"}
-
-        body = params.get("body", "").strip()
-        if not body:
-            return {"ok": False, "error": "body is required"}
-
-        service_name = params.get("service", "iMessage") or "iMessage"
-        if service_name not in ("iMessage", "SMS"):
-            service_name = "iMessage"
-
-        # Map service name to AppleScript service type constant
-        service_type = "iMessage" if service_name == "iMessage" else "SMS"
-
-        # Escape double quotes to prevent AppleScript injection
-        recipient_esc = recipient.replace('"', '\\"')
-        body_esc = body.replace('"', '\\"')
-
-        script = f'''tell application "Messages"
-    set targetService to 1st service whose service type = {service_type}
-    set targetBuddy to buddy "{recipient_esc}" of targetService
-    send "{body_esc}" to targetBuddy
-end tell'''
-
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                return {"ok": True, "error": None}
-            return {"ok": False, "error": result.stderr.strip()}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "osascript timeout"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_send_imessage(params)
 
     def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список доступных чатов через main Krab userbot.
-
-        Параметры: нет.
-
-        Возвращает:
-          {chats: [{id, title, type}, ...]}
-
-        Ошибки:
-          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
-          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
-          - "circuit_open" — если circuit breaker разомкнут.
-        """
-        if not settings.TELEGRAM_BRIDGE_ENABLED:
-            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
-
-        try:
-            chats = self._telegram_bridge.get_chats()
-        except CircuitBreakerOpen as exc:
-            raise RuntimeError(f"circuit_open: {exc}") from exc
-        except Exception as exc:
-            msg = str(exc)
-            if "krab_unavailable" in msg or "krab_error" in msg:
-                raise RuntimeError(msg) from exc
-            raise RuntimeError(f"krab_unavailable: {msg}") from exc
-
-        return {"chats": chats}
+        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
+        return self._apple_integration_svc.handle_list_telegram_chats(params)
 
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
-
-    # ------------------------------------------------------------------
-    # STT hotwords (initial_prompt boost)
-    # ------------------------------------------------------------------
-
-    # Whisper initial_prompt hard limit: ~224 tokens ≈ ~170 avg words.
-    # We cap hotwords at 100 entries (≈ safe budget) to avoid prompt overflow.
-    # When the list exceeds this limit, oldest entries are dropped (FIFO).
-    _STT_HOTWORDS_MAX: int = 100
-
-    def _handle_add_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Добавляет термин в список STT hotwords.
-
-        Параметры:
-          - word: str — термин для добавления (имя, бренд, технический термин).
-
-        Возвращает: {hotwords: list[str], truncated: bool} — обновлённый список.
-          truncated=True если список обрезан до _STT_HOTWORDS_MAX.
-        """
-        word = str(params.get("word") or "").strip()
-        if not word:
-            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
-        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        truncated = False
-        if word not in current:
-            current = current + [word]
-            # Enforce per-IPC budget: drop oldest entries when limit exceeded.
-            if len(current) > self._STT_HOTWORDS_MAX:
-                excess = len(current) - self._STT_HOTWORDS_MAX
-                logger.warning(
-                    "stt_hotwords: список превышает лимит %d — удаляем %d старых записей",
-                    self._STT_HOTWORDS_MAX, excess,
-                )
-                current = current[excess:]
-                truncated = True
-            self._settings_svc.handle_set_settings({"stt_hotwords": current})
-        return {"hotwords": current, "truncated": truncated}
-
-    def _handle_remove_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет термин из списка STT hotwords.
-
-        Параметры:
-          - word: str — термин для удаления.
-
-        Возвращает: {hotwords: list[str]} — обновлённый список.
-        """
-        word = str(params.get("word") or "").strip()
-        if not word:
-            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
-        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        updated = [w for w in current if w != word]
-        if len(updated) != len(current):
-            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
-        return {"hotwords": updated}
-
-    def _handle_list_stt_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий список STT hotwords.
-
-        Учитывает флаг stt_hotwords_enabled: если False — возвращает пустой список.
-
-        Возвращает: {hotwords: list[str], enabled: bool}
-        """
-        s = self._settings_svc.cached_settings()
-        enabled = bool(s.get("stt_hotwords_enabled", True))
-        if not enabled:
-            return {"hotwords": [], "enabled": False}
-        current: list[str] = s.get("stt_hotwords", [])
-        if not isinstance(current, list):
-            current = []
-        return {"hotwords": sorted(current), "enabled": True}
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_get_timeline_view(params)
+        """Группирует историю транскрипций по временным блокам (timeline).
 
-    # ── Timeline export ──────────────────────────────────────────────────────
+        Параметры:
+          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
+          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
+          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
+          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
+        """
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+        include_heatmap = bool(params.get("include_heatmap", False))
+        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
+
+        raw_items = self.store._load_active_items_with_lock()[:limit]
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        result: dict[str, Any] = {
+            "blocks": [b.to_dict() for b in blocks],
+            "total_blocks": len(blocks),
+            "group_by": group_by,
+        }
+
+        if include_heatmap:
+            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
+            result["activity_heatmap"] = heatmap
+
+        return result
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegated to TextScoringService."""
-        return self._text_scoring_svc.handle_generate_auto_title(params)
+        """Генерирует автоматический заголовок для транскрибации.
+
+        Параметры:
+            text (str): текст транскрибации (обязательный).
+            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
+            max_length (int): максимальная длина заголовка (по умолчанию 50).
+            with_date (bool): если true и timestamp указан — включает дату.
+            items (list): список записей для пакетной генерации (альтернатива text).
+
+        Ответ (одиночный):
+            {title: str}
+
+        Ответ (пакетный):
+            {titles: [{id, title, generated_at}]}
+        """
+        # Пакетный режим
+        items = params.get("items")
+        if items is not None:
+            if not isinstance(items, list):
+                raise ValueError("Параметр 'items' должен быть списком")
+            titles = self._auto_title_generator.batch_generate(items)
+            return {"titles": titles}
+
+        # Одиночный режим
+        text = str(params.get("text", "") or "")
+        timestamp = str(params.get("timestamp", "") or "")
+        max_length = int(params.get("max_length", 50))
+        with_date = bool(params.get("with_date", False))
+
+        if not text:
+            return {"title": "Запись"}
+
+        if with_date and timestamp:
+            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
+        else:
+            title = self._auto_title_generator.generate_title(text, max_length=max_length)
+
+        return {"title": title}
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
@@ -4849,8 +4614,16 @@ end tell'''
         return self._language_learning.handle_get_learning_stats(params_with_store)
 
     def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Stub: делегирует в AnalyticsService (Wave 392)."""
-        return self._analytics_svc.handle_get_analytics_dashboard(params)
+        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
+
+        Параметры:
+            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
+
+        Возвращает:
+            overview, today, trends, languages, quality, engagement, storage, performance
+        """
+        days = max(1, min(int(params.get("days", 30) or 30), 365))
+        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
@@ -4918,47 +4691,6 @@ end tell'''
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
-
-    def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: select_model — умный выбор STT-модели на основе условий.
-
-        Параметры:
-            duration_sec  — длительность аудио в секундах (float, обязательный).
-            quality       — "balanced" | "max" (строка, опциональный, по умолчанию "balanced").
-            is_preview    — True если это превью-транскрибация (bool, опциональный).
-            system_load   — нагрузка CPU 0.0–1.0 (float, опциональный, по умолчанию 0).
-
-        Возвращает:
-            {model_name, reason, estimated_latency_ms, quality_tier}
-        """
-        from core.model_selector import SmartModelSelector
-
-        try:
-            duration_sec = float(params.get("duration_sec", 0.0))
-        except (TypeError, ValueError):
-            raise ValueError("Параметр 'duration_sec' должен быть числом")
-
-        quality = str(params.get("quality", "balanced")).strip()
-        is_preview = bool(params.get("is_preview", False))
-
-        try:
-            system_load = float(params.get("system_load", 0.0))
-        except (TypeError, ValueError):
-            system_load = 0.0
-
-        selector = SmartModelSelector()
-        sel = selector.select_model(
-            duration_sec=duration_sec,
-            quality=quality,
-            is_preview=is_preview,
-            system_load=system_load,
-        )
-        return {
-            "model_name": sel.model_name,
-            "reason": sel.reason,
-            "estimated_latency_ms": sel.estimated_latency_ms,
-            "quality_tier": sel.quality_tier,
-        }
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
@@ -5256,7 +4988,7 @@ def main() -> None:
     sentry_ok = init_sentry(
         dsn=settings.SENTRY_DSN or None,
         environment=settings.SENTRY_ENVIRONMENT,
-        release=f"krab-ear@{APP_VERSION}",
+        release=get_release_string(),
     )
     if sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
