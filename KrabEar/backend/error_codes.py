@@ -577,6 +577,54 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # ── Wave 490: Phase B Wave 82 — 3 HIGH priority codes ────────────────────
+
+    # disk.critical — DiskSpaceMonitor detected free space below critical threshold
+    # (< 1 GB). Separate from disk.low_space (warn-only). This triggers a critical
+    # user alert — backend may lose writes. Dedupe 600s (10 min) to avoid spam.
+    # Production evidence: disk hit 0.22 GB on 2026-05-22.
+    "disk.critical": {
+        "user_msg_ru": (
+            "🔴 КРИТИЧНО: меньше 1 GB на диске — backend может потерять записи. "
+            "Очисти место немедленно."
+        ),
+        "actionable": True,
+        "action_id": "open_logs",
+        "action_label": "Открыть папку логов",
+        "severity": "critical",
+        "dedupe_seconds": 600,
+    },
+
+    # system.proc_cmdline_permission — psutil.process_iter() raised PermissionError
+    # or SystemError when reading process cmdline on macOS Sequoia (KERN_PROCARGS2
+    # blocked for sandboxed processes). Causes silent failure of memory analytics.
+    # 6 ERROR crashes observed 2026-05-13. Dedupe 3600s (1 hour) — one alert per session.
+    "system.proc_cmdline_permission": {
+        "user_msg_ru": (
+            "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2). "
+            "Аналитика памяти недоступна."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 3600,
+    },
+
+    # startup.stt_model_cache_miss — Whisper HF model not found in local cache.
+    # First transcription will stall for several minutes while downloading.
+    # Recurring on 2026-05-22/23. Dedupe 86400s (1 day) — one toast per startup cycle.
+    "startup.stt_model_cache_miss": {
+        "user_msg_ru": (
+            "Модель Whisper отсутствует в кэше — первая транскрибация задержится на минуты."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 86400,
+    },
+
     # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────
 
     # rewriter.lm_studio_stream_gpu_lost — LM Studio returned HTTP 500 with

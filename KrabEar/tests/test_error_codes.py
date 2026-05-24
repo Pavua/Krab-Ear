@@ -98,5 +98,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # 12 production hits 2026-05-18, misclassified as rewriter.timeout.
             # Now retried once (2s sleep) before circuit failure; dedicated code.
             "rewriter.lm_studio_stream_gpu_lost",
+            # Added Wave 490 — Phase B Wave 82: 3 HIGH priority codes
+            # disk.critical (< 1 GB, user alert), system.proc_cmdline_permission
+            # (Sequoia KERN_PROCARGS2 block), startup.stt_model_cache_miss (HF cache miss).
+            "disk.critical",
+            "system.proc_cmdline_permission",
+            "startup.stt_model_cache_miss",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
