@@ -139,13 +139,17 @@ final class CallAutomationController: NSViewController {
         return sc
     }()
 
-    private let providerStatusDot: NSTextField = {
-        let l = NSTextField(labelWithString: "●")
-        l.font = .systemFont(ofSize: 11)
-        l.textColor = .systemGray
-        l.toolTip = "API key и from-number не настроены"
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
+    // Wave 522 (AGENT-J sister): `●` U+25CF → SF Symbol to avoid TFPFont::CopyGlyphPath hang.
+    // Root cause analysis: Wave 67 (PR #412). This site found by Wave 416 audit.
+    private let providerStatusDot: NSImageView = {
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус провайдера")?
+            .withSymbolConfiguration(symConfig) ?? NSImage()
+        let iv = NSImageView(image: img)
+        iv.contentTintColor = .systemGray
+        iv.toolTip = "API key и from-number не настроены"
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        return iv
     }()
 
     // MARK: - UI: Input
@@ -207,11 +211,35 @@ final class CallAutomationController: NSViewController {
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
-    private let statusBadgeLabel: NSTextField = {
-        let l = NSTextField(labelWithString: "●  Ожидание")
+    // Wave 522 (AGENT-J sister): split "● Ожидание" NSTextField into dot NSImageView + text NSTextField.
+    // `●` U+25CF in NSAttributedString triggers TFPFont::CopyGlyphPath CoreText hang on first CALayer
+    // commit. Fix: SF Symbol `circle.fill` via NSImageView. Root cause: Wave 67 (PR #412).
+    // Wave 416 audit identified this site.
+    private let statusBadgeDotView: NSImageView = {
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус сессии")?
+            .withSymbolConfiguration(symConfig) ?? NSImage()
+        let iv = NSImageView(image: img)
+        iv.contentTintColor = .secondaryLabelColor
+        iv.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        iv.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        return iv
+    }()
+    private let statusBadgeTextLabel: NSTextField = {
+        let l = NSTextField(labelWithString: "Ожидание")
         l.font = KrabEarTheme.Typography.captionMedium
         l.textColor = .secondaryLabelColor
         return l
+    }()
+    /// Horizontal row: [circle.fill SF Symbol] [status text]. Replaces old single NSTextField with `●` literal.
+    private lazy var statusBadgeLabel: NSStackView = {
+        let sv = NSStackView(views: [statusBadgeDotView, statusBadgeTextLabel])
+        sv.orientation = .horizontal
+        sv.spacing = 4
+        sv.alignment = .centerY
+        sv.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        return sv
     }()
     private let durationLabel: NSTextField = {
         let l = NSTextField(labelWithString: "00:00")
@@ -819,8 +847,9 @@ final class CallAutomationController: NSViewController {
             let from = (settings["twilio_from_number"] as? String) ?? ""
             isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
         }
-        providerStatusDot.textColor = isConfigured ? .systemGreen : .systemGray
-        providerStatusDot.toolTip   = isConfigured
+        // Wave 522: NSImageView uses contentTintColor (was NSTextField.textColor).
+        providerStatusDot.contentTintColor = isConfigured ? .systemGreen : .systemGray
+        providerStatusDot.toolTip          = isConfigured
             ? "\(provider.capitalized) настроен"
             : "\(provider.capitalized): API key или from-number не задан в Настройках"
     }
@@ -960,8 +989,10 @@ final class CallAutomationController: NSViewController {
 
     private func updateSessionUI(session: CallSession?) {
         guard let session else {
-            statusBadgeLabel.stringValue = "●  Ожидание"
-            statusBadgeLabel.textColor = .secondaryLabelColor
+            // Wave 522: update dot + text separately — no `●` string literal in NSTextField.
+            statusBadgeTextLabel.stringValue = "Ожидание"
+            statusBadgeDotView.contentTintColor = .secondaryLabelColor
+            statusBadgeTextLabel.textColor = .secondaryLabelColor
             durationLabel.isHidden = true
             costLabel.isHidden = true
             hangupButton.isHidden = true
@@ -971,8 +1002,10 @@ final class CallAutomationController: NSViewController {
             return
         }
 
-        statusBadgeLabel.stringValue = "●  \(session.status.displayTitle)"
-        statusBadgeLabel.textColor = session.status.badgeColor
+        // Wave 522: dot color + text label updated separately — no `●` Unicode bullet.
+        statusBadgeTextLabel.stringValue = session.status.displayTitle
+        statusBadgeDotView.contentTintColor = session.status.badgeColor
+        statusBadgeTextLabel.textColor = session.status.badgeColor
         durationLabel.isHidden = session.startedAt == nil
         costLabel.isHidden = session.costUSD == 0
 

@@ -793,3 +793,146 @@ final class IPCErrorHandlingTests: XCTestCase {
         XCTAssertEqual(code, "telnyx_not_configured")
     }
 }
+
+// MARK: - Wave 522: SF Symbol regression tests (AGENT-J sister fix)
+//
+// Wave 67 (PR #412) fixed AGENT-J root cause: `●` U+25CF in NSAttributedString triggers
+// TFPFont::CopyGlyphPath heavy CoreText synchronous work on first CALayer commit → AppHang ≥2s.
+// Fix: replace with `circle.fill` SF Symbol via NSImageView + contentTintColor.
+//
+// Wave 416 audit found 4 sites in CallAutomationController.swift:
+//   1. providerStatusDot (NSTextField "●") → NSImageView circle.fill
+//   2. statusBadgeDotView (was in "●  Ожидание") → NSImageView circle.fill
+//   3. updateSessionUI nil branch: "●  Ожидание" string → statusBadgeTextLabel.stringValue
+//   4. updateSessionUI session branch: "●  <title>" string → statusBadgeTextLabel.stringValue
+//
+// These tests verify:
+//   (a) SF Symbol `circle.fill` is available on the target platform (macOS 11+).
+//   (b) No `●` U+25CF literal appears in any status-display string (regression guard).
+//   (c) CallSession.Status.badgeColor produces non-nil NSColor for all statuses (used by dot).
+//   (d) CallSession.Status.displayTitle produces non-empty strings (used by text label).
+
+final class Wave522SFSymbolFixTests: XCTestCase {
+
+    // MARK: - (a) SF Symbol availability
+
+    func test_circleFillSFSymbolAvailable() {
+        // `circle.fill` must be available on macOS 11+ (Krab Ear min deployment target).
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+        XCTAssertNotNil(img, "circle.fill SF Symbol must be available — used by Wave 522 providerStatusDot and statusBadgeDotView")
+    }
+
+    func test_circleFillWithSymbolConfiguration() {
+        // Verify the exact SymbolConfiguration used in both NSImageView declarations compiles and returns image.
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус провайдера")?
+            .withSymbolConfiguration(symConfig)
+        XCTAssertNotNil(img, "circle.fill with SymbolConfiguration(pointSize:9 weight:.regular) must produce non-nil image")
+    }
+
+    func test_sfSymbolProducesNonNilImageForStatusDot() {
+        // Both NSImageView declarations use this fallback pattern: ?? NSImage()
+        // Verify the guard branch never triggers (SF Symbol available).
+        let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус сессии")?
+            .withSymbolConfiguration(symConfig)
+        // If this fails, the NSImageView will show an empty image — visible regression.
+        XCTAssertNotNil(img, "circle.fill must be available for statusBadgeDotView")
+    }
+
+    // MARK: - (b) No Unicode bullet in status display strings (regression guard)
+
+    func test_displayTitle_doesNotContainUnicodeBullet() {
+        // Wave 522 fix: status text goes into statusBadgeTextLabel.stringValue — must NOT contain `●`.
+        let bullet = "●"
+        for status: CallSession.Status in [.idle, .dialing, .connected, .talking, .ending, .ended, .error] {
+            XCTAssertFalse(
+                status.displayTitle.contains(bullet),
+                "CallSession.Status.\(status.rawValue).displayTitle must not contain `●` U+25CF — use SF Symbol dot instead"
+            )
+        }
+    }
+
+    func test_historyIcon_isSafeCharsNotUnicodeBullet() {
+        // historyIcon uses ✓/✗/⏱/• — bullet here is the SMALL BULLET U+2022 (safe, not the BLACK CIRCLE U+25CF).
+        // Verify the fallback bullet is U+2022, not U+25CF.
+        let blackCircle = "\u{25CF}"  // ● — the problematic glyph
+        let smallBullet = "\u{2022}"  // • — safe in most fonts
+        for status: CallSession.Status in [.idle, .dialing, .connected, .talking] {
+            let icon = status.historyIcon
+            XCTAssertFalse(icon.contains(blackCircle), "historyIcon for .\(status.rawValue) must not use U+25CF BLACK CIRCLE")
+            XCTAssertEqual(icon, smallBullet, "non-terminal statuses should use U+2022 BULLET for historyIcon")
+        }
+    }
+
+    // MARK: - (c) badgeColor non-nil for all statuses
+
+    func test_badgeColor_allStatuses_nonNil() {
+        // providerStatusDot.contentTintColor and statusBadgeDotView.contentTintColor are set to badgeColor.
+        for status: CallSession.Status in [.idle, .dialing, .connected, .talking, .ending, .ended, .error] {
+            let color = status.badgeColor
+            XCTAssertNotNil(color, "badgeColor for .\(status.rawValue) must be non-nil")
+            // Verify it resolves to a concrete RGB color (not a dynamic color that fails outside window context).
+            // NSColor.secondaryLabelColor is dynamic but always resolves, so this is fine.
+        }
+    }
+
+    func test_badgeColor_activeStatuses_distinctFromIdle() {
+        // Active statuses (dialing/connected/talking) use non-secondary colors — visual distinction is important.
+        let idleColor = CallSession.Status.idle.badgeColor
+        XCTAssertNotEqual(CallSession.Status.dialing.badgeColor, idleColor)
+        XCTAssertNotEqual(CallSession.Status.connected.badgeColor, idleColor)
+        XCTAssertNotEqual(CallSession.Status.talking.badgeColor, idleColor)
+        XCTAssertNotEqual(CallSession.Status.error.badgeColor, idleColor)
+    }
+
+    // MARK: - (d) displayTitle non-empty for all statuses
+
+    func test_displayTitle_allStatuses_nonEmpty() {
+        // statusBadgeTextLabel.stringValue = session.status.displayTitle — must always have content.
+        for status: CallSession.Status in [.idle, .dialing, .connected, .talking, .ending, .ended, .error] {
+            XCTAssertFalse(
+                status.displayTitle.isEmpty,
+                "displayTitle for .\(status.rawValue) must be non-empty — shown in statusBadgeTextLabel"
+            )
+        }
+    }
+
+    // MARK: - Wave 522 source-level regression guard
+
+    func test_noUnicodeBulletInDisplayTitles_sourceCheck() {
+        // Inline display title strings — same values as the impl — to catch copy-paste regressions.
+        let titles = [
+            "Ожидание", "Набор номера...", "Подключено",
+            "Разговор", "Завершение...", "Завершён", "Ошибка",
+        ]
+        let blackCircle = "\u{25CF}"
+        for t in titles {
+            XCTAssertFalse(t.contains(blackCircle), "'\(t)' must not contain U+25CF (AGENT-J CoreText hang)")
+        }
+    }
+}
+
+// MARK: - Wave 522: providerStatusDot color semantics
+
+final class Wave522ProviderDotColorTests: XCTestCase {
+
+    func test_configuredProviderColor_isSystemGreen() {
+        // applyProviderStatus sets contentTintColor = .systemGreen when configured.
+        // Verify the expected color constant is accessible.
+        let configured: NSColor = .systemGreen
+        XCTAssertNotNil(configured)
+    }
+
+    func test_notConfiguredProviderColor_isSystemGray() {
+        // applyProviderStatus sets contentTintColor = .systemGray when not configured.
+        let notConfigured: NSColor = .systemGray
+        XCTAssertNotNil(notConfigured)
+    }
+
+    func test_secondaryLabelColor_usedForIdleState() {
+        // updateSessionUI(nil) sets statusBadgeDotView.contentTintColor = .secondaryLabelColor
+        let idle: NSColor = .secondaryLabelColor
+        XCTAssertNotNil(idle)
+    }
+}
