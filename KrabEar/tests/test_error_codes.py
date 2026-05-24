@@ -86,6 +86,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "mlx.semaphore_leak",
             "stt.empty_audio_warning",
             "system.malloc_env_leak",
+            # Added Wave 171 — Metal GPU stream misclassification (BACKEND-J fix):
+            # LM Studio HTTP 400 "There is no Stream(gpu, N)" was grouping into
+            # rewriter.timeout; now a distinct code for accurate Sentry triage.
+            "rewriter.gpu_stream_error",
             # Added Wave 78 (Wave 205) — 5 production-discovered codes from Wave 202 audit:
             # gigaam HF cache miss / rewriter model unloaded / output ratio fallback
             # / MLX watchdog hang / audio device poll flood
