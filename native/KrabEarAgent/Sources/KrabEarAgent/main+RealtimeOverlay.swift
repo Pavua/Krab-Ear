@@ -311,7 +311,10 @@ extension AgentAppDelegate {
         }
     }
 
-    func sanitizePreviewFallbackText(_ text: String) -> String {
+    // Wave 554: marked `nonisolated` so it can be called from the
+    // DispatchQueue.global(qos:.userInitiated) background queue without crossing
+    // MainActor boundary (pure-function text processing — no UI state touched).
+    nonisolated func sanitizePreviewFallbackText(_ text: String) -> String {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return "" }
 
@@ -347,7 +350,8 @@ extension AgentAppDelegate {
         return clean
     }
 
-    func normalizeForHeuristic(_ text: String) -> String {
+    // Wave 578: nonisolated for DispatchQueue.global call from sanitizePreviewFallbackText
+    nonisolated func normalizeForHeuristic(_ text: String) -> String {
         let lowered = text.lowercased()
         let allowed = lowered.map { char -> Character in
             if char.isLetter || char.isNumber || char == " " || char == "-" {
@@ -359,7 +363,8 @@ extension AgentAppDelegate {
         return compact.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func looksLikeLoopingFallback(tokens: [String]) -> Bool {
+    // Wave 578: nonisolated for DispatchQueue.global call from sanitizePreviewFallbackText
+    nonisolated func looksLikeLoopingFallback(tokens: [String]) -> Bool {
         guard tokens.count >= 6 else { return false }
 
         var frequency: [String: Int] = [:]
@@ -392,7 +397,7 @@ extension AgentAppDelegate {
         return containsRepeatedChunk(tokens: tokens, minRepeats: 3)
     }
 
-    func containsRepeatedChunk(tokens: [String], minRepeats: Int) -> Bool {
+    nonisolated func containsRepeatedChunk(tokens: [String], minRepeats: Int) -> Bool {
         let total = tokens.count
         guard total >= 6 else { return false }
 
