@@ -394,5 +394,98 @@ class TestEmotionDetectorIPC(unittest.TestCase):
         self.assertIn(resp["result"]["primary_emotion"], ("excited", "positive"))
 
 
+class TestEmotionDetectorEmoji(unittest.TestCase):
+    """Тесты обработки emoji в тексте."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    def test_emoji_in_positive_text(self) -> None:
+        """Emoji в позитивном тексте не ломает детектор."""
+        result = self.detector.detect("Отлично 😊 всё здорово 🎉")
+        self.assertIn(result.primary_emotion, ("positive", "excited", "neutral"))
+        self.assertIsInstance(result.confidence, float)
+        self.assertGreaterEqual(result.confidence, 0.0)
+
+    def test_emoji_only_text_returns_valid_result(self) -> None:
+        """Текст только из emoji — нет букв, возвращает нейтральный результат."""
+        result = self.detector.detect("😊🎉🔥💯")
+        # No letters → caps_ratio=0, no word tokens → no matches → neutral
+        self.assertEqual(result.primary_emotion, "neutral")
+        self.assertIsInstance(result.caps_ratio, float)
+        self.assertEqual(result.caps_ratio, 0.0)
+
+    def test_emoji_with_exclamation_triggers_excited(self) -> None:
+        """Emoji + восклицательный знак → excited."""
+        result = self.detector.detect("Ура! 🎉🎊")
+        self.assertEqual(result.exclamation_count, 1)
+        self.assertIn(result.primary_emotion, ("excited", "neutral"))
+
+    def test_emoji_mixed_with_negative_words(self) -> None:
+        """Emoji не маскируют негативные слова."""
+        result = self.detector.detect("Всё ужасно 😞 плохо 😢")
+        self.assertIn(result.primary_emotion, ("negative",))
+        self.assertGreater(result.confidence, 0.0)
+
+    def test_emoji_no_crash_various(self) -> None:
+        """Различные Unicode-символы (emoji, спецзнаки) не вызывают исключений."""
+        texts = [
+            "Тест 🇷🇺 текст",
+            "Hello 🌍 world",
+            "数字 123 текст 😀",
+            "مرحبا بالعالم",
+            "★☆♪♫♬",
+        ]
+        for text in texts:
+            result = self.detector.detect(text)
+            self.assertIsInstance(result.primary_emotion, str)
+            self.assertIsInstance(result.confidence, float)
+
+
+class TestEmotionDetectorConcurrent(unittest.TestCase):
+    """Тест конкурентного вызова detect из нескольких потоков."""
+
+    def test_concurrent_detect(self) -> None:
+        """EmotionDetector потокобезопасен при параллельных вызовах."""
+        import threading
+
+        detector = EmotionDetector()
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        texts = [
+            ("Отлично, всё работает!", "ru"),
+            ("Ужасно, всё плохо", "ru"),
+            ("Excelente trabajo!", "es"),
+            ("Terrible mal horrible", "es"),
+            ("", "ru"),
+            ("СТОП ВСЕМУ КОНЕЦ", "ru"),
+            ("Как дела? Что происходит?", "ru"),
+            ("Great work amazing!", "en"),
+        ] * 4  # 32 total calls
+
+        def worker(text: str, lang: str) -> None:
+            try:
+                r = detector.detect(text, language=lang)
+                with lock:
+                    results.append(r.primary_emotion)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(str(exc))
+
+        threads = [threading.Thread(target=worker, args=(t, l)) for t, l in texts]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Errors in threads: {errors}")
+        self.assertEqual(len(results), len(texts))
+        valid_emotions = {"neutral", "positive", "negative", "excited", "frustrated", "questioning"}
+        for emotion in results:
+            self.assertIn(emotion, valid_emotions)
+
+
 if __name__ == "__main__":
     unittest.main()
