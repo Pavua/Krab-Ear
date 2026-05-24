@@ -168,7 +168,7 @@ final class QuickEditOverlay: NSObject {
         cancelBtn.font = NSFont.systemFont(ofSize: 13)
 
         // Hint label
-        let hint = NSTextField(labelWithString: "Enter — вставить  •  Esc — отменить")
+        let hint = NSTextField(labelWithString: "Enter — вставить  |  Esc — отменить")
         hint.frame = NSRect(x: 16, y: vPad + 5, width: 280, height: 18)
         hint.font = NSFont.systemFont(ofSize: 11)
         hint.textColor = NSColor.tertiaryLabelColor
