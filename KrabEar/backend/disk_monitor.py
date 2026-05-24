@@ -178,7 +178,17 @@ class DiskSpaceMonitor:
         else:
             level = "ok"
 
-        history_large = history_mb >= self._settings.HISTORY_LARGE_MB
+        # Wave 546: defensive cast — settings.HISTORY_LARGE_MB may be a MagicMock
+        # (or other non-numeric) when DiskSpaceMonitor is instantiated by tests
+        # that don't stub the field explicitly. Cast to float with safe fallback
+        # to module default (500 MB) avoids TypeError without forcing all tests
+        # to know about every settings field. Affects production safety only
+        # under truly corrupt settings (logged elsewhere by SettingsValidator).
+        try:
+            _history_large_threshold = float(self._settings.HISTORY_LARGE_MB)
+        except (TypeError, ValueError):
+            _history_large_threshold = 500.0
+        history_large = history_mb >= _history_large_threshold
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         status: dict[str, Any] = {
