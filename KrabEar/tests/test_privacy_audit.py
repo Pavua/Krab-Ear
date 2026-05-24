@@ -8,7 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "KrabEar") not in sys.path:
