@@ -506,6 +506,24 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # rewriter.gpu_stream_error — LM Studio Metal CommandStream corrupted by
+    # concurrent MLX / GigaAM GPU pressure. Body contains:
+    #   "There is no Stream(gpu, N) in current thread"
+    #   "Metal command stream" corruption variants
+    # Root cause: Wave 167 / BACKEND-J Sentry issue (2026-05-18 ~21:41, 2 events).
+    # Was previously misclassified as rewriter.timeout (catch-all else branch).
+    # Circuit breaker correctly opens on 10 consecutive 400s, but the Sentry event
+    # was misleading — now splits into a distinct issue for proper triage.
+    # Action: open LM Studio to restart the model and clear the Metal context.
+    "rewriter.gpu_stream_error": {
+        "user_msg_ru": "LM Studio: ошибка GPU-потока. Попробуй перезапустить модель в LM Studio.",
+        "actionable": True,
+        "action_id": "open_lm_studio_settings",
+        "action_label": "Открыть LM Studio",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
+
     # ── Wave 78 (Wave 205): 5 production-discovered codes ────────────────────
 
     # stt.gigaam_hf_cache_miss — GigaAM longform path requires pyannote/segmentation-3.0
