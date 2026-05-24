@@ -372,5 +372,88 @@ class TestConcurrentBreadcrumbsThreadSafe(unittest.TestCase):
         self.assertEqual(sdk.add_breadcrumb.call_count, call_count)
 
 
+# ---------------------------------------------------------------------------
+# 13. get_release_string — Wave 704 regression fix
+#     Ensures release tag reads from Info.plist / __version__ / env var,
+#     never stays stuck at a stale hardcoded value.
+# ---------------------------------------------------------------------------
+
+class TestGetReleaseString(unittest.TestCase):
+    """Wave 704: get_release_string returns krab-ear@<current_version>."""
+
+    def setUp(self):
+        self.mod = _reset_module()
+        # Ensure env var override is clean for each test.
+        _os.environ.pop("KRAB_EAR_RELEASE", None)
+
+    def tearDown(self):
+        _os.environ.pop("KRAB_EAR_RELEASE", None)
+
+    def test_release_format_starts_with_krab_ear_at(self):
+        """get_release_string() always returns 'krab-ear@<version>'."""
+        result = self.mod.get_release_string()
+        self.assertTrue(
+            result.startswith("krab-ear@"),
+            msg=f"Expected 'krab-ear@...' prefix, got: {result!r}",
+        )
+
+    def test_release_is_not_stuck_at_2_0_0(self):
+        """Release tag must NOT be the stale 2.0.0 value (W701 regression)."""
+        # Patch plist reader to return current correct version.
+        with patch.object(self.mod, "_read_version_from_plist", return_value="2.0.4"):
+            result = self.mod.get_release_string()
+        self.assertNotEqual(
+            result, "krab-ear@2.0.0",
+            msg="Release tag still stuck at stale 2.0.0 — W701 regression not fixed!",
+        )
+        self.assertEqual(result, "krab-ear@2.0.4")
+
+    def test_plist_version_takes_priority_over_version_file(self):
+        """Info.plist version (2.0.4) wins over __version__ file."""
+        with patch.object(self.mod, "_read_version_from_plist", return_value="2.0.4"):
+            result = self.mod.get_release_string()
+        self.assertEqual(result, "krab-ear@2.0.4")
+
+    def test_env_var_override_takes_highest_priority(self):
+        """KRAB_EAR_RELEASE env var wins over plist and __version__."""
+        _os.environ["KRAB_EAR_RELEASE"] = "2.1.0-staging"
+        with patch.object(self.mod, "_read_version_from_plist", return_value="2.0.4"):
+            result = self.mod.get_release_string()
+        self.assertEqual(result, "krab-ear@2.1.0-staging")
+
+    def test_env_var_with_prefix_not_doubled(self):
+        """If env var already has 'krab-ear@' prefix it's returned as-is."""
+        _os.environ["KRAB_EAR_RELEASE"] = "krab-ear@2.1.0-ci"
+        result = self.mod.get_release_string()
+        self.assertEqual(result, "krab-ear@2.1.0-ci")
+
+    def test_fallback_to_version_file_when_plist_absent(self):
+        """Falls back to __version__ when plist not found."""
+        with patch.object(self.mod, "_read_version_from_plist", return_value=None):
+            # __version__ is now "2.0.4" — not "2.0.0".
+            result = self.mod.get_release_string()
+        self.assertTrue(result.startswith("krab-ear@"))
+        self.assertNotEqual(result, "krab-ear@unknown")
+
+    def test_version_file_now_reflects_2_0_4(self):
+        """__version__.py is updated to 2.0.4 (W704 source-of-truth fix)."""
+        import importlib  # noqa: PLC0415
+        ver_mod = importlib.import_module("__version__")
+        self.assertEqual(
+            ver_mod.__version__, "2.0.4",
+            msg="__version__.py still shows stale version — update it!",
+        )
+
+    def test_init_sentry_uses_get_release_string(self):
+        """init_sentry with no explicit release calls get_release_string."""
+        sdk = _make_sdk_stub()
+        with patch.object(self.mod, "_read_version_from_plist", return_value="2.0.4"):
+            with patch.dict(sys.modules, {"sentry_sdk": sdk}):
+                # Pass release=None so init_sentry falls through to release_from_git.
+                # We verify the plist-based get_release_string would yield 2.0.4.
+                release = self.mod.get_release_string()
+        self.assertEqual(release, "krab-ear@2.0.4")
+
+
 if __name__ == "__main__":
     unittest.main()

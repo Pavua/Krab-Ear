@@ -7,6 +7,8 @@ All functions are no-op when DSN is not provided — safe to ship without a DSN.
 from __future__ import annotations
 
 import logging
+import os
+import plistlib
 import re
 import signal
 import subprocess
@@ -14,6 +16,54 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 _sentry_initialized = False
+
+
+def _read_version_from_plist() -> str | None:
+    """Read CFBundleShortVersionString from the app bundle's Info.plist.
+
+    Searches relative to this file's location to find the .app bundle.
+    Returns None if the plist cannot be found or read.
+    """
+    # This file lives at: <repo>/KrabEar/backend/observability.py
+    # Info.plist lives at: <repo>/Krab Ear.app/Contents/Info.plist
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(os.path.dirname(here))  # up 2 levels: backend → KrabEar → repo
+    plist_path = os.path.join(repo_root, "Krab Ear.app", "Contents", "Info.plist")
+    if not os.path.isfile(plist_path):
+        return None
+    try:
+        with open(plist_path, "rb") as fh:
+            data = plistlib.load(fh)
+        version = data.get("CFBundleShortVersionString") or data.get("CFBundleVersion")
+        return str(version) if version else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def get_release_string() -> str:
+    """Return the canonical Sentry release string for the Python backend.
+
+    Priority:
+      1. ``KRAB_EAR_RELEASE`` environment variable (CI / staging override).
+      2. ``CFBundleShortVersionString`` from ``Krab Ear.app/Contents/Info.plist``
+         (single source of truth for production builds — set at bundle build time).
+      3. ``__version__`` from ``KrabEar/__version__.py`` (dev / test fallback).
+
+    Returns a string of the form ``krab-ear@<version>``.
+    """
+    env_ver = os.environ.get("KRAB_EAR_RELEASE", "").strip()
+    if env_ver:
+        return env_ver if env_ver.startswith("krab-ear@") else f"krab-ear@{env_ver}"
+
+    plist_ver = _read_version_from_plist()
+    if plist_ver:
+        return f"krab-ear@{plist_ver}"
+
+    try:
+        from __version__ import __version__ as _ver  # noqa: PLC0415
+        return f"krab-ear@{_ver}"
+    except Exception:  # noqa: BLE001
+        return "krab-ear@unknown"
 
 
 def release_from_git() -> str:
