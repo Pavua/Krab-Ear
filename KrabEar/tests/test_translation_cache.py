@@ -443,5 +443,97 @@ class TestTranslationCacheKeyCollision(unittest.TestCase):
         self.assertEqual(stats["hits"], 3)
 
 
+class TestTranslationCacheWave103(unittest.TestCase):
+    """Wave 103 — обязательные test cases по спецификации задачи."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.cache = TranslationCache(data_dir=self._tmpdir)
+
+    def test_set_get_basic(self):
+        """put + get возвращает сохранённый перевод."""
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет")
+        result = self.cache.get("hello", "en", "ru", "hf_marian")
+        self.assertEqual(result, "привет")
+
+    def test_cache_miss_returns_none(self):
+        """get на несохранённый ключ возвращает None."""
+        result = self.cache.get("nonexistent", "en", "ru", "hf_marian")
+        self.assertIsNone(result)
+
+    def test_cache_keys_normalized(self):
+        """Ключи кэша чувствительны к регистру и пробелам (хэш по точному тексту).
+
+        TranslationCache использует SHA-256 хэш без нормализации — «Hello» и «hello»
+        и «hello » — три разных ключа. Тест документирует это поведение явно.
+        """
+        self.cache.put("Hello", "en", "ru", "hf_marian", "Привет_cap")
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет_lower")
+        self.cache.put("hello ", "en", "ru", "hf_marian", "привет_trailing")
+
+        # Разные ключи — разные результаты
+        self.assertEqual(self.cache.get("Hello", "en", "ru", "hf_marian"), "Привет_cap")
+        self.assertEqual(self.cache.get("hello", "en", "ru", "hf_marian"), "привет_lower")
+        self.assertEqual(self.cache.get("hello ", "en", "ru", "hf_marian"), "привет_trailing")
+        # Несохранённый вариант — miss
+        self.assertIsNone(self.cache.get("HELLO", "en", "ru", "hf_marian"))
+
+    def test_eviction_lru(self):
+        """LRU вытесняет наименее недавно использованную запись при достижении лимита."""
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=3)
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        cache.put("c", "en", "ru", "e", "В")
+        # Обращаемся к "a" — он становится MRU
+        _ = cache.get("a", "en", "ru", "e")
+        # Добавляем "d" → вытесняется "b" (LRU)
+        cache.put("d", "en", "ru", "e", "Г")
+        self.assertIsNone(cache.get("b", "en", "ru", "e"),
+                          "b должна быть вытеснена как LRU")
+        self.assertIsNotNone(cache.get("a", "en", "ru", "e"),
+                             "a должна остаться (была недавно прочитана)")
+        self.assertIsNotNone(cache.get("c", "en", "ru", "e"))
+        self.assertIsNotNone(cache.get("d", "en", "ru", "e"))
+        stats = cache.get_stats()
+        self.assertLessEqual(stats["entries"], 3)
+
+    def test_persist_across_reload(self):
+        """Записи кэша сохраняются на диск и доступны после пересоздания экземпляра."""
+        self.cache.put("hello", "en", "ru", "hf_marian", "привет")
+        self.cache.put("world", "en", "ru", "hf_marian", "мир")
+        # Новый экземпляр читает с диска
+        cache2 = TranslationCache(data_dir=self._tmpdir)
+        self.assertEqual(cache2.get("hello", "en", "ru", "hf_marian"), "привет")
+        self.assertEqual(cache2.get("world", "en", "ru", "hf_marian"), "мир")
+
+    def test_unicode_text_in_cache(self):
+        """Тексты с кириллицей, CJK и эмодзи корректно сохраняются и извлекаются."""
+        text = "Привет 你好 مرحبا 🌍"
+        translation = "Hello all 🎉"
+        self.cache.put(text, "multi", "en", "hf_marian", translation)
+        result = self.cache.get(text, "multi", "en", "hf_marian")
+        self.assertEqual(result, translation)
+
+    def test_concurrent_set_thread_safe(self):
+        """Параллельные put + get не вызывают ошибок и данные не теряются."""
+        errors: list[Exception] = []
+
+        def worker(n: int) -> None:
+            try:
+                key = f"text_{n}"
+                self.cache.put(key, "en", "ru", "hf_marian", f"перевод_{n}")
+                result = self.cache.get(key, "en", "ru", "hf_marian")
+                assert result == f"перевод_{n}", f"Expected перевод_{n}, got {result}"
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -395,5 +395,197 @@ class TestMakeSummaryHelper(unittest.TestCase):
         self.assertEqual(result[1], "функция")
 
 
+class TestTopicTrackerGradualDrift(unittest.TestCase):
+    """Тест плавного дрейфа темы — алгоритм не должен создавать сегмент на каждой записи."""
+
+    def setUp(self):
+        self.tracker = TopicTracker()
+
+    def test_gradual_drift_smoothed(self) -> None:
+        """Постепенный сдвиг лексики не создаёт отдельный сегмент на каждый элемент.
+
+        Симулируем постепенный переход: начинаем со спорта, добавляем
+        по одному слову из другой темы — окно должно сгладить это.
+        """
+        items = [
+            _item("Football match team players score goals win championship"),
+            _item("Football match team coach tactics win players scored"),
+            _item("Football team training tactics coach players strategy"),
+            _item("Team training coach strategy players sports tactics games"),
+            _item("Training sports strategy coach games athletics players"),
+            _item("Sports games athletics competition players training events"),
+            _item("Athletics competition games events sports training outdoor"),
+            _item("Competition events athletics outdoor sports games training"),
+        ]
+        result = self.tracker.track_topics(items, window_size=4)
+        # С window_size=4 постепенный дрейф должен быть сглажен:
+        # результат должен иметь значительно меньше сегментов, чем элементов
+        self.assertLess(len(result), len(items),
+                        f"Expected fewer segments than items due to smoothing, got {len(result)}")
+        # Полное покрытие
+        total_covered = sum(seg.items_count for seg in result)
+        self.assertEqual(total_covered, len(items))
+
+    def test_gradual_vs_abrupt_shift_window_effect(self) -> None:
+        """Большее окно сглаживает смену лучше, чем маленькое."""
+        items = _items_two_topics()
+        small_window = self.tracker.track_topics(items, window_size=1)
+        large_window = self.tracker.track_topics(items, window_size=5)
+        # Большее окно сглаживает переходы → меньше или равно сегментов
+        self.assertLessEqual(len(large_window), len(small_window))
+
+
+class TestTopicTrackerUnicode(unittest.TestCase):
+    """Тест обработки Unicode-текста (кириллица, испанский, эмодзи)."""
+
+    def setUp(self):
+        self.tracker = TopicTracker()
+
+    def test_unicode_topic_words(self) -> None:
+        """Кирилличные слова корректно попадают в topic_words."""
+        items = [
+            _item("программирование алгоритмы структуры данных Python разработка"),
+            _item("алгоритмы сортировка поиск данные структуры программирование"),
+            _item("Python разработка код алгоритмы структуры данных функции"),
+        ]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+        all_words = [w for seg in result for w in seg.topic_words]
+        # Должны быть кирилличные слова в topic_words
+        cyrillic_words = [w for w in all_words if any('а' <= c <= 'я' or 'А' <= c <= 'Я' for c in w)]
+        self.assertGreater(len(cyrillic_words), 0, "Кирилличные слова должны быть в topic_words")
+
+    def test_spanish_unicode_topic_words(self) -> None:
+        """Испанские слова с диакритикой обрабатываются корректно."""
+        items = [
+            _item("programación algoritmos datos estructuras desarrollo Python"),
+            _item("algoritmos búsqueda ordenación datos estructuras programación"),
+            _item("desarrollo código Python algoritmos estructuras función"),
+        ]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+    def test_mixed_language_items_no_crash(self) -> None:
+        """Смешанный русский/испанский/английский в одном наборе не вызывает ошибок."""
+        items = [
+            _item("Python код функция программирование"),
+            _item("código función programación Python"),
+            _item("code function programming Python"),
+            _item("Python разработка сортировка алгоритм"),
+        ]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+    def test_emoji_in_items_no_crash(self) -> None:
+        """Emoji в текстах не вызывает ошибок — regex фильтрует их."""
+        items = [
+            _item("Отлично 😊 программирование Python функции"),
+            _item("Код 🚀 алгоритмы структуры данных разработка"),
+            _item("Python 💡 разработка функции программирование код"),
+        ]
+        result = self.tracker.track_topics(items, window_size=2)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+
+class TestTopicTrackerWindowSize(unittest.TestCase):
+    """Тест параметра window_size."""
+
+    def setUp(self):
+        self.tracker = TopicTracker()
+
+    def test_window_size_respected(self) -> None:
+        """window_size влияет на детекцию смен: большее окно = меньше сегментов."""
+        # 10 элементов с чёткой сменой посередине
+        items = _items_two_topics()  # 5 sport + 5 cooking = 10 items
+
+        # Маленькое окно — более чувствительно к переходам
+        result_w1 = self.tracker.track_topics(items, window_size=1)
+        # Большое окно — сглаживает переходы
+        result_w5 = self.tracker.track_topics(items, window_size=5)
+
+        # Оба покрывают все элементы
+        self.assertEqual(sum(s.items_count for s in result_w1), len(items))
+        self.assertEqual(sum(s.items_count for s in result_w5), len(items))
+
+        # При window_size=1 должно быть не меньше сегментов, чем при window_size=5
+        self.assertGreaterEqual(len(result_w1), len(result_w5),
+                                f"w1={len(result_w1)} segments should be >= w5={len(result_w5)}")
+
+    def test_window_size_zero_treated_as_one(self) -> None:
+        """window_size=0 обрабатывается как window_size=1 (max(1, 0))."""
+        items = _items_same_topic(4)
+        result = self.tracker.track_topics(items, window_size=0)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+    def test_window_size_larger_than_items(self) -> None:
+        """window_size > len(items) не вызывает ошибок."""
+        items = _items_same_topic(3)
+        result = self.tracker.track_topics(items, window_size=100)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+    def test_window_size_equals_items_count(self) -> None:
+        """window_size == len(items) — граничный случай."""
+        items = _items_same_topic(5)
+        result = self.tracker.track_topics(items, window_size=5)
+        self.assertGreater(len(result), 0)
+        total = sum(seg.items_count for seg in result)
+        self.assertEqual(total, len(items))
+
+
+class TestTopicTrackerConcurrent(unittest.TestCase):
+    """Тест конкурентного вызова track_topics из нескольких потоков."""
+
+    def test_concurrent_track(self) -> None:
+        """TopicTracker потокобезопасен при параллельных вызовах."""
+        import threading
+
+        tracker = TopicTracker()
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def worker(items: list, window_size: int) -> None:
+            try:
+                segs = tracker.track_topics(items, window_size=window_size)
+                total = sum(s.items_count for s in segs)
+                with lock:
+                    results.append((len(segs), total, len(items)))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(str(exc))
+
+        tasks = [
+            (_items_same_topic(6), 3),
+            (_items_two_topics(), 3),
+            (_items_same_topic(4), 2),
+            (_items_two_topics(), 2),
+            (_items_same_topic(8), 4),
+        ] * 4  # 20 total tasks
+
+        threads = [threading.Thread(target=worker, args=(items, ws)) for items, ws in tasks]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+
+        self.assertEqual(errors, [], f"Errors in threads: {errors}")
+        self.assertEqual(len(results), len(tasks))
+        # Each result must cover all items
+        for n_segs, total_covered, n_items in results:
+            self.assertEqual(total_covered, n_items,
+                             f"Coverage mismatch: {total_covered} != {n_items}")
+            self.assertGreater(n_segs, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
