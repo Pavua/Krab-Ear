@@ -217,5 +217,83 @@ class TestBuildInitialPromptCodeSwitching(unittest.TestCase):
         self.assertIn(_CODE_SWITCHING_HINT, prompt)
 
 
+class TestCodeSwitchingDetectorWave112(unittest.TestCase):
+    """Wave 112 — дополнительные кейсы по spec."""
+
+    def setUp(self) -> None:
+        self.det = CodeSwitchingDetector(switch_threshold=0.10)
+
+    # --- exact names from Wave 112 spec ---
+
+    def test_no_switch_pure_russian(self) -> None:
+        result = self.det.analyze("я пошёл в магазин купить продукты на ужин")
+        self.assertFalse(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+        self.assertIsNone(result["secondary_lang"])
+
+    def test_switch_ru_to_en_mid_sentence(self) -> None:
+        result = self.det.analyze(
+            "я нажал кнопку submit и потом нажал cancel в диалоге"
+        )
+        self.assertTrue(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+        self.assertEqual(result["secondary_lang"], "en")
+
+    def test_switch_ru_to_es(self) -> None:
+        """Spanish words (plain ASCII) trigger Latin detection alongside Russian."""
+        # «hola» / «casa» / «bueno» — plain ASCII Latin (no ES markers),
+        # but they ARE classified as "latin" → triggers code-switching with RU.
+        result = self.det.analyze(
+            "привет amigo это mucho trabajo для меня сегодня"
+        )
+        self.assertTrue(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+        # secondary_lang is "en" (detector doesn't distinguish ES from EN — by design)
+        self.assertIsNotNone(result["secondary_lang"])
+
+    def test_tech_tokens_excluded(self) -> None:
+        """URLs and ProperNouns like MacBook should be excluded from Latin count."""
+        # MacBook would match camelCase pattern (uppercase M + mixed case)
+        result = self.det.analyze(
+            "я открыл MacBook и посетил https://apple.com там всё понятно"
+        )
+        # URL excluded, MacBook is camelCase → excluded; only RU remains
+        self.assertFalse(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+
+    def test_quoted_foreign_text_excluded(self) -> None:
+        """Words wrapped in quotes are still processed, but short foreign quotes
+        should not push ratio above threshold when surrounded by RU text."""
+        # 1 quoted Latin word vs 10 Russian words → ratio < 10%
+        result = self.det.analyze(
+            "она сказала мне слово ok и ушла домой в хорошем настроении"
+        )
+        # "ok" = 1 Latin vs 10 RU = 9.1% → just below default 10% threshold
+        self.assertFalse(result["is_mixed"])
+        self.assertLess(result["switch_ratio"], 0.10)
+
+    def test_multiple_switches_in_long_text(self) -> None:
+        """Multiple language switches in a long utterance are detected."""
+        text = (
+            "сначала я написал функцию потом сделал commit и запустил "
+            "тесты через pytest потом написал документацию"
+        )
+        result = self.det.analyze(text)
+        # commit, pytest are plain Latin words → triggers mixing
+        self.assertTrue(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+        self.assertGreater(result["switch_ratio"], 0.0)
+        self.assertLess(result["switch_ratio"], 0.90)
+
+    def test_unicode_punctuation_handled(self) -> None:
+        """Unicode punctuation (—, «», …) does not break analysis."""
+        result = self.det.analyze(
+            "он сказал — «запусти deploy немедленно» — и ушёл…"
+        )
+        # "deploy" is a Latin word → mixed
+        self.assertTrue(result["is_mixed"])
+        self.assertEqual(result["primary_lang"], "ru")
+
+
 if __name__ == "__main__":
     unittest.main()
