@@ -588,5 +588,53 @@ class TestWave149FalsePositiveFix(unittest.TestCase):
         self.assertEqual(by_method["phantom_handler"].classification, "DEFINITELY_DEAD")
 
 
+class TestWave460IpcCallFix(unittest.TestCase):
+    """
+    Wave 460 regression: transcribe_paths was DEFINITELY_DEAD in v2 because
+    the audit script did not recognise _ipc_call("method_name", ...) pattern
+    used in cli.py.  After the v3 fix, such callers are treated as LIVE.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_ipc_call_pattern_makes_handler_live(self):
+        """_ipc_call("method_name", ...) in a non-test Python file → LIVE, not DEAD."""
+        root = self.root
+        _write(root / "KrabEar" / "backend" / "service.py", """\
+            handlers = {
+                "transcribe_paths": self._handle_transcribe_paths,
+                "truly_dead_v3": self._handle_truly_dead_v3,
+            }
+        """)
+        _write(root / "KrabEar" / "backend" / "rest_server.py", "")
+        _write(root / "native" / "KrabEarAgent" / "Sources" / "A.swift", "")
+        _write(root / "KrabEar" / "tests" / "placeholder.py", "")
+        # cli.py lives outside KrabEar/backend/ and KrabEar/tests/
+        _write(root / "KrabEar" / "cli.py", """\
+            resp = _ipc_call("transcribe_paths", {"paths": ["/tmp/audio.m4a"]})
+        """)
+
+        results = run_audit(root)
+        by_method = {r.method: r for r in results}
+
+        # transcribe_paths called via _ipc_call → LIVE
+        self.assertEqual(
+            by_method["transcribe_paths"].classification,
+            "LIVE",
+            "transcribe_paths should be LIVE (called via _ipc_call in cli.py), not DEAD",
+        )
+        self.assertTrue(by_method["transcribe_paths"].is_other_python_caller,
+                        "is_other_python_caller must be True for _ipc_call detection")
+
+        # truly_dead_v3 has no callers anywhere → DEFINITELY_DEAD
+        self.assertEqual(by_method["truly_dead_v3"].classification, "DEFINITELY_DEAD")
+
+
 if __name__ == "__main__":
     unittest.main()
