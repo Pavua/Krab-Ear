@@ -7,6 +7,7 @@ from core.fuzzy_search import FuzzyMatch, FuzzySearcher
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -308,6 +309,107 @@ class HistoryServiceFuzzySearchTests(unittest.TestCase):
         result = self.svc.handle_fuzzy_search({"query": "Helo world", "threshold": 1.0})
         # Опечатка, порог 1.0 — должно вернуть пустой список
         self.assertEqual(result["matches"], [])
+
+
+class FuzzySearcherWave111Tests(unittest.TestCase):
+    """Wave 111 required tests по спецификации задачи."""
+
+    def setUp(self) -> None:
+        self.searcher = FuzzySearcher()
+
+    # ------------------------------------------------------------------
+    # test_exact_match_returns_1_0_score
+    # ------------------------------------------------------------------
+    def test_exact_match_returns_1_0_score(self) -> None:
+        texts = ["transcription result"]
+        results = self.searcher.search("transcription result", texts, threshold=0.0)
+        self.assertTrue(len(results) >= 1)
+        # Точное совпадение должно давать score == 1.0
+        self.assertAlmostEqual(results[0].score, 1.0, places=5)
+
+    # ------------------------------------------------------------------
+    # test_close_match_high_score (1-2 typo distance)
+    # ------------------------------------------------------------------
+    def test_close_match_high_score(self) -> None:
+        # «transcripion» — пропущена буква 't', расстояние редактирования 1
+        texts = ["transcription"]
+        results = self.searcher.search("transcripion", texts, threshold=0.7)
+        self.assertTrue(len(results) >= 1,
+                        "Ожидается высокий score при 1 опечатке")
+        self.assertGreaterEqual(results[0].score, 0.7)
+
+    # ------------------------------------------------------------------
+    # test_dissimilar_strings_low_score
+    # ------------------------------------------------------------------
+    def test_dissimilar_strings_low_score(self) -> None:
+        texts = ["completely unrelated gibberish xqzwv"]
+        results = self.searcher.search("hello world", texts, threshold=0.9)
+        # Нет совпадений выше 0.9 — пустой результат
+        self.assertEqual(results, [])
+
+    # ------------------------------------------------------------------
+    # test_unicode_substrings
+    # ------------------------------------------------------------------
+    def test_unicode_substrings(self) -> None:
+        # Запрос — кириллическая подстрока
+        texts = [
+            "Голосовая транскрипция в Krab Ear",
+            "совершенно другой контент",
+        ]
+        results = self.searcher.search("транскрипция", texts, threshold=0.5)
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0].index, 0)
+
+    # ------------------------------------------------------------------
+    # test_empty_query_handling
+    # ------------------------------------------------------------------
+    def test_empty_query_handling(self) -> None:
+        texts = ["some text here", "another entry"]
+        # Пустая строка → сразу возврат []
+        self.assertEqual(self.searcher.search("", texts), [])
+        # Только пробелы — тоже пустой запрос по длине 0
+        # (FuzzySearcher проверяет `if not query`)
+        # Строка из пробелов — truthy, но будем проверять граничный случай
+        results = self.searcher.search("   ", texts, threshold=0.9)
+        # Результат может быть пуст (пробелы не совпадут с реальным текстом)
+        self.assertIsInstance(results, list)
+
+    # ------------------------------------------------------------------
+    # test_case_insensitive_match
+    # ------------------------------------------------------------------
+    def test_case_insensitive_match(self) -> None:
+        texts = ["Hello World Recording"]
+        # Запрос в нижнем регистре — должен совпасть благодаря .lower()
+        results = self.searcher.search("hello world recording", texts, threshold=0.9)
+        self.assertTrue(len(results) >= 1,
+                        "Case-insensitive match должен работать")
+        self.assertAlmostEqual(results[0].score, 1.0, places=5)
+        # Оригинальный текст сохраняется без изменений
+        self.assertEqual(results[0].matched_text, "Hello World Recording")
+
+    # ------------------------------------------------------------------
+    # test_concurrent_search
+    # ------------------------------------------------------------------
+    def test_concurrent_search(self) -> None:
+        texts = [f"текст {i} для параллельного поиска" for i in range(100)]
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(30):
+                    results = self.searcher.search("параллельного", texts, threshold=0.5)
+                    assert isinstance(results, list)
+                    assert all(isinstance(m, FuzzyMatch) for m in results)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent FuzzySearch raised: {errors}")
 
 
 if __name__ == "__main__":
