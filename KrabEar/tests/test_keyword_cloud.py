@@ -438,6 +438,60 @@ class TestTopN(unittest.TestCase):
         self.assertEqual(counts, sorted(counts, reverse=True))
 
 
+class TestUnicodeWords(unittest.TestCase):
+    """Тесты обработки Unicode-слов (кириллица, испанские акценты)."""
+
+    def setUp(self) -> None:
+        self.gen = KeywordCloudGenerator(stop_words=frozenset())
+
+    def test_cyrillic_words_counted(self) -> None:
+        items = [_dict_item("Привет привет привет мир")]
+        result = self.gen.generate_cloud(items)
+        words = {cw.word for cw in result}
+        self.assertIn("привет", words)
+        self.assertIn("мир", words)
+
+    def test_spanish_accented_words_counted(self) -> None:
+        """Слова с диакритикой: á/é/í/ó/ú/ñ должны корректно токенизироваться."""
+        items = [_dict_item("canción canción música música música café")]
+        result = self.gen.generate_cloud(items)
+        words = {cw.word for cw in result}
+        self.assertIn("música", words)
+        self.assertIn("canción", words)
+        self.assertIn("café", words)
+
+    def test_spanish_accented_case_normalization(self) -> None:
+        """Акцентированные слова нормализуются к нижнему регистру."""
+        items = [_dict_item("Música música MÚSICA")]
+        result = self.gen.generate_cloud(items)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].word, "música")
+        self.assertEqual(result[0].count, 3)
+
+    def test_mixed_scripts_all_counted(self) -> None:
+        """Кириллица и латиница в одном тексте — оба подсчитываются."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        items = [_dict_item("кошка кошка cat cat cat")]
+        result = gen.generate_cloud(items)
+        words = {cw.word for cw in result}
+        self.assertIn("кошка", words)
+        self.assertIn("cat", words)
+        # cat встречается 3 раза, кошка — 2, cat должна быть первой
+        counts = {cw.word: cw.count for cw in result}
+        self.assertEqual(counts["cat"], 3)
+        self.assertEqual(counts["кошка"], 2)
+
+    def test_unicode_tokenize_strips_digits(self) -> None:
+        """Цифры не должны попасть в слова (только буквы)."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        items = [_dict_item("test123 hello world")]
+        result = gen.generate_cloud(items)
+        words = {cw.word for cw in result}
+        # test123 разбивается по цифрам — «test» и «hello» попадут
+        self.assertIn("hello", words)
+        self.assertNotIn("123", words)
+
+
 class TestCloudWordWeightEdge(unittest.TestCase):
     """Дополнительные граничные случаи weight/font_size."""
 

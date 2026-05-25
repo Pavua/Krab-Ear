@@ -365,6 +365,107 @@ class TestEmptyPayloadEdgeCases(unittest.TestCase):
         self.assertNotEqual(sig_empty, sig_with_data)
 
 
+class TestWave136Required(unittest.TestCase):
+    """Wave 136 required test names for RequestSigner."""
+
+    def setUp(self) -> None:
+        self.signer = RequestSigner()
+        self.secret = RequestSigner.generate_secret()
+
+    def test_sign_request_produces_hmac(self) -> None:
+        """sign_request returns a 64-char hex HMAC-SHA256 signature."""
+        signed = self.signer.sign_request("ping", {"key": "val"}, self.secret)
+        self.assertIsInstance(signed.signature, str)
+        self.assertEqual(len(signed.signature), 64)
+        # Must be valid hex
+        int(signed.signature, 16)
+
+    def test_verify_valid_signature(self) -> None:
+        """A freshly signed request verifies successfully."""
+        signed = self.signer.sign_request("get_settings", {}, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, signed.params, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertTrue(ok)
+
+    def test_verify_tampered_request_fails(self) -> None:
+        """Changing params after signing causes verification to fail."""
+        signed = self.signer.sign_request("transcribe", {"lang": "ru"}, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, {"lang": "en"}, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertFalse(ok)
+
+    def test_verify_wrong_secret_fails(self) -> None:
+        """Using a different secret key to verify returns False."""
+        signed = self.signer.sign_request("ping", {}, self.secret)
+        other_secret = RequestSigner.generate_secret()
+        ok = self.signer.verify_request(
+            signed.method, signed.params, signed.signature, other_secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertFalse(ok)
+
+    def test_unicode_payload(self) -> None:
+        """Unicode characters in method name and params sign + verify cleanly."""
+        params = {"текст": "Привет мир 🎤", "язык": "ru"}
+        signed = self.signer.sign_request("транскрибировать", params, self.secret)
+        ok = self.signer.verify_request(
+            signed.method, params, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertTrue(ok)
+
+    def test_timestamp_skew_rejected(self) -> None:
+        """A request with timestamp older than TIMESTAMP_WINDOW_SEC is rejected."""
+        stale_ts = time.time() - TIMESTAMP_WINDOW_SEC - 10
+        signed = self.signer.sign_request("ping", {}, self.secret, timestamp=stale_ts)
+        ok = self.signer.verify_request(
+            signed.method, signed.params, signed.signature, self.secret,
+            timestamp=signed.timestamp, nonce=signed.nonce,
+        )
+        self.assertFalse(ok)
+
+    def test_concurrent_sign(self) -> None:
+        """Multiple threads signing simultaneously produce valid, distinct signatures."""
+        import threading
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                local_signer = RequestSigner()
+                local_secret = RequestSigner.generate_secret()
+                signed = local_signer.sign_request(
+                    "ping", {"worker": threading.get_ident()}, local_secret
+                )
+                ok = local_signer.verify_request(
+                    signed.method, signed.params, signed.signature, local_secret,
+                    timestamp=signed.timestamp, nonce=signed.nonce,
+                )
+                results.append((signed.signature, ok))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent sign errors: {errors}")
+        self.assertEqual(len(results), 12)
+        # All verifications pass
+        for sig, ok in results:
+            self.assertTrue(ok, f"Signature {sig!r} failed verification")
+        # All signatures are distinct (different secrets + params)
+        sigs = [r[0] for r in results]
+        self.assertEqual(len(set(sigs)), 12)
+
+
 # ---------------------------------------------------------------------------
 # Вспомогательный метод для тестов — добавляем к RequestSigner через monkey-patch
 # ---------------------------------------------------------------------------

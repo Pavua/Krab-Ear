@@ -144,8 +144,7 @@ class PrivacyAuditLogger:
     def clear(self) -> None:
         """Удаляет файл лога. Идемпотентно — не ошибается если файл не существует."""
         try:
-            if self._log_path.exists():
-                self._log_path.unlink()
+            self._log_path.unlink(missing_ok=True)
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка удаления лога")
 

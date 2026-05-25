@@ -221,5 +221,84 @@ class TestBookmarkManager(unittest.TestCase):
         self.assertEqual(len(result["bookmarks"]), 2)
 
 
+class TestBookmarkManagerWave137(unittest.TestCase):
+    """Wave 137 additional tests: unicode, concurrent, corrupted storage."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.bm = BookmarkManager(data_dir=Path(self._tmp.name))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_unicode_bookmark_label(self):
+        """Bookmark with Unicode note (Cyrillic/Spanish/emoji) persists correctly."""
+        note = "Важный момент — café résumé 🎙️ встреча"
+        bm = self.bm.add("sess_unicode", 5.5, note)
+        self.assertEqual(bm["note"], note)
+
+        # Reload and verify
+        bm2 = BookmarkManager(data_dir=Path(self._tmp.name))
+        results = bm2.list_for_item("sess_unicode")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["note"], note)
+
+    def test_concurrent_add_remove(self):
+        """Concurrent add and remove calls do not corrupt the journal."""
+        import threading
+
+        errors = []
+
+        def do_add(n):
+            try:
+                for i in range(5):
+                    self.bm.add(f"session_{n}", float(i), f"note {n}-{i}")
+            except Exception as exc:
+                errors.append(exc)
+
+        def do_remove():
+            try:
+                # Delete whatever is available
+                for bm in self.bm.list_all()[:3]:
+                    self.bm.delete(bm["id"])
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=do_add, args=(i,)) for i in range(3)]
+        threads += [threading.Thread(target=do_remove) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        # Journal must remain parseable
+        journal_path = Path(self._tmp.name) / "bookmarks.ndjson"
+        for line in journal_path.read_text().splitlines():
+            if line.strip():
+                json.loads(line)  # must not raise
+
+    def test_handles_corrupted_storage(self):
+        """Corrupted lines in bookmarks.ndjson are silently skipped."""
+        self.bm.add("good_sess", 1.0, "good bookmark")
+
+        # Inject corrupted data into the journal
+        journal_path = Path(self._tmp.name) / "bookmarks.ndjson"
+        with journal_path.open("a", encoding="utf-8") as fh:
+            fh.write("{not valid json }\n")
+            fh.write("completely broken line\n")
+            fh.write('{"id": "ok2", "session_id": "good_sess", '
+                     '"offset_sec": 2.0, "note": "after corruption", '
+                     '"ts": "2026-01-01T00:00:00", "deleted": false}\n')
+
+        # Should not raise; should return valid entries only
+        bm2 = BookmarkManager(data_dir=Path(self._tmp.name))
+        results = bm2.list_for_item("good_sess")
+        self.assertEqual(len(results), 2)
+        notes = {b["note"] for b in results}
+        self.assertIn("good bookmark", notes)
+        self.assertIn("after corruption", notes)
+
+
 if __name__ == "__main__":
     unittest.main()

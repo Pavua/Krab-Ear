@@ -237,12 +237,19 @@ class HistoryService:
         return {"items": results, "next_cursor": next_cursor}
 
     def handle_delete_history_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        import time as _time
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             raise ValueError("id обязателен для удаления")
+        _t0 = _time.monotonic()
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        add_breadcrumb(
+            category="history",
+            message="delete_history_item",
+            data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+        )
         return {"deleted": True}
 
     def handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -251,6 +258,7 @@ class HistoryService:
 
     def handle_import_history_ndjson(self, params: dict[str, Any]) -> dict[str, Any]:
         """Импортирует историю из внешнего NDJSON-файла."""
+        import time as _time
         raw_path = str(params.get("path", "")).strip()
         if not raw_path:
             raise RuntimeError("path обязателен")
@@ -258,12 +266,26 @@ class HistoryService:
         allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
         if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
             return {"error": {"message": f"Path outside allowed directories: {resolved}"}}
+        _t0 = _time.monotonic()
         result = self.store.import_history_ndjson(resolved)
+        imported = int(result.get("imported", 0))
+        errors = int(result.get("errors", 0))
+        add_breadcrumb(
+            category="history",
+            message="import_history_ndjson",
+            level="warning" if errors else "info",
+            data={
+                "imported": imported,
+                "skipped": int(result.get("skipped", 0)),
+                "errors": errors,
+                "duration_ms": round((_time.monotonic() - _t0) * 1000),
+            },
+        )
         return {
             "path": raw_path,
-            "imported": int(result.get("imported", 0)),
+            "imported": imported,
             "skipped": int(result.get("skipped", 0)),
-            "errors": int(result.get("errors", 0)),
+            "errors": errors,
         }
 
     def handle_get_history_stats(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +591,8 @@ class HistoryService:
             total_items (int): количество экспортированных записей
             path (str|None): путь к файлу, если save_to_file=True
         """
+        import time as _time
+        _t0 = _time.monotonic()
         limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
 
         items_dicts, _ = self.store.get_history_page_filtered(
@@ -659,6 +683,15 @@ class HistoryService:
             except Exception as exc:
                 logger.warning("Не удалось сохранить экспорт в файл: %s", exc)
 
+        add_breadcrumb(
+            category="history",
+            message="export_history",
+            data={
+                "total_items": len(items),
+                "save_to_file": save_path is not None,
+                "duration_ms": round((_time.monotonic() - _t0) * 1000),
+            },
+        )
         return {"content": content, "total_items": len(items), "path": save_path}
 
     def handle_export_history_srt(self, params: dict[str, Any]) -> dict[str, Any]:

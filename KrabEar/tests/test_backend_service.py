@@ -11,9 +11,11 @@ import json
 import sys
 import tempfile
 import time
+import threading
 import unittest
 
 import numpy as np
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -218,6 +220,31 @@ class BackendServiceTestCase(unittest.TestCase):
         return self.service.handle_request(
             {"id": request_id, "method": method, "params": params or {}}
         )
+
+    def _wait_for_preview_update(self, timeout: float = 5.0) -> bool:
+        """Ждёт детерминистически, пока preview loop сделает хотя бы одну итерацию.
+
+        Опрашивает ``service._preview_updated_at``, которое атомарно обновляется
+        вместе с ``_preview_text`` внутри ``_preview_lock``.  Использует
+        ``threading.Event`` вместо фиксированного ``time.sleep()``, поэтому
+        не зависит от нагрузки CI-раннера.
+        """
+        done = threading.Event()
+        snapshot = self.service._preview_updated_at
+
+        def _poll() -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with self.service._preview_lock:
+                    current = self.service._preview_updated_at
+                if current != snapshot:
+                    done.set()
+                    return
+                time.sleep(0.05)
+
+        t = threading.Thread(target=_poll, daemon=True)
+        t.start()
+        return done.wait(timeout)
 
     def test_ping_and_settings(self) -> None:
         ping = self.request("ping")
@@ -604,7 +631,7 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_recording_flow(self) -> None:
         self.assertTrue(self.request("start_recording")["ok"])
-        time.sleep(1.2)
+        # is_recording flag обновляется синхронно в handle_request → sleep не нужен
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertTrue(state["result"]["is_recording"])
@@ -722,7 +749,7 @@ class BackendServiceTestCase(unittest.TestCase):
             lambda audio_data, quality_profile="balanced": {"text": f"preview-dict ({quality_profile})"}
         )
         self.assertTrue(self.request("start_recording")["ok"])
-        time.sleep(1.2)
+        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview не обновился за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertIn("preview-dict", state["result"]["preview_text"])
@@ -736,7 +763,8 @@ class BackendServiceTestCase(unittest.TestCase):
             )
         )
         self.assertTrue(self.request("start_recording")["ok"])
-        time.sleep(1.8)
+        # Ждём, пока preview loop обработает эхо промпта и обнулит _preview_text
+        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview loop не сработал за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertEqual(state["result"]["preview_text"], "")
@@ -747,7 +775,8 @@ class BackendServiceTestCase(unittest.TestCase):
             lambda audio_data, quality_profile="balanced": "ой ой ой ой ой ой ой ой"
         )
         self.assertTrue(self.request("start_recording")["ok"])
-        time.sleep(1.8)
+        # Ждём, пока preview loop обработает повторяющийся шум и обнулит _preview_text
+        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview loop не сработал за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         self.assertEqual(state["result"]["preview_text"], "")
@@ -1096,7 +1125,8 @@ class BackendServiceTestCase(unittest.TestCase):
 
     def test_preview_updates_even_when_snapshot_size_constant(self) -> None:
         self.assertTrue(self.request("start_recording")["ok"])
-        time.sleep(2.4)
+        # Ждём, пока preview loop выполнит хотя бы одну итерацию с новым текстом
+        self.assertTrue(self._wait_for_preview_update(timeout=5.0), "preview не обновился за 5s")
         state = self.request("get_recording_state")
         self.assertTrue(state["ok"])
         preview_text = state["result"]["preview_text"]
@@ -1232,6 +1262,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.assertEqual(imported["result"]["imported"], 1)
         self.assertEqual(imported["result"]["skipped"], 1)
 
+    @pytest.mark.slow
     def test_integration_1000_cycles(self) -> None:
         for idx in range(1000):
             start = self.request("start_recording", request_id=f"s{idx}")

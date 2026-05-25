@@ -9,12 +9,17 @@
 6. IPC handle_* методы (get, record, list)
 7. multi_bundle — разные bundle_id → разные профили
 8. invalid_profile — некорректный профиль → ValueError
+9. get_unset_returns_none — явный тест незаданного ключа
+10. unicode_bundle_id — юникод в bundle_id
+11. concurrent_set — параллельная запись без потери данных
+12. handles_corrupted_storage — повреждённый JSON → безопасная загрузка
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -259,6 +264,185 @@ class TestPasteAppMemoryInvalidProfile(unittest.TestCase):
         for profile in ("plain", "markdown", "html", "telegram", "email", "notes"):
             self.mem.record(f"com.example.{profile}", profile)
             self.assertEqual(self.mem.get_profile_for(f"com.example.{profile}"), profile)
+
+
+class TestPasteAppMemoryGetUnset(unittest.TestCase):
+    """9. get_unset_returns_none — явный тест незаданного ключа."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.mem = _make_mem(Path(self._tmpdir.name))
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_get_unset_returns_none(self) -> None:
+        """get_profile_for для bundle_id который никогда не был задан → None."""
+        result = self.mem.get_profile_for("com.never.set.app")
+        self.assertIsNone(result)
+
+    def test_get_after_delete_returns_none(self) -> None:
+        """get_profile_for после delete → None."""
+        self.mem.record("com.example.app", "plain")
+        self.assertIsNotNone(self.mem.get_profile_for("com.example.app"))
+        self.mem.delete("com.example.app")
+        self.assertIsNone(self.mem.get_profile_for("com.example.app"))
+
+    def test_delete_nonexistent_returns_false(self) -> None:
+        """delete несуществующей записи → False, без ошибок."""
+        result = self.mem.delete("com.nonexistent.app")
+        self.assertFalse(result)
+
+
+class TestPasteAppMemoryUnicode(unittest.TestCase):
+    """10. unicode_bundle_id — юникод в bundle_id и profile value."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_unicode_bundle_id_stored_and_retrieved(self) -> None:
+        """bundle_id с юникод-символами корректно сохраняется и читается."""
+        mem = _make_mem(self.tmp_path)
+        unicode_bundle = "com.пример.приложение"
+        mem.record(unicode_bundle, "plain")
+        self.assertEqual(mem.get_profile_for(unicode_bundle), "plain")
+
+    def test_unicode_survives_reload(self) -> None:
+        """юникод bundle_id корректно персистится (JSON roundtrip)."""
+        unicode_bundle = "com.例え.アプリ"
+        mem1 = _make_mem(self.tmp_path)
+        mem1.record(unicode_bundle, "markdown")
+        mem2 = _make_mem(self.tmp_path)
+        self.assertEqual(mem2.get_profile_for(unicode_bundle), "markdown")
+
+    def test_unicode_in_json_file_no_escape(self) -> None:
+        """JSON-файл хранит юникод без ASCII-экранирования (ensure_ascii=False)."""
+        mem = _make_mem(self.tmp_path)
+        mem.record("com.тест.app", "plain")
+        raw = (self.tmp_path / "paste_app_memory.json").read_text(encoding="utf-8")
+        self.assertIn("тест", raw)
+
+
+class TestPasteAppMemoryConcurrent(unittest.TestCase):
+    """11. concurrent_set — параллельная запись без потери данных."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_concurrent_record_no_data_loss(self) -> None:
+        """20 потоков записывают разные bundle_id одновременно — все записи присутствуют."""
+        mem = _make_mem(self.tmp_path)
+        n_threads = 20
+        bundle_ids = [f"com.app.{i}" for i in range(n_threads)]
+        profiles = ["plain", "markdown", "html", "telegram", "email", "notes"]
+        errors: list[Exception] = []
+
+        def worker(bid: str, profile: str) -> None:
+            try:
+                mem.record(bid, profile)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(bid, profiles[i % len(profiles)]))
+            for i, bid in enumerate(bundle_ids)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Exceptions in threads: {errors}")
+        # Все записи должны присутствовать
+        listed = {p["bundle_id"] for p in mem.list_profiles()}
+        for bid in bundle_ids:
+            self.assertIn(bid, listed)
+
+    def test_concurrent_set_same_bundle(self) -> None:
+        """Несколько потоков записывают один bundle_id — финальное значение валидно."""
+        mem = _make_mem(self.tmp_path)
+        bundle = "com.shared.app"
+        valid = ["plain", "markdown"]
+        errors: list[Exception] = []
+
+        def worker(profile: str) -> None:
+            try:
+                for _ in range(10):
+                    mem.record(bundle, profile)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(p,)) for p in valid * 5]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        result = mem.get_profile_for(bundle)
+        self.assertIn(result, valid)
+
+
+class TestPasteAppMemoryCorrupted(unittest.TestCase):
+    """12. handles_corrupted_storage — повреждённый JSON файл."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_corrupted_json_initialises_empty(self) -> None:
+        """Повреждённый JSON → PasteAppMemory инициализируется с пустым словарём."""
+        corrupt_path = self.tmp_path / "paste_app_memory.json"
+        corrupt_path.write_text("{not valid json!!", encoding="utf-8")
+        mem = PasteAppMemory(data_dir=self.tmp_path)
+        # Должен загрузиться без исключения
+        self.assertEqual(mem.list_profiles(), [])
+
+    def test_partial_data_skipped_gracefully(self) -> None:
+        """JSON с неверной структурой значений загружается без ошибок."""
+        corrupt_path = self.tmp_path / "paste_app_memory.json"
+        # Значение — число вместо словаря или строки
+        corrupt_path.write_text(
+            json.dumps({"com.valid.app": {"profile": "plain", "last_used": "2026-01-01T00:00:00+00:00"},
+                        "com.broken.app": 12345}),
+            encoding="utf-8",
+        )
+        mem = PasteAppMemory(data_dir=self.tmp_path)
+        # com.valid.app должен загрузиться, com.broken.app — пропущен
+        self.assertEqual(mem.get_profile_for("com.valid.app"), "plain")
+        self.assertIsNone(mem.get_profile_for("com.broken.app"))
+
+    def test_legacy_flat_format_loaded(self) -> None:
+        """Старый плоский формат {bundle_id: 'profile_str'} загружается корректно."""
+        flat_path = self.tmp_path / "paste_app_memory.json"
+        flat_path.write_text(
+            json.dumps({"com.legacy.app": "markdown"}),
+            encoding="utf-8",
+        )
+        mem = PasteAppMemory(data_dir=self.tmp_path)
+        self.assertEqual(mem.get_profile_for("com.legacy.app"), "markdown")
+
+    def test_empty_file_initialises_empty(self) -> None:
+        """Пустой файл → инициализация с пустым словарём без ошибок."""
+        empty_path = self.tmp_path / "paste_app_memory.json"
+        empty_path.write_text("", encoding="utf-8")
+        mem = PasteAppMemory(data_dir=self.tmp_path)
+        self.assertEqual(mem.list_profiles(), [])
 
 
 if __name__ == "__main__":

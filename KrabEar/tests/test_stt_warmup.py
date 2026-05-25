@@ -13,10 +13,9 @@ from __future__ import annotations
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -109,6 +108,11 @@ class TestAudioEngineWarmup(unittest.TestCase):
         mock_mlx.transcribe.return_value = {"text": ""}
         engine = self._make_engine()
         model_name = engine.current_model
+
+        # Reset mock after engine construction to ignore any background init calls
+        # that may fire before warmup() in CI (e.g. lang-id or other lazy init).
+        mock_mlx.reset_mock()
+        mock_mlx.transcribe.return_value = {"text": ""}
 
         result = engine.warmup()
 

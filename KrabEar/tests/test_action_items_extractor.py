@@ -473,5 +473,146 @@ class IPCHandlerTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["error"], "not_found")
 
 
+# ---------------------------------------------------------------------------
+# 8. Wave 121 additional coverage
+# ---------------------------------------------------------------------------
+
+class Wave121ActionItemsTest(unittest.TestCase):
+    """Дополнительные тесты для Wave 121 — short transcript, unicode, concurrent, priority."""
+
+    def test_extract_task_with_priority_high(self):
+        """Задача с priority=high корректно разбирается."""
+        extractor = make_extractor()
+        payload = json.dumps({
+            "action_items": [
+                {"text": "Deploy hotfix ASAP", "assignee": "DevOps", "due": "today", "priority": "high"},
+            ],
+            "decisions": [],
+            "questions": [],
+        })
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract("Deploy hotfix today urgently", language="en")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.action_items), 1)
+        self.assertEqual(result.action_items[0].priority, "high")
+        self.assertEqual(result.action_items[0].assignee, "DevOps")
+
+    def test_extract_decision(self):
+        """Решение (decision) корректно извлекается."""
+        extractor = make_extractor()
+        payload = json.dumps({
+            "action_items": [],
+            "decisions": ["Migrate all services to Kubernetes by Q4"],
+            "questions": [],
+        })
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract("We decided to migrate to Kubernetes.", language="en")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.decisions), 1)
+        self.assertIn("Kubernetes", result.decisions[0])
+        self.assertFalse(result.is_empty)
+
+    def test_extract_question(self):
+        """Открытый вопрос корректно извлекается."""
+        extractor = make_extractor()
+        payload = json.dumps({
+            "action_items": [],
+            "decisions": [],
+            "questions": ["Who owns the monitoring dashboard?"],
+        })
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract("Who is responsible for the monitoring dashboard?", language="en")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.questions), 1)
+        self.assertIn("monitoring", result.questions[0])
+
+    def test_no_actionable_items_returns_empty_lists(self):
+        """Транскрипт без задач/решений/вопросов → ok=True, все списки пустые."""
+        extractor = make_extractor()
+        payload = json.dumps({"action_items": [], "decisions": [], "questions": []})
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract("It was a nice sunny day.", language="en")
+        self.assertTrue(result.ok)
+        self.assertTrue(result.is_empty)
+        self.assertEqual(result.action_items, [])
+        self.assertEqual(result.decisions, [])
+        self.assertEqual(result.questions, [])
+
+    def test_handles_short_transcript(self):
+        """Очень короткий транскрипт (одно слово) проходит без ошибок."""
+        extractor = make_extractor()
+        payload = json.dumps({"action_items": [], "decisions": [], "questions": []})
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract("OK", language="en")
+        # Either ok=True with empty lists, or a graceful empty result — never raises.
+        self.assertIsInstance(result, ActionItemsResult)
+        self.assertIsNone(result.fallback_reason) if result.ok else self.assertIsNotNone(result.fallback_reason)
+
+    def test_unicode_text(self):
+        """Транскрипт с Unicode символами (emoji, CJK, арабские) не вызывает исключений."""
+        extractor = make_extractor()
+        unicode_transcript = (
+            "Задача: обновить 📋 dashboard. "
+            "Решение: используем 日本語テスト и Arabic: مرحبا. "
+            "Вопрос: когда это будет готово? 🚀"
+        )
+        payload = json.dumps({
+            "action_items": [{"text": "Обновить dashboard", "assignee": "", "due": "", "priority": "medium"}],
+            "decisions": ["Используем 日本語テスト"],
+            "questions": ["Когда это будет готово?"],
+        })
+        with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+            result = extractor.extract(unicode_transcript, language="ru")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.action_items), 1)
+        self.assertEqual(len(result.decisions), 1)
+        self.assertEqual(len(result.questions), 1)
+
+    def test_concurrent_extract(self):
+        """10 параллельных потоков вызывают extract() — нет исключений, все результаты валидны."""
+        import threading
+        extractor = make_extractor()
+        payload = json.dumps({
+            "action_items": [{"text": "Task", "assignee": "", "due": "", "priority": "medium"}],
+            "decisions": ["Decision"],
+            "questions": ["Question?"],
+        })
+
+        results: list[ActionItemsResult] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def worker():
+            try:
+                with patch.object(extractor._session, "post", return_value=make_mock_response(payload)):
+                    r = extractor.extract(SAMPLE_TRANSCRIPT_EN, language="en")
+                with lock:
+                    results.append(r)
+            except BaseException as exc:  # pragma: no cover
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        self.assertEqual(errors, [], f"Ошибки в потоках: {errors!r}")
+        self.assertEqual(len(results), 10)
+        for r in results:
+            self.assertIsInstance(r, ActionItemsResult)
+
+    def test_handles_llm_failure_gracefully(self):
+        """При любой ошибке LLM extract() никогда не raises, возвращает empty result."""
+        extractor = make_extractor()
+        # Simulate a completely unexpected exception from requests
+        with patch.object(extractor._session, "post", side_effect=RuntimeError("unexpected boom")):
+            result = extractor.extract(SAMPLE_TRANSCRIPT_RU)
+        self.assertIsInstance(result, ActionItemsResult)
+        self.assertFalse(result.ok)
+        self.assertIsNotNone(result.fallback_reason)
+
+
 if __name__ == "__main__":
     unittest.main()

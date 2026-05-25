@@ -215,6 +215,101 @@ class HistoryServiceTestCase(unittest.TestCase):
         result = self.svc.handle_cleanup_old_history({})
         self.assertIn("deleted_count", result)
 
+    # ------------------------------------------------------------------
+    # Breadcrumb tests (Wave 702)
+    # ------------------------------------------------------------------
+
+    def test_delete_history_item_fires_breadcrumb(self) -> None:
+        """delete_history_item вызывает add_breadcrumb с category='history'."""
+        item = self.store.add_history_item(text="test delete", paste_status="ok")
+        calls: list[dict] = []
+        import backend.history_service as _hs_mod
+        orig = _hs_mod.add_breadcrumb
+
+        def _capture(**kwargs: object) -> None:  # type: ignore[override]
+            calls.append(dict(kwargs))
+
+        _hs_mod.add_breadcrumb = _capture  # type: ignore[assignment]
+        try:
+            self.svc.handle_delete_history_item({"id": item.id})
+        finally:
+            _hs_mod.add_breadcrumb = orig  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["category"], "history")
+        self.assertEqual(calls[0]["message"], "delete_history_item")
+        data = calls[0].get("data", {})
+        self.assertTrue(data.get("ok"))
+        self.assertIn("duration_ms", data)
+        # Privacy: breadcrumb data must NOT contain transcript text
+        self.assertNotIn("text", data)
+
+    def test_import_history_ndjson_fires_breadcrumb(self) -> None:
+        """import_history_ndjson вызывает add_breadcrumb с импортированным count."""
+        import json
+        ndjson_file = Path(self.tmp.name) / "import_test.ndjson"
+        record = {
+            "id": "imp-001",
+            "ts": "2026-01-01T10:00:00Z",
+            "text": "imported item",
+            "paste_status": "ok",
+            "source_lang": "ru",
+        }
+        ndjson_file.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        calls: list[dict] = []
+        import backend.history_service as _hs_mod
+        orig = _hs_mod.add_breadcrumb
+
+        def _capture(**kwargs: object) -> None:
+            calls.append(dict(kwargs))
+
+        _hs_mod.add_breadcrumb = _capture  # type: ignore[assignment]
+        try:
+            result = self.svc.handle_import_history_ndjson({"path": str(ndjson_file)})
+        finally:
+            _hs_mod.add_breadcrumb = orig  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["category"], "history")
+        self.assertEqual(calls[0]["message"], "import_history_ndjson")
+        data = calls[0].get("data", {})
+        self.assertGreaterEqual(data.get("imported", 0), 1)
+        self.assertIn("duration_ms", data)
+        self.assertEqual(data.get("errors", 0), 0)
+        # Privacy: no raw transcript text in breadcrumb
+        self.assertNotIn("text", data)
+        self.assertNotIn("path", data)
+
+    def test_export_history_fires_breadcrumb(self) -> None:
+        """export_history вызывает add_breadcrumb с total_items и duration_ms."""
+        self.store.add_history_item(text="export breadcrumb test", paste_status="ok")
+
+        calls: list[dict] = []
+        import backend.history_service as _hs_mod
+        orig = _hs_mod.add_breadcrumb
+
+        def _capture(**kwargs: object) -> None:
+            calls.append(dict(kwargs))
+
+        _hs_mod.add_breadcrumb = _capture  # type: ignore[assignment]
+        try:
+            result = self.svc.handle_export_history({"limit": 10})
+        finally:
+            _hs_mod.add_breadcrumb = orig  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["category"], "history")
+        self.assertEqual(calls[0]["message"], "export_history")
+        data = calls[0].get("data", {})
+        self.assertGreaterEqual(data.get("total_items", 0), 1)
+        self.assertIn("duration_ms", data)
+        self.assertIn("save_to_file", data)
+        # Privacy: exported content (transcript text) must NOT appear in breadcrumb data
+        for v in data.values():
+            if isinstance(v, str):
+                self.assertNotIn("export breadcrumb test", v)
+
 
 if __name__ == "__main__":
     unittest.main()

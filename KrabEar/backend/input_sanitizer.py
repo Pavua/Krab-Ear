@@ -101,6 +101,11 @@ class InputSanitizer:
         """Нормализует путь и проверяет, что он находится в разрешённых директориях.
 
         Бросает ValueError при path traversal или выходе за пределы allowed_dirs.
+
+        Важно: относительные пути НЕ допускаются — они резолвятся через CWD (рабочую
+        директорию процесса) и могут проходить проверку allowed_dirs только случайно,
+        когда CWD находится внутри home. Все входные пути должны быть абсолютными.
+        Тильда (~) разворачивается как исключение.
         """
         if not isinstance(p, str):
             raise ValueError(f"Путь должен быть строкой, получено {type(p).__name__}")
@@ -108,17 +113,22 @@ class InputSanitizer:
         if not p:
             raise ValueError("Пустой путь не допускается")
 
-        # Разворачиваем ~ и нормализуем
-        resolved = Path(os.path.expanduser(p)).resolve()
+        # Запрещаем относительные пути (кроме тильды-сокращений)
+        # Относительный путь резолвится через CWD — это непредсказуемо и опасно.
+        expanded = os.path.expanduser(p)
+        if not os.path.isabs(expanded):
+            raise ValueError(
+                f"Относительные пути не допускаются: {p!r}. "
+                "Используйте абсолютный путь."
+            )
+
+        # Резолвим симлинки и нормализуем (убирает ../ и ./)
+        resolved = Path(expanded).resolve()
 
         dirs = allowed_dirs if allowed_dirs is not None else self._allowed_dirs
-        for allowed in dirs:
-            allowed_resolved = Path(os.path.expanduser(allowed)).resolve()
-            try:
-                resolved.relative_to(allowed_resolved)
-                return str(resolved)
-            except ValueError:
-                continue
+        allowed_resolved = [Path(os.path.expanduser(d)).resolve() for d in dirs]
+        if any(resolved.is_relative_to(a) for a in allowed_resolved):
+            return str(resolved)
 
         raise ValueError(
             f"Path traversal или недопустимый путь: {p!r} разрешается в {resolved}, "

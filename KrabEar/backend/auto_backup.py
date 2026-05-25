@@ -101,7 +101,7 @@ class AutoBackupManager:
         to_delete = backups[: max(0, len(backups) - self.max_copies)]
         for d in to_delete:
             try:
-                shutil.rmtree(d)
+                shutil.rmtree(d, ignore_errors=True)
                 logger.info("Удалён старый авто-бэкап: %s", d)
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-бэкап %s: %s", d, exc)

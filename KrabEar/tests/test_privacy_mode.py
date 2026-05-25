@@ -28,7 +28,6 @@ class TestInitSentryPrivacyMode(unittest.TestCase):
 
     def _call(self, dsn=None, settings=None):
         # Import fresh each time to avoid _sentry_initialized global pollution.
-        from importlib import reload
         import backend.observability as obs_module
         obs_module._sentry_initialized = False
         return obs_module.init_sentry(dsn=dsn, settings=settings)

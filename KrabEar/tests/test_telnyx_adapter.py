@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -274,6 +277,152 @@ class ListActiveCallsTestCase(unittest.TestCase):
         result = self.adapter.get_call_status("ctrl_abc")
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "bridged")
+
+
+class BearerAuthTestCase(unittest.TestCase):
+    """Тест установки Bearer-заголовка авторизации."""
+
+    # 16 — Bearer auth header содержит API key
+    def test_bearer_auth_header_set(self) -> None:
+        adapter = _make_adapter(api_key="super_secret_key")
+        # Force session creation
+        session = adapter._get_session()
+        auth_header = session.headers.get("Authorization", "")
+        self.assertEqual(auth_header, "Bearer super_secret_key")
+
+    # 17 — Content-Type и Accept заголовки установлены
+    def test_content_type_header_set(self) -> None:
+        adapter = _make_adapter()
+        session = adapter._get_session()
+        self.assertEqual(session.headers.get("Content-Type"), "application/json")
+        self.assertEqual(session.headers.get("Accept"), "application/json")
+
+
+class NetworkFailureTestCase(unittest.TestCase):
+    """Тест обработки сетевых ошибок."""
+
+    def setUp(self) -> None:
+        self.adapter = _make_adapter()
+
+    def _set_mock_post_raises(self, exc: Exception) -> None:
+        sess_mock = MagicMock()
+        sess_mock.post.side_effect = exc
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+    def _set_mock_get_raises(self, exc: Exception) -> None:
+        sess_mock = MagicMock()
+        sess_mock.get.side_effect = exc
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+    # 18 — ConnectionError при dial → {"ok": False, "error": "network_error"}
+    def test_handles_network_failure_dial(self) -> None:
+        self._set_mock_post_raises(requests.exceptions.ConnectionError("connection refused"))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+        self.assertIn("connection refused", result["message"])
+
+    # 19 — Timeout при hangup → network_error
+    def test_handles_timeout_hangup(self) -> None:
+        self._set_mock_post_raises(requests.exceptions.Timeout("timed out"))
+        result = self.adapter.hangup("ctrl_abc")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+
+    # 20 — ConnectionError при get_call_status → network_error
+    def test_handles_network_failure_get_status(self) -> None:
+        self._set_mock_get_raises(requests.exceptions.ConnectionError("refused"))
+        result = self.adapter.get_call_status("ctrl_abc")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+
+
+class Http5xxTestCase(unittest.TestCase):
+    """Тесты обработки 5xx ответов (retry на уровне urllib3 уже отработал)."""
+
+    def setUp(self) -> None:
+        self.adapter = _make_adapter()
+
+    def _set_mock_post(self, mock_resp: MagicMock) -> None:
+        sess_mock = MagicMock()
+        sess_mock.post.return_value = mock_resp
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+    # 21 — HTTP 500 возвращает {"ok": False, "error": "http_500"}
+    def test_handles_500_returns_error(self) -> None:
+        self._set_mock_post(_mock_response(500, None))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "http_500")
+        self.assertEqual(result["status"], 500)
+
+    # 22 — HTTP 503 возвращает {"ok": False, "error": "http_503"}
+    def test_handles_503_returns_error(self) -> None:
+        self._set_mock_post(_mock_response(503, None))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "http_503")
+
+    # 23 — HTTP 401 unauthorized при dial
+    def test_handles_401_unauthorized(self) -> None:
+        self._set_mock_post(_mock_response(401, {}))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "unauthorized")
+
+
+class ConcurrentDialTestCase(unittest.TestCase):
+    """Тест параллельных вызовов dial из нескольких потоков."""
+
+    # 24 — concurrent dial не вызывает исключений и все потоки получают результат
+    def test_concurrent_dial(self) -> None:
+        results = []
+        errors = []
+
+        def do_dial(number: str) -> None:
+            try:
+                sess_mock = MagicMock()
+                sess_mock.post.return_value = _mock_response(
+                    201,
+                    {
+                        "data": {
+                            "call_leg_id": f"leg_{number[-4:]}",
+                            "call_control_id": f"ctrl_{number[-4:]}",
+                        }
+                    },
+                )
+                sess_mock.headers = {}
+                # Each thread gets own adapter to avoid session sharing issues
+                local_adapter = _make_adapter()
+                local_adapter._session = sess_mock
+                result = local_adapter.dial(number)
+                results.append(result)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        numbers = [f"+155500{i:05d}" for i in range(8)]
+        threads = [threading.Thread(target=do_dial, args=(n,)) for n in numbers]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r["ok"] for r in results))
+
+    # 25 — is_configured возвращает True для сконфигурированного адаптера
+    def test_is_configured_true(self) -> None:
+        adapter = _make_adapter()
+        self.assertTrue(adapter.is_configured())
+
+    # 26 — is_configured возвращает False для stub-адаптера
+    def test_is_configured_false(self) -> None:
+        adapter = TelnyxAdapter(api_key="")
+        self.assertFalse(adapter.is_configured())
 
 
 if __name__ == "__main__":

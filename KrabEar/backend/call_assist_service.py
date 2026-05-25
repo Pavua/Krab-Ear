@@ -513,6 +513,7 @@ class CallAssistService:
 
     def handle_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запрашивает summary текущей звонковой сессии."""
+        t0 = time.monotonic()
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
@@ -529,7 +530,18 @@ class CallAssistService:
             path=f"/v1/sessions/{gateway_session_id}/summary",
             payload={"max_items": max_items},
         )
-        if not summary_result.get("ok"):
+        ok = summary_result.get("ok", False)
+        add_breadcrumb(
+            category="call",
+            message="call_assist_summary",
+            level="info" if ok else "warning",
+            data={
+                "ok": ok,
+                "max_items": max_items,
+                "duration_ms": round((time.monotonic() - t0) * 1000),
+            },
+        )
+        if not ok:
             raise RuntimeError(f"Gateway summary error: {summary_result.get('error', 'unknown')}")
         return {
             "gateway_session_id": gateway_session_id,
@@ -674,6 +686,7 @@ class CallAssistService:
 
     def handle_cost_estimate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Считает оценку telephony+AI стоимости через Voice Gateway."""
+        t0 = time.monotonic()
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
         voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
@@ -724,9 +737,22 @@ class CallAssistService:
             api_key=voice_gateway_api_key,
             path=query,
         )
-        if not result.get("ok"):
+        ok = result.get("ok", False)
+        payload = result.get("payload", {}) if ok else {}
+        total_usd = float(payload.get("total_usd", 0.0)) if isinstance(payload, dict) else 0.0
+        add_breadcrumb(
+            category="call",
+            message="call_assist_cost_estimate",
+            level="info" if ok else "warning",
+            data={
+                "ok": ok,
+                "country": country,
+                "total_usd": round(total_usd, 4),
+                "duration_ms": round((time.monotonic() - t0) * 1000),
+            },
+        )
+        if not ok:
             raise RuntimeError(f"Gateway cost estimate error: {result.get('error', 'unknown')}")
-        payload = result.get("payload", {})
         return payload if isinstance(payload, dict) else {"ok": True, "country": country}
 
     def handle_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -951,6 +977,17 @@ class CallAssistService:
             target_lang="",
             translation_status="not_requested",
             translation_engine="call_assist_timeline",
+        )
+        add_breadcrumb(
+            category="call",
+            message="call_assist_timeline_to_history",
+            level="info",
+            data={
+                "format": export_format,
+                "chars": len(content),
+                "summary_included": bool(summary_payload),
+                "stats_included": bool(stats_payload),
+            },
         )
         return {
             "ok": True,

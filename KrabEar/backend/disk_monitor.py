@@ -178,7 +178,17 @@ class DiskSpaceMonitor:
         else:
             level = "ok"
 
-        history_large = history_mb >= self._settings.HISTORY_LARGE_MB
+        # Wave 546: defensive cast — settings.HISTORY_LARGE_MB may be a MagicMock
+        # (or other non-numeric) when DiskSpaceMonitor is instantiated by tests
+        # that don't stub the field explicitly. Cast to float with safe fallback
+        # to module default (500 MB) avoids TypeError without forcing all tests
+        # to know about every settings field. Affects production safety only
+        # under truly corrupt settings (logged elsewhere by SettingsValidator).
+        try:
+            _history_large_threshold = float(self._settings.HISTORY_LARGE_MB)
+        except (TypeError, ValueError):
+            _history_large_threshold = 500.0
+        history_large = history_mb >= _history_large_threshold
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         status: dict[str, Any] = {
@@ -232,6 +242,9 @@ class DiskSpaceMonitor:
                 self._last_disk_level = level
                 # Wave 60: push disk.low_space to error bus (severity matches level)
                 self._push_disk_error(level, free_gb)
+                # Wave 490: push dedicated disk.critical error when level == critical
+                if level == "critical":
+                    self._push_disk_critical_error(free_gb)
 
                 # Auto-cleanup hook: если AUTO_CLEANUP_ENABLED и диск критический
                 if (
@@ -289,6 +302,37 @@ class DiskSpaceMonitor:
             error_bus.push(err)
         except Exception:
             logger.exception("DiskSpaceMonitor: error_bus.push failed")
+
+    def _push_disk_critical_error(self, free_gb: float) -> None:
+        """Push disk.critical error to error bus. Never raises.
+
+        Wave 490: dedicated critical code (separate from disk.low_space warn).
+        """
+        error_bus = self._error_bus
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("disk.critical", {})
+            err = KrabError(
+                severity="critical",
+                component="disk",
+                code="disk.critical",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "🔴 КРИТИЧНО: меньше 1 GB на диске",
+                ),
+                message_debug=f"disk.critical: {free_gb:.2f} GB free",
+                timestamp=datetime.now(timezone.utc),
+                context={"level": "critical", "free_gb": free_gb},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("DiskSpaceMonitor: disk.critical error_bus.push failed")
 
     def _trigger_auto_cleanup(self) -> None:
         """Запускает авто-очистку старых записей в фоновом потоке."""

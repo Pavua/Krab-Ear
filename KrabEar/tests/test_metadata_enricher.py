@@ -520,5 +520,129 @@ class EnrichIntegrationTestCase(unittest.TestCase):
         self.assertEqual(stats["items_enriched"], 7)
 
 
+class RequiredWave134TestCase(unittest.TestCase):
+    """Обязательные тест-кейсы Wave 134 для MetadataEnricher."""
+
+    def setUp(self) -> None:
+        self._enricher = MetadataEnricher()
+
+    # test_enrich_basic_fields
+    def test_enrich_basic_fields(self) -> None:
+        """enrich() возвращает все базовые поля metadata."""
+        item = _make_item(text="Привет мир. Это тест!", duration_sec=5.0, confidence=0.85)
+        result = self._enricher.enrich(item)
+        meta = result["metadata"]
+        required = {
+            "word_count", "sentence_count", "avg_word_length",
+            "language_detected", "emotion", "speech_pace_wpm",
+            "quality_grade", "auto_title", "topics", "enriched_at",
+        }
+        for key in required:
+            self.assertIn(key, meta, f"Missing metadata key: {key}")
+        self.assertIsInstance(meta["word_count"], int)
+        self.assertGreater(meta["word_count"], 0)
+
+    # test_enrich_skips_existing_fields
+    def test_enrich_skips_existing_fields(self) -> None:
+        """enrich() не перезаписывает исходные поля item, только добавляет metadata."""
+        item = _make_item(text="Тест")
+        item["existing_custom"] = "preserve_me"
+        item["confidence"] = 0.77
+        result = self._enricher.enrich(item)
+        # Исходные поля сохранены
+        self.assertEqual(result["existing_custom"], "preserve_me")
+        self.assertAlmostEqual(result["confidence"], 0.77)
+        # metadata добавлена
+        self.assertIn("metadata", result)
+        # Исходный item не мутирован
+        self.assertNotIn("metadata", item)
+
+    # test_handles_empty_text
+    def test_handles_empty_text(self) -> None:
+        """enrich() с пустым text не падает, возвращает нулевые метрики."""
+        result = self._enricher.enrich(_make_item(text=""))
+        meta = result["metadata"]
+        self.assertEqual(meta["word_count"], 0)
+        self.assertEqual(meta["sentence_count"], 0)
+        self.assertEqual(meta["avg_word_length"], 0.0)
+        self.assertIn("metadata", result)
+
+    # test_unicode_text
+    def test_unicode_text(self) -> None:
+        """enrich() корректно обрабатывает кириллицу, испанский, emoji."""
+        texts = [
+            "Привет! Как дела?",
+            "¡Hola mundo! Esto funciona.",
+            "Тест 🎙️ emoji не ломает подсчёт слов.",
+        ]
+        for text in texts:
+            with self.subTest(text=text):
+                result = self._enricher.enrich(_make_item(text=text))
+                self.assertIn("metadata", result)
+                self.assertGreaterEqual(result["metadata"]["word_count"], 0)
+
+    # test_language_inferred
+    def test_language_inferred(self) -> None:
+        """language_detected инферируется правильно из текста."""
+        cases = [
+            ("Это русский текст для теста прямо сейчас.", "ru"),
+            ("Hello this is an English sentence for the test.", "en"),
+            ("Hola esto es una prueba en español ahora.", "es"),
+        ]
+        for text, expected_lang in cases:
+            with self.subTest(lang=expected_lang):
+                result = self._enricher.enrich(_make_item(text=text))
+                self.assertEqual(result["metadata"]["language_detected"], expected_lang)
+
+    # test_keywords_extracted
+    def test_keywords_extracted(self) -> None:
+        """topics — список строк, для текста с реальными словами не пуст."""
+        text = "Программирование Python искусственный интеллект технологии данные"
+        result = self._enricher.enrich(_make_item(text=text, duration_sec=10.0))
+        topics = result["metadata"]["topics"]
+        self.assertIsInstance(topics, list)
+        # Каждый элемент — строка
+        for t in topics:
+            self.assertIsInstance(t, str)
+
+    # test_concurrent_enrich
+    def test_concurrent_enrich(self) -> None:
+        """Параллельные вызовы enrich() на одном экземпляре безопасны."""
+        import threading
+
+        enricher = MetadataEnricher()
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def worker(idx: int) -> None:
+            try:
+                item = _make_item(
+                    text=f"Текст номер {idx} для параллельного теста обогащения.",
+                    duration_sec=float(idx + 1),
+                )
+                enriched = enricher.enrich(item)
+                with lock:
+                    results.append(enriched)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Concurrency errors: {errors}")
+        self.assertEqual(len(results), 10)
+        for r in results:
+            self.assertIn("metadata", r)
+            self.assertGreater(r["metadata"]["word_count"], 0)
+
+        stats = enricher.get_enrichment_stats()
+        self.assertEqual(stats["items_enriched"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()

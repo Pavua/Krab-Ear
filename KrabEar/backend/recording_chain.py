@@ -108,6 +108,27 @@ class RecordingChainManager:
                 chain["item_ids"].append(item_id)
                 self._save()
 
+    def unlink_recording_from_chain(self, chain_id: str, item_id: str) -> bool:
+        """Удаляет запись из цепочки.
+
+        Returns:
+            True  — элемент был найден и удалён.
+            False — элемент отсутствовал в цепочке (идемпотентно).
+
+        Raises:
+            KeyError: если цепочка не существует.
+        """
+        with self._lock:
+            chain = self._data["chains"].get(chain_id)
+            if chain is None:
+                raise KeyError(f"Цепочка не найдена: {chain_id}")
+            item_id = str(item_id).strip()
+            if item_id in chain["item_ids"]:
+                chain["item_ids"].remove(item_id)
+                self._save()
+                return True
+            return False
+
     def end_chain(self, chain_id: str) -> None:
         """Завершает цепочку (помечает ended_at)."""
         with self._lock:
@@ -227,3 +248,13 @@ class RecordingChainManager:
             raise ValueError("Параметр 'chain_id' обязателен")
         text = self.merge_chain_text(chain_id)
         return {"text": text}
+
+    def handle_unlink_recording_from_chain(self, params: dict[str, Any]) -> dict[str, Any]:
+        chain_id = str(params.get("chain_id", "")).strip()
+        item_id = str(params.get("item_id", "")).strip()
+        if not chain_id:
+            raise ValueError("Параметр 'chain_id' обязателен")
+        if not item_id:
+            raise ValueError("Параметр 'item_id' обязателен")
+        removed = self.unlink_recording_from_chain(chain_id, item_id)
+        return {"ok": True, "removed": removed}

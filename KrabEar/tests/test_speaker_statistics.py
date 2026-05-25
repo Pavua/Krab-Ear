@@ -474,5 +474,101 @@ class TestFieldNamesAndScenarios(unittest.TestCase):
         self.assertIsNone(result["speakers"]["SPEAKER_00"]["avg_confidence"])
 
 
+class TestRequiredScenarios(unittest.TestCase):
+    """Явные тесты с именами из задания Wave 99."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeakerStatisticsAnalyzer()
+
+    def test_compute_word_count_per_speaker(self) -> None:
+        """Количество слов распределяется по спикерам из текста turn."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_00", 0.0, 30.0, "один два три"),       # 3 слова
+                _turn("SPEAKER_01", 30.0, 60.0, "four five six seven"),  # 4 слова
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+        self.assertEqual(result["speakers"]["SPEAKER_00"]["total_words"], 3)
+        self.assertEqual(result["speakers"]["SPEAKER_01"]["total_words"], 4)
+
+    def test_compute_total_duration_per_speaker(self) -> None:
+        """Суммарная длительность вычисляется по временным меткам turn."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_00", 0.0, 50.0),   # 50 сек
+                _turn("SPEAKER_01", 50.0, 65.0),  # 15 сек
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_00"]["total_speaking_time_sec"], 50.0, places=2
+        )
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_01"]["total_speaking_time_sec"], 15.0, places=2
+        )
+
+    def test_average_confidence_per_speaker(self) -> None:
+        """avg_confidence усредняется по всем записям спикера."""
+        items = [
+            _make_diar_item([_turn("SPEAKER_00", 0, 10)], confidence=0.80),
+            _make_diar_item([_turn("SPEAKER_00", 0, 10)], confidence=0.90),
+        ]
+        result = self.analyzer.analyze_speakers(items)
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_00"]["avg_confidence"], 0.85, places=4
+        )
+
+    def test_no_diarization_returns_empty(self) -> None:
+        """Записи без диаризации → speakers пустой, total_speakers=0."""
+        items = [
+            {"text": "hello world", "confidence": 0.9, "source_lang": "en"},
+        ]
+        result = self.analyzer.analyze_speakers(items)
+        self.assertEqual(result["speakers"], {})
+        self.assertEqual(result["total_speakers"], 0)
+
+    def test_unicode_speaker_name(self) -> None:
+        """Имя спикера в Кириллице обрабатывается корректно."""
+        item = _make_diar_item(
+            turns=[
+                _turn("ГОВОРЯЩИЙ_01", 0.0, 30.0, "тест"),
+                _turn("Спикер-Два", 30.0, 60.0, "ещё тест"),
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+        self.assertIn("ГОВОРЯЩИЙ_01", result["speakers"])
+        self.assertIn("Спикер-Два", result["speakers"])
+        self.assertEqual(result["total_speakers"], 2)
+
+    def test_handles_single_speaker_history(self) -> None:
+        """Один спикер — все поля заполнены корректно, balance=0."""
+        item = _make_diar_item(
+            turns=[_turn("SPEAKER_00", 0.0, 60.0, "один два три")],
+            confidence=0.9,
+        )
+        result = self.analyzer.analyze_speakers([item])
+        self.assertEqual(result["total_speakers"], 1)
+        s = result["speakers"]["SPEAKER_00"]
+        self.assertIn("total_words", s)
+        self.assertIn("total_speaking_time_sec", s)
+        self.assertEqual(result["speaker_balance"], 0.0)
+
+    def test_skip_speaker_with_zero_segments(self) -> None:
+        """Если все turns у спикера имеют нулевую длительность — спикер всё равно учитывается (words > 0)."""
+        item = _make_diar_item(
+            turns=[
+                _turn("SPEAKER_00", 5.0, 5.0, "слово"),  # duration=0, но words=1
+            ],
+        )
+        result = self.analyzer.analyze_speakers([item])
+        # Спикер создаётся (turn существует), но speaking_time = 0
+        self.assertIn("SPEAKER_00", result["speakers"])
+        self.assertAlmostEqual(
+            result["speakers"]["SPEAKER_00"]["total_speaking_time_sec"], 0.0, places=3
+        )
+        self.assertEqual(result["speakers"]["SPEAKER_00"]["total_words"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

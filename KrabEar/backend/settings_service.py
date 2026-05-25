@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
+from backend.observability import add_breadcrumb
 from backend.settings_backup import SettingsBackup
 from backend.settings_validator import SettingsValidator
 
@@ -281,6 +282,15 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        _t1 = time.monotonic()
+        add_breadcrumb(
+            category="settings",
+            message="set_settings",
+            data={
+                "keys": sorted(params.keys()),
+                "key_count": len(params),
+            },
+        )
         # Hot-reload pydantic Settings из обновлённого settings.json — без
         # restart engine.py видит новые feature flags (STT_GIGAAM_ENABLED,
         # STT_LANGUAGE_ROUTING_ENABLED, etc).
@@ -315,6 +325,14 @@ class SettingsService:
         settings["active_preset"] = profile
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        add_breadcrumb(
+            category="settings",
+            message="apply_profile_preset",
+            data={
+                "profile": profile,
+                "keys_changed": sorted(preset.keys()),
+            },
+        )
         try:
             import backend.event_bus as _ebus  # noqa: PLC0415
             _ebus.bus.emit("preset.changed", {
@@ -448,6 +466,16 @@ class SettingsService:
         imported = len(incoming) - skipped
         self.store.save_settings(merged)
         self.invalidate_cache()
+        add_breadcrumb(
+            category="settings",
+            message="import_settings",
+            level="info" if not errors else "warning",
+            data={
+                "imported": imported,
+                "skipped": skipped,
+                "error_count": len(errors),
+            },
+        )
 
         _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
                   imported, skipped, len(errors), src)

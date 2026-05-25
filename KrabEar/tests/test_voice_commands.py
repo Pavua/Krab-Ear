@@ -6,6 +6,7 @@
 
 import sys
 import os
+import threading
 import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -366,6 +367,57 @@ class TestEdgeCases(unittest.TestCase):
         result = proc.process("один два удалить последнее слово три", language="ru")
         # "один два" → delete "два" → "один" → continue " три" → "один три"
         self.assertEqual(result, "один три")
+
+
+class TestConcurrentProcess(unittest.TestCase):
+    """VoiceCommandProcessor потокобезопасен при параллельном вызове process()."""
+
+    def test_concurrent_process(self):
+        """Несколько потоков вызывают process() одновременно — нет гонок/сбоев."""
+        import threading
+
+        proc = _make_proc()
+        errors: list[Exception] = []
+        results: list[str] = []
+        lock = threading.Lock()
+
+        inputs = [
+            ("Привет запятая мир", "ru"),
+            ("hello comma world", "en"),
+            ("hola coma mundo", "es"),
+            ("Всё хорошо точка", "ru"),
+            ("what question mark", "en"),
+        ]
+        expected = [
+            "Привет, мир",
+            "hello, world",
+            "hola, mundo",
+            "Всё хорошо.",
+            "what?",
+        ]
+
+        def worker(text, lang, expected_result):
+            try:
+                res = proc.process(text, language=lang)
+                with lock:
+                    results.append((res, expected_result))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(t, l, e))
+            for (t, l), e in zip(inputs, expected)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=5.0)
+
+        self.assertEqual(errors, [], msg=f"Exceptions in threads: {errors}")
+        self.assertEqual(len(results), len(inputs))
+        for actual, expected_result in results:
+            self.assertEqual(actual, expected_result)
 
 
 if __name__ == "__main__":

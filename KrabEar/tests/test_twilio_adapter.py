@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -306,6 +309,134 @@ class ListActiveCallsTestCase(unittest.TestCase):
         result = self.adapter.list_active_calls()
         self.assertTrue(result["ok"])
         self.assertEqual(result["calls"], [])
+
+
+class BasicAuthTestCase(unittest.TestCase):
+    """Тест установки Basic Auth."""
+
+    # 27 — Basic Auth использует account_sid и auth_token
+    def test_basic_auth_uses_account_sid(self) -> None:
+        adapter = _make_adapter(account_sid="ACtest123", auth_token="authtoken456")
+        auth = adapter._auth()
+        self.assertEqual(auth.username, "ACtest123")
+        self.assertEqual(auth.password, "authtoken456")
+
+    # 28 — Content-Type для Twilio — application/x-www-form-urlencoded
+    def test_content_type_form_encoded(self) -> None:
+        adapter = _make_adapter()
+        session = adapter._get_session()
+        self.assertEqual(
+            session.headers.get("Content-Type"),
+            "application/x-www-form-urlencoded",
+        )
+
+
+class NetworkFailureTestCase(unittest.TestCase):
+    """Тест обработки сетевых ошибок."""
+
+    def setUp(self) -> None:
+        self.adapter = _make_adapter()
+
+    # 29 — ConnectionError при dial → {"ok": False, "error": "network_error"}
+    def test_handles_network_failure_dial(self) -> None:
+        sess_mock = MagicMock()
+        sess_mock.post.side_effect = requests.exceptions.ConnectionError("refused")
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+        self.assertIn("refused", result["message"])
+
+    # 30 — Timeout при hangup → network_error
+    def test_handles_timeout_hangup(self) -> None:
+        sess_mock = MagicMock()
+        sess_mock.post.side_effect = requests.exceptions.Timeout("timed out")
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+        result = self.adapter.hangup("CA123")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+
+    # 31 — ConnectionError при get_call_status → network_error
+    def test_handles_network_failure_get_status(self) -> None:
+        sess_mock = MagicMock()
+        sess_mock.get.side_effect = requests.exceptions.ConnectionError("refused")
+        sess_mock.headers = {}
+        self.adapter._session = sess_mock
+
+        result = self.adapter.get_call_status("CA123")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "network_error")
+
+
+class Http5xxTestCase(unittest.TestCase):
+    """Тест обработки 5xx ответов."""
+
+    def setUp(self) -> None:
+        self.adapter = _make_adapter()
+
+    # 32 — HTTP 500 → {"ok": False, "error": "http_500"}
+    def test_handles_500_returns_error(self) -> None:
+        _set_mock_post(self.adapter, _mock_response(500, None, content=b""))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "http_500")
+        self.assertEqual(result["status"], 500)
+
+    # 33 — HTTP 503 → {"ok": False, "error": "http_503"}
+    def test_handles_503_returns_error(self) -> None:
+        _set_mock_post(self.adapter, _mock_response(503, None, content=b""))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "http_503")
+
+    # 34 — HTTP 402 → insufficient_balance
+    def test_handles_402_insufficient_balance(self) -> None:
+        _set_mock_post(self.adapter, _mock_response(402, None, content=b""))
+        result = self.adapter.dial("+15550001234")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "insufficient_balance")
+
+
+class ConcurrentDialTestCase(unittest.TestCase):
+    """Тест параллельных вызовов dial из нескольких потоков."""
+
+    # 35 — concurrent dial не вызывает исключений
+    def test_concurrent_dial(self) -> None:
+        results = []
+        errors = []
+
+        def do_dial(number: str) -> None:
+            try:
+                local_adapter = _make_adapter()
+                mock_resp = _mock_response(
+                    201,
+                    {"sid": f"CA_{number[-4:]}", "status": "queued"},
+                )
+                _set_mock_post(local_adapter, mock_resp)
+                result = local_adapter.dial(number)
+                results.append(result)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        numbers = [f"+155500{i:05d}" for i in range(8)]
+        threads = [threading.Thread(target=do_dial, args=(n,)) for n in numbers]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r["ok"] for r in results))
+
+    # 36 — base_url включает account_sid
+    def test_base_url_contains_account_sid(self) -> None:
+        adapter = _make_adapter(account_sid="ACtest999")
+        self.assertIn("ACtest999", adapter._base_url())
 
 
 if __name__ == "__main__":

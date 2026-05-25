@@ -225,6 +225,18 @@ class TranslationService:
         )
 
         latency_ms = int((time.monotonic() - t0) * 1000)
+        add_breadcrumb(
+            category="translation",
+            message="translate_selection",
+            level="info",
+            data={
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "char_count": len(text),
+                "engine": result.engine or "none",
+                "duration_ms": latency_ms,
+            },
+        )
         return {
             "translated_text": result.text,
             "source_lang_detected": source_lang,
@@ -247,7 +259,18 @@ class TranslationService:
         settings["translation_glossary"] = glossary
         saved = self.store.save_settings(settings)
         self._invalidate_settings_cache()
-        return {"updated": True, "count": len(saved.get("translation_glossary", {}))}
+        glossary_count = len(saved.get("translation_glossary", {}))
+        add_breadcrumb(
+            category="translation",
+            message="set_translation_glossary_item",
+            level="info",
+            data={
+                "source_char_count": len(source),
+                "target_char_count": len(target),
+                "glossary_size": glossary_count,
+            },
+        )
+        return {"updated": True, "count": glossary_count}
 
     def handle_remove_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет одну пару из глоссария перевода."""
@@ -367,6 +390,17 @@ class TranslationService:
         suggestions.sort(key=lambda s: (s["origin"] == "brand_replacement", -s["count"], s["source"]))
         top = suggestions[:top_k]
 
+        add_breadcrumb(
+            category="translation",
+            message="get_glossary_suggestions",
+            level="info",
+            data={
+                "scanned_items": len(items),
+                "total_candidates": len(suggestions),
+                "returned": len(top),
+                "current_glossary_size": len(current_glossary),
+            },
+        )
         return {
             "suggestions": top,
             "total_candidates": len(suggestions),

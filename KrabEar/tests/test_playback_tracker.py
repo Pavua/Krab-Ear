@@ -648,5 +648,95 @@ class TestMultipleItemsIndependence(unittest.TestCase):
                 self.assertAlmostEqual(stats["total_listened_sec"], float(i * 2))
 
 
+# ===========================================================================
+# Wave 133 explicitly-named tests matching task spec
+# ===========================================================================
+
+class TestPlaybackTrackerWave133(unittest.TestCase):
+    """Named tests matching wave133 task spec."""
+
+    def test_record_play_event(self):
+        """record_playback() must register exactly one play event."""
+        tracker = PlaybackTracker()
+        tracker.record_playback("w133_item", duration_listened_sec=5.0)
+        stats = tracker.get_playback_stats("w133_item")
+        self.assertEqual(stats["play_count"], 1)
+        self.assertIsNotNone(stats["last_played"])
+
+    def test_aggregate_count_per_item(self):
+        """Multiple play events for the same item accumulate play_count."""
+        tracker = PlaybackTracker()
+        for _ in range(7):
+            tracker.record_playback("w133_multi", duration_listened_sec=1.0)
+        stats = tracker.get_playback_stats("w133_multi")
+        self.assertEqual(stats["play_count"], 7)
+
+    def test_total_listened_seconds(self):
+        """total_listened_sec must be the sum of all duration_listened_sec values."""
+        tracker = PlaybackTracker()
+        durations = [3.5, 7.0, 12.25]
+        for d in durations:
+            tracker.record_playback("w133_dur", duration_listened_sec=d)
+        stats = tracker.get_playback_stats("w133_dur")
+        self.assertAlmostEqual(stats["total_listened_sec"], sum(durations), places=4)
+
+    def test_persist_reload(self):
+        """Stats written to disk must survive a tracker reload."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            t1 = PlaybackTracker(data_dir=tmpdir)
+            t1.record_playback("persist_me", duration_listened_sec=9.9)
+            t1.record_playback("persist_me", duration_listened_sec=0.1)
+
+            t2 = PlaybackTracker(data_dir=tmpdir)
+            stats = t2.get_playback_stats("persist_me")
+            self.assertEqual(stats["play_count"], 2)
+            self.assertAlmostEqual(stats["total_listened_sec"], 10.0, places=4)
+
+    def test_unicode_item_id(self):
+        """Unicode item IDs (Cyrillic etc.) must be stored and retrieved correctly."""
+        tracker = PlaybackTracker()
+        uid = "запись_тест_юникод"
+        tracker.record_playback(uid, duration_listened_sec=4.0)
+        stats = tracker.get_playback_stats(uid)
+        self.assertEqual(stats["play_count"], 1)
+        self.assertEqual(stats["item_id"], uid)
+
+    def test_concurrent_record(self):
+        """Concurrent record_playback() calls must not lose counts."""
+        tracker = PlaybackTracker()
+        n_threads = 20
+        n_per_thread = 10
+
+        def worker():
+            for _ in range(n_per_thread):
+                tracker.record_playback("concurrent_w133", duration_listened_sec=0.5)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        stats = tracker.get_playback_stats("concurrent_w133")
+        expected = n_threads * n_per_thread
+        self.assertEqual(stats["play_count"], expected)
+        self.assertAlmostEqual(
+            stats["total_listened_sec"], expected * 0.5, places=2
+        )
+
+    def test_handles_corrupted_storage(self):
+        """Corrupted playback_stats.json must not crash init or subsequent ops."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "playback_stats.json"
+            path.write_text("[ NOT VALID { JSON }}", encoding="utf-8")
+            tracker = PlaybackTracker(data_dir=tmpdir)
+            # Should start with empty stats
+            self.assertEqual(tracker.get_playback_stats("any")["play_count"], 0)
+            # Should be able to write new entries after corruption recovery
+            tracker.record_playback("recovery_item", duration_listened_sec=3.0)
+            stats = tracker.get_playback_stats("recovery_item")
+            self.assertEqual(stats["play_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

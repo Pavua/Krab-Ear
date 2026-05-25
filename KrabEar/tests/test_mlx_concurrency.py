@@ -157,7 +157,7 @@ class MLXLockSmokeCheckEngineTests(unittest.TestCase):
                 continue
             # Look back up to 20 lines for 'with mlx_lock'
             context_start = max(0, i - 20)
-            context = "\n".join(lines[context_start : i + 1])
+            context = "\n".join(lines[context_start:i + 1])
             self.assertIn(
                 "mlx_lock",
                 context,
@@ -219,7 +219,7 @@ class MLXLockSmokeCheckAudioLangIdTests(unittest.TestCase):
                 # This is a structural check: the function _detect_with_mlx should only
                 # be called from within a mlx_lock context in _run_detect.
                 context_start = max(0, i - 30)
-                context = "\n".join(lines[context_start : i + 1])
+                context = "\n".join(lines[context_start:i + 1])
                 # The inference calls are inside _detect_with_mlx, called from _run_detect
                 # under mlx_lock. Verify the file still has that pattern.
                 self.assertIn(
@@ -230,7 +230,7 @@ class MLXLockSmokeCheckAudioLangIdTests(unittest.TestCase):
                 self.assertIn(
                     "with mlx_lock():",
                     text,
-                    f"audio_lang_id.py must have 'with mlx_lock():' wrapping MLX inference calls",
+                    "audio_lang_id.py must have 'with mlx_lock():' wrapping MLX inference calls",
                 )
 
 
@@ -269,7 +269,7 @@ class MLXLockSmokeCheckDebugScriptTests(unittest.TestCase):
             if "mlx_whisper.transcribe" not in line:
                 continue
             context_start = max(0, i - 10)
-            context = "\n".join(lines[context_start : i + 1])
+            context = "\n".join(lines[context_start:i + 1])
             self.assertIn(
                 "mlx_lock",
                 context,
