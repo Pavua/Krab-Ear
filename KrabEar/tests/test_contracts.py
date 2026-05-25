@@ -360,5 +360,221 @@ class SchemaExportTest(unittest.TestCase):
                 self.assertEqual(data["type"], "object")
 
 
+# ---------------------------------------------------------------------------
+# Wave 162 — additional required tests
+# ---------------------------------------------------------------------------
+
+class LiveSubsEventPayloadTest(unittest.TestCase):
+    """test_live_subs_event_payload_valid — LiveSubsResult payload validation."""
+
+    def test_live_subs_event_payload_valid(self):
+        from contracts.live_subs_events import LiveSubsResult
+        ev = LiveSubsResult(
+            text="Привет, мир",
+            translation="Hola, mundo",
+            start_ts=0.0,
+            end_ts=3.5,
+            language_detected="ru",
+        )
+        self.assertEqual(ev.text, "Привет, мир")
+        self.assertEqual(ev.translation, "Hola, mundo")
+        self.assertAlmostEqual(ev.end_ts, 3.5)
+        self.assertEqual(ev.language_detected, "ru")
+
+    def test_live_subs_event_payload_minimal(self):
+        """translation and language_detected are optional."""
+        from contracts.live_subs_events import LiveSubsResult
+        ev = LiveSubsResult(text="hello", start_ts=0.0, end_ts=1.0)
+        self.assertIsNone(ev.translation)
+        self.assertIsNone(ev.language_detected)
+
+    def test_live_subs_missing_required_raises(self):
+        from contracts.live_subs_events import LiveSubsResult
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            LiveSubsResult(text="hi")  # missing start_ts and end_ts
+
+    def test_live_subs_schema_map_entry(self):
+        """LIVE_SUBS_RESULT is in EVENT_SCHEMA_MAP."""
+        from contracts.live_subs_events import LiveSubsResult
+        self.assertIs(EVENT_SCHEMA_MAP[EventType.LIVE_SUBS_RESULT], LiveSubsResult)
+
+
+class SttEventPayloadMissingFieldTest(unittest.TestCase):
+    """test_stt_event_payload_missing_field_rejected."""
+
+    def test_stt_event_payload_missing_field_rejected(self):
+        from pydantic import ValidationError
+        # SttFinal requires history_id, text, duration_sec
+        with self.assertRaises(ValidationError):
+            SttFinal(text="hello")
+
+    def test_stt_partial_missing_text_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            SttPartial()
+
+    def test_stt_failed_missing_reason_rejected(self):
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            SttFailed()
+
+
+class SttEventPayloadValidTest(unittest.TestCase):
+    """test_stt_event_payload_valid — all required fields accepted."""
+
+    def test_stt_event_payload_valid(self):
+        ev = SttFinal(
+            history_id="hid-wave162",
+            text="Краб слышит всё",
+            duration_sec=4.2,
+            language="ru",
+            confidence=0.97,
+        )
+        self.assertEqual(ev.history_id, "hid-wave162")
+        self.assertAlmostEqual(ev.confidence, 0.97)
+
+
+class TranslationEventPayloadValidTest(unittest.TestCase):
+    """test_translation_event_payload_valid."""
+
+    def test_translation_event_payload_valid(self):
+        from contracts.translation_events import TranslationCompleted
+        ev = TranslationCompleted(
+            history_id="hid-t1",
+            source_text="buenos días amigo",
+            translated_text="good morning friend",
+            source_lang="es",
+            target_lang="en",
+            engine="local",
+            mode="es_en",
+        )
+        self.assertEqual(ev.source_lang, "es")
+        self.assertEqual(ev.target_lang, "en")
+        self.assertEqual(ev.engine, "local")
+
+
+class EventEnvelopeFormatTest(unittest.TestCase):
+    """test_event_envelope_format — {type, ts, data} required keys."""
+
+    def test_event_envelope_format(self):
+        from contracts.envelope import KrabEventEnvelope
+        now = datetime.now(timezone.utc)
+        env = KrabEventEnvelope(type="stt.final", ts=now, data={"text": "hi"})
+        dumped = env.model_dump()
+        self.assertIn("type", dumped)
+        self.assertIn("ts", dumped)
+        self.assertIn("data", dumped)
+        self.assertEqual(dumped["type"], "stt.final")
+
+    def test_envelope_missing_type_raises(self):
+        from contracts.envelope import KrabEventEnvelope
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            KrabEventEnvelope(ts=datetime.now(timezone.utc), data={})
+
+    def test_envelope_missing_ts_raises(self):
+        from contracts.envelope import KrabEventEnvelope
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            KrabEventEnvelope(type="stt.partial", data={})
+
+
+class EventTypeEnumCompleteTest(unittest.TestCase):
+    """test_event_type_enum_complete — all known event type values present."""
+
+    _EXPECTED = {
+        "stt.partial",
+        "stt.final",
+        "stt.failed",
+        "translation.completed",
+        "translation.failed",
+        "markdown_export",
+        "auto_summary",
+        "hotword.detected",
+        "live_subs.result",
+    }
+
+    def test_event_type_enum_complete(self):
+        actual = {e.value for e in EventType}
+        self.assertEqual(actual, self._EXPECTED)
+
+    def test_no_unexpected_values(self):
+        actual = {e.value for e in EventType}
+        extras = actual - self._EXPECTED
+        self.assertEqual(extras, set(), f"Unexpected EventType values: {extras}")
+
+
+class SchemaMapCompleteTest(unittest.TestCase):
+    """test_schema_map_complete — EVENT_SCHEMA_MAP has entry for each EventType."""
+
+    def test_schema_map_complete(self):
+        for etype in EventType:
+            self.assertIn(
+                etype, EVENT_SCHEMA_MAP,
+                f"EVENT_SCHEMA_MAP missing entry for {etype.value!r}",
+            )
+
+    def test_schema_map_no_orphan_entries(self):
+        valid_types = set(EventType)
+        for key in EVENT_SCHEMA_MAP:
+            self.assertIn(key, valid_types, f"Orphan key in EVENT_SCHEMA_MAP: {key!r}")
+
+    def test_schema_map_all_pydantic_models(self):
+        from pydantic import BaseModel
+        for etype, cls in EVENT_SCHEMA_MAP.items():
+            self.assertTrue(
+                issubclass(cls, BaseModel),
+                f"EVENT_SCHEMA_MAP[{etype.value!r}] is not a BaseModel subclass",
+            )
+
+
+class UnicodeInPayloadFieldsTest(unittest.TestCase):
+    """test_unicode_in_payload_fields — Cyrillic, Spanish, emoji in payload fields."""
+
+    def test_unicode_in_stt_final(self):
+        ev = SttFinal(
+            history_id="uid-кириллица",
+            text="Привет, как дела? ¡Hola! 🦀",
+            duration_sec=2.0,
+            language="ru",
+        )
+        self.assertIn("кириллица", ev.history_id)
+        self.assertIn("🦀", ev.text)
+
+    def test_unicode_roundtrip_json(self):
+        ev = SttFinal(
+            history_id="uid-1",
+            text="Краб слышит: ¡Привет! 你好 🎤",
+            duration_sec=1.5,
+        )
+        restored = SttFinal.model_validate_json(ev.model_dump_json())
+        self.assertEqual(restored.text, ev.text)
+
+    def test_unicode_in_translation_completed(self):
+        from contracts.translation_events import TranslationCompleted
+        ev = TranslationCompleted(
+            history_id="hid-u",
+            source_text="Привет, это тест с Unicode: 🦀",
+            translated_text="Hola, esta es una prueba con Unicode: 🦀",
+            source_lang="ru",
+            target_lang="es",
+            engine="local",
+            mode="ru_es",
+        )
+        self.assertIn("🦀", ev.source_text)
+        self.assertIn("🦀", ev.translated_text)
+
+    def test_unicode_in_live_subs(self):
+        from contracts.live_subs_events import LiveSubsResult
+        ev = LiveSubsResult(
+            text="日本語テスト — Японский текст",
+            translation="Japanese test text",
+            start_ts=0.0,
+            end_ts=2.0,
+        )
+        self.assertIn("日本語", ev.text)
+
+
 if __name__ == "__main__":
     unittest.main()
