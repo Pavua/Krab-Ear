@@ -226,5 +226,128 @@ class TestContextMemoryThreadSafety(unittest.TestCase):
         self.assertLessEqual(mem.size(), 20)
 
 
+class TestContextMemorySpecNames(unittest.TestCase):
+    """Wave-126 spec-named tests для ContextMemory."""
+
+    def setUp(self) -> None:
+        self.mem = ContextMemory(window_size=5)
+
+    # ------------------------------------------------------------------
+    # 17. test_add_words_to_context
+    # ------------------------------------------------------------------
+    def test_add_words_to_context(self) -> None:
+        self.mem.update("AudioEngine BackendService API")
+        words = self.mem.get_context_words()
+        lower = [w.lower() for w in words]
+        # At least one notable word extracted and stored
+        self.assertTrue(len(words) >= 1)
+        self.assertTrue(
+            any(x in lower for x in ("audioengine", "backendservice", "api"))
+        )
+
+    # ------------------------------------------------------------------
+    # 18. test_sliding_window_drops_oldest
+    # ------------------------------------------------------------------
+    def test_sliding_window_drops_oldest(self) -> None:
+        mem = ContextMemory(window_size=2)
+        mem.update("OldTermAlpha здесь")
+        mem.update("OldTermBeta тут")
+        # Both in window; add 2 more to push both out
+        mem.update("NewTermGamma один")
+        mem.update("NewTermDelta два")
+        self.assertEqual(mem.size(), 2)
+        words_lower = [w.lower() for w in mem.get_context_words(max_words=30)]
+        self.assertNotIn("oldtermalpha", words_lower)
+        self.assertNotIn("oldtermbeta", words_lower)
+        self.assertIn("newtermdelta", words_lower)
+
+    # ------------------------------------------------------------------
+    # 19. test_topic_extraction
+    # ------------------------------------------------------------------
+    def test_topic_extraction(self) -> None:
+        self.mem.update("Нейросеть обрабатывает AudioEngine данные API")
+        self.mem.update("AudioEngine снова вызван для обработки")
+        topics = self.mem.get_recent_topics(max_topics=5)
+        self.assertIsInstance(topics, list)
+        self.assertTrue(len(topics) >= 1)
+        lower = [t.lower() for t in topics]
+        # AudioEngine appears twice → should surface as a top topic
+        self.assertIn("audioengine", lower)
+
+    # ------------------------------------------------------------------
+    # 20. test_get_hint_for_stt
+    # ------------------------------------------------------------------
+    def test_get_hint_for_stt(self) -> None:
+        self.mem.update("GPT4 модель используется для API запроса")
+        self.mem.update("GPT4 снова вызывается для BackendService")
+        hints = self.mem.get_context_words(max_words=20)
+        lower = [h.lower() for h in hints]
+        # Repeated GPT4 should be top hint
+        self.assertIn("gpt4", lower)
+        # Count should be 2 in internal counter
+        self.assertEqual(self.mem._word_counter.get("gpt4", 0), 2)
+
+    # ------------------------------------------------------------------
+    # 21. test_unicode_words
+    # ------------------------------------------------------------------
+    def test_unicode_words(self) -> None:
+        # Cyrillic CamelCase-like and tech terms with unicode chars
+        self.mem.update("Архитектура системы использует ВоисГейтвей GPT4")
+        self.mem.update("Трансляция ТелеграмБридж активна API")
+        words = self.mem.get_context_words(max_words=30)
+        # Should not raise, returns a list
+        self.assertIsInstance(words, list)
+        # Tech term GPT4 must survive unicode-heavy text
+        lower = [w.lower() for w in words]
+        self.assertIn("gpt4", lower)
+
+    # ------------------------------------------------------------------
+    # 22. test_concurrent_add
+    # ------------------------------------------------------------------
+    def test_concurrent_add(self) -> None:
+        mem = ContextMemory(window_size=50)
+        errors: list[Exception] = []
+
+        def worker(n: int) -> None:
+            try:
+                for i in range(20):
+                    mem.update(f"Thread{n} BackendService{i} API{i} GPT4")
+                    _ = mem.get_context_words()
+                    _ = mem.get_recent_topics()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        self.assertLessEqual(mem.size(), 50)
+        # Internal counter must remain non-negative
+        for key, count in mem._word_counter.items():
+            self.assertGreater(count, 0, f"Non-positive count for '{key}': {count}")
+
+    # ------------------------------------------------------------------
+    # 23. test_clear_context
+    # ------------------------------------------------------------------
+    def test_clear_context(self) -> None:
+        self.mem.update("BackendService API AudioEngine")
+        self.mem.update("GPT4 CamelCase XYZ")
+        self.assertGreater(self.mem.size(), 0)
+        self.assertGreater(len(self.mem.get_context_words()), 0)
+
+        self.mem.clear()
+
+        self.assertEqual(self.mem.size(), 0)
+        self.assertEqual(self.mem.get_context_words(), [])
+        self.assertEqual(self.mem.get_recent_topics(), [])
+        d = self.mem.to_dict()
+        self.assertEqual(d["current_size"], 0)
+        self.assertEqual(d["context_words"], [])
+        self.assertEqual(d["top_words"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
