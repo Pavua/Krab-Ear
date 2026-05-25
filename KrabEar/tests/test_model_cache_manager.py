@@ -466,23 +466,21 @@ class TestModelCacheManagerConcurrentEviction(unittest.TestCase):
     def test_concurrent_evict_same_model_no_crash(self):
         """Два потока, удаляющих одну и ту же модель.
 
-        NOTE: evict() использует shutil.rmtree без try/except —
-        при гонке двух потоков второй получает FileNotFoundError.
-        Тест проверяет, что при параллельном evict модель в итоге удалена.
+        evict() поглощает FileNotFoundError внутри себя (явный try/except):
+        ровно один поток получает True (удалил сам), остальные — False (race lost).
+        Никакое исключение не должно вырваться наружу.
         """
         import threading
         _make_model_dir(self.cache_dir, "concurrent/model", size_bytes=1024)
-        # Разрешаем FileNotFoundError — это ожидаемое поведение при гонке
-        allowed_error_types = (FileNotFoundError,)
-        unexpected_errors = []
+        results = []
+        errors = []
 
         def evict_worker():
             try:
-                self.mgr.evict("concurrent/model")
-            except allowed_error_types:
-                pass  # Ожидаемо: второй поток пытается удалить уже удалённую папку
+                result = self.mgr.evict("concurrent/model")
+                results.append(result)
             except Exception as exc:
-                unexpected_errors.append(exc)
+                errors.append(exc)
 
         threads = [threading.Thread(target=evict_worker) for _ in range(4)]
         for t in threads:
@@ -490,7 +488,12 @@ class TestModelCacheManagerConcurrentEviction(unittest.TestCase):
         for t in threads:
             t.join()
 
-        self.assertEqual(unexpected_errors, [], f"Unexpected errors: {unexpected_errors}")
+        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
+        # Нет исключений — FileNotFoundError поглощается внутри evict().
+        # Хотя бы один поток вернул True (удалил), все остальные вернули False
+        # (модель не найдена или гонка — оба случая корректны).
+        self.assertGreaterEqual(results.count(True), 1, f"At least one evict should succeed; got {results}")
+        self.assertEqual(results.count(True) + results.count(False), len(results))
         # После всех вызовов модель должна быть удалена
         self.assertFalse(self.mgr.is_model_cached("concurrent/model"))
 
@@ -528,9 +531,8 @@ class TestModelCacheManagerConcurrentEviction(unittest.TestCase):
     def test_concurrent_enforce_size_limit_no_crash(self):
         """Параллельные enforce_size_limit не ломают менеджер.
 
-        NOTE: enforce_size_limit → evict() не защищён от гонки при
-        параллельных вызовах — FileNotFoundError при удалении уже
-        удалённой папки является известным поведением (не баг теста).
+        evict() поглощает FileNotFoundError внутри себя — enforce_size_limit
+        и все вызывающие никогда не получают это исключение при гонке.
         Тест проверяет, что после всех вызовов менеджер остаётся рабочим.
         """
         import threading
@@ -538,14 +540,11 @@ class TestModelCacheManagerConcurrentEviction(unittest.TestCase):
             _make_model_dir(self.cache_dir, f"heavy/m{i}", size_bytes=2 * 1024 * 1024)
 
         mgr = ModelCacheManager(cache_dir=self.cache_dir, size_limit_mb=1.0)
-        # Разрешаем FileNotFoundError от shutil.rmtree (race при параллельном evict)
         unexpected_errors = []
 
         def enforcer():
             try:
                 mgr.enforce_size_limit()
-            except FileNotFoundError:
-                pass  # Ожидаемо при гонке
             except Exception as exc:
                 unexpected_errors.append(exc)
 
