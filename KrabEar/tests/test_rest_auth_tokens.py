@@ -170,6 +170,7 @@ class TestRestAuthFilePermissions(unittest.TestCase):
 def _ensure_rest_server_stubs():
     stubs = {
         "core.engine": {"AudioEngine": type("FE", (), {
+            "__init__": lambda s, *a, **k: None,
             "quality_profile": "balanced",
             "normalize_audio": lambda s, *a, **k: None,
         })},
