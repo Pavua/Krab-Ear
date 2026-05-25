@@ -263,6 +263,13 @@ class AudioChunker:
         split_points: list[float] = []
         cursor = 0.0
 
+        # Minimum advance per iteration to guarantee loop termination.
+        # Chosen as half of max_chunk_sec so that even a silence right at
+        # the start of a window still produces a meaningful chunk size and
+        # the cursor always moves forward by > 0 (prevents micro-advance
+        # regression where cursor += 0.01 s per step on leading silence).
+        _MIN_ADVANCE_SEC = max_chunk_sec / 2.0
+
         while cursor + max_chunk_sec < total_sec:
             window_end = cursor + max_chunk_sec
 
@@ -275,10 +282,13 @@ class AudioChunker:
                     continue
                 mid = (region.start_sec + region.end_sec) / 2.0
                 if cursor < mid <= window_end:
-                    # Режем в середину паузы (с отступом от края)
+                    # Режем в начало паузы (с отступом от края).
+                    # Гарантируем, что разрез продвигает курсор хотя бы
+                    # на _MIN_ADVANCE_SEC, иначе откатываемся к жёсткому разрезу.
                     cut = region.start_sec + _SPLIT_OFFSET_SEC
-                    cut = max(cut, cursor + 0.01)  # не назад
-                    if best_cut is None or cut > best_cut:
+                    if cut <= cursor + _MIN_ADVANCE_SEC:
+                        cut = None  # type: ignore[assignment]
+                    elif best_cut is None or cut > best_cut:
                         best_cut = cut
 
             if best_cut is not None:
@@ -286,7 +296,7 @@ class AudioChunker:
                 cursor = best_cut
                 logger.debug("Разрез по тишине: %.3f с", best_cut)
             else:
-                # Нет паузы — жёсткий разрез
+                # Нет подходящей паузы — жёсткий разрез
                 split_points.append(window_end)
                 cursor = window_end
                 logger.debug("Жёсткий разрез: %.3f с", window_end)

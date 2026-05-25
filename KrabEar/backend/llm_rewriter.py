@@ -692,14 +692,17 @@ class LLMRewriter:
                     f"HTTP 500 HTML body: {body_preview}",
                     severity="error",
                 )
-            elif response.status_code in (400, 422) and any(
-                kw in body_preview.lower()
-                for kw in ("model has not started loading", "model is not loaded",
-                           "not started loading", "model not loaded")
+            elif (
+                "there is no stream(gpu" in body_preview.lower()
+                or "metal command stream" in body_preview.lower()
             ):
+                # Wave 171 / BACKEND-J: Metal CommandStream corrupted by concurrent
+                # MLX/GigaAM GPU pressure.  LM Studio returns HTTP 400 with body
+                # "RuntimeError: There is no Stream(gpu, N) in current thread".
+                # Previously fell through to rewriter.timeout — now a distinct code.
                 self._push_error(
-                    "rewriter.model_unloaded",
-                    f"HTTP {response.status_code}: {body_preview}",
+                    "rewriter.gpu_stream_error",
+                    f"http_{response.status_code}: {body_preview}",
                     severity="error",
                 )
             else:
