@@ -52,15 +52,13 @@ struct CallSession {
             }
         }
 
-        /// SF Symbol name для колонки истории.
-        /// Wave 532 (AGENT-J sister): заменяет Unicode ✓/✗/⏱/• → SF Symbols
-        /// чтобы избежать TFPFont::CopyGlyphPath hang в CoreText (Wave 67 PR #412).
-        var historySymbolName: String {
+        /// Иконка-символ для колонки истории
+        var historyIcon: String {
             switch self {
-            case .ended:   return "checkmark.circle.fill"
-            case .error:   return "xmark.circle.fill"
-            case .ending:  return "timer"
-            default:       return "circle.fill"
+            case .ended:            return "✓"
+            case .error:            return "✗"
+            case .ending:           return "⏱"
+            default:                return "•"
             }
         }
 
@@ -72,9 +70,6 @@ struct CallSession {
             default:       return .secondaryLabelColor
             }
         }
-
-        /// Shim: returns SF Symbol name (not Unicode). Kept for test back-compat.
-        var historyIcon: String { historySymbolName }
     }
 
     var sessionID: String
@@ -144,21 +139,12 @@ final class CallAutomationController: NSViewController {
         return sc
     }()
 
-    /// Wave 547 (AGENT-J sister): заменяет NSTextField "●" → NSImageView SF Symbol "circle.fill"
-    /// чтобы избежать TFPFont::CopyGlyphPath hang в CoreText (Wave 67 PR #412, Wave 523 PR #620).
     private let providerStatusDot: NSImageView = {
-        let cfg = NSImage.SymbolConfiguration(paletteColors: [.systemGray])
-        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус провайдера")!
-            .withSymbolConfiguration(cfg)!
-        let iv = NSImageView(image: img)
-        iv.imageScaling = .scaleProportionallyDown
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "статус провайдера")
+        let iv = NSImageView(image: img ?? NSImage())
         iv.contentTintColor = .systemGray
         iv.toolTip = "API key и from-number не настроены"
         iv.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            iv.widthAnchor.constraint(equalToConstant: 10),
-            iv.heightAnchor.constraint(equalToConstant: 10),
-        ])
         return iv
     }()
 
@@ -221,22 +207,6 @@ final class CallAutomationController: NSViewController {
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
-    /// Wave 547: status badge uses SF Symbol image + text label side-by-side to avoid CoreText hang.
-    /// The dot image is updated in updateSessionUI via statusBadgeDot.contentTintColor.
-    private let statusBadgeDot: NSImageView = {
-        let cfg = NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor])
-        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Статус звонка")!
-            .withSymbolConfiguration(cfg)!
-        let iv = NSImageView(image: img)
-        iv.imageScaling = .scaleProportionallyDown
-        iv.contentTintColor = .secondaryLabelColor
-        iv.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            iv.widthAnchor.constraint(equalToConstant: 10),
-            iv.heightAnchor.constraint(equalToConstant: 10),
-        ])
-        return iv
-    }()
     private let statusBadgeLabel: NSTextField = {
         let l = NSTextField(labelWithString: "Ожидание")
         l.font = KrabEarTheme.Typography.captionMedium
@@ -292,14 +262,8 @@ final class CallAutomationController: NSViewController {
     // MARK: - UI: Emergency stop button
 
     /// Большая красная кнопка — экстренный hangup без confirmation dialog.
-    /// Wave 547: заменяет emoji 🛑 → SF Symbol "exclamationmark.octagon.fill" слева от текста
     private let emergencyStopButton: NSButton = {
-        let b = NSButton(title: "ЭКСТРЕННО ПРЕРВАТЬ", target: nil, action: nil)
-        // SF Symbol слева от текста — безопасно для CoreText
-        if let img = NSImage(systemSymbolName: "exclamationmark.octagon.fill", accessibilityDescription: "Стоп") {
-            b.image = img
-            b.imagePosition = .imageLeft
-        }
+        let b = NSButton(title: "🛑 ЭКСТРЕННО ПРЕРВАТЬ", target: nil, action: nil)
         b.bezelStyle = .rounded
         b.font = .systemFont(ofSize: 13, weight: .bold)
         b.contentTintColor = .white
@@ -855,7 +819,7 @@ final class CallAutomationController: NSViewController {
             let from = (settings["twilio_from_number"] as? String) ?? ""
             isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
         }
-        providerStatusDot.contentTintColor = isConfigured ? .systemGreen : .systemGray
+        providerStatusDot.textColor = isConfigured ? .systemGreen : .systemGray
         providerStatusDot.toolTip   = isConfigured
             ? "\(provider.capitalized) настроен"
             : "\(provider.capitalized): API key или from-number не задан в Настройках"
