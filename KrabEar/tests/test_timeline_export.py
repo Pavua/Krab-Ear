@@ -286,5 +286,90 @@ class EscapingTestCase(unittest.TestCase):
         self.assertIn("\\n", self.exporter._ical_escape("a\nb"))
 
 
+# ---------------------------------------------------------------------------
+# Тесты concurrent export + unicode
+# ---------------------------------------------------------------------------
+
+class ConcurrentAndUnicodeTestCase(unittest.TestCase):
+    """Тесты параллельного экспорта и юникодных заголовков."""
+
+    def setUp(self) -> None:
+        self.exporter = TimelineExporter()
+
+    def test_unicode_event_titles(self) -> None:
+        """Unicode-символы в summary_text сохраняются во всех форматах."""
+        block = _make_block(summary_text="会議メモ — 日本語テスト 🎙️")
+        # JSON
+        result_json = self.exporter.export_json([block])
+        self.assertIn("会議メモ", result_json)
+        # iCal
+        result_ical = self.exporter.export_ical([block])
+        self.assertIn("会議メモ", result_ical)
+        # SVG (tooltip)
+        result_svg = self.exporter.export_svg([block])
+        self.assertIn("<svg", result_svg)  # должен быть валидным SVG
+
+    def test_unicode_in_ical_escape(self) -> None:
+        """_ical_escape корректно обрабатывает строки с кириллицей и CJK."""
+        text = "Привет, мир; foo\nbar"
+        escaped = self.exporter._ical_escape(text)
+        self.assertIn("\\,", escaped)
+        self.assertIn("\\;", escaped)
+        self.assertIn("\\n", escaped)
+        # Кириллица сохраняется
+        self.assertIn("Привет", escaped)
+
+    def test_concurrent_export(self) -> None:
+        """Параллельный вызов export_json/export_svg/export_ical безопасен."""
+        import threading
+
+        blocks = [_make_block(start_time=f"2026-04-{10 + i}T10:00:00+00:00") for i in range(5)]
+        errors: list[Exception] = []
+        results: list[str] = []
+        lock = threading.Lock()
+
+        def _run_json() -> None:
+            try:
+                r = self.exporter.export_json(blocks)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        def _run_svg() -> None:
+            try:
+                r = self.exporter.export_svg(blocks)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        def _run_ical() -> None:
+            try:
+                r = self.exporter.export_ical(blocks)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_run_json),
+            threading.Thread(target=_run_svg),
+            threading.Thread(target=_run_ical),
+            threading.Thread(target=_run_json),
+            threading.Thread(target=_run_ical),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

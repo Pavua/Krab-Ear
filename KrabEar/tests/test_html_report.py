@@ -458,5 +458,191 @@ class TestHTMLReportSelfContained(unittest.TestCase):
         self.assertIn("Единственная запись", result)
 
 
+class TestHTMLReportExtras(unittest.TestCase):
+    """Wave 207 extra coverage: full report, well-formed HTML, inline SVG/charts,
+    unicode escaping, XSS safety (extra vector), concurrency, and size limit."""
+
+    def setUp(self) -> None:
+        self.gen = HTMLReportGenerator()
+
+    # test_generate_full_report (mocked dashboard equivalent)
+    def test_generate_full_report_with_all_features(self) -> None:
+        """Full report with translation, diarization, confidence, tags, favorite."""
+        diar = {
+            "enabled": True,
+            "speaker_turns": [
+                {"speaker": "SPEAKER_00", "text": "Добрый день", "start": 0.0, "end": 2.0},
+                {"speaker": "SPEAKER_01", "text": "Привет", "start": 2.5, "end": 4.0},
+            ],
+        }
+        items = [
+            _simple_item(
+                text="Привет мир",
+                ts="2026-05-01T10:00:00",
+                confidence=0.93,
+                translated_text="Hello world",
+                tags=["meeting", "important"],
+                favorite=True,
+                diarization=diar,
+            ),
+            _simple_item(
+                text="Как дела",
+                ts="2026-05-01T10:05:00",
+                confidence=0.55,
+                translated_text="How are you",
+                tags=[],
+                favorite=False,
+                diarization=None,
+            ),
+        ]
+        result = self.gen.generate_report(items, title="Полный отчёт 2026")
+        self.assertIn("<!DOCTYPE html>", result)
+        self.assertIn("Полный отчёт 2026", result)
+        self.assertIn("entry-translation", result)
+        self.assertIn("speaker-badge", result)
+        self.assertIn("conf-high", result)
+        self.assertIn("conf-mid", result)
+        self.assertIn("entry-card favorite", result)
+        self.assertIn("meeting", result)
+        self.assertIn("SPEAKER_00", result)
+
+    # test_html_well_formed (parses without error via html.parser)
+    def test_html_well_formed_parses_cleanly(self) -> None:
+        """html.parser must handle the output without raising errors."""
+        from html.parser import HTMLParser
+
+        class StrictParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.errors: list[str] = []
+
+            def handle_error(self, message):  # type: ignore[override]
+                self.errors.append(message)
+
+        items = [_simple_item(text="Тест <структура>", confidence=0.8)]
+        result = self.gen.generate_report(items)
+        parser = StrictParser()
+        # Should not raise
+        parser.feed(result)
+        self.assertEqual(parser.errors, [])
+        # Structural sanity checks
+        self.assertIn("<html", result)
+        self.assertIn("</html>", result)
+        self.assertIn("<head>", result)
+        self.assertIn("<body>", result)
+
+    # test_includes_charts_inline_svg (confidence fill inline style — proxy for SVG/inline viz)
+    def test_includes_inline_charts_confidence_fill(self) -> None:
+        """Confidence bars render inline as width-style fill (SVG/CSS chart proxy)."""
+        items = [
+            _simple_item(confidence=0.95),
+            _simple_item(confidence=0.5),
+            _simple_item(confidence=0.1),
+        ]
+        result = self.gen.generate_report(items)
+        # Each confidence bar should have an inline width style
+        import re
+        fills = re.findall(r'class="confidence-fill[^"]*"\s+style="width:[0-9.]+%"', result)
+        self.assertEqual(len(fills), 3, f"Expected 3 confidence fills, got {len(fills)}: {fills}")
+        # Word cloud words also have inline font-size styling
+        wc_words = re.findall(r'font-size:[0-9.]+em', result)
+        self.assertGreater(len(wc_words), 0, "Expected inline font-size for word cloud words")
+
+    # test_unicode_text_escaped_correctly
+    def test_unicode_text_escaped_correctly(self) -> None:
+        """Cyrillic, emoji, CJK, and RTL text must appear verbatim (no double-escape)."""
+        items = [
+            _simple_item(text="Привет мир — Шрифт «кавычки»"),
+            _simple_item(text="你好世界 مرحبا"),
+            _simple_item(text="Запись с эмодзи 🎤🔊"),
+        ]
+        result = self.gen.generate_report(items)
+        self.assertIn("Привет мир", result)
+        self.assertIn("你好世界", result)
+        self.assertIn("مرحبا", result)
+        # Emoji may be HTML-encoded or literal; either is fine — just no Python repr
+        self.assertNotIn("\\u", result)
+        # Em-dash and guillemets should be escaped as HTML entities or left as UTF-8
+        self.assertNotIn("—&amp;", result, "Double-escaped em-dash detected")
+
+    # test_no_XSS_in_output (extra vectors beyond test_xss_escape_in_entry_text)
+    def test_no_xss_additional_vectors(self) -> None:
+        """Multiple XSS injection vectors must be neutralised."""
+        payloads = [
+            ('<img src=x onerror=alert(1)>', '&lt;img'),
+            ('<a href="javascript:void(0)">', '&lt;a'),
+            ('"><svg/onload=alert()>', '&lt;svg'),
+        ]
+        for payload, expected_escaped_prefix in payloads:
+            with self.subTest(payload=payload):
+                items = [_simple_item(text=payload)]
+                result = self.gen.generate_report(items)
+                # The raw HTML tag opener must not appear literally
+                self.assertNotIn(payload, result, f"Unescaped payload: {payload}")
+                # But the escaped version should be present
+                self.assertIn(expected_escaped_prefix, result)
+
+        # Title injection
+        items_plain = [_simple_item(text="safe")]
+        result = self.gen.generate_report(
+            items_plain,
+            title='</title><script>alert("xss")</script>',
+        )
+        self.assertNotIn("<script>alert", result)
+
+    # test_concurrent_generate
+    def test_concurrent_generate(self) -> None:
+        """Multiple threads generating reports concurrently must not crash."""
+        import threading
+
+        items = [_simple_item(text=f"Запись {i}", confidence=0.7 + i * 0.05) for i in range(5)]
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def worker():
+            try:
+                html_out = self.gen.generate_report(items, title="Concurrent Test")
+                results.append(html_out)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Errors during concurrent generation: {errors}")
+        self.assertEqual(len(results), 8)
+        for r in results:
+            self.assertIn("<!DOCTYPE html>", r)
+            self.assertIn("Concurrent Test", r)
+
+    # test_size_within_limit (< 10 MB)
+    def test_size_within_limit_10mb(self) -> None:
+        """Generated report for 100 items must stay below 10 MB (10 * 1024 * 1024 bytes)."""
+        MAX_BYTES = 10 * 1024 * 1024
+        items = [
+            _simple_item(
+                text=f"Длинная запись номер {i} с несколькими словами для наполнения",
+                ts=f"2026-05-{(i % 28) + 1:02d}T10:00:00",
+                confidence=0.5 + (i % 5) * 0.1,
+                translated_text=f"Long entry number {i} with several words for filling",
+                tags=[f"tag{i % 3}", f"category{i % 5}"],
+                favorite=(i % 10 == 0),
+            )
+            for i in range(100)
+        ]
+        result = self.gen.generate_report(items, title="Большой отчёт")
+        size = len(result.encode("utf-8"))
+        self.assertLess(
+            size,
+            MAX_BYTES,
+            f"Report size {size / 1024:.1f} KB exceeds 10 MB limit",
+        )
+        # Sanity: not empty
+        self.assertGreater(size, 1000)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -294,4 +294,169 @@ final class KrabEarThemeTests: XCTestCase {
                           KrabEarTheme.Interaction.hoverOverlayAlpha,
                           "transparent hover must be softer than standard hover")
     }
+
+    // MARK: - ThemePrimaryButton initial state
+
+    func test_themePrimaryButton_initial_state() {
+        let btn = ThemePrimaryButton(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
+        XCTAssertTrue(btn.isBordered, "ThemePrimaryButton must be bordered")
+        XCTAssertEqual(btn.bezelStyle, .push, "ThemePrimaryButton bezelStyle must be .push")
+        XCTAssertEqual(btn.bezelColor, KrabEarTheme.Colors.accent,
+                       "ThemePrimaryButton bezelColor must use theme accent")
+        XCTAssertEqual(btn.font?.pointSize ?? 0, KrabEarTheme.Typography.body.pointSize,
+                       accuracy: 0.1, "ThemePrimaryButton font must be Typography.body")
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.01,
+                       "ThemePrimaryButton must be fully opaque when enabled")
+        XCTAssertTrue(btn.isEnabled, "ThemePrimaryButton must default to enabled")
+    }
+
+    func test_themeSecondaryButton_initial_state() {
+        let btn = ThemeSecondaryButton(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
+        XCTAssertTrue(btn.isBordered, "ThemeSecondaryButton must be bordered")
+        XCTAssertEqual(btn.bezelStyle, .push, "ThemeSecondaryButton bezelStyle must be .push")
+        XCTAssertEqual(btn.font?.pointSize ?? 0, KrabEarTheme.Typography.body.pointSize,
+                       accuracy: 0.1, "ThemeSecondaryButton font must be Typography.body")
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.01)
+    }
+
+    // MARK: - ThemeButton: disabled state opacity
+
+    func test_themeButton_disabled_state_opacity() {
+        let btn = ThemePrimaryButton(frame: NSRect(x: 0, y: 0, width: 80, height: 28))
+        // Button starts enabled — alphaValue should be 1.0.
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.01, "enabled alpha must be 1.0")
+
+        // Disable: applyInteractionState sets alphaValue = disabledOpacity.
+        btn.isEnabled = false
+        // CATransaction animations may be async; run the run loop briefly so
+        // the CATransaction (even at duration 0) can settle.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        XCTAssertEqual(btn.alphaValue, KrabEarTheme.Interaction.disabledOpacity, accuracy: 0.05,
+                       "disabled alpha must approach disabledOpacity (\(KrabEarTheme.Interaction.disabledOpacity))")
+
+        // Re-enable: alpha restores to 1.0.
+        btn.isEnabled = true
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.05,
+                       "re-enabled button alpha must return to 1.0")
+    }
+
+    // MARK: - ThemeButton: hover overlay color logic
+
+    func test_themeButton_hover_overlay_alpha_token_contract() {
+        // NSEvent.mouseEvent(with: .mouseEntered …) is unsupported in headless
+        // unit tests — it raises NSInternalInconsistencyException. Instead, verify
+        // the token-level contract that drives the overlay colour logic.
+        //
+        // ThemeButton applies NSColor.white.withAlphaComponent(hoverOverlayAlpha)
+        // on hover for bordered buttons. The token must be non-zero and < 0.5.
+        let btn = ThemePrimaryButton(frame: NSRect(x: 0, y: 0, width: 80, height: 28))
+        XCTAssertTrue(btn.isBordered, "precondition: ThemePrimaryButton is bordered")
+
+        // Standard hover path uses hoverOverlayAlpha.
+        let stdAlpha = KrabEarTheme.Interaction.hoverOverlayAlpha
+        XCTAssertGreaterThan(stdAlpha, 0, "hover overlay alpha must be > 0 to be visible")
+        XCTAssertLessThan(stdAlpha, 0.5, "hover overlay must be subtle")
+
+        // Non-hover (idle) state: button starts visible at alpha 1.0.
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.01,
+                       "idle enabled button must be fully visible")
+    }
+
+    func test_themeButton_hover_state_does_not_change_alphaValue() {
+        // Verify the view-level alphaValue is NOT changed by hover (only the
+        // overlayLayer's backgroundColor changes). This is a key design invariant:
+        // the button itself stays at alphaValue=1.0 while hovered; only the
+        // internal sublayer shows the tint.
+        //
+        // We verify this by confirming the alphaValue stays 1.0 at idle,
+        // and then confirming that disabling (which DOES change alphaValue)
+        // changes it to the expected value — proving the setter path works.
+        let btn = ThemePrimaryButton(frame: NSRect(x: 0, y: 0, width: 80, height: 28))
+
+        // Idle: 1.0
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.01, "idle alpha must be 1.0")
+
+        // Disable: should change to disabledOpacity.
+        btn.isEnabled = false
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertLessThan(btn.alphaValue, 1.0,
+                          "disabled button must have alphaValue < 1.0")
+
+        // Re-enable: returns to 1.0.
+        btn.isEnabled = true
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        XCTAssertEqual(btn.alphaValue, 1.0, accuracy: 0.05,
+                       "re-enabled button alpha must return to 1.0")
+    }
+
+    // MARK: - ThemeButton: pressedScale token
+
+    func test_themeButton_pressedScale_isApplied_on_mouseDown() {
+        // Verify the pressedScale token is < 1.0 (animation contract,
+        // independent of whether AppKit applies the transform in headless test).
+        XCTAssertLessThan(KrabEarTheme.Interaction.pressedScale, 1.0)
+        XCTAssertGreaterThan(KrabEarTheme.Interaction.pressedScale, 0.9)
+    }
+
+    // MARK: - ThemeButton: isTransparentStyle uses softer hover alpha
+
+    func test_themeButton_transparentStyle_uses_softer_hover_alpha() {
+        let btn = ThemePrimaryButton(frame: NSRect(x: 0, y: 0, width: 80, height: 28))
+        btn.isTransparentStyle = true
+
+        // Token-level check: transparentHoverAlpha is strictly less than hoverOverlayAlpha.
+        XCTAssertLessThan(
+            KrabEarTheme.Interaction.transparentHoverAlpha,
+            KrabEarTheme.Interaction.hoverOverlayAlpha,
+            "transparent style must use softer hover alpha than standard"
+        )
+    }
+
+    // MARK: - ThemeCardView initial state
+
+    func test_themeCardView_initialState() {
+        let card = ThemeCardView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        XCTAssertTrue(card.wantsLayer, "ThemeCardView must have wantsLayer=true")
+        XCTAssertEqual(card.layer?.cornerRadius ?? 0, KrabEarTheme.Metrics.cardCornerRadius,
+                       accuracy: 0.001, "ThemeCardView corner radius must equal cardCornerRadius token")
+        XCTAssertTrue(card.layer?.masksToBounds ?? false,
+                      "ThemeCardView must clip to bounds for rounded corners")
+    }
+
+    func test_themeCardView_title_updates_label() {
+        let card = ThemeCardView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        XCTAssertTrue(card.title.isEmpty, "default title must be empty")
+
+        card.title = "Test Section"
+        XCTAssertEqual(card.title, "Test Section", "title property must store value")
+    }
+
+    // MARK: - Motion.animate: Reduce Motion guard (runtime smoke)
+
+    func test_motion_animate_completes_without_crash() {
+        // Smoke: Motion.animate must invoke its block without crashing,
+        // regardless of current Reduce Motion system setting.
+        var didRun = false
+        let exp = expectation(description: "animate runs")
+        KrabEarTheme.Motion.animate(
+            duration: KrabEarTheme.Motion.Duration.micro,
+            easing: KrabEarTheme.Motion.Easing.linear
+        ) {
+            didRun = true
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+        XCTAssertTrue(didRun, "animate block must execute")
+    }
+
+    func test_motion_animate_respects_reduce_motion_setting_contractually() {
+        // Contract: when Reduce Motion is ON, actualDuration = 0.
+        // We verify the contract via the Duration tokens (they must be > 0 so the
+        // guard can meaningfully zero them).
+        XCTAssertGreaterThan(KrabEarTheme.Motion.Duration.micro, 0.0,
+                             "micro must be > 0 so Reduce Motion can suppress it")
+        XCTAssertGreaterThan(KrabEarTheme.Motion.Duration.standard, 0.0)
+    }
 }

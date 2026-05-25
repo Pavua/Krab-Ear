@@ -6,6 +6,7 @@ from core.hallucination_manager import HallucinationManager, HallucinationMatch
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -284,6 +285,141 @@ class TestCustomPatternMatchAfterRemove(unittest.TestCase):
         # Теперь совпадения только от встроенных паттернов
         remaining = [m for m in mgr.check_text(text) if m.category == "temp"]
         self.assertEqual(remaining, [])
+
+
+class TestUnicodePatterns(unittest.TestCase):
+    """Тесты поддержки Unicode паттернов (кириллица, испанский и т.д.)."""
+
+    def test_add_cyrillic_pattern(self):
+        mgr = HallucinationManager()
+        entry = mgr.add_pattern(r"конец вещания[.!?]*\s*$", category="broadcast_ru")
+        self.assertEqual(entry["pattern"], r"конец вещания[.!?]*\s*$")
+        self.assertEqual(entry["category"], "broadcast_ru")
+
+    def test_cyrillic_pattern_matches_text(self):
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"конец вещания[.!?]*\s*$", category="broadcast_ru")
+        text = "Сегодня обсудили всё. Конец вещания."
+        matches = mgr.check_text(text)
+        cats = {m.category for m in matches}
+        self.assertIn("broadcast_ru", cats)
+
+    def test_add_spanish_unicode_pattern(self):
+        mgr = HallucinationManager()
+        entry = mgr.add_pattern(r"gracias por ver[.!?]*\s*$", category="youtube_es")
+        self.assertEqual(entry["category"], "youtube_es")
+        text = "Muy bien. Gracias por ver."
+        matches = mgr.check_text(text)
+        cats = {m.category for m in matches}
+        self.assertIn("youtube_es", cats)
+
+    def test_pattern_with_unicode_chars_special_class(self):
+        """Паттерн с Unicode символами в character class."""
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"[аеиоуыёэюя]{3,}\s*$", category="vowel_run")
+        # Текст заканчивается на 3+ гласных кириллицей
+        text = "какое-то слово уоауе"
+        matches = mgr.check_text(text)
+        cats = {m.category for m in matches}
+        self.assertIn("vowel_run", cats)
+
+    def test_strip_unicode_pattern(self):
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"спасибо за вашу поддержку[.!?]*\s*$", category="support")
+        text = "Хорошее видео. Спасибо за вашу поддержку."
+        result = mgr.strip_hallucinations(text)
+        self.assertNotIn("поддержку", result.lower())
+        self.assertIn("Хорошее видео", result)
+
+
+class TestConcurrentAddRemove(unittest.TestCase):
+    """Тесты потокобезопасности add_pattern / remove_pattern."""
+
+    def test_concurrent_add(self):
+        """Concurrent add_pattern не приводит к гонке или потере записей."""
+        mgr = HallucinationManager()
+        errors: list[Exception] = []
+
+        def add_patterns(start: int) -> None:
+            for i in range(start, start + 10):
+                try:
+                    mgr.add_pattern(f"concurrent pattern {i}\\s*$", category="stress")
+                except ValueError:
+                    pass  # дубликаты ожидаемы при некотором перекрытии
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=add_patterns, args=(i * 10,)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
+        custom = [p for p in mgr.list_patterns() if not p["builtin"]]
+        # Должно быть ровно 50 уникальных паттернов (0..49)
+        self.assertEqual(len(custom), 50)
+
+    def test_concurrent_add_remove(self):
+        """Concurrent add + remove не вызывает corrupt state или исключений."""
+        mgr = HallucinationManager()
+        # Предварительно добавляем паттерны для удаления
+        for i in range(20):
+            mgr.add_pattern(f"remove me {i}\\s*$", category="temp")
+
+        errors: list[Exception] = []
+
+        def remover() -> None:
+            for i in range(20):
+                try:
+                    mgr.remove_pattern(f"remove me {i}\\s*$")
+                except Exception as exc:
+                    errors.append(exc)
+
+        def adder() -> None:
+            for i in range(20):
+                try:
+                    mgr.add_pattern(f"add new {i}\\s*$", category="new")
+                except Exception as exc:
+                    errors.append(exc)
+
+        t1 = threading.Thread(target=remover)
+        t2 = threading.Thread(target=adder)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(errors, [], f"Unexpected errors in concurrent add/remove: {errors}")
+        # list_patterns() не должен падать после конкурентных операций
+        patterns = mgr.list_patterns()
+        self.assertIsInstance(patterns, list)
+
+    def test_concurrent_check_text(self):
+        """check_text безопасен для вызова из нескольких потоков."""
+        mgr = HallucinationManager()
+        mgr.add_pattern(r"check concurrent[.!?]*\s*$", category="check")
+        errors: list[Exception] = []
+        results: list[list] = []
+
+        def checker() -> None:
+            try:
+                m = mgr.check_text("Текст. Check concurrent.")
+                results.append(m)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=checker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent check_text errors: {errors}")
+        self.assertEqual(len(results), 20)
+        for r in results:
+            cats = {m.category for m in r}
+            self.assertIn("check", cats)
 
 
 if __name__ == "__main__":

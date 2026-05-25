@@ -129,15 +129,19 @@ class TestFindSwiftCallers(unittest.TestCase):
         result = find_swift_callers(self.tmp / "nonexistent")
         self.assertEqual(result, set())
 
-    def test_does_not_pick_up_comments(self):
+    def test_does_not_pick_up_swift_line_comments(self):
+        """v2: // comments are stripped before matching (Wave 149)."""
         src = self.tmp / "Sources" / "A.swift"
         _write(src, """\
             // let _ = ipcClient.call(method: "commented_out", params: [:])
             let r = ipcClient.call(method: "real_method", params: [:])
+            // ipcClient.callAsync(method: "also_commented", params: [:])
         """)
         result = find_swift_callers(self.tmp / "Sources")
         self.assertIn("real_method", result)
-        # commented-out lines are still matched by regex (acceptable — conservative)
+        # v2: commented-out lines are now stripped → these should NOT be found
+        self.assertNotIn("commented_out", result)
+        self.assertNotIn("also_commented", result)
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +200,6 @@ class TestFindPythonTestCallers(unittest.TestCase):
         self.assertIn("warmup_rewriter", result)
         self.assertIn("probe_llm_http", result)
 
-
     def test_finds_dispatch_helper_pattern(self):
         f = self.tmp / "test_dispatch.py"
         _write(f, """\
@@ -221,6 +224,92 @@ class TestFindPythonTestCallers(unittest.TestCase):
         """)
         result = find_python_test_callers(self.tmp)
         self.assertIn("search_history", result)
+
+    def test_finds_assert_dispatch_pattern(self):
+        """self.assert_dispatch('X') — 201 uses in real test suite (Wave 149 v2)."""
+        f = self.tmp / "test_dispatch_mixin.py"
+        _write(f, """\
+            class TestDispatch(unittest.TestCase):
+                def assert_dispatch(self, method, params=None, *, ok_required=False):
+                    resp = self.svc.handle_request({"id": "t", "method": method, "params": params or {}})
+                    return resp
+
+                def test_ping(self):
+                    resp = self.assert_dispatch("ping", ok_required=True)
+                    self.assertTrue(resp["ok"])
+
+                def test_get_settings(self):
+                    self.assert_dispatch("get_settings", ok_required=True)
+
+                def test_start_recording(self):
+                    self.assert_dispatch("start_recording", ok_required=True)
+        """)
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("ping", result)
+        self.assertIn("get_settings", result)
+        self.assertIn("start_recording", result)
+
+    def test_finds_self_call_helper_pattern(self):
+        """self._call('X') — 80 uses in real test suite (Wave 149 v2)."""
+        f = self.tmp / "test_error_bus_integration.py"
+        _write(f, """\
+            class TestErrorBus(unittest.TestCase):
+                def _call(self, method, params=None):
+                    return self.svc.handle_request({"id": "t", "method": method, "params": params or {}})
+
+                def test_list_errors(self):
+                    resp = self._call("list_recent_errors")
+                    self.assertTrue(resp["ok"])
+
+                def test_clear_errors(self):
+                    resp = self._call("clear_recent_errors", {})
+
+                def test_report_paste(self):
+                    resp = self._call("report_paste_failure", {"reason": "ax_denied"})
+        """)
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("list_recent_errors", result)
+        self.assertIn("clear_recent_errors", result)
+        self.assertIn("report_paste_failure", result)
+
+    def test_finds_self_call_single_quotes(self):
+        """self._call('X') with single quotes."""
+        f = self.tmp / "test_single_call.py"
+        _write(f, """\
+            resp = self._call('probe_llm_http')
+            resp2 = self._call('get_memory_stats', {})
+        """)
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("probe_llm_http", result)
+        self.assertIn("get_memory_stats", result)
+
+    def test_skips_commented_assert_dispatch(self):
+        """assert_dispatch calls on commented lines should NOT be caught."""
+        f = self.tmp / "test_commented.py"
+        _write(f, """\
+            # self.assert_dispatch("only_in_comment")
+            self.assert_dispatch("real_method")
+        """)
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("real_method", result)
+        self.assertNotIn("only_in_comment", result)
+
+    def test_skips_method_in_docstring(self):
+        """Method names inside docstrings should NOT be caught."""
+        f = self.tmp / "test_docstring.py"
+        _write(f, '''\
+            class TestSomething(unittest.TestCase):
+                """
+                Tests for: self._call("docstring_method_name")
+                See also assert_dispatch("another_docstring_method")
+                """
+                def test_real(self):
+                    resp = self._call("actual_method")
+        ''')
+        result = find_python_test_callers(self.tmp)
+        self.assertIn("actual_method", result)
+        self.assertNotIn("docstring_method_name", result)
+        self.assertNotIn("another_docstring_method", result)
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +507,133 @@ class TestFalsePositiveGuard(unittest.TestCase):
         self.assertNotIn("health_check", dead_methods)
         self.assertNotIn("generate_daily_digest", dead_methods)
         self.assertIn("phantom_method", dead_methods)
+
+
+class TestWave149FalsePositiveFix(unittest.TestCase):
+    """
+    Wave 149 regression: report_paste_failure was DEFINITELY_DEAD in v1
+    because self._call("report_paste_failure") wasn't caught.
+    Ensure it's TEST_ONLY after the fix.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_self_call_prevents_false_dead(self):
+        root = self.root
+        _write(root / "KrabEar" / "backend" / "service.py", """\
+            handlers = {
+                "report_paste_failure": self._handle_report_paste_failure,
+                "truly_dead": self._handle_truly_dead,
+            }
+        """)
+        _write(root / "KrabEar" / "backend" / "rest_server.py", "")
+        _write(root / "native" / "KrabEarAgent" / "Sources" / "A.swift", "")
+        _write(root / "KrabEar" / "tests" / "test_errors.py", """\
+            class TestErrors(unittest.TestCase):
+                def _call(self, method, params=None):
+                    return self.svc.handle_request({"id": "t", "method": method, "params": params or {}})
+
+                def test_report_paste(self):
+                    resp = self._call("report_paste_failure", {"reason": "ax_denied"})
+                    self.assertTrue(resp["ok"])
+        """)
+
+        results = run_audit(root)
+        by_method = {r.method: r for r in results}
+
+        # report_paste_failure has _call coverage → TEST_ONLY, NOT DEAD
+        self.assertEqual(
+            by_method["report_paste_failure"].classification,
+            "TEST_ONLY",
+            "report_paste_failure should be TEST_ONLY (covered by self._call), not DEAD",
+        )
+        # truly_dead has no coverage anywhere → DEFINITELY_DEAD
+        self.assertEqual(by_method["truly_dead"].classification, "DEFINITELY_DEAD")
+
+    def test_assert_dispatch_prevents_false_dead(self):
+        root = self.root
+        _write(root / "KrabEar" / "backend" / "service.py", """\
+            handlers = {
+                "get_recording_state": self._handle_get_recording_state,
+                "phantom_handler": self._handle_phantom_handler,
+            }
+        """)
+        _write(root / "KrabEar" / "backend" / "rest_server.py", "")
+        _write(root / "native" / "KrabEarAgent" / "Sources" / "A.swift", "")
+        _write(root / "KrabEar" / "tests" / "test_dispatch.py", """\
+            class TestDispatch(unittest.TestCase):
+                def assert_dispatch(self, method, params=None, *, ok_required=False):
+                    return self.svc.handle_request({"id": "t", "method": method, "params": params or {}})
+
+                def test_state(self):
+                    self.assert_dispatch("get_recording_state", ok_required=True)
+        """)
+
+        results = run_audit(root)
+        by_method = {r.method: r for r in results}
+
+        # get_recording_state covered by assert_dispatch → TEST_ONLY
+        self.assertEqual(
+            by_method["get_recording_state"].classification,
+            "TEST_ONLY",
+            "get_recording_state should be TEST_ONLY (covered by assert_dispatch)",
+        )
+        # phantom_handler has no coverage → DEFINITELY_DEAD
+        self.assertEqual(by_method["phantom_handler"].classification, "DEFINITELY_DEAD")
+
+
+class TestWave460IpcCallFix(unittest.TestCase):
+    """
+    Wave 460 regression: transcribe_paths was DEFINITELY_DEAD in v2 because
+    the audit script did not recognise _ipc_call("method_name", ...) pattern
+    used in cli.py.  After the v3 fix, such callers are treated as LIVE.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_ipc_call_pattern_makes_handler_live(self):
+        """_ipc_call("method_name", ...) in a non-test Python file → LIVE, not DEAD."""
+        root = self.root
+        _write(root / "KrabEar" / "backend" / "service.py", """\
+            handlers = {
+                "transcribe_paths": self._handle_transcribe_paths,
+                "truly_dead_v3": self._handle_truly_dead_v3,
+            }
+        """)
+        _write(root / "KrabEar" / "backend" / "rest_server.py", "")
+        _write(root / "native" / "KrabEarAgent" / "Sources" / "A.swift", "")
+        _write(root / "KrabEar" / "tests" / "placeholder.py", "")
+        # cli.py lives outside KrabEar/backend/ and KrabEar/tests/
+        _write(root / "KrabEar" / "cli.py", """\
+            resp = _ipc_call("transcribe_paths", {"paths": ["/tmp/audio.m4a"]})
+        """)
+
+        results = run_audit(root)
+        by_method = {r.method: r for r in results}
+
+        # transcribe_paths called via _ipc_call → LIVE
+        self.assertEqual(
+            by_method["transcribe_paths"].classification,
+            "LIVE",
+            "transcribe_paths should be LIVE (called via _ipc_call in cli.py), not DEAD",
+        )
+        self.assertTrue(by_method["transcribe_paths"].is_other_python_caller,
+                        "is_other_python_caller must be True for _ipc_call detection")
+
+        # truly_dead_v3 has no callers anywhere → DEFINITELY_DEAD
+        self.assertEqual(by_method["truly_dead_v3"].classification, "DEFINITELY_DEAD")
 
 
 if __name__ == "__main__":

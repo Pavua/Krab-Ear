@@ -9,12 +9,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 logger = logging.getLogger("KrabEar.Backend.TranscriptionQueue")
 
@@ -76,12 +78,78 @@ class TranscriptionQueue:
     """Потокобезопасная очередь транскрипции с приоритетами.
 
     Не создаёт фоновых потоков — обработка инициируется извне через process_next().
+
+    Опциональная персистентность: при передаче persist_path pending-задания
+    сохраняются в NDJSON-файл при каждой мутации и восстанавливаются при запуске.
+    Задания в статусе processing/completed/failed/cancelled не сохраняются —
+    только pending. Если persist_path=None — поведение полностью in-memory (default).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, persist_path: Optional[Path] = None) -> None:
         self._lock = threading.Lock()
         # Все задания по job_id
         self._jobs: dict[str, TranscriptionJob] = {}
+        self._persist_path: Optional[Path] = persist_path
+        if self._persist_path is not None:
+            self._load()
+
+    # ------------------------------------------------------------------
+    # Персистентность (опциональная)
+    # ------------------------------------------------------------------
+
+    def _save(self) -> None:
+        """Сохраняет pending-задания в NDJSON-файл (если задан persist_path).
+
+        Вызывается под self._lock — не захватывает лок повторно.
+        Сохраняет только задания со статусом pending; остальные
+        восстанавливать при старте смысла нет.
+        """
+        if self._persist_path is None:
+            return
+        pending = [j for j in self._jobs.values() if j.status == STATUS_PENDING]
+        try:
+            lines = "\n".join(json.dumps(j.to_dict(), ensure_ascii=False) for j in pending)
+            self._persist_path.write_text(lines + "\n" if lines else "", encoding="utf-8")
+        except Exception as exc:
+            logger.error("TranscriptionQueue: не удалось сохранить очередь в %s: %s", self._persist_path, exc)
+
+    def _load(self) -> None:
+        """Восстанавливает pending-задания из NDJSON-файла при инициализации.
+
+        Повреждённые строки пропускаются с предупреждением — graceful degradation.
+        """
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+        try:
+            raw = self._persist_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.warning("TranscriptionQueue: не удалось прочитать %s: %s", self._persist_path, exc)
+            return
+        restored = 0
+        for lineno, line in enumerate(raw.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                job = TranscriptionJob(
+                    file_path=data["file_path"],
+                    priority=data.get("priority", PRIORITY_DEFAULT),
+                    label=data.get("label", ""),
+                )
+                # Восстанавливаем оригинальный job_id и метаданные времени
+                job.job_id = data["job_id"]
+                job.created_at_iso = data.get("created_at", job.created_at_iso)
+                # status оставляем pending (только pending сохраняются)
+                self._jobs[job.job_id] = job
+                restored += 1
+            except Exception as exc:
+                logger.warning(
+                    "TranscriptionQueue: строка %d в %s пропущена (%s): %r",
+                    lineno, self._persist_path, exc, line[:80],
+                )
+        if restored:
+            logger.info("TranscriptionQueue: восстановлено %d pending-заданий из %s", restored, self._persist_path)
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -106,6 +174,7 @@ class TranscriptionQueue:
         job = TranscriptionJob(file_path=file_path, priority=priority, label=label)
         with self._lock:
             self._jobs[job.job_id] = job
+            self._save()
         logger.debug("Задание поставлено в очередь: job_id=%s file=%r priority=%d", job.job_id, file_path, priority)
         return job.job_id
 
@@ -127,6 +196,7 @@ class TranscriptionQueue:
                 return False
             job.status = STATUS_CANCELLED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
+            self._save()
         logger.debug("Задание отменено: job_id=%s", job_id)
         return True
 
@@ -215,6 +285,7 @@ class TranscriptionQueue:
             job.status = STATUS_COMPLETED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
             job.result = result
+            self._save()
         return True
 
     def mark_failed(self, job_id: str, error: str = "") -> bool:
@@ -236,6 +307,7 @@ class TranscriptionQueue:
             job.status = STATUS_FAILED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
             job.error = error or "Неизвестная ошибка"
+            self._save()
         return True
 
     # ------------------------------------------------------------------

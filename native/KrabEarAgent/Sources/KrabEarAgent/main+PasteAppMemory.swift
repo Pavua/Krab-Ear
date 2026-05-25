@@ -15,21 +15,18 @@ extension AgentAppDelegate {
 
     // MARK: - Per-app paste profile
 
-    // In-memory cache: bundleId → profile string.
+    // Shared reader-writer cache: bundleId → profile string.
+    // Extracted into PasteProfileCache for unit-testability (Wave 265).
     // Populated by background prefetch; stale entries survive for the process lifetime
     // (profiles rarely change mid-session).
-    private static var _pasteProfileCache: [String: String] = [:]
-    private static let _pasteProfileCacheQueue = DispatchQueue(
-        label: "com.krabear.pasteProfileCache", attributes: .concurrent)
+    static let pasteProfileCache = PasteProfileCache()
 
     private func cachedPasteProfile(for bundleId: String) -> String? {
-        Self._pasteProfileCacheQueue.sync { Self._pasteProfileCache[bundleId] }
+        Self.pasteProfileCache.get(bundleId)
     }
 
     private func storeCachedPasteProfile(_ profile: String, for bundleId: String) {
-        Self._pasteProfileCacheQueue.async(flags: .barrier) {
-            Self._pasteProfileCache[bundleId] = profile
-        }
+        Self.pasteProfileCache.set(profile, for: bundleId)
     }
 
     /// Запрашивает профиль вставки для указанного приложения.

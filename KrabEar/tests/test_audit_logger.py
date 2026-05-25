@@ -268,5 +268,62 @@ class TestAuditLoggerEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(entry["duration_ms"], 3.14, places=2)
 
 
+class TestAuditLoggerRotationPermissionError(unittest.TestCase):
+    """Ротация не крашит log_request при PermissionError."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.logger = AuditLogger(data_dir=self.tmpdir)
+        # Первый вызов создаёт файл под текущей датой
+        self.logger.log_request("init", {}, {"ok": True, "result": {}}, 0.1)
+
+    def tearDown(self):
+        self.logger.close()
+
+    def test_rotation_permission_error_does_not_propagate(self):
+        """PermissionError при открытии нового файла не доходит до вызывающего кода."""
+        import unittest.mock as mock
+
+        original_open = open
+
+        def patched_open(path, *args, **kwargs):
+            p = str(path)
+            if "audit_" in p and p.endswith(".ndjson"):
+                raise PermissionError("Read-only filesystem")
+            return original_open(path, *args, **kwargs)
+
+        # Сбрасываем дату, чтобы форсировать ротацию
+        with self.logger._lock:
+            self.logger._current_date = "1970-01-01"
+
+        with mock.patch("builtins.open", side_effect=patched_open):
+            # Не должно бросить исключение
+            try:
+                self.logger.log_request("after_rotation", {}, {"ok": True}, 1.0)
+            except (PermissionError, OSError) as exc:
+                self.fail(f"log_request пробросил PermissionError: {exc}")
+
+    def test_rotation_permission_error_file_handle_is_none(self):
+        """После неудачной ротации _file_handle == None и запись пропускается без краша."""
+        import unittest.mock as mock
+
+        original_open = open
+
+        def patched_open(path, *args, **kwargs):
+            p = str(path)
+            if "audit_" in p and p.endswith(".ndjson"):
+                raise PermissionError("Disk full")
+            return original_open(path, *args, **kwargs)
+
+        with self.logger._lock:
+            self.logger._current_date = "1970-01-01"
+
+        with mock.patch("builtins.open", side_effect=patched_open):
+            self.logger.log_request("skip_me", {}, {"ok": True}, 0.5)
+
+        # _file_handle должен быть None после неудачной ротации
+        self.assertIsNone(self.logger._file_handle)
+
+
 if __name__ == "__main__":
     unittest.main()

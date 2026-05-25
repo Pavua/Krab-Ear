@@ -272,5 +272,94 @@ class TestGetStats(unittest.TestCase):
         self.assertIsInstance(global_profiler, PerformanceProfiler)
 
 
+class TestWave136Required(unittest.TestCase):
+    """Wave 136 required test names for PerformanceProfiler."""
+
+    def setUp(self):
+        self.p = PerformanceProfiler(window_size=200)
+
+    def test_record_elapsed_time(self):
+        """_record() stores elapsed_ms; get_profile_report returns it."""
+        self.p._record("elapsed_op", 42.5)
+        report = self.p.get_profile_report()
+        self.assertIn("elapsed_op", report["methods"])
+        self.assertAlmostEqual(report["methods"]["elapsed_op"]["avg_ms"], 42.5, places=1)
+
+    def test_aggregate_by_operation(self):
+        """Multiple _record() calls under the same name aggregate correctly."""
+        for ms in [10.0, 20.0, 30.0]:
+            self.p._record("agg_op", ms)
+        stats = self.p.get_profile_report()["methods"]["agg_op"]
+        self.assertEqual(stats["calls"], 3)
+        self.assertAlmostEqual(stats["avg_ms"], 20.0, places=1)
+
+    def test_min_max_avg_computed(self):
+        """avg_ms, max_ms, and p50_ms are computed from recorded values."""
+        for ms in [5.0, 10.0, 15.0]:
+            self.p._record("stat_op", ms)
+        stats = self.p.get_profile_report()["methods"]["stat_op"]
+        self.assertAlmostEqual(stats["avg_ms"], 10.0, places=1)
+        self.assertAlmostEqual(stats["max_ms"], 15.0, places=1)
+        # p50 of [5, 10, 15] = 10
+        self.assertAlmostEqual(stats["p50_ms"], 10.0, places=1)
+
+    def test_reset_history(self):
+        """reset() wipes all history; subsequent report is empty."""
+        self.p._record("to_clear", 99.0)
+        self.p.reset()
+        report = self.p.get_profile_report()
+        self.assertNotIn("to_clear", report["methods"])
+        self.assertEqual(report["total_profiled_time_sec"], 0.0)
+
+    def test_unicode_operation_name(self):
+        """Operation names with Unicode (Cyrillic, emoji) are stored correctly."""
+        unicode_name = "стт_транскрибация"
+        self.p._record(unicode_name, 7.3)
+        report = self.p.get_profile_report()
+        self.assertIn(unicode_name, report["methods"])
+        self.assertAlmostEqual(report["methods"][unicode_name]["avg_ms"], 7.3, places=1)
+
+        emoji_name = "🎤записать"
+        self.p._record(emoji_name, 1.1)
+        report2 = self.p.get_profile_report()
+        self.assertIn(emoji_name, report2["methods"])
+
+    def test_concurrent_record(self):
+        """Concurrent _record() calls from many threads don't corrupt data."""
+        errors = []
+
+        def worker(op_name, duration_ms):
+            try:
+                for _ in range(30):
+                    self.p._record(op_name, duration_ms)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(f"op_{i}", float(i)))
+            for i in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        report = self.p.get_profile_report()
+        for i in range(8):
+            self.assertIn(f"op_{i}", report["methods"])
+
+    def test_handles_zero_duration(self):
+        """Recording zero-duration entries does not raise and is handled gracefully."""
+        self.p._record("zero_op", 0.0)
+        report = self.p.get_profile_report()
+        self.assertIn("zero_op", report["methods"])
+        stats = report["methods"]["zero_op"]
+        self.assertEqual(stats["calls"], 1)
+        self.assertEqual(stats["avg_ms"], 0.0)
+        self.assertEqual(stats["max_ms"], 0.0)
+        self.assertEqual(stats["p50_ms"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,10 +20,8 @@ Acceptable non-dispatch handle_* names (see KNOWN_ORPHANS below):
 
 import sys
 import os
-import types
-import inspect
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -355,7 +353,6 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         were deleted as dead code (no callers). Regression guard: these methods must
         NOT be present in service.py anymore.
         """
-        import re
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
@@ -373,7 +370,6 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         and _handle_get_speaker_statistics deleted as dead code (zero callers confirmed
         by audit script PR #418). Regression guard: these methods must NOT reappear.
         """
-        import re
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()

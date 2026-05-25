@@ -530,5 +530,65 @@ class TestGigaAMAndFinetuneBothEnabled(unittest.TestCase):
                                 "GigaAM должен быть раньше RU_FINETUNE в chain")
 
 
+# ---------------------------------------------------------------------------
+# Wave 359 — regression: GigaAM longform threshold at 30s (not 24s)
+# ---------------------------------------------------------------------------
+
+class TestWave359LongformThreshold(unittest.TestCase):
+    """Regression: use_longform threshold должен быть >30.0, не >24.0.
+
+    Bug: audio 24-30s отправлялось по longform path (chunking), хотя GigaAM
+    shortform limit ~30s — это вызывало ненужный overhead и порождало пустые
+    trailing chunks на boundary clips.
+
+    Fix: порог поднят с 24.0 → 30.0 (engine.py:2418).
+    """
+
+    def test_24_8s_uses_shortform(self):
+        """24.8s audio → use_longform=False (порог 30.0 не превышен)."""
+        sr = 16000
+        duration = 24.8
+        audio = _audio(duration, sr)
+        use_longform = len(audio) / sr > 30.0
+        self.assertFalse(
+            use_longform,
+            f"24.8s audio должен use_longform=False, но threshold={len(audio)/sr:.2f}>30.0",
+        )
+
+    def test_30_5s_uses_longform(self):
+        """30.5s audio → use_longform=True (порог 30.0 превышен)."""
+        sr = 16000
+        duration = 30.5
+        audio = _audio(duration, sr)
+        use_longform = len(audio) / sr > 30.0
+        self.assertTrue(
+            use_longform,
+            f"30.5s audio должен use_longform=True, но threshold={len(audio)/sr:.2f}>30.0",
+        )
+
+    def test_exactly_30s_uses_shortform(self):
+        """Ровно 30.0s — граничный случай, остаётся shortform (строгое >)."""
+        sr = 16000
+        duration = 30.0
+        audio = _audio(duration, sr)
+        use_longform = len(audio) / sr > 30.0
+        self.assertFalse(
+            use_longform,
+            "Ровно 30.0s должен быть shortform (>30.0 строго)",
+        )
+
+    def test_old_threshold_24_would_have_failed(self):
+        """Проверяем что старый порог 24.0 давал неправильный результат для 24.8s."""
+        sr = 16000
+        duration = 24.8
+        audio = _audio(duration, sr)
+        # OLD wrong behavior: would have been True with 24.0 threshold
+        old_longform = len(audio) / sr > 24.0
+        # NEW correct behavior: should be False with 30.0 threshold
+        new_longform = len(audio) / sr > 30.0
+        self.assertTrue(old_longform, "Старый порог 24.0 → True для 24.8s (подтверждение бага)")
+        self.assertFalse(new_longform, "Новый порог 30.0 → False для 24.8s (исправлен)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -601,21 +601,21 @@ class SharePackageIdentifierTestCase(unittest.TestCase):
 
 
 class NoExpiryTestCase(unittest.TestCase):
-    """SharingManager не имеет TTL/expiry — пакеты сохраняются бессрочно."""
+    """SharingManager с share_no_default_ttl=True — пакеты сохраняются бессрочно."""
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        # Disable default TTL so packages have no expiry (backward-compat mode)
+        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True)
         self._store.add_fake_item("e1", "вечный текст")
 
-    def test_share_package_has_no_expiry_field(self) -> None:
-        """SharePackage не содержит поля expiry / expires_at."""
+    def test_share_package_has_expires_at_none_when_no_default_ttl(self) -> None:
+        """SharePackage.expires_at равен None при share_no_default_ttl=True."""
         pkg = self._mgr.prepare_share(["e1"])
         d = pkg.to_dict()
-        self.assertNotIn("expiry", d)
-        self.assertNotIn("expires_at", d)
-        self.assertNotIn("expiry_sec", d)
+        self.assertIn("expires_at", d)
+        self.assertIsNone(d["expires_at"])
 
     def test_share_always_retrievable_after_multiple_gets(self) -> None:
         """Повторные get_shared всегда возвращают тот же пакет."""
@@ -628,7 +628,7 @@ class NoExpiryTestCase(unittest.TestCase):
     def test_share_survives_manager_reload_no_expiry(self) -> None:
         """Пакет доступен после перезагрузки менеджера (нет TTL)."""
         pkg = self._mgr.prepare_share(["e1"])
-        mgr2 = SharingManager(store=self._store)
+        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True)
         found = mgr2.get_shared(pkg.share_id)
         self.assertIsNotNone(found)
         self.assertEqual(found.content, pkg.content)

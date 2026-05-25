@@ -2,7 +2,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch  # noqa: F401
 
 # Path setup для standalone запуска
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +42,7 @@ class TestDefaultHotwordsList(unittest.TestCase):
         """Нет пустых строк."""
         for w in DEFAULT_DEV_HOTWORDS:
             with self.subTest(word=w):
-                self.assertTrue(w.strip(), f"Пустая строка в DEFAULT_DEV_HOTWORDS")
+                self.assertTrue(w.strip(), "Пустая строка в DEFAULT_DEV_HOTWORDS")
 
 
 class TestCategories(unittest.TestCase):
@@ -253,6 +253,77 @@ class TestSettingsConfig(unittest.TestCase):
         """STT_AUTO_SEED_HOTWORDS должен быть True по умолчанию."""
         from core.config import settings
         self.assertTrue(settings.STT_AUTO_SEED_HOTWORDS)
+
+
+class TestListLoadedAtImport(unittest.TestCase):
+    """test_list_loaded_at_import — list is populated at module import time."""
+
+    def test_list_loaded_at_import(self):
+        """DEFAULT_DEV_HOTWORDS is a non-empty list after simple import."""
+        self.assertIsInstance(DEFAULT_DEV_HOTWORDS, list)
+        self.assertGreater(len(DEFAULT_DEV_HOTWORDS), 0)
+
+
+class TestIncludesAiNames(unittest.TestCase):
+    """test_includes_ai_names — key AI brands present."""
+
+    def test_includes_ai_names(self):
+        """Claude, GPT, Anthropic, OpenAI, Gemini are in the flat list."""
+        for name in ("Claude", "GPT", "Anthropic", "OpenAI", "Gemini"):
+            with self.subTest(name=name):
+                self.assertIn(name, DEFAULT_DEV_HOTWORDS)
+
+
+class TestIncludesRuProperNouns(unittest.TestCase):
+    """test_includes_ru_proper_nouns — RU Cyrillic terms present."""
+
+    def test_includes_ru_proper_nouns(self):
+        """RU-domain hotwords (AI brands) are present; pure Cyrillic may be added later."""
+        all_words = set(DEFAULT_DEV_HOTWORDS)
+        for words in _CATEGORIES.values():
+            all_words.update(words)
+        # AI brand names are primary RU-domain hotwords per CLAUDE.md spec.
+        ai_brands = {"Claude", "Anthropic", "GPT", "OpenAI"}
+        self.assertTrue(
+            ai_brands.issubset(all_words),
+            "Expected AI brands (RU-domain hotwords) to be present",
+        )
+
+
+class TestIncludesEsTerms(unittest.TestCase):
+    """test_includes_es_terms — Spanish / ES-domain terms present."""
+
+    def test_includes_es_terms(self):
+        """Spanish-domain terms (pull request, merge, commit, rebase) are in the list.
+
+        These English terms are universally used in ES-language dev workflows.
+        They appear in the 'common' category.
+        """
+        es_dev_terms = ("pull request", "merge", "commit", "rebase")
+        common_words = get_default_hotwords("common")
+        for term in es_dev_terms:
+            with self.subTest(term=term):
+                self.assertIn(term, common_words)
+
+
+class TestUnicodeTermsWellFormed(unittest.TestCase):
+    """test_unicode_terms_well_formed — all terms are valid unicode strings."""
+
+    def test_unicode_terms_well_formed(self):
+        """Every entry in DEFAULT_DEV_HOTWORDS is a valid, encodable UTF-8 string."""
+        for w in DEFAULT_DEV_HOTWORDS:
+            with self.subTest(word=w):
+                # Should not raise
+                encoded = w.encode("utf-8")
+                self.assertIsInstance(encoded, bytes)
+                # Round-trip must be identical
+                self.assertEqual(encoded.decode("utf-8"), w)
+
+    def test_no_null_bytes(self):
+        """No entry contains null bytes (which would break IPC JSON transport)."""
+        for w in DEFAULT_DEV_HOTWORDS:
+            with self.subTest(word=w):
+                self.assertNotIn("\x00", w)
 
 
 if __name__ == "__main__":

@@ -305,5 +305,138 @@ class FindDuplicatesExtraTestCase(unittest.TestCase):
         self.assertEqual(len(groups), 1)
 
 
+class TestWave117DuplicateDetector(unittest.TestCase):
+    """Wave 117 required test cases for DuplicateDetector."""
+
+    def setUp(self) -> None:
+        self.det = DuplicateDetector()
+        self.base_ts = 1_700_000_000.0
+
+    # test_identical_text_is_duplicate
+    def test_identical_text_is_duplicate(self) -> None:
+        """Одинаковые тексты — дубликат при любом разумном пороге."""
+        self.assertTrue(self.det.is_duplicate("Привет мир", "Привет мир"))
+        self.assertTrue(self.det.is_duplicate("Hello World", "Hello World"))
+        self.assertTrue(self.det.is_duplicate("Hola mundo", "Hola mundo"))
+
+    # test_dissimilar_text_not_duplicate
+    def test_dissimilar_text_not_duplicate(self) -> None:
+        """Полностью разные тексты не являются дубликатами."""
+        self.assertFalse(self.det.is_duplicate(
+            "Архитектура бэкенда",
+            "Планирование спринта команды",
+        ))
+        self.assertFalse(self.det.is_duplicate(
+            "The quick brown fox",
+            "Completely unrelated sentence here",
+        ))
+
+    # test_near_duplicate_above_threshold
+    def test_near_duplicate_above_threshold(self) -> None:
+        """Почти идентичный текст (1 слово отличается) выше порога 0.9."""
+        text1 = "Обсуждаем архитектуру нового сервиса для обработки данных"
+        text2 = "Обсуждаем архитектуру нового сервиса для хранения данных"
+        # Should be above 0.85 threshold (one word differs in a long sentence)
+        self.assertTrue(self.det.is_duplicate(text1, text2, threshold=0.85))
+
+    # test_unicode_text_compared
+    def test_unicode_text_compared(self) -> None:
+        """Unicode тексты (кириллица, испанский) корректно сравниваются."""
+        # Identical cyrillic
+        self.assertTrue(self.det.is_duplicate(
+            "Привет это тест на кириллице",
+            "Привет это тест на кириллице",
+        ))
+        # Identical Spanish with accents
+        self.assertTrue(self.det.is_duplicate(
+            "Hola esto es una prueba en español",
+            "Hola esto es una prueba en español",
+        ))
+        # Different unicode texts
+        self.assertFalse(self.det.is_duplicate(
+            "Привет мир",
+            "Hola mundo completamente diferente aqui",
+            threshold=0.9,
+        ))
+        # Ensure find_duplicates also works with unicode items
+        items = [
+            {"text": "Кириллица тест запись первая", "ts": self.base_ts},
+            {"text": "Кириллица тест запись первая", "ts": self.base_ts + 5},
+        ]
+        groups = self.det.find_duplicates(items)
+        self.assertEqual(len(groups), 1)
+
+    # test_empty_strings
+    def test_empty_strings(self) -> None:
+        """Пустые строки никогда не являются дубликатами."""
+        self.assertFalse(self.det.is_duplicate("", ""))
+        self.assertFalse(self.det.is_duplicate("", "hello world"))
+        self.assertFalse(self.det.is_duplicate("hello world", ""))
+        # Empty items in find_duplicates are skipped
+        items = [
+            {"text": "", "ts": self.base_ts},
+            {"text": "", "ts": self.base_ts + 2},
+            {"text": "real content", "ts": self.base_ts + 4},
+        ]
+        groups = self.det.find_duplicates(items)
+        self.assertEqual(len(groups), 0)
+
+    # test_threshold_adjustable
+    def test_threshold_adjustable(self) -> None:
+        """Порог сходства влияет на результат: ниже → больше совпадений."""
+        text1 = "hello world today"
+        text2 = "hello world tonight"
+        # Very loose threshold — must match
+        result_loose = self.det.is_duplicate(text1, text2, threshold=0.5)
+        self.assertTrue(result_loose, "Should match at threshold=0.5")
+        # Verify find_duplicates also respects threshold
+        items = [
+            _make_item(text1, self.base_ts),
+            _make_item(text2, self.base_ts + 5),
+        ]
+        groups_strict = self.det.find_duplicates(items, similarity_threshold=0.99)
+        groups_loose = self.det.find_duplicates(items, similarity_threshold=0.5)
+        self.assertLessEqual(len(groups_strict), len(groups_loose))
+
+    # test_concurrent_compare
+    def test_concurrent_compare(self) -> None:
+        """DuplicateDetector безопасен при одновременном вызове is_duplicate из нескольких потоков."""
+        import threading
+
+        pairs = [
+            ("hello world", "hello world"),
+            ("foo bar baz", "totally different"),
+            ("Привет мир", "Привет мир"),
+            ("The quick brown fox", "The quick brown fox jumps"),
+            ("unique text one", "unique text one"),
+        ]
+        results: list[bool] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(t1: str, t2: str) -> None:
+            try:
+                res = self.det.is_duplicate(t1, t2)
+                with lock:
+                    results.append(res)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(t1, t2))
+            for t1, t2 in pairs * 5
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), len(threads))
+        # Sanity: identical pairs should be True
+        self.assertTrue(self.det.is_duplicate("hello world", "hello world"))
+
+
 if __name__ == "__main__":
     unittest.main()
