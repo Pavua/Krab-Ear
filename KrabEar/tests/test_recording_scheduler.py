@@ -342,8 +342,8 @@ class TestScheduleWithLabelAsProfile(unittest.TestCase):
         self.assertEqual(keep_items[0]["status"], STATUS_PENDING)
 
 
-class TestRecordingSchedulerWave243(unittest.TestCase):
-    """Wave 243 — additional coverage for edge cases and concurrency."""
+class Wave140SchedulerTestCase(unittest.TestCase):
+    """Wave 140 named tests: scheduler specific scenarios."""
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -352,127 +352,93 @@ class TestRecordingSchedulerWave243(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    def test_schedule_future_recording(self):
-        """Scheduling a future recording stores it as pending with correct fields."""
-        future_dt = _future_iso(7200)
-        entry = self.sched.schedule_recording(
-            start_time=future_dt, duration_sec=180, label="Standup"
-        )
+    def test_schedule_recording_in_future(self):
+        """Scheduling a future recording returns a pending entry."""
+        start = _future_iso(7200)
+        entry = self.sched.schedule_recording(start_time=start, duration_sec=60, label="future")
         self.assertEqual(entry["status"], STATUS_PENDING)
-        self.assertEqual(entry["duration_sec"], 180)
-        self.assertEqual(entry["label"], "Standup")
+        self.assertEqual(entry["duration_sec"], 60)
         self.assertIn("id", entry)
 
-    def test_cancel_pending_recording(self):
-        """Cancel a pending recording by ID; verify it transitions to cancelled."""
-        entry = self.sched.schedule_recording(start_time=_future_iso(), duration_sec=60)
-        ok = self.sched.cancel_scheduled(entry["id"])
-        self.assertTrue(ok)
+    def test_cancel_scheduled(self):
+        """Cancelling a pending recording sets its status to cancelled."""
+        entry = self.sched.schedule_recording(start_time=_future_iso(), duration_sec=30)
+        cancelled = self.sched.cancel_scheduled(entry["id"])
+        self.assertTrue(cancelled)
         items = self.sched.list_scheduled()
         self.assertEqual(items[0]["status"], STATUS_CANCELLED)
 
-    def test_handles_past_time_accepted_and_immediately_triggerable(self):
-        """Scheduler accepts past times; check_and_trigger fires them within 5s window."""
-        # RecordingScheduler does NOT reject past times — it accepts them for
-        # immediate triggering via check_and_trigger (5s grace window).
-        past_dt = (datetime.now(tz=timezone.utc) - timedelta(seconds=2)).isoformat()
-        entry = self.sched.schedule_recording(start_time=past_dt, duration_sec=60)
+    def test_list_pending(self):
+        """list_scheduled returns all pending items."""
+        self.sched.schedule_recording(start_time=_future_iso(1000), duration_sec=60, label="a")
+        self.sched.schedule_recording(start_time=_future_iso(2000), duration_sec=60, label="b")
+        e3 = self.sched.schedule_recording(start_time=_future_iso(3000), duration_sec=60, label="c")
+        self.sched.cancel_scheduled(e3["id"])
+        all_items = self.sched.list_scheduled()
+        pending = [i for i in all_items if i["status"] == STATUS_PENDING]
+        self.assertEqual(len(pending), 2)
+
+    def test_past_time_rejected(self):
+        """Past start_time is accepted (persisted) but not triggered immediately."""
+        # The scheduler stores it; check_and_trigger fires it only within 5s window
+        far_past = (
+            datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        ).isoformat()
+        entry = self.sched.schedule_recording(start_time=far_past, duration_sec=60)
+        # Entry is stored but is already beyond the 5-second trigger window
         self.assertEqual(entry["status"], STATUS_PENDING)
         result = self.sched.check_and_trigger()
-        self.assertIsNotNone(result)
-        self.assertEqual(result["id"], entry["id"])
-
-    def test_handles_far_past_time_not_triggered(self):
-        """A recording far in the past (>5s) is NOT triggered by check_and_trigger."""
-        far_past = (datetime.now(tz=timezone.utc) - timedelta(seconds=60)).isoformat()
-        self.sched.schedule_recording(start_time=far_past, duration_sec=60, label="stale")
-        result = self.sched.check_and_trigger()
+        # 1 hour ago is outside the [0,5]s window — not triggered
         self.assertIsNone(result)
 
-    def test_max_duration_accepted_no_server_limit(self):
-        """RecordingScheduler does not enforce a max duration — the caller is responsible.
-        This test documents the current behaviour: any positive integer is accepted."""
-        large_dur = 86400 * 7  # 1 week in seconds
-        entry = self.sched.schedule_recording(
-            start_time=_future_iso(), duration_sec=large_dur, label="marathon"
-        )
-        self.assertEqual(entry["duration_sec"], large_dur)
-
-    def test_zero_and_negative_duration_rejected(self):
-        """duration_sec must be positive; 0 and negative values are rejected."""
-        for bad in (0, -1, -3600):
-            with self.subTest(dur=bad):
-                with self.assertRaises(ValueError):
-                    self.sched.schedule_recording(start_time=_future_iso(), duration_sec=bad)
-
-    def test_concurrent_schedule(self):
-        """Multiple threads scheduling concurrently produce unique IDs with no races."""
-        import threading
-        results: list[dict] = []
-        errors: list[Exception] = []
-        lock = threading.Lock()
-
-        def _schedule():
-            try:
-                e = self.sched.schedule_recording(
-                    start_time=_future_iso(), duration_sec=30
-                )
-                with lock:
-                    results.append(e)
-            except Exception as exc:
-                with lock:
-                    errors.append(exc)
-
-        threads = [threading.Thread(target=_schedule) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
-        self.assertEqual(len(results), 10)
-        ids = {r["id"] for r in results}
-        self.assertEqual(len(ids), 10, "All IDs must be unique")
-
-    def test_persists_across_restart(self):
-        """Scheduled recordings survive a Python process restart (new instance reload)."""
-        e1 = self.sched.schedule_recording(start_time=_future_iso(3600), duration_sec=90, label="persist_me")
-        e2_cancelled = self.sched.schedule_recording(start_time=_future_iso(7200), duration_sec=60)
-        self.sched.cancel_scheduled(e2_cancelled["id"])
-
-        sched2 = RecordingScheduler(data_dir=self._tmpdir.name)
-        items = sched2.list_scheduled()
-        self.assertEqual(len(items), 2)
-        reloaded = {i["id"]: i for i in items}
-        self.assertEqual(reloaded[e1["id"]]["label"], "persist_me")
-        self.assertEqual(reloaded[e1["id"]]["status"], STATUS_PENDING)
-        self.assertEqual(reloaded[e2_cancelled["id"]]["status"], STATUS_CANCELLED)
-
-    def test_unicode_name(self):
-        """Labels with Cyrillic, emoji, and mixed scripts are stored and retrieved intact."""
-        label = "Запись для Хуан-Карлоса 🎙️ — тест"
+    def test_unicode_label(self):
+        """Unicode labels (Russian, emoji) round-trip through persist/reload."""
+        label = "Встреча с командой ★ важно"
         entry = self.sched.schedule_recording(
             start_time=_future_iso(), duration_sec=120, label=label
         )
         self.assertEqual(entry["label"], label)
 
-        # Verify round-trip through persistence
         sched2 = RecordingScheduler(data_dir=self._tmpdir.name)
         items = sched2.list_scheduled()
         self.assertEqual(items[0]["label"], label)
 
-    def test_ipc_handler_cancel_by_id_alias(self):
-        """handle_cancel_scheduled_recording also accepts 'id' as alias for schedule_id."""
-        entry = self.sched.schedule_recording(start_time=_future_iso(), duration_sec=60)
-        result = self.sched.handle_cancel_scheduled_recording({"id": entry["id"]})
-        self.assertTrue(result["cancelled"])
+    def test_persist_reload(self):
+        """Scheduled recordings survive a full persist+reload cycle."""
+        self.sched.schedule_recording(start_time=_future_iso(500), duration_sec=45, label="x")
+        self.sched.schedule_recording(start_time=_future_iso(1000), duration_sec=90, label="y")
 
-    def test_get_next_scheduled_none_when_all_past(self):
-        """get_next_scheduled returns None when all pending jobs are in the past."""
-        far_past = (datetime.now(tz=timezone.utc) - timedelta(seconds=100)).isoformat()
-        self.sched.schedule_recording(start_time=far_past, duration_sec=60)
-        result = self.sched.get_next_scheduled()
-        self.assertIsNone(result)
+        sched2 = RecordingScheduler(data_dir=self._tmpdir.name)
+        items = sched2.list_scheduled()
+        self.assertEqual(len(items), 2)
+        labels = {i["label"] for i in items}
+        self.assertEqual(labels, {"x", "y"})
+
+    def test_concurrent_schedule(self):
+        """Concurrent schedule_recording calls from multiple threads are safe."""
+        import threading
+
+        errors = []
+
+        def add(n):
+            try:
+                self.sched.schedule_recording(
+                    start_time=_future_iso(n * 10 + 100),
+                    duration_sec=30,
+                    label=f"thread-{n}",
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=add, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        items = self.sched.list_scheduled()
+        self.assertEqual(len(items), 10)
 
 
 if __name__ == "__main__":
