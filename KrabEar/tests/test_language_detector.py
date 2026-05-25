@@ -277,5 +277,61 @@ class TestLanguageDetectorShortTexts(unittest.TestCase):
                                  f"confidence > 1 for {text!r}")
 
 
+class TestLanguageDetectorWave112(unittest.TestCase):
+    """Wave 112 — дополнительные кейсы: emoji, числа, явные имена тестов."""
+
+    def setUp(self):
+        self.detector = LanguageDetector()
+
+    # --- exact names from Wave 112 spec ---
+
+    def test_detect_pure_russian(self):
+        result = self.detector.detect("Сегодня отличная погода, светит солнце")
+        self.assertEqual(result.language, "ru")
+        self.assertEqual(result.script, "cyrillic")
+        self.assertGreaterEqual(result.confidence, 0.9)
+
+    def test_detect_pure_spanish(self):
+        """Spanish with accents á/é/í/ó/ú/ñ."""
+        result = self.detector.detect("El niño jugó con mucha alegría")
+        self.assertEqual(result.language, "es")
+        self.assertEqual(result.script, "latin")
+
+    def test_detect_pure_english(self):
+        result = self.detector.detect("The quick brown fox jumps over the lazy dog")
+        self.assertEqual(result.language, "en")
+        self.assertEqual(result.script, "latin")
+
+    def test_detect_mixed_returns_dominant(self):
+        """Dominant script language wins in mixed text."""
+        result = self.detector.detect("Привет мир привет мир hi")
+        self.assertEqual(result.language, "ru")
+        self.assertEqual(result.script, "mixed")
+
+    def test_short_text_uncertain_label(self):
+        """Short text (<3 letters) gets low confidence."""
+        result = self.detector.detect("ну")
+        self.assertIn(result.language, ("ru", "uk"))
+        self.assertLessEqual(result.confidence, 0.5)
+
+    def test_empty_text(self):
+        result = self.detector.detect("")
+        self.assertEqual(result.language, "und")
+        self.assertEqual(result.confidence, 0.0)
+        self.assertEqual(result.script, "unknown")
+
+    def test_numbers_only(self):
+        result = self.detector.detect("123 456 789")
+        self.assertEqual(result.language, "und")
+        self.assertEqual(result.script, "unknown")
+
+    def test_emoji_only(self):
+        """Emoji has no letters → undetermined."""
+        result = self.detector.detect("😀🎉🔥💯")
+        self.assertEqual(result.language, "und")
+        self.assertEqual(result.confidence, 0.0)
+        self.assertEqual(result.script, "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()

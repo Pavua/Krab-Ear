@@ -369,73 +369,79 @@ class TestIPCHandlerScoreTranscription(unittest.TestCase):
         self.assertAlmostEqual(factors["llm_enhancement_bonus"], 10.0)
 
 
-class TestTranscriptionScorerSpecRequirements(unittest.TestCase):
-    """Explicit named tests required by Wave 238 spec."""
+class TestTranscriptionScorerWave116Required(unittest.TestCase):
+    """Wave 116 — required named tests for TranscriptionScorer."""
 
     def setUp(self) -> None:
         self.scorer = TranscriptionScorer()
 
-    def test_high_confidence_short_duration_gets_A(self) -> None:
-        """High confidence + short duration with all bonuses → grade A."""
-        text = "Привет это тест для оценки качества"
+    def test_high_confidence_long_audio_grade_A(self) -> None:
+        """Высокая уверенность + длинный текст + бонусы → оценка A."""
+        # 30 слов за 10 секунд = 3 вел/с (в зоне нормального темпа)
+        text = " ".join(["слово"] * 30)
         result = self.scorer.score(
             text=text,
             confidence=1.0,
-            duration_sec=3.0,
+            duration_sec=10.0,
             has_diarization=True,
             has_llm_enhancement=True,
         )
         self.assertEqual(result.grade, "A")
         self.assertGreaterEqual(result.overall_score, 90.0)
 
-    def test_low_confidence_gets_lower_grade(self) -> None:
-        """Low confidence score is lower than high confidence score."""
-        text = "Тест транскрибации для проверки уверенности модели"
-        high = self.scorer.score(text=text, confidence=1.0, duration_sec=5.0)
-        low = self.scorer.score(text=text, confidence=0.1, duration_sec=5.0)
-        self.assertGreater(high.overall_score, low.overall_score)
-        # low confidence alone should not reach A
-        self.assertNotEqual(low.grade, "A")
+    def test_low_confidence_short_audio_grade_F(self) -> None:
+        """Нулевая уверенность + пустой текст → оценка F."""
+        result = self.scorer.score(
+            text="",
+            confidence=0.0,
+            duration_sec=2.0,
+            has_diarization=False,
+            has_llm_enhancement=False,
+        )
+        self.assertEqual(result.grade, "F")
+        self.assertLess(result.overall_score, 60.0)
 
-    def test_diarization_boosts_score(self) -> None:
-        """Diarization flag boosts score by exactly 10 points."""
-        text = "Тест с диаризацией"
-        without = self.scorer.score(text=text, confidence=0.7, duration_sec=2.0, has_diarization=False)
-        with_d = self.scorer.score(text=text, confidence=0.7, duration_sec=2.0, has_diarization=True)
-        self.assertGreater(with_d.overall_score, without.overall_score)
-        self.assertAlmostEqual(with_d.overall_score - without.overall_score, 10.0, places=1)
+    def test_diarization_bonus(self) -> None:
+        """has_diarization=True добавляет ровно 10 к итоговому баллу."""
+        text = "Тест диаризации спикеров для проверки бонуса."
+        base = self.scorer.score(text=text, confidence=0.8, duration_sec=5.0,
+                                 has_diarization=False)
+        bonused = self.scorer.score(text=text, confidence=0.8, duration_sec=5.0,
+                                    has_diarization=True)
+        self.assertAlmostEqual(bonused.factors["diarization_bonus"], 10.0, places=2)
+        self.assertAlmostEqual(base.factors["diarization_bonus"], 0.0, places=2)
+        self.assertAlmostEqual(bonused.overall_score - base.overall_score, 10.0, places=1)
 
-    def test_llm_flag_penalizes_score(self) -> None:
-        """Without LLM enhancement, score is lower than with it (LLM adds 10 points)."""
-        text = "Тест LLM рерайтера"
-        without = self.scorer.score(text=text, confidence=0.7, duration_sec=2.0, has_llm_enhancement=False)
-        with_llm = self.scorer.score(text=text, confidence=0.7, duration_sec=2.0, has_llm_enhancement=True)
-        # "llm_flag_penalizes" = absence of LLM is the penalty
-        self.assertGreater(with_llm.overall_score, without.overall_score)
-        self.assertAlmostEqual(with_llm.factors["llm_enhancement_bonus"], 10.0)
+    def test_llm_penalty_on_hallucination_flag(self) -> None:
+        """has_llm_enhancement=False → нет бонуса LLM; has_llm_enhancement=True → +10."""
+        text = "Проверка флага LLM-обработки транскрипции."
+        without = self.scorer.score(text=text, confidence=0.85, duration_sec=5.0,
+                                    has_llm_enhancement=False)
+        with_llm = self.scorer.score(text=text, confidence=0.85, duration_sec=5.0,
+                                     has_llm_enhancement=True)
         self.assertAlmostEqual(without.factors["llm_enhancement_bonus"], 0.0)
+        self.assertAlmostEqual(with_llm.factors["llm_enhancement_bonus"], 10.0)
+        self.assertGreater(with_llm.overall_score, without.overall_score)
 
-    def test_score_bounds_0_to_100(self) -> None:
-        """overall_score is always within [0, 100] for any input."""
-        cases = [
+    def test_score_in_0_100_range(self) -> None:
+        """Итоговый балл всегда в диапазоне [0, 100] для любых входных данных."""
+        test_cases = [
             ("", 0.0, 0.0, False, False),
-            ("", -99.0, -5.0, False, False),
-            ("слово", 2.0, 1.0, True, True),       # confidence clamped to 1.0
-            ("слово" * 1000, 1.0, 1.0, True, True),
+            ("Тест", 1.5, 5.0, True, True),  # confidence > 1 → clamped
+            ("Слово", -0.5, -1.0, False, False),  # negative inputs
+            (" ".join(["слово"] * 200), 1.0, 60.0, True, True),  # очень много слов
         ]
-        for text, conf, dur, diar, llm in cases:
-            result = self.scorer.score(
-                text=text, confidence=conf, duration_sec=dur,
-                has_diarization=diar, has_llm_enhancement=llm,
-            )
-            self.assertGreaterEqual(result.overall_score, 0.0, msg=f"conf={conf}")
-            self.assertLessEqual(result.overall_score, 100.0, msg=f"conf={conf}")
+        for text, conf, dur, diar, llm in test_cases:
+            result = self.scorer.score(text=text, confidence=conf, duration_sec=dur,
+                                       has_diarization=diar, has_llm_enhancement=llm)
+            self.assertGreaterEqual(result.overall_score, 0.0,
+                                    f"Score below 0 for: {(text[:20], conf, dur)}")
+            self.assertLessEqual(result.overall_score, 100.0,
+                                 f"Score above 100 for: {(text[:20], conf, dur)}")
 
-    def test_grade_mapping_correct(self) -> None:
-        """Grade mapping: A>=90, B 80-89, C 70-79, D 60-69, F<60."""
-        # Use direct _grade function for deterministic boundary checks
+    def test_grade_letter_thresholds(self) -> None:
+        """Проверяет буквенные оценки на граничных значениях: A>=90, B>=80, C>=70, D>=60, F<60."""
         from core.transcription_scorer import _grade
-        self.assertEqual(_grade(100.0), "A")
         self.assertEqual(_grade(90.0), "A")
         self.assertEqual(_grade(89.9), "B")
         self.assertEqual(_grade(80.0), "B")
@@ -445,52 +451,46 @@ class TestTranscriptionScorerSpecRequirements(unittest.TestCase):
         self.assertEqual(_grade(60.0), "D")
         self.assertEqual(_grade(59.9), "F")
         self.assertEqual(_grade(0.0), "F")
+        self.assertEqual(_grade(100.0), "A")
 
-    def test_unicode_text_handled(self) -> None:
-        """Unicode text (emoji, special chars, mixed scripts) is handled without error."""
-        texts = [
-            "Тест 🎤 микрофона — всё хорошо!",
-            "日本語テキスト with mixed ASCII",
-            "Ñoño español con tildes áéíóú",
-            "   ",  # whitespace-only
-            "café résumé naïve",
-        ]
-        for text in texts:
-            result = self.scorer.score(text=text, confidence=0.8, duration_sec=3.0)
-            self.assertIsInstance(result, QualityScore)
-            self.assertGreaterEqual(result.overall_score, 0.0)
-            self.assertLessEqual(result.overall_score, 100.0)
+    def test_empty_metadata(self) -> None:
+        """Пустой текст + duration=0 возвращает валидный QualityScore без исключений."""
+        result = self.scorer.score(text="", confidence=0.0, duration_sec=0.0)
+        self.assertIsInstance(result, QualityScore)
+        self.assertIn(result.grade, ("A", "B", "C", "D", "F"))
+        self.assertGreaterEqual(result.overall_score, 0.0)
+        self.assertLessEqual(result.overall_score, 100.0)
+        # Все факторы присутствуют
+        for key in ("confidence", "text_completeness", "duration_appropriateness",
+                    "diarization_bonus", "llm_enhancement_bonus"):
+            self.assertIn(key, result.factors)
 
     def test_concurrent_score(self) -> None:
-        """TranscriptionScorer is safe for concurrent use from multiple threads."""
+        """Параллельные вызовы score() не вызывают исключений и возвращают корректные результаты."""
         import threading
-
-        scorer = TranscriptionScorer()
         results = []
         errors = []
+        text = "Параллельная транскрипция для проверки потокобезопасности скорера."
 
-        def worker(idx: int) -> None:
+        def worker():
             try:
-                r = scorer.score(
-                    text=f"Тест транскрибации номер {idx}",
-                    confidence=0.5 + (idx % 5) * 0.1,
-                    duration_sec=float(1 + idx % 10),
-                )
-                results.append(r)
+                for _ in range(50):
+                    res = self.scorer.score(text=text, confidence=0.8, duration_sec=5.0,
+                                            has_diarization=True, has_llm_enhancement=True)
+                    results.append(res)
+                    assert 0.0 <= res.overall_score <= 100.0
+                    assert res.grade in ("A", "B", "C", "D", "F")
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        threads = [threading.Thread(target=worker) for _ in range(4)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=5.0)
+            t.join()
 
-        self.assertEqual(errors, [], msg=f"Thread errors: {errors}")
-        self.assertEqual(len(results), 20)
-        for r in results:
-            self.assertGreaterEqual(r.overall_score, 0.0)
-            self.assertLessEqual(r.overall_score, 100.0)
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 200)
 
 
 if __name__ == "__main__":

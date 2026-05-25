@@ -245,8 +245,8 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
 
 #### Phase B — Loud Errors (2026-05-04+) Python additions:
-- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **47** codes wired runtime.
-- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**47** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc, disk, audio, system, vgw categories). Wave 60 +5, Wave 61 +3, Wave 64 +5, Wave 78 +7 added codes post-Phase B initial 24.
+- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **57** codes wired runtime.
+- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**57** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc, disk, audio, system, vgw categories). Wave 60 +5, Wave 61 +3, Wave 64 +5, Wave 78 +7, Wave 82 +6 added codes post-Phase B initial 24.
 - **`backend/error_actions.py`** — `ACTION_HANDLERS` dispatch + 8 action handlers (open_privacy_settings, disable_rewriter, etc.).
 - **`backend/llm_probe.py`** — `LLMHttpProbe` passive GET `/v1/models` health check (post-PR #364 F2 — was POST /v1/chat/completions which caused JIT churn).
 
@@ -355,6 +355,7 @@ make lint          # Flake8 on Python backend
 - `scripts/create_local_signing_identity.command` — create `Krab Ear Dev Local` self-signed identity for stable TCC grants (PR #235)
 - `scripts/build_distribution_dmg.command` — build distribution DMG for sharing (PR #229)
 - `scripts/install_agent_launchagent.command` — opt-in launchd KeepAlive for Swift agent (Wave 59 self-recovery)
+- **Wave 651 worktree cleanup**: pruned 141 stale worktrees (22 merged-branch + 119 >30d+lsof-empty); 439→298 worktrees; 112 GB → 103 GB freed 9 GB. Unlock-then-prune pattern required (git skips locked entries even after dir removed).
 
 ### Launch app
 ```bash
