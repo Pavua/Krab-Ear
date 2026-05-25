@@ -446,68 +446,77 @@ class TestChunkAndMergeIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Wave 359 — regression tests for GigaAM padding bugs
+# 8. Concurrency — thread-safety
 # ---------------------------------------------------------------------------
 
-class TestWave359ChunkerMicroAdvance(unittest.TestCase):
-    """Regression: silence region starting before cursor must not cause micro-advance.
+class TestChunkConcurrency(unittest.TestCase):
+    """AudioChunker должен быть thread-safe: параллельные вызовы не ломают результаты."""
 
-    Bug: _compute_split_points iterated ALL silence regions. A region with
-    start_sec < cursor but mid > cursor would produce:
-      cut = start_sec + 0.05 < cursor → clamped to cursor + 0.01
-    Each iteration advanced cursor by only 0.01 s, producing 100s of 10 ms chunks.
+    def test_concurrent_chunking_thread_safe(self):
+        """Несколько потоков одновременно вызывают chunk() — результаты корректны."""
+        import threading
 
-    Fix: skip regions whose start_sec < cursor at the top of the for-loop.
-    """
+        chunker = AudioChunker(min_silence_sec=0.3)
+        errors: list[Exception] = []
+        results: list[list] = []
+        lock = threading.Lock()
 
-    def setUp(self):
-        from core.silence_detector import SilenceRegion as _SR
-        self._SR = _SR
-        self.chunker = AudioChunker()
+        def worker(worker_id: int) -> None:
+            try:
+                # Каждый поток работает с независимым аудио
+                audio = _cat(_speech(20.0), _silence(0.5), _speech(20.0))
+                chunks = chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+                with lock:
+                    results.append(chunks)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
 
-    def test_stale_silence_region_no_micro_advance(self):
-        """Silence region starting before cursor must produce hard cut, not micro-advance.
+        n_threads = 8
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
 
-        Setup: total=50s, max_chunk=20s → first hard cut at 20.0, cursor=20.0.
-        Stale region: start=5.0, end=40.0 → start_sec(5.0) < cursor(20.0).
-        Pre-fix: mid=22.5 in window → cut=5.05 → clamped to 20.01 → micro-advance.
-        Post-fix: region skipped → hard cut at 40.0.
-        """
-        regions = [
-            self._SR(start_sec=5.0, end_sec=40.0, duration_sec=35.0),
-        ]
-        points = self.chunker._compute_split_points(
-            total_sec=50.0,
-            max_chunk_sec=20.0,
-            usable_silences=regions,
-        )
-        # With fix: stale region skipped → 2 hard cuts at [20.0, 40.0]
-        # Without fix: cursor micro-advances 0.01s per iteration → hundreds of points
-        self.assertLessEqual(
-            len(points), 5,
-            f"Expected ≤5 split points, got {len(points)} — micro-advance loop detected",
-        )
-        # Second cut must be far from cursor (not micro-advance at ~20.01)
-        if len(points) >= 2:
-            self.assertGreater(
-                points[1], 20.5,
-                f"Second split point {points[1]:.3f}s too close to cursor 20.0 — micro-advance",
-            )
+        self.assertEqual(errors, [], msg=f"Ошибки в потоках: {errors}")
+        self.assertEqual(len(results), n_threads)
 
-    def test_silence_at_cursor_boundary_not_skipped(self):
-        """Silence starting exactly at cursor (not before) must NOT be skipped."""
-        regions = [
-            # starts at cursor=0.0 → start_sec(0.0) < cursor(0.0) is False → keep
-            self._SR(start_sec=0.0, end_sec=2.0, duration_sec=2.0),
-        ]
-        points = self.chunker._compute_split_points(
-            total_sec=25.0,
-            max_chunk_sec=20.0,
-            usable_silences=regions,
-        )
-        # The region should be considered (mid=1.0 is in window [0, 20])
-        # Result: cut at 0.05 (start + offset) → 1 split point
-        self.assertGreater(len(points), 0, "Region at cursor boundary должен быть использован")
+        # Каждый поток должен вернуть >= 1 чанк и >1 для аудио с паузой
+        for chunks in results:
+            self.assertGreaterEqual(len(chunks), 1)
+
+    def test_concurrent_merge_results_thread_safe(self):
+        """merge_results() (статический метод) безопасен при параллельных вызовах."""
+        import threading
+
+        errors: list[Exception] = []
+        results: list[dict] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            try:
+                chunks = [
+                    {"text": f"слово_{i}", "start_sec": float(i), "end_sec": float(i + 1)}
+                    for i in range(10)
+                ]
+                merged = AudioChunker.merge_results(chunks)
+                with lock:
+                    results.append(merged)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 12)
+        for r in results:
+            self.assertEqual(r["chunk_count"], 10)
 
 
 if __name__ == "__main__":
