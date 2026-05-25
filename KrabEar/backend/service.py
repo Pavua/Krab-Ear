@@ -111,6 +111,7 @@ from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_silence_probe import CallSilenceProbe
 from backend.call_auto_end import CallAutoEnd
+from backend.health_check_service import HealthCheckService
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
@@ -552,6 +553,24 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+
+        # HealthCheckService — делегат диагностических IPC-методов.
+        # Использует уже инициализированные collaborators.
+        self._health_check_svc = HealthCheckService(
+            store=self.store,
+            health_checker=self._health_checker,
+            startup_diagnostics=self._startup_diagnostics,
+            integrity_checker=self._integrity_checker,
+            llm_probe=getattr(self, "_llm_probe", None),
+            metrics_collector=getattr(self, "_metrics_collector", None),
+            transcriber=self.transcriber,
+            llm_rewriter=self._llm_rewriter,
+            settings_svc=self._settings_svc,
+            start_time=self._start_time,
+            app_version=APP_VERSION,
+            recorder=self.recorder,
+            last_stt_engine_ref=[self._last_stt_engine or ""],
+        )
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -1218,18 +1237,7 @@ class BackendService:
         )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-        return {
-            "status": "ok",
-            "service": "krabear-backend",
-            "version": APP_VERSION,
-            "uptime_sec": round(time.monotonic() - self._start_time, 1),
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
-            "history_count": history_count,
-        }
+        return self._health_check_svc.handle_ping(params)
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         started = self.recorder.start()
@@ -1813,6 +1821,9 @@ class BackendService:
         # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
         if tp.get("engine"):
             self._last_stt_engine = str(tp["engine"])
+            # Синхронизируем shared ref для HealthCheckService.
+            if hasattr(self, "_health_check_svc"):
+                self._health_check_svc._last_stt_engine_ref[0] = self._last_stt_engine
         confidence = tp.get("confidence", 0.0)
         add_breadcrumb(
             category="transcription",
@@ -2282,60 +2293,11 @@ class BackendService:
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
-        try:
-            diarization_device = str(self.transcriber.engine._resolve_diarization_device())
-        except Exception:
-            diarization_device = "unknown"
-
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-
-        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
-        try:
-            profiler_report = performance_profiler.get_profile_report()
-        except Exception as exc:
-            logger = logging.getLogger("KrabEar.Backend.Service")
-            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
-            profiler_report = {
-                "methods": {},
-                "slowest_methods": [],
-                "total_profiled_time_sec": 0.0,
-                "error": str(exc),
-            }
-
-        return {
-            "system": {
-                "python_version": sys.version,
-                "platform": platform.platform(),
-                "uptime_sec": time.monotonic() - self._start_time,
-            },
-            "stt": {
-                "model_balanced": settings.MODEL_BALANCED,
-                "model_max": settings.MODEL_MAX_CANDIDATES,
-                "quality_profile": self.transcriber.engine.quality_profile,
-                "current_model": self.transcriber.engine.current_model,
-                "diarization_enabled": settings.DIARIZATION_ENABLED,
-                "diarization_device": diarization_device,
-                "last_engine": self._last_stt_engine,
-            },
-            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
-            "history": {
-                "total_items": history_count,
-                "data_dir": str(self.store.data_dir),
-                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
-            },
-            "settings_cache": {
-                "ttl_sec": self._settings_svc._cache_ttl,
-                "cached": self._settings_svc._cache is not None,
-            },
-            "profiler": profiler_report,
-        }
+        return self._health_check_svc.handle_get_diagnostics(params)
 
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
-        return self._health_checker.check_all()
+        return self._health_check_svc.handle_health_check(params)
 
     # ------------------------------------------------------------------
     # Phase B.1 — error bus + LLM probe handlers
@@ -2702,14 +2664,7 @@ class BackendService:
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
-        if self._llm_rewriter is None:
-            return {"reachable": False, "latency_ms": 0, "model": None}
-        ok = self._llm_rewriter.warmup()
-        return {
-            "reachable": bool(ok),
-            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
-            "model": getattr(self._llm_rewriter, "_model", None),
-        }
+        return self._health_check_svc.handle_probe_llm_http(params)
 
     def _handle_warmup_stt(self, params: dict) -> dict:
         """Ручной запуск STT warmup — полезен после смены профиля или модели.
@@ -2745,8 +2700,7 @@ class BackendService:
 
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает результаты диагностики при старте бэкенда."""
-        report = self._startup_diagnostics.run_all_checks()
-        return report.to_dict()
+        return self._health_check_svc.handle_get_startup_diagnostics(params)
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -4522,22 +4476,7 @@ class BackendService:
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Проверяет целостность файлов данных Krab Ear."""
-        report = self._integrity_checker.check_integrity(self.store.data_dir)
-        return {
-            "status": report.status,
-            "total_items": report.total_items,
-            "orphaned_tombstones": report.orphaned_tombstones,
-            "invalid_json_lines": report.invalid_json_lines,
-            "checks": [
-                {
-                    "name": c.name,
-                    "status": c.status,
-                    "message": c.message,
-                    "auto_fixable": c.auto_fixable,
-                }
-                for c in report.checks
-            ],
-        }
+        return self._health_check_svc.handle_check_integrity(params)
 
     def _handle_repair_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Исправляет автоматически устраняемые проблемы целостности данных."""

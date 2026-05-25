@@ -1,0 +1,208 @@
+"""HealthCheckService — обработчики IPC-методов диагностики и проверки здоровья Krab Ear.
+
+Выделен из backend/service.py для снижения размера монолитного модуля.
+Содержит 6 IPC-обработчиков: ping, health_check, get_diagnostics,
+probe_llm_http, get_startup_diagnostics, check_integrity.
+
+КРИТИЧНО: контракт handle_ping должен оставаться bit-exact —
+HealthMonitor.swift проверяет поле status == "ok" по каждому 3-секундному тику.
+"""
+
+from __future__ import annotations
+
+import logging
+import platform
+import sys
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.health_checker import HealthChecker
+    from backend.integrity_checker import IntegrityChecker
+    from backend.llm_probe import LLMHttpProbe
+    from backend.llm_rewriter import LLMRewriter
+    from backend.metrics_collector import MetricsCollector
+    from backend.settings_service import SettingsService
+    from backend.startup_diagnostics import StartupDiagnostics
+    from backend.state_store import StateStore
+    from backend.transcriber import Transcriber
+
+logger = logging.getLogger("KrabEar.Backend.HealthCheckService")
+
+
+class HealthCheckService:
+    """Обработчики IPC-команд диагностики и проверки здоровья бэкенда."""
+
+    def __init__(
+        self,
+        store: "StateStore",
+        health_checker: "HealthChecker",
+        startup_diagnostics: "StartupDiagnostics",
+        integrity_checker: "IntegrityChecker",
+        llm_probe: "LLMHttpProbe | None" = None,
+        metrics_collector: "MetricsCollector | None" = None,
+        # Optional collaborators for get_diagnostics
+        transcriber: "Transcriber | None" = None,
+        llm_rewriter: "LLMRewriter | None" = None,
+        settings_svc: "SettingsService | None" = None,
+        start_time: float | None = None,
+        app_version: str = "",
+        recorder: Any = None,
+        last_stt_engine_ref: list[str] | None = None,
+    ) -> None:
+        self.store = store
+        self._health_checker = health_checker
+        self._startup_diagnostics = startup_diagnostics
+        self._integrity_checker = integrity_checker
+        self._llm_probe = llm_probe
+        self._metrics_collector = metrics_collector
+        self._transcriber = transcriber
+        self._llm_rewriter = llm_rewriter
+        self._settings_svc = settings_svc
+        self._start_time: float = start_time if start_time is not None else time.monotonic()
+        self._app_version: str = app_version
+        self._recorder = recorder
+        # last_stt_engine_ref: mutable single-element list updated by BackendService on each transcription.
+        # BackendService должен обновлять last_stt_engine_ref[0] при каждом stop_recording.
+        self._last_stt_engine_ref: list[str] = last_stt_engine_ref if last_stt_engine_ref is not None else [""]
+
+    # ------------------------------------------------------------------
+    # handle_ping
+    # КРИТИЧНО: не менять поля / типы — HealthMonitor.swift парсит ответ.
+    # Контракт: {"status": "ok", "service": str, "version": str,
+    #            "uptime_sec": float, "is_recording": bool, "history_count": int}
+    # ------------------------------------------------------------------
+
+    def handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает статус сервиса. Используется HealthMonitor.swift (3-сек тик).
+
+        ВАЖНО: контракт bit-exact — не менять имена полей и типы.
+        """
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+        return {
+            "status": "ok",
+            "service": "krabear-backend",
+            "version": self._app_version,
+            "uptime_sec": round(time.monotonic() - self._start_time, 1),
+            "is_recording": bool(getattr(self._recorder, "is_recording", False)),
+            "history_count": history_count,
+        }
+
+    # ------------------------------------------------------------------
+    # handle_health_check
+    # ------------------------------------------------------------------
+
+    def handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Агрегированный health check всех ключевых подсистем бэкенда."""
+        return self._health_checker.check_all()
+
+    # ------------------------------------------------------------------
+    # handle_get_diagnostics
+    # ------------------------------------------------------------------
+
+    def handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
+        # Import inside method to avoid heavy dep at module load time and to match service.py pattern
+        from backend.performance_profiler import profiler as _performance_profiler
+        from core.config import settings as _global_settings
+
+        try:
+            diarization_device = str(self._transcriber.engine._resolve_diarization_device()) if self._transcriber else "unknown"
+        except Exception:
+            diarization_device = "unknown"
+
+        try:
+            history_count = self.store.count_active_items()
+        except Exception:
+            history_count = -1
+
+        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
+        try:
+            profiler_report = _performance_profiler.get_profile_report()
+        except Exception as exc:
+            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
+            profiler_report = {
+                "methods": {},
+                "slowest_methods": [],
+                "total_profiled_time_sec": 0.0,
+                "error": str(exc),
+            }
+
+        return {
+            "system": {
+                "python_version": sys.version,
+                "platform": platform.platform(),
+                "uptime_sec": time.monotonic() - self._start_time,
+            },
+            "stt": {
+                "model_balanced": _global_settings.MODEL_BALANCED,
+                "model_max": _global_settings.MODEL_MAX_CANDIDATES,
+                "quality_profile": getattr(self._transcriber.engine, "quality_profile", None) if self._transcriber else None,
+                "current_model": getattr(self._transcriber.engine, "current_model", None) if self._transcriber else None,
+                "diarization_enabled": _global_settings.DIARIZATION_ENABLED,
+                "diarization_device": diarization_device,
+                "last_engine": self._last_stt_engine_ref[0] if self._last_stt_engine_ref else "",
+            },
+            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
+            "history": {
+                "total_items": history_count,
+                "data_dir": str(self.store.data_dir),
+                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
+            },
+            "settings_cache": {
+                "ttl_sec": self._settings_svc._cache_ttl if self._settings_svc else 0,
+                "cached": self._settings_svc._cache is not None if self._settings_svc else False,
+            },
+            "profiler": profiler_report,
+        }
+
+    # ------------------------------------------------------------------
+    # handle_probe_llm_http
+    # ------------------------------------------------------------------
+
+    def handle_probe_llm_http(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
+        if self._llm_rewriter is None:
+            return {"reachable": False, "latency_ms": 0, "model": None}
+        ok = self._llm_rewriter.warmup()
+        return {
+            "reachable": bool(ok),
+            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
+            "model": getattr(self._llm_rewriter, "_model", None),
+        }
+
+    # ------------------------------------------------------------------
+    # handle_get_startup_diagnostics
+    # ------------------------------------------------------------------
+
+    def handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает результаты диагностики при старте бэкенда."""
+        report = self._startup_diagnostics.run_all_checks()
+        return report.to_dict()
+
+    # ------------------------------------------------------------------
+    # handle_check_integrity
+    # ------------------------------------------------------------------
+
+    def handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Проверяет целостность файлов данных Krab Ear."""
+        report = self._integrity_checker.check_integrity(self.store.data_dir)
+        return {
+            "status": report.status,
+            "total_items": report.total_items,
+            "orphaned_tombstones": report.orphaned_tombstones,
+            "invalid_json_lines": report.invalid_json_lines,
+            "checks": [
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "message": c.message,
+                    "auto_fixable": c.auto_fixable,
+                }
+                for c in report.checks
+            ],
+        }
