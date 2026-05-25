@@ -36,7 +36,7 @@ class TestClassifyMethod(unittest.TestCase):
     """Тест _classify_method — корректная категоризация."""
 
     def test_heavy_methods_classified_correctly(self):
-        for m in ["transcribe_paths", "export_history", "summarize_text"]:
+        for m in ["export_history", "summarize_text"]:
             self.assertEqual(_classify_method(m), "heavy", f"Expected heavy: {m}")
 
     def test_medium_methods_classified_correctly(self):
@@ -66,15 +66,15 @@ class TestTokenBucket(unittest.TestCase):
     def test_allows_calls_within_limit(self):
         throttle = IPCThrottle(limits={"heavy": 3, "medium": 30, "light": 120})
         for _ in range(3):
-            self.assertTrue(throttle.check_rate("transcribe_paths"))
+            self.assertTrue(throttle.check_rate("export_history"))
 
     def test_rejects_call_when_bucket_empty(self):
         # Лимит = 3 для heavy
         throttle = IPCThrottle(limits={"heavy": 3, "medium": 30, "light": 120})
         for _ in range(3):
-            throttle.check_rate("transcribe_paths")
+            throttle.check_rate("export_history")
         # 4-й вызов должен быть отклонён
-        self.assertFalse(throttle.check_rate("transcribe_paths"))
+        self.assertFalse(throttle.check_rate("export_history"))
 
     def test_allows_calls_after_token_refill(self):
         # capacity=60 => rate = 60/60 = 1 token/sec.
@@ -92,7 +92,7 @@ class TestTokenBucket(unittest.TestCase):
     def test_light_methods_have_higher_limit(self):
         # Дефолтный лимит light = 120, heavy = 5
         throttle = IPCThrottle()
-        heavy_ok = sum(1 for _ in range(6) if throttle.check_rate("transcribe_paths"))
+        heavy_ok = sum(1 for _ in range(6) if throttle.check_rate("export_history"))
         # Ровно 5 разрешённых
         self.assertEqual(heavy_ok, 5)
 
@@ -106,7 +106,7 @@ class TestGetWaitTime(unittest.TestCase):
 
     def test_zero_when_tokens_available(self):
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 120})
-        wait = throttle.get_wait_time("transcribe_paths")
+        wait = throttle.get_wait_time("export_history")
         self.assertAlmostEqual(wait, 0.0, places=2)
 
     def test_positive_when_bucket_empty(self):
@@ -120,7 +120,7 @@ class TestGetWaitTime(unittest.TestCase):
     def test_wait_time_independent_methods(self):
         throttle = IPCThrottle(limits={"heavy": 1, "medium": 30, "light": 120})
         # Исчерпать heavy
-        throttle.check_rate("transcribe_paths")
+        throttle.check_rate("export_history")
         # light не должен иметь wait
         self.assertAlmostEqual(throttle.get_wait_time("get_clipboard_history"), 0.0, places=2)
 
@@ -175,9 +175,9 @@ class TestThrottleStats(unittest.TestCase):
 
     def test_stats_includes_category_and_limit(self):
         throttle = IPCThrottle()
-        throttle.check_rate("transcribe_paths")
+        throttle.check_rate("export_history")
         stats = throttle.get_throttle_stats()
-        method_info = stats["methods"]["transcribe_paths"]
+        method_info = stats["methods"]["export_history"]
         self.assertEqual(method_info["category"], "heavy")
         self.assertEqual(method_info["limit_per_minute"], 5)
 
@@ -195,7 +195,7 @@ class TestCustomLimits(unittest.TestCase):
 
     def test_custom_heavy_limit(self):
         throttle = IPCThrottle(limits={"heavy": 10, "medium": 30, "light": 120})
-        ok = sum(1 for _ in range(11) if throttle.check_rate("transcribe_paths"))
+        ok = sum(1 for _ in range(11) if throttle.check_rate("export_history"))
         self.assertEqual(ok, 10)
 
     def test_custom_light_limit(self):
@@ -234,7 +234,7 @@ class TestThreadSafety(unittest.TestCase):
 
         def burst():
             for _ in range(20):
-                throttle.check_rate("transcribe_paths")
+                throttle.check_rate("export_history")
 
         threads = [threading.Thread(target=burst) for _ in range(5)]
         for t in threads:
@@ -245,7 +245,7 @@ class TestThreadSafety(unittest.TestCase):
         stats = throttle.get_throttle_stats()
         total = stats["total_calls"]
         throttled = stats["total_throttled"]
-        method_stats = stats["methods"].get("transcribe_paths", {})
+        method_stats = stats["methods"].get("export_history", {})
         self.assertEqual(total, 100)  # 5 threads * 20 calls
         self.assertEqual(method_stats.get("calls", 0), 100)
         allowed = total - throttled

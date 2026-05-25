@@ -18,7 +18,6 @@ from backend.template_manager import TemplateManager
 from backend.search_history import SearchHistoryManager
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
-from backend.timeline_export import TimelineExporter
 from backend.auto_deduplication import AutoDeduplicator
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
@@ -451,7 +450,6 @@ class BackendService:
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
         self._metadata_enricher = MetadataEnricher()
-        self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
@@ -817,7 +815,6 @@ class BackendService:
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
             "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
             "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
@@ -3245,13 +3242,6 @@ class BackendService:
                 "devices": self._list_audio_inputs(),
             }
 
-    def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Синхронная транскрибация списка файлов (CLI/legacy путь).
-
-        Делегирует в `_transcribe_paths_core` без progress/cancel коллбеков.
-        """
-        return self._transcribe_paths_core(params)
-
     def _transcribe_paths_core(
         self,
         params: dict[str, Any],
@@ -4845,6 +4835,8 @@ end tell'''
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
         """Stub: делегирует в AnalyticsService (Wave 392)."""
         return self._analytics_svc.handle_get_timeline_view(params)
+
+    # ── Timeline export ──────────────────────────────────────────────────────
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to TextScoringService."""
