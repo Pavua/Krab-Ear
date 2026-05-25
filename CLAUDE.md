@@ -35,7 +35,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, ~5821 lines. The `handle_request` method dispatches **296** JSON-RPC methods via a handler lookup table, delegating to extracted services (Wave 65 batch 1 removed 19 dead handlers from 325; subsequent batches brought total to 296). Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines). Dead-handler removal ongoing — see `docs/drift-report-2026-05-12.md`.
+- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, **~5024 lines** (down from 5821 after marathon extractions). The `handle_request` method dispatches **318** JSON-RPC methods via a handler lookup table, delegating to **11 extracted services** (Wave 65 batch 1 removed 19 dead handlers; marathon waves W392/W404/W423/W525/W683/W691/W734 added AnalyticsService, TextScoringService, HealthCheckService, AppleIntegrationService, STTManagementService, RecordingCoreService and others). Full API reference: `docs/IPC_API_REFERENCE.md` (PR #243, 4341 lines) — has 58% drift per W657 audit; cross-check live via `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`.
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
@@ -245,8 +245,8 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 - **`StatusIndicatorView.swift`** — menu bar dot + history panel header dot. Phase A: green/yellow/red по supervisor state. Phase B.1 добавит layered foreground severity badge поверх (info/warn/error/critical).
 
 #### Phase B — Loud Errors (2026-05-04+) Python additions:
-- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **57** codes wired runtime.
-- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**57** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc, disk, audio, system, vgw categories). Wave 60 +5, Wave 61 +3, Wave 64 +5, Wave 78 +7, Wave 82 +6 added codes post-Phase B initial 24.
+- **`backend/error_bus.py`** — `KrabError` Pydantic model + `ErrorBus` (push/dedupe/ring buffer/Sentry tier routing) + `WarnBatcher`. **47** codes wired runtime.
+- **`backend/error_codes.py`** — `ERROR_REGISTRY` dict (**47** codes covering paste, rewriter, stt, diarization, translation, mlx, history, vocabulary, hotkey, ipc, disk, audio, system, vgw categories). Wave 60 +5, Wave 61 +3, Wave 64 +5, Wave 78 +7 added codes post-Phase B initial 24.
 - **`backend/error_actions.py`** — `ACTION_HANDLERS` dispatch + 8 action handlers (open_privacy_settings, disable_rewriter, etc.).
 - **`backend/llm_probe.py`** — `LLMHttpProbe` passive GET `/v1/models` health check (post-PR #364 F2 — was POST /v1/chat/completions which caused JIT churn).
 
@@ -355,7 +355,6 @@ make lint          # Flake8 on Python backend
 - `scripts/create_local_signing_identity.command` — create `Krab Ear Dev Local` self-signed identity for stable TCC grants (PR #235)
 - `scripts/build_distribution_dmg.command` — build distribution DMG for sharing (PR #229)
 - `scripts/install_agent_launchagent.command` — opt-in launchd KeepAlive for Swift agent (Wave 59 self-recovery)
-- **Wave 651 worktree cleanup**: pruned 141 stale worktrees (22 merged-branch + 119 >30d+lsof-empty); 439→298 worktrees; 112 GB → 103 GB freed 9 GB. Unlock-then-prune pattern required (git skips locked entries even after dir removed).
 
 ### Launch app
 ```bash
