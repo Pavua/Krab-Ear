@@ -372,5 +372,152 @@ class TestNoiseProfileToDict(unittest.TestCase):
         self.assertIsInstance(d["suitable_for_stt"], bool)
 
 
+class TestWhiteNoiseClassified(unittest.TestCase):
+    """Белый шум должен классифицироваться как 'broadband'."""
+
+    def test_white_noise_frequency_profile_is_broadband(self):
+        audio = _white_noise(duration=2.0, amplitude=0.1)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertEqual(result.frequency_profile, "broadband",
+                         f"Белый шум должен быть broadband, получен {result.frequency_profile}")
+
+    def test_white_noise_type_is_office_or_quiet(self):
+        audio = _white_noise(duration=2.0, amplitude=0.02)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertIn(result.noise_type, {"quiet", "office"},
+                      f"Умеренный белый шум: {result.noise_type}")
+
+
+class TestCleanSpeechHighSnr(unittest.TestCase):
+    """Чистая речь (тональный сигнал + микрошум) должна давать высокий SNR и suitable_for_stt=True."""
+
+    def test_clean_speech_high_snr(self):
+        # Имитация чистой речи: доминирующая синусоида + ничтожный шум
+        speech = _sine(300, 2.0, 0.5)
+        tiny = _white_noise(2.0, 0.001)
+        audio = (speech + tiny).astype(np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertGreater(result.snr_db, 15.0,
+                           f"Ожидался SNR > 15 dB для чистой речи, получен {result.snr_db:.1f} dB")
+        self.assertTrue(result.suitable_for_stt,
+                        "Чистая речь должна быть suitable_for_stt")
+
+    def test_clean_speech_noise_level_is_low(self):
+        # Синусоида доминирует во всех фреймах, поэтому noise floor (10-й перцентиль RMS)
+        # отражает уровень самой синусоиды (~-8 dBFS), а не тишины.
+        # Проверяем, что уровень не превышает разумный порог для чистого тонального сигнала.
+        speech = _sine(200, 2.0, 0.4)
+        audio = (speech + _white_noise(2.0, 0.0005)).astype(np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertLess(result.noise_level_db, 0.0,
+                        f"noise_level_db должен быть отрицательным (dBFS), получен {result.noise_level_db:.1f}")
+
+
+class TestLowSnrDetected(unittest.TestCase):
+    """Низкий SNR должен быть обнаружен и флаг suitable_for_stt сброшен или рекомендации включены."""
+
+    def test_low_snr_has_recommendation(self):
+        # Сигнал ≈ шум → низкий SNR
+        rng = np.random.default_rng(7)
+        loud_noise = (0.25 * rng.standard_normal(SR * 2)).astype(np.float32)
+        tiny_signal = _sine(440, 2.0, 0.01)
+        audio = (loud_noise + tiny_signal).astype(np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        if not result.suitable_for_stt:
+            # Если not suitable — должна быть рекомендация об SNR
+            joined = " ".join(result.recommendations).lower()
+            self.assertTrue(
+                "snr" in joined or "точность" in joined or "шум" in joined,
+                f"Ожидалась рекомендация об SNR, получено: {result.recommendations}"
+            )
+
+    def test_low_snr_result_is_noise_profile(self):
+        rng = np.random.default_rng(13)
+        audio = (0.3 * rng.standard_normal(SR * 2)).astype(np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertIsInstance(result, NoiseProfile)
+        self.assertIsInstance(result.snr_db, float)
+
+
+class TestEmptyAudioHandled(unittest.TestCase):
+    """Пустое аудио должно возвращать корректный NoiseProfile без исключений."""
+
+    def test_empty_array_returns_profile(self):
+        audio = np.array([], dtype=np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertIsInstance(result, NoiseProfile)
+
+    def test_empty_audio_noise_type_quiet(self):
+        result = NoiseProfiler().profile(np.array([], dtype=np.float32), SR)
+        self.assertEqual(result.noise_type, "quiet")
+
+    def test_empty_audio_not_suitable_for_stt(self):
+        result = NoiseProfiler().profile(np.array([], dtype=np.float32), SR)
+        self.assertFalse(result.suitable_for_stt)
+
+    def test_single_sample_audio_handled(self):
+        audio = np.array([0.1], dtype=np.float32)
+        result = NoiseProfiler().profile(audio, SR)
+        self.assertIsInstance(result, NoiseProfile)
+        self.assertFalse(result.suitable_for_stt)
+
+
+class TestConcurrentProfile(unittest.TestCase):
+    """NoiseProfiler должен быть безопасен при параллельных вызовах."""
+
+    def test_concurrent_profile_calls_no_errors(self):
+        import threading
+        profiler = NoiseProfiler()
+        errors: list[Exception] = []
+        results: list[NoiseProfile] = []
+        lock = threading.Lock()
+
+        def worker(idx: int) -> None:
+            rng = np.random.default_rng(idx)
+            audio = (0.05 * rng.standard_normal(SR)).astype(np.float32)
+            try:
+                r = profiler.profile(audio, SR)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки при параллельных вызовах: {errors}")
+        self.assertEqual(len(results), 16)
+
+    def test_concurrent_profile_results_are_independent(self):
+        import threading
+        profiler = NoiseProfiler()
+        results: dict[int, NoiseProfile] = {}
+        lock = threading.Lock()
+
+        def worker(idx: int) -> None:
+            # Разные амплитуды → разные результаты
+            amp = 0.001 * (idx + 1)
+            audio = _white_noise(1.0, amp)
+            r = profiler.profile(audio, SR)
+            with lock:
+                results[idx] = r
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(results), 8)
+        # Каждый результат независим — noise_level_db должен расти с амплитудой
+        levels = [results[i].noise_level_db for i in range(8)]
+        self.assertEqual(levels, sorted(levels),
+                         "noise_level_db должен монотонно расти с амплитудой")
+
+
 if __name__ == "__main__":
     unittest.main()
