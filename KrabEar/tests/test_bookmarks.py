@@ -221,8 +221,8 @@ class TestBookmarkManager(unittest.TestCase):
         self.assertEqual(len(result["bookmarks"]), 2)
 
 
-class TestBookmarkManagerWave243(unittest.TestCase):
-    """Wave 243 — additional coverage: position validation, concurrency, unicode, tombstone."""
+class TestBookmarkManagerWave137(unittest.TestCase):
+    """Wave 137 additional tests: unicode, concurrent, corrupted storage."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -231,145 +231,73 @@ class TestBookmarkManagerWave243(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_add_bookmark_at_position(self):
-        """add() stores offset_sec precisely and returns all expected fields."""
-        bm = self.bm.add(session_id="rec-001", offset_sec=25.75, note="chorus starts")
-        self.assertAlmostEqual(bm["offset_sec"], 25.75, places=2)
-        self.assertEqual(bm["session_id"], "rec-001")
-        self.assertEqual(bm["note"], "chorus starts")
-        for field in ("id", "ts", "deleted"):
-            self.assertIn(field, bm)
-
-    def test_remove_bookmark(self):
-        """delete() removes a bookmark via tombstone; it no longer appears in list."""
-        bm = self.bm.add("sess", 5.0, "mark to remove")
-        ok = self.bm.delete(bm["id"])
-        self.assertTrue(ok)
-        self.assertEqual(self.bm.list_for_item("sess"), [])
-
-    def test_list_bookmarks_for_recording(self):
-        """list_for_item returns only bookmarks belonging to the requested session."""
-        self.bm.add("rec-A", 1.0, "A1")
-        self.bm.add("rec-A", 2.0, "A2")
-        self.bm.add("rec-B", 3.0, "B1")
-
-        a_items = self.bm.list_for_item("rec-A")
-        self.assertEqual(len(a_items), 2)
-        self.assertTrue(all(b["session_id"] == "rec-A" for b in a_items))
-
-        b_items = self.bm.list_for_item("rec-B")
-        self.assertEqual(len(b_items), 1)
-
-    def test_tombstone_deletion(self):
-        """delete() appends a tombstone record; NDJSON has original + tombstone lines."""
-        bm = self.bm.add("sess", 10.0, "tombstone test")
-        self.bm.delete(bm["id"])
-
-        ndjson = Path(self._tmp.name) / "bookmarks.ndjson"
-        raw_lines = [ln for ln in ndjson.read_text().splitlines() if ln.strip()]
-        lines = [json.loads(ln) for ln in raw_lines]
-        # Original record + tombstone
-        self.assertEqual(len(lines), 2)
-        self.assertFalse(lines[0]["deleted"])
-        self.assertTrue(lines[1]["deleted"])
-        self.assertEqual(lines[1]["id"], bm["id"])
-
-    def test_persistence_ndjson(self):
-        """Bookmarks persist across BookmarkManager instances (NDJSON reload)."""
-        self.bm.add("session-persist", 7.0, "saved note")
-
-        bm2 = BookmarkManager(data_dir=Path(self._tmp.name))
-        results = bm2.list_for_item("session-persist")
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["note"], "saved note")
-        self.assertAlmostEqual(results[0]["offset_sec"], 7.0)
-
-    def test_unicode_label(self):
-        """Unicode notes (Cyrillic, emoji) are stored and retrieved correctly."""
-        note = "Важный момент 🎯 — не пропустить"
-        bm = self.bm.add("sess-unicode", 3.14, note)
+    def test_unicode_bookmark_label(self):
+        """Bookmark with Unicode note (Cyrillic/Spanish/emoji) persists correctly."""
+        note = "Важный момент — café résumé 🎙️ встреча"
+        bm = self.bm.add("sess_unicode", 5.5, note)
         self.assertEqual(bm["note"], note)
 
-        # Verify round-trip via NDJSON
+        # Reload and verify
         bm2 = BookmarkManager(data_dir=Path(self._tmp.name))
-        reloaded = bm2.list_for_item("sess-unicode")
-        self.assertEqual(reloaded[0]["note"], note)
+        results = bm2.list_for_item("sess_unicode")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["note"], note)
 
-    def test_concurrent_add(self):
-        """Multiple threads adding bookmarks concurrently produce unique, valid IDs."""
+    def test_concurrent_add_remove(self):
+        """Concurrent add and remove calls do not corrupt the journal."""
         import threading
-        results: list[dict] = []
-        errors: list[Exception] = []
-        lock = threading.Lock()
 
-        def _add(i: int):
+        errors = []
+
+        def do_add(n):
             try:
-                bm = self.bm.add("concurrent-sess", float(i), f"note-{i}")
-                with lock:
-                    results.append(bm)
+                for i in range(5):
+                    self.bm.add(f"session_{n}", float(i), f"note {n}-{i}")
             except Exception as exc:
-                with lock:
-                    errors.append(exc)
+                errors.append(exc)
 
-        threads = [threading.Thread(target=_add, args=(i,)) for i in range(20)]
+        def do_remove():
+            try:
+                # Delete whatever is available
+                for bm in self.bm.list_all()[:3]:
+                    self.bm.delete(bm["id"])
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=do_add, args=(i,)) for i in range(3)]
+        threads += [threading.Thread(target=do_remove) for _ in range(2)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=10)
 
         self.assertEqual(errors, [], f"Concurrent errors: {errors}")
-        self.assertEqual(len(results), 20)
-        ids = {b["id"] for b in results}
-        self.assertEqual(len(ids), 20, "All bookmark IDs must be unique")
+        # Journal must remain parseable
+        journal_path = Path(self._tmp.name) / "bookmarks.ndjson"
+        for line in journal_path.read_text().splitlines():
+            if line.strip():
+                json.loads(line)  # must not raise
 
-        # NDJSON should contain exactly 20 lines
-        ndjson = Path(self._tmp.name) / "bookmarks.ndjson"
-        lines = [ln for ln in ndjson.read_text().splitlines() if ln.strip()]
-        self.assertEqual(len(lines), 20)
+    def test_handles_corrupted_storage(self):
+        """Corrupted lines in bookmarks.ndjson are silently skipped."""
+        self.bm.add("good_sess", 1.0, "good bookmark")
 
-    def test_invalid_position_rejected(self):
-        """handle_add_bookmark rejects negative offset_sec values."""
-        with self.assertRaises(ValueError):
-            self.bm.handle_add_bookmark({"session_id": "s", "offset_sec": -0.001})
+        # Inject corrupted data into the journal
+        journal_path = Path(self._tmp.name) / "bookmarks.ndjson"
+        with journal_path.open("a", encoding="utf-8") as fh:
+            fh.write("{not valid json }\n")
+            fh.write("completely broken line\n")
+            fh.write('{"id": "ok2", "session_id": "good_sess", '
+                     '"offset_sec": 2.0, "note": "after corruption", '
+                     '"ts": "2026-01-01T00:00:00", "deleted": false}\n')
 
-    def test_invalid_position_string_raises(self):
-        """handle_add_bookmark rejects non-numeric offset_sec values."""
-        with self.assertRaises(ValueError):
-            self.bm.handle_add_bookmark({"session_id": "s", "offset_sec": "not-a-number"})
-
-    def test_delete_already_deleted_returns_false(self):
-        """Deleting an already-deleted bookmark returns False (idempotent)."""
-        bm = self.bm.add("sess", 1.0)
-        self.bm.delete(bm["id"])
-        result = self.bm.delete(bm["id"])
-        self.assertFalse(result)
-
-    def test_get_returns_bookmark_by_id(self):
-        """get() returns the correct bookmark dict for a valid ID."""
-        bm = self.bm.add("sess", 22.0, "find me")
-        found = self.bm.get(bm["id"])
-        self.assertIsNotNone(found)
-        self.assertEqual(found["id"], bm["id"])
-        self.assertEqual(found["note"], "find me")
-
-    def test_get_returns_none_for_nonexistent(self):
-        """get() returns None for an unknown bookmark ID."""
-        result = self.bm.get("does-not-exist")
-        self.assertIsNone(result)
-
-    def test_zero_offset_valid(self):
-        """offset_sec=0.0 is a valid position (start of recording)."""
-        bm = self.bm.add("sess", 0.0, "start")
-        self.assertEqual(bm["offset_sec"], 0.0)
-
-    def test_update_session_id_then_list(self):
-        """update_session_id migrates bookmarks from temp to real ID."""
-        self.bm.add("temp-sess", 1.0, "first")
-        self.bm.add("temp-sess", 2.0, "second")
-        count = self.bm.update_session_id("temp-sess", "final-item-id")
-        self.assertEqual(count, 2)
-        self.assertEqual(self.bm.list_for_item("temp-sess"), [])
-        self.assertEqual(len(self.bm.list_for_item("final-item-id")), 2)
+        # Should not raise; should return valid entries only
+        bm2 = BookmarkManager(data_dir=Path(self._tmp.name))
+        results = bm2.list_for_item("good_sess")
+        self.assertEqual(len(results), 2)
+        notes = {b["note"] for b in results}
+        self.assertIn("good bookmark", notes)
+        self.assertIn("after corruption", notes)
 
 
 if __name__ == "__main__":

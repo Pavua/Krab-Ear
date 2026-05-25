@@ -208,6 +208,32 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
+    def remove_item(self, item_id: str) -> bool:
+        """Remove item from index. Returns True if removed, False if not found.
+
+        Thread-safe. Shifts row indices for all items after the removed one.
+        Also persists the updated index to disk.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return False
+
+        with self._index_lock:
+            if item_id not in self._index:
+                return False
+            idx = self._index.index(item_id)
+            # Remove the item_id from the list
+            self._index.pop(idx)
+            # Remove the corresponding row from the embeddings matrix
+            if self._embeddings is not None:
+                if self._embeddings.shape[0] == 1:
+                    self._embeddings = None
+                else:
+                    self._embeddings = np.delete(self._embeddings, idx, axis=0)
+            self._save_locked()
+        return True
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
