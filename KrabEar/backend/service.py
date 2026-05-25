@@ -1142,6 +1142,25 @@ class BackendService:
             if not self._ipc_throttle.check_rate(method):
                 wait_sec = self._ipc_throttle.get_wait_time(method)
                 logger.warning("IPC rate limit exceeded: method=%s wait=%.2fs", method, wait_sec)
+                # Wave 77: push ipc.rate_limit_exceeded (2779 occurrences in production logs)
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("ipc.rate_limit_exceeded", {})
+                    self._error_bus.push(KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="ipc",
+                        code="ipc.rate_limit_exceeded",
+                        message_user=_entry.get("user_msg_ru", "Превышен лимит запросов IPC"),
+                        message_debug=f"rate limit hit: method={method!r} wait={wait_sec:.2f}s",
+                        timestamp=datetime.now(timezone.utc),
+                        context={"method": method, "wait_sec": wait_sec},
+                        actionable=False,
+                        action_id=None,
+                    ))
+                except Exception:
+                    pass
                 return self._error(
                     request_id,
                     "rate_limit_exceeded",
