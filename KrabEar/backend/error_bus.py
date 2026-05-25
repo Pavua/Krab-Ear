@@ -27,6 +27,8 @@ Component = Literal[
     "vgw",
     # Wave 64 additions
     "system",
+    # Wave 490 additions
+    "startup",
 ]
 
 
