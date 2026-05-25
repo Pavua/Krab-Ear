@@ -314,5 +314,218 @@ class TestConvertMocked(unittest.TestCase):
         mock_run.assert_not_called()
 
 
+class TestConvertMp3ToWav(unittest.TestCase):
+    """test_convert_mp3_to_wav: mock subprocess — не требует реального ffmpeg."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_mp3_")
+        self.fake_ffmpeg = os.path.join(self.tmp, "ffmpeg")
+        with open(self.fake_ffmpeg, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_ffmpeg, 0o755)
+        self.converter = AudioConverter(ffmpeg_path=self.fake_ffmpeg)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_convert_mp3_to_wav(self):
+        """convert() с .mp3 исходником вызывает ffmpeg и возвращает .wav путь."""
+        # Создаём фиктивный .mp3 (AudioConverter проверяет только расширение + exists)
+        src = os.path.join(self.tmp, "sample.mp3")
+        with open(src, "wb") as f:
+            f.write(b"\xff\xfb\x90\x00" * 100)  # minimal MP3-like header bytes
+        dst = os.path.join(self.tmp, "output.wav")
+
+        ok_result = MagicMock()
+        ok_result.returncode = 0
+        ok_result.stderr = ""
+
+        with patch("subprocess.run", return_value=ok_result) as mock_run:
+            result = self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
+
+        self.assertEqual(result, dst)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        # ffmpeg called with the mp3 input
+        self.assertIn(src, cmd)
+        # output is dst
+        self.assertIn(dst, cmd)
+        # mono flag
+        self.assertIn("-ac", cmd)
+        self.assertIn("1", cmd)
+
+
+class TestExtractMetadata(unittest.TestCase):
+    """Tests for duration and sample_rate extraction via get_audio_info."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_meta_")
+        self.converter = AudioConverter()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_extract_duration(self):
+        """get_audio_info возвращает корректную длительность (±50 мс)."""
+        wav = os.path.join(self.tmp, "dur_test.wav")
+        _make_wav(wav, duration=3.0, sample_rate=16000)
+        info = self.converter.get_audio_info(wav)
+        self.assertAlmostEqual(info.duration, 3.0, delta=0.05)
+
+    def test_extract_sample_rate(self):
+        """get_audio_info корректно читает sample_rate из WAV."""
+        wav = os.path.join(self.tmp, "sr_test.wav")
+        _make_wav(wav, duration=0.5, sample_rate=44100)
+        info = self.converter.get_audio_info(wav)
+        self.assertEqual(info.sample_rate, 44100)
+
+    def test_handles_corrupt_file(self):
+        """get_audio_info бросает RuntimeError для повреждённого файла."""
+        corrupt = os.path.join(self.tmp, "corrupt.wav")
+        with open(corrupt, "wb") as f:
+            f.write(b"RIFF\x00\x00\x00\x00WAVEfmt not really valid data here" * 5)
+        with self.assertRaises(RuntimeError):
+            self.converter.get_audio_info(corrupt)
+
+
+class TestFfmpegNotInPath(unittest.TestCase):
+    """test_handles_ffmpeg_not_in_path: FileNotFoundError от subprocess → RuntimeError."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_fnf_")
+        # Create a fake executable that AudioConverter __init__ will accept
+        self.fake_ffmpeg = os.path.join(self.tmp, "ffmpeg")
+        with open(self.fake_ffmpeg, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_ffmpeg, 0o755)
+        self.converter = AudioConverter(ffmpeg_path=self.fake_ffmpeg)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_handles_ffmpeg_not_in_path(self):
+        """subprocess.run raises FileNotFoundError → convert() raises RuntimeError."""
+        wav = os.path.join(self.tmp, "input.wav")
+        _make_wav(wav, duration=0.2, sample_rate=16000)
+        dst = os.path.join(self.tmp, "out.wav")
+
+        with patch("subprocess.run", side_effect=FileNotFoundError("ffmpeg: No such file")):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.converter.convert(wav, output_path=dst)
+        self.assertIn("ffmpeg", str(ctx.exception).lower())
+
+
+class TestICloudPathCopiestoTmp(unittest.TestCase):
+    """test_iCloud_path_copies_to_tmp: convert() succeeds even with iCloud-style paths.
+
+    iCloud files under Mobile Documents trigger errno 11 (EAGAIN) on read.
+    The converter itself delegates to subprocess — the iCloud copy workaround
+    lives in service.py.  This test verifies that convert() accepts a path
+    that looks like an iCloud path and forwards it to ffmpeg unchanged.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_icloud_")
+        self.fake_ffmpeg = os.path.join(self.tmp, "ffmpeg")
+        with open(self.fake_ffmpeg, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_ffmpeg, 0o755)
+        self.converter = AudioConverter(ffmpeg_path=self.fake_ffmpeg)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_icloud_path_passed_to_ffmpeg(self):
+        """convert() passes iCloud-style input path directly to ffmpeg command."""
+        # Simulate an iCloud path by creating a file in a Mobile Documents-like subdir
+        icloud_dir = os.path.join(self.tmp, "Mobile Documents", "com~apple~CloudDocs")
+        os.makedirs(icloud_dir, exist_ok=True)
+        src = os.path.join(icloud_dir, "voice_note.m4a")
+        with open(src, "wb") as f:
+            f.write(b"\x00" * 64)
+        dst = os.path.join(self.tmp, "converted.wav")
+
+        ok_result = MagicMock()
+        ok_result.returncode = 0
+        ok_result.stderr = ""
+
+        with patch("subprocess.run", return_value=ok_result) as mock_run:
+            result = self.converter.convert(src, output_format="wav", output_path=dst)
+
+        self.assertEqual(result, dst)
+        cmd = mock_run.call_args[0][0]
+        # The iCloud path is passed directly to ffmpeg
+        self.assertIn(src, cmd)
+
+    def test_icloud_path_subprocess_eagain_raises_runtime_error(self):
+        """If ffmpeg reports errno 11 (iCloud resource locked), RuntimeError is raised."""
+        icloud_dir = os.path.join(self.tmp, "Mobile Documents", "com~apple~CloudDocs")
+        os.makedirs(icloud_dir, exist_ok=True)
+        src = os.path.join(icloud_dir, "locked.m4a")
+        with open(src, "wb") as f:
+            f.write(b"\x00" * 64)
+        dst = os.path.join(self.tmp, "out.wav")
+
+        fail_result = MagicMock()
+        fail_result.returncode = 1
+        fail_result.stderr = "[Errno 11] Resource temporarily unavailable (iCloud not downloaded)"
+
+        with patch("subprocess.run", return_value=fail_result):
+            with self.assertRaises(RuntimeError):
+                self.converter.convert(src, output_path=dst)
+
+
+class TestMaxSizeLimit(unittest.TestCase):
+    """test_max_size_limit: size_mb reported by get_audio_info can be used to enforce limits."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="krab_ear_size_")
+        self.converter = AudioConverter()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_size_mb_reported_correctly(self):
+        """get_audio_info.size_mb matches the actual file size on disk."""
+        wav = os.path.join(self.tmp, "sized.wav")
+        _make_wav(wav, duration=1.0, sample_rate=16000)
+        info = self.converter.get_audio_info(wav)
+        actual_mb = os.path.getsize(wav) / (1024 * 1024)
+        self.assertAlmostEqual(info.size_mb, actual_mb, delta=0.01)
+
+    def test_max_size_limit_enforcement(self):
+        """A caller can use size_mb from get_audio_info to reject over-limit files."""
+        wav = os.path.join(self.tmp, "big.wav")
+        # 5 s @ 44100 Hz — real file around ~0.8 MB
+        _make_wav(wav, duration=5.0, sample_rate=44100)
+        info = self.converter.get_audio_info(wav)
+        # Simulate a very tight MAX_AUDIO_MB = 0.001 MB limit
+        MAX_AUDIO_MB = 0.001
+        if info.size_mb > MAX_AUDIO_MB:
+            too_large = True
+        else:
+            too_large = False
+        self.assertTrue(too_large, "File larger than 0.001 MB should be flagged as too large")
+
+    def test_size_mb_is_float(self):
+        """size_mb field is always a float."""
+        wav = os.path.join(self.tmp, "float_size.wav")
+        _make_wav(wav, duration=0.2, sample_rate=16000)
+        info = self.converter.get_audio_info(wav)
+        self.assertIsInstance(info.size_mb, float)
+
+    def test_small_file_size_mb_positive(self):
+        """Even a small WAV reports size_mb > 0."""
+        wav = os.path.join(self.tmp, "small.wav")
+        _make_wav(wav, duration=0.1, sample_rate=8000)
+        info = self.converter.get_audio_info(wav)
+        self.assertGreater(info.size_mb, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
