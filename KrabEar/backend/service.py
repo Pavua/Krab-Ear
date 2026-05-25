@@ -716,6 +716,20 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    def _handle_remove_from_semantic_index(self, params: dict) -> dict:
+        """Удаляет элемент из семантического индекса.
+
+        Params:
+            item_id — str, идентификатор элемента для удаления (обязателен)
+        Returns:
+            {"removed": bool}
+        """
+        item_id = (params.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError("item_id обязателен")
+        removed = self._semantic_searcher.remove_item(item_id)
+        return {"removed": removed}
+
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
@@ -1057,6 +1071,7 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
+            "remove_from_semantic_index": self._handle_remove_from_semantic_index,  # удалить элемент из семантического индекса
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
