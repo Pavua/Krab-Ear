@@ -812,5 +812,80 @@ class RecordingStreakExtendedTestCase(unittest.TestCase):
             self.assertGreaterEqual(streak.confidence, 0.5)
 
 
+class Wave140InsightsTestCase(unittest.TestCase):
+    """Wave 140 named tests: RecordingInsightsGenerator specific scenarios."""
+
+    def setUp(self) -> None:
+        self.gen = RecordingInsightsGenerator()
+
+    def test_insights_from_busy_day(self) -> None:
+        """Many recordings in one day trigger peak_productivity insight."""
+        # 15 recordings today spread across two hours
+        items = [_make_item(ts_offset_days=0.0 + i * 0.01, hour=10) for i in range(10)]
+        items += [_make_item(ts_offset_days=0.0 + i * 0.01, hour=14) for i in range(5)]
+        insights = self.gen.generate_insights(items, days=7)
+        self.assertGreater(len(insights), 0)
+        types = {ins.type for ins in insights}
+        self.assertIn("peak_productivity", types)
+
+    def test_insights_from_empty_history(self) -> None:
+        """Empty history produces no insights."""
+        result = self.gen.generate_insights([])
+        self.assertEqual(result, [])
+
+    def test_insights_detect_pattern(self) -> None:
+        """Consecutive-day recordings trigger recording_streak."""
+        items = _make_items_for_streak(5)
+        insights = self.gen.generate_insights(items, days=7)
+        types = {ins.type for ins in insights}
+        self.assertIn("recording_streak", types)
+        streak = next(i for i in insights if i.type == "recording_streak")
+        self.assertGreaterEqual(streak.data["streak_days"], 2)
+
+    def test_unicode_text_handled(self) -> None:
+        """Cyrillic and mixed-language text does not raise exceptions."""
+        items = [
+            _make_item(
+                ts_offset_days=i * 0.1,
+                text="Программа código program сервер системе данные",
+                source_lang="ru",
+            )
+            for i in range(5)
+        ]
+        # Must not raise
+        insights = self.gen.generate_insights(items, days=7)
+        self.assertIsInstance(insights, list)
+        for ins in insights:
+            self.assertIsInstance(ins.title, str)
+            self.assertIsInstance(ins.description, str)
+
+    def test_concurrent_generate(self) -> None:
+        """Concurrent generate_insights calls from multiple threads are safe."""
+        import threading
+
+        items = [_make_item(ts_offset_days=i * 0.05, hour=10 + i % 4) for i in range(10)]
+        results = []
+        errors = []
+
+        def run():
+            try:
+                r = self.gen.generate_insights(items, days=7)
+                results.append(r)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        self.assertEqual(len(results), 8)
+        # All threads should return the same number of insights
+        lens = [len(r) for r in results]
+        self.assertTrue(all(n == lens[0] for n in lens), f"Inconsistent results: {lens}")
+
+
 if __name__ == "__main__":
     unittest.main()
