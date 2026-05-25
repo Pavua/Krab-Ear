@@ -109,6 +109,23 @@ _LIMITS: Dict[str, int] = {
     "light": 120,
 }
 
+# ---------------------------------------------------------------------------
+# Per-method fine-grained limits (rps + burst).
+# Переопределяют категорийный лимит для конкретных методов.
+# Формат: {"method_name": (rate_per_second, burst_capacity)}
+# Например (1, 3) → 1 токен/сек, бакет до 3 токенов.
+# Wave 575 audit: тяжёлые методы получают строгий per-second лимит
+# чтобы GPU/CPU не перегружались при конкурентных вызовах.
+# ---------------------------------------------------------------------------
+THROTTLE_LIMITS: Dict[str, tuple] = {
+    # Импорт + транскрибация файлов: 1 rps, burst=3
+    "transcribe_paths": (1, 3),
+    # LLM rewrite: 2 rps, burst=5
+    "rewrite_text": (2, 5),
+    # Диаризация через pyannote: 1 rps, burst=2
+    "run_diarization": (1, 2),
+}
+
 
 def _classify_method(method: str) -> str:
     """Возвращает категорию метода: 'heavy', 'medium' или 'light'.

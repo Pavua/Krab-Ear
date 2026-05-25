@@ -23,6 +23,16 @@ from typing import Any, Callable
 
 logger = logging.getLogger("KrabEar.Backend.OpenWakeWordAdapter")
 
+# Lazy import — EventBus not available during unit tests without full backend
+try:
+    from backend.event_bus import bus as _event_bus  # type: ignore[import]
+    from contracts.registry import EventType as _EventType  # type: ignore[import]
+    _BUS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _event_bus = None  # type: ignore[assignment]
+    _EventType = None  # type: ignore[assignment]
+    _BUS_AVAILABLE = False
+
 # Встроенные модели openWakeWord
 _BUILTIN_MODELS: list[str] = [
     "alexa",
@@ -213,6 +223,16 @@ class OpenWakeWordAdapter:
             logger.info(
                 "Wake word обнаружен: model=%r score=%.3f", name, score
             )
+            # Emit wake_word.detected via EventBus so Swift fallback SSE listener
+            # can trigger conversation without Porcupine.
+            if _BUS_AVAILABLE and _event_bus is not None:
+                try:
+                    _event_bus.emit(
+                        str(_EventType.WAKE_WORD_DETECTED),
+                        {"model": name, "score": round(score, 4)},
+                    )
+                except Exception as exc:  # pragma: no cover
+                    logger.debug("wake_word.detected emit error: %s", exc)
 
         try:
             self.start(model_name, _on_detected, threshold=threshold)

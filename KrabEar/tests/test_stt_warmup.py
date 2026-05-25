@@ -284,7 +284,7 @@ class TestHandleWarmupStt(unittest.TestCase):
                 recorder=FakeRecorder(),
                 translator=FakeTranslator(),
             )
-            result = svc._handle_warmup_stt({})
+            result = svc._stt_mgmt_svc.handle_warmup_stt({})
 
         self.assertIn("loaded", result)
         self.assertIn("latency_ms", result)
@@ -292,7 +292,7 @@ class TestHandleWarmupStt(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_handle_warmup_stt_no_engine(self):
-        """_handle_warmup_stt возвращает error=engine not available если нет engine."""
+        """handle_warmup_stt возвращает error=engine not available если нет engine."""
         with tempfile.TemporaryDirectory() as tmp:
             from backend.state_store import StateStore
             from backend.service import BackendService
@@ -305,7 +305,7 @@ class TestHandleWarmupStt(unittest.TestCase):
                 translator=FakeTranslator(),
             )
             # FakeTranscriber has no .engine — engine check should fail gracefully
-            result = svc._handle_warmup_stt({})
+            result = svc._stt_mgmt_svc.handle_warmup_stt({})
 
         # Either success (if service fell back) or error with useful message
         self.assertIn("loaded", result)

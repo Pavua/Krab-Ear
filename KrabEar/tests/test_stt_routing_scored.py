@@ -268,37 +268,23 @@ class TestScoreAdapters(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRoutingDecisionIPC(unittest.TestCase):
-    """Tests for BackendService._handle_get_stt_routing_decision."""
+    """Tests for STTManagementService.handle_get_stt_routing_decision."""
 
-    def _make_service(self):
-        """Build a minimal BackendService stub for handler testing."""
-        # Avoid importing heavy dependencies — patch at import level.
-        # We patch score_adapters / select_adapter_scored from stt_router.
-        sys.modules.setdefault("backend.privacy_audit", MagicMock())
-        sys.modules.setdefault("backend.audit_logger", MagicMock())
-
+    def _make_stt_svc(self):
+        """Build a minimal STTManagementService stub for handler testing."""
         try:
-            from backend.service import BackendService
+            from backend.stt_management_service import STTManagementService
         except Exception:
-            self.skipTest("BackendService import failed in test env")
+            self.skipTest("STTManagementService import failed in test env")
             return None
 
-        store = MagicMock()
-        store.data_dir = MagicMock()
-        store.data_dir.__truediv__ = lambda self, o: MagicMock()
-
-        svc = BackendService.__new__(BackendService)
-        # Minimal attributes to avoid AttributeError in the handler
-        svc._llm_rewriter = None
-        svc._translator = None
-        svc._transcriber = None
-        svc._recorder = None
-        svc._store = store
+        settings_svc = MagicMock()
+        svc = STTManagementService(settings_svc=settings_svc, transcriber=None)
         return svc
 
     def test_routing_decision_ipc_returns_scores(self):
         """IPC handler returns selected_engine and scores dict."""
-        svc = self._make_service()
+        svc = self._make_stt_svc()
         if svc is None:
             return
 
@@ -308,7 +294,7 @@ class TestRoutingDecisionIPC(unittest.TestCase):
             _adapter("whisper-mlx", set()),
         ]
 
-        result = svc._handle_get_stt_routing_decision({
+        result = svc.handle_get_stt_routing_decision({
             "language": "ru",
             "audio_duration_s": 10.0,
         })
@@ -323,7 +309,7 @@ class TestRoutingDecisionIPC(unittest.TestCase):
 
     def test_routing_decision_handles_no_audio_duration(self):
         """Handler works when audio_duration_s is not provided."""
-        svc = self._make_service()
+        svc = self._make_stt_svc()
         if svc is None:
             return
 
@@ -331,13 +317,13 @@ class TestRoutingDecisionIPC(unittest.TestCase):
             _adapter("whisper-mlx", set()),
         ]
 
-        result = svc._handle_get_stt_routing_decision({"language": "en"})
+        result = svc.handle_get_stt_routing_decision({"language": "en"})
         self.assertIsNone(result.get("audio_duration_s"))
         self.assertEqual(result["selected_engine"], "whisper-mlx")
 
     def test_routing_decision_no_language_uses_und(self):
         """Missing language param defaults to 'und' — only multilingual adapters match."""
-        svc = self._make_service()
+        svc = self._make_stt_svc()
         if svc is None:
             return
 
@@ -346,7 +332,7 @@ class TestRoutingDecisionIPC(unittest.TestCase):
             _adapter("whisper-mlx", set()),
         ]
 
-        result = svc._handle_get_stt_routing_decision({})
+        result = svc.handle_get_stt_routing_decision({})
         self.assertEqual(result["language"], "und")
         # Only whisper-mlx supports unknown lang
         self.assertEqual(result["selected_engine"], "whisper-mlx")

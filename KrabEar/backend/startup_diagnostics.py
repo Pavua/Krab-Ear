@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from KrabEar.__version__ import __version__ as APP_VERSION
+from backend.observability import add_breadcrumb
 
 logger = logging.getLogger("KrabEar.Backend.StartupDiagnostics")
 
@@ -92,10 +93,6 @@ class StartupDiagnostics:
         self._cache_ttl_sec = cache_ttl_sec
         self._cached_report: StartupReport | None = None
         self._cache_ts: float = 0.0
-
-        # Late-injected by BackendService after construction (Wave 490).
-        # If None, startup.stt_model_cache_miss errors are not pushed to error bus.
-        self._error_bus: Any | None = None
 
     # ------------------------------------------------------------------
     # Публичный метод
@@ -394,13 +391,18 @@ class StartupDiagnostics:
             # Стандартное расположение кэша HF: ~/.cache/huggingface/hub/
             hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
             if not hf_cache.exists():
-                # Wave 490: push startup.stt_model_cache_miss to error bus
-                self._push_stt_cache_miss_error(model_name)
+                elapsed = (time.monotonic() - t0) * 1000.0
+                add_breadcrumb(
+                    category="startup",
+                    message="stt_model_check",
+                    level="warning",
+                    data={"model_name": model_name, "cached": False, "duration_ms": round(elapsed, 2)},
+                )
                 return CheckResult(
                     name="stt_model_cached",
                     status="warning",
                     message=f"HF кэш не найден — модель {model_name} будет загружена при первом запуске",
-                    duration_ms=(time.monotonic() - t0) * 1000.0,
+                    duration_ms=elapsed,
                     details={"model": model_name, "cached": False, "cache_dir": str(hf_cache)},
                 )
 
@@ -409,6 +411,12 @@ class StartupDiagnostics:
             model_dir = hf_cache / model_dir_name
             cached = model_dir.exists()
             elapsed = (time.monotonic() - t0) * 1000.0
+            add_breadcrumb(
+                category="startup",
+                message="stt_model_check",
+                level="info" if cached else "warning",
+                data={"model_name": model_name, "cached": cached, "duration_ms": round(elapsed, 2)},
+            )
             if cached:
                 return CheckResult(
                     name="stt_model_cached",
@@ -417,8 +425,6 @@ class StartupDiagnostics:
                     duration_ms=elapsed,
                     details={"model": model_name, "cached": True, "cache_dir": str(model_dir)},
                 )
-            # Wave 490: push startup.stt_model_cache_miss to error bus
-            self._push_stt_cache_miss_error(model_name)
             return CheckResult(
                 name="stt_model_cached",
                 status="warning",
@@ -427,11 +433,18 @@ class StartupDiagnostics:
                 details={"model": model_name, "cached": False, "cache_dir": str(hf_cache)},
             )
         except Exception as exc:
+            elapsed = (time.monotonic() - t0) * 1000.0
+            add_breadcrumb(
+                category="startup",
+                message="stt_model_check",
+                level="error",
+                data={"error_type": type(exc).__name__, "duration_ms": round(elapsed, 2)},
+            )
             return CheckResult(
                 name="stt_model_cached",
                 status="warning",
                 message=f"Не удалось проверить кэш STT модели: {exc}",
-                duration_ms=(time.monotonic() - t0) * 1000.0,
+                duration_ms=elapsed,
             )
 
     def _check_lm_studio_reachable(self) -> CheckResult:
@@ -574,39 +587,3 @@ class StartupDiagnostics:
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 details={"count": 0},
             )
-
-    # ------------------------------------------------------------------
-    # Error bus helpers (Wave 490)
-    # ------------------------------------------------------------------
-
-    def _push_stt_cache_miss_error(self, model_name: str) -> None:
-        """Push startup.stt_model_cache_miss to error bus. Never raises.
-
-        Wave 490: fired when Whisper HF model is not cached locally.
-        Dedupe 86400s ensures at most one toast per day.
-        """
-        error_bus = self._error_bus
-        if error_bus is None:
-            return
-        try:
-            from backend.error_bus import KrabError
-            from backend.error_codes import ERROR_REGISTRY
-            from datetime import datetime, timezone
-            entry = ERROR_REGISTRY.get("startup.stt_model_cache_miss", {})
-            err = KrabError(
-                severity="warn",
-                component="startup",
-                code="startup.stt_model_cache_miss",
-                message_user=entry.get(
-                    "user_msg_ru",
-                    "Модель Whisper отсутствует в кэше — первая транскрибация задержится на минуты.",
-                ),
-                message_debug=f"STT model not cached: {model_name}",
-                timestamp=datetime.now(timezone.utc),
-                context={"model": model_name},
-                actionable=entry.get("actionable", False),
-                action_id=entry.get("action_id"),
-            )
-            error_bus.push(err)
-        except Exception:
-            logger.exception("StartupDiagnostics: startup.stt_model_cache_miss push failed")
