@@ -457,5 +457,97 @@ class RecordingComparisonIdenticalTestCase(unittest.TestCase):
         self.assertEqual(result.language_distribution.get("es"), 1)
 
 
+class RecordingComparisonRequiredNamesTestCase(unittest.TestCase):
+    """Тесты с именами, заданными в Wave 139 task spec."""
+
+    def setUp(self) -> None:
+        self.svc = RecordingComparison()
+        self.store = FakeStore()
+
+    def test_compare_two_recordings(self) -> None:
+        """compare() двух записей возвращает ComparisonView с 2x2 матрицей."""
+        self.store.add_item("r1", text="hello world test", audio_duration_sec=5.0)
+        self.store.add_item("r2", text="hello world check", audio_duration_sec=8.0)
+        result = self.svc.compare(["r1", "r2"], self.store)
+        self.assertIsInstance(result, ComparisonView)
+        self.assertEqual(len(result.items), 2)
+        self.assertEqual(len(result.text_similarity_matrix), 2)
+        self.assertEqual(len(result.text_similarity_matrix[0]), 2)
+
+    def test_similarity_matrix_n_x_n(self) -> None:
+        """Матрица сходства всегда NxN для N записей."""
+        for i in range(5):
+            self.store.add_item(f"nm{i}", text=f"unique words item number {i} text")
+        result = self.svc.compare([f"nm{i}" for i in range(5)], self.store)
+        n = 5
+        self.assertEqual(len(result.text_similarity_matrix), n)
+        for row in result.text_similarity_matrix:
+            self.assertEqual(len(row), n)
+
+    def test_shared_words_extracted(self) -> None:
+        """common_words содержит слова, общие для всех записей."""
+        self.store.add_item("sw1", text="python coding tutorial")
+        self.store.add_item("sw2", text="python programming tutorial")
+        result = self.svc.compare(["sw1", "sw2"], self.store)
+        self.assertIn("python", result.common_words)
+        self.assertIn("tutorial", result.common_words)
+        self.assertNotIn("coding", result.common_words)
+        self.assertNotIn("programming", result.common_words)
+
+    def test_unicode_text_compared(self) -> None:
+        """Unicode (кириллица, испанский) корректно обрабатывается."""
+        self.store.add_item("uc1", text="Привет добрый мир")
+        self.store.add_item("uc2", text="Привет хороший день")
+        result = self.svc.compare(["uc1", "uc2"], self.store)
+        self.assertIsInstance(result, ComparisonView)
+        # «привет» общее слово
+        self.assertIn("привет", result.common_words)
+        # Матрица симметрична
+        self.assertAlmostEqual(
+            result.text_similarity_matrix[0][1],
+            result.text_similarity_matrix[1][0],
+        )
+
+    def test_empty_history_handled(self) -> None:
+        """Записи с пустым текстом обрабатываются без исключений."""
+        self.store.add_item("eh1", text="")
+        self.store.add_item("eh2", text="")
+        result = self.svc.compare(["eh1", "eh2"], self.store)
+        self.assertIsInstance(result, ComparisonView)
+        self.assertEqual(result.text_similarity_matrix[0][1], 0.0)
+        self.assertEqual(result.common_words, [])
+
+    def test_concurrent_compare(self) -> None:
+        """Параллельный вызов compare() из нескольких потоков безопасен."""
+        import threading
+
+        for i in range(4):
+            self.store.add_item(f"cc{i}", text=f"concurrent test item data {i}")
+
+        errors: list[Exception] = []
+        results: list[ComparisonView] = []
+        lock = threading.Lock()
+
+        def run() -> None:
+            try:
+                r = self.svc.compare(["cc0", "cc1", "cc2", "cc3"], self.store)
+                with lock:
+                    results.append(r)
+            except Exception as e:
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=run) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], msg=str(errors))
+        self.assertEqual(len(results), 6)
+        for r in results:
+            self.assertEqual(len(r.text_similarity_matrix), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
