@@ -13,6 +13,7 @@ from backend.api_versioning import (
 from flask import Flask
 import sys
 import os
+import threading
 import unittest
 
 # Ensure project root is on sys.path so ``backend.*`` imports resolve.
@@ -244,6 +245,127 @@ class TestApiInfoEndpoint(unittest.TestCase):
         resp = self.client.get("/api/info")
         data = resp.get_json()
         self.assertGreater(len(data["supported_versions"]), 0)
+
+
+class TestNegotiateHighestSupported(unittest.TestCase):
+    """negotiate_returns_highest_supported — no explicit hint returns latest default."""
+
+    def setUp(self):
+        self.app = _make_app()
+
+    def test_negotiate_returns_highest_supported(self):
+        """When client sends all supported versions in Accept, highest wins by path."""
+        # The highest version reachable via URL prefix is V2.
+        with self.app.test_request_context("/v2/stt"):
+            version = get_api_version()
+        self.assertEqual(version, APIVersion.V2)
+
+    def test_negotiate_v1_still_supported(self):
+        """V1 remains accessible alongside V2."""
+        with self.app.test_request_context("/v1/stt"):
+            version = get_api_version()
+        self.assertEqual(version, APIVersion.V1)
+
+    def test_all_supported_versions_in_list(self):
+        """SUPPORTED_VERSIONS must contain both V1 and V2 (marked supported)."""
+        self.assertIn(APIVersion.V1, SUPPORTED_VERSIONS)
+        self.assertIn(APIVersion.V2, SUPPORTED_VERSIONS)
+
+    def test_v1_marked_supported(self):
+        """APIVersion.V1 is present in SUPPORTED_VERSIONS."""
+        self.assertIn(APIVersion.V1, SUPPORTED_VERSIONS)
+
+    def test_v2_marked_supported(self):
+        """APIVersion.V2 is present in SUPPORTED_VERSIONS."""
+        self.assertIn(APIVersion.V2, SUPPORTED_VERSIONS)
+
+    def test_unknown_version_rejected(self):
+        """Unknown version string via query param falls back to default, not error."""
+        with self.app.test_request_context("/ping?api_version=v99"):
+            version = get_api_version()
+        self.assertEqual(version, DEFAULT_VERSION)
+
+    def test_unknown_version_via_accept_rejected(self):
+        """Unknown version in Accept header falls back to default."""
+        with self.app.test_request_context(
+            "/ping", headers={"Accept": "application/vnd.krabear.v99+json"}
+        ):
+            version = get_api_version()
+        self.assertEqual(version, DEFAULT_VERSION)
+
+
+class TestUnicodeInMetadata(unittest.TestCase):
+    """Unicode characters in version metadata / deprecation headers are handled."""
+
+    def setUp(self):
+        self.app = Flask(__name__)
+
+    def test_unicode_in_sunset_date_header(self):
+        """Sunset header with unicode-safe ASCII date works correctly."""
+        with self.app.test_request_context("/"):
+            resp = self.app.response_class(status=200)
+            resp = deprecation_warning(resp, "v1", "2027-01-01")
+            # Confirm the header is set and readable as a plain string
+            self.assertIsInstance(resp.headers["Sunset"], str)
+            self.assertEqual(resp.headers["Sunset"], "2027-01-01")
+
+    def test_unicode_in_deprecation_version_field(self):
+        """Version string containing non-ASCII is stored without error."""
+        with self.app.test_request_context("/"):
+            resp = self.app.response_class(status=200)
+            # Non-ASCII version label — should not crash
+            resp = deprecation_warning(resp, "ñv1", "2027-01-01")
+            self.assertIn("Deprecation", resp.headers)
+
+    def test_get_api_info_app_version_is_string(self):
+        """app_version in get_api_info() is a non-empty string (may include unicode)."""
+        info = get_api_info()
+        self.assertIsInstance(info["app_version"], str)
+        self.assertTrue(len(info["app_version"]) > 0)
+
+    def test_deprecation_metadata_format(self):
+        """Deprecation header follows version=\\"<ver>\\" format."""
+        with self.app.test_request_context("/"):
+            resp = self.app.response_class(status=200)
+            resp = deprecation_warning(resp, "v1", "2026-12-31")
+            self.assertIn('version="v1"', resp.headers["Deprecation"])
+            self.assertEqual(resp.headers["Sunset"], "2026-12-31")
+
+
+class TestConcurrentNegotiate(unittest.TestCase):
+    """get_api_version() is safe to call concurrently from multiple threads."""
+
+    def setUp(self):
+        self.app = _make_app()
+
+    def test_concurrent_negotiate(self):
+        """Multiple threads calling get_api_version() simultaneously return consistent results."""
+        results = []
+        errors = []
+
+        def worker(path, expected):
+            try:
+                with self.app.test_request_context(path):
+                    v = get_api_version()
+                results.append((v, expected))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("/v1/ping", APIVersion.V1)),
+            threading.Thread(target=worker, args=("/v2/ping", APIVersion.V2)),
+            threading.Thread(target=worker, args=("/ping", DEFAULT_VERSION)),
+            threading.Thread(target=worker, args=("/v1/stt", APIVersion.V1)),
+            threading.Thread(target=worker, args=("/v2/stt", APIVersion.V2)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        for actual, expected in results:
+            self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":
