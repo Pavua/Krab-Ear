@@ -255,5 +255,155 @@ class TestCalendarLinkIPCHandlers(unittest.TestCase):
         self.assertEqual(event["title"], "Updated Event")
 
 
+class TestFindOverlappingEvent(_DarwinPatchedTestCase):
+    """test_find_overlapping_event — event returned when recording overlaps."""
+
+    def test_find_overlapping_event(self):
+        """find_active_event returns event whose window overlaps at_time."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = SAMPLE_RAW
+        mock_proc.stderr = ""
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=1)
+            result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["title"], "Stand-up")
+
+    def test_no_overlap_returns_none(self):
+        """When osascript returns empty, no event is found."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=1)
+            result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
+
+
+class TestUnicodeEventTitle(_DarwinPatchedTestCase):
+    """test_unicode_event_title — titles with RU/ES/emoji parse correctly."""
+
+    def test_unicode_event_title(self):
+        """Titles containing Cyrillic, accented chars, and emoji are parsed."""
+        epoch_s = SAMPLE_EPOCH_START
+        epoch_e = SAMPLE_EPOCH_END
+        unicode_titles = [
+            "Совещание 🎉|||{}|||{}|||Офис|||Работа".format(epoch_s, epoch_e),
+            "Reunión de equipo|||{}|||{}|||Sala B|||Personal".format(epoch_s, epoch_e),
+            "会议 (CJK)|||{}|||{}|||Online|||Work".format(epoch_s, epoch_e),
+        ]
+        for raw_line in unicode_titles:
+            with self.subTest(line=raw_line[:30]):
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = raw_line + "\n"
+                mock_proc.stderr = ""
+                with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+                    linker = CalendarLinker(cache_minutes=1)
+                    result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+                self.assertIsNotNone(result)
+                self.assertTrue(len(result["title"]) > 0)
+
+
+class TestHandlesOsascriptErrorGracefully(unittest.TestCase):
+    """test_handles_osascript_error_gracefully — FileNotFoundError, generic exc."""
+
+    def test_handles_osascript_error_gracefully(self):
+        """Generic exception from subprocess.run → returns None."""
+        with patch(
+            "backend.calendar_link.subprocess.run",
+            side_effect=OSError("unexpected OS error"),
+        ):
+            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
+                linker = CalendarLinker(cache_minutes=1)
+                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
+
+    def test_file_not_found_returns_none(self):
+        """Missing osascript binary → graceful None."""
+        with patch(
+            "backend.calendar_link.subprocess.run",
+            side_effect=FileNotFoundError("osascript not found"),
+        ):
+            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
+                linker = CalendarLinker(cache_minutes=1)
+                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
+
+
+class TestHandlesCalendarAppNotRunning(unittest.TestCase):
+    """test_handles_calendar_app_not_running — non-zero rc + empty stdout."""
+
+    def test_handles_calendar_app_not_running(self):
+        """Non-zero rc with empty stdout (Calendar not running) → None."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "Calendar is not running."
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
+                linker = CalendarLinker(cache_minutes=1)
+                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
+
+
+class TestConcurrentLink(_DarwinPatchedTestCase):
+    """test_concurrent_link — thread-safe concurrent calls."""
+
+    def test_concurrent_link(self):
+        """Multiple threads calling find_active_event concurrently return consistent results."""
+        import threading
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = SAMPLE_RAW
+        mock_proc.stderr = ""
+        results = []
+        errors = []
+
+        def call_linker(linker, at_time):
+            try:
+                results.append(linker.find_active_event(at_time=at_time))
+            except Exception as e:
+                errors.append(e)
+
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=5)
+            at_time = datetime(2024, 4, 25, 10, 0)
+            threads = [threading.Thread(target=call_linker, args=(linker, at_time)) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 10)
+        # All results must be either equal to the sample event or None
+        for r in results:
+            if r is not None:
+                self.assertEqual(r["title"], "Stand-up")
+
+
+class TestLinkReturnsEventId(_DarwinPatchedTestCase):
+    """test_link_returns_event_id — returned dict contains expected keys."""
+
+    def test_link_returns_event_id(self):
+        """Returned event dict contains title, start_iso, end_iso, calendar_name keys."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = SAMPLE_RAW
+        mock_proc.stderr = ""
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=1)
+            result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNotNone(result)
+        for key in ("title", "start_iso", "end_iso", "calendar_name"):
+            self.assertIn(key, result)
+        # Internal _start_epoch must be stripped from result
+        self.assertNotIn("_start_epoch", result)
+
+
 if __name__ == "__main__":
     unittest.main()
