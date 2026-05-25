@@ -7,12 +7,14 @@
 - Retry с экспоненциальной задержкой (до 3 попыток).
 - Персистентность реестра в {data_dir}/webhooks.json.
 - Статистику доставки на webhook.
+- SSRF-защита: блокируются localhost, RFC1918, link-local и mDNS адреса.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import threading
@@ -21,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -30,6 +33,60 @@ _WEBHOOKS_FILE = "webhooks.json"
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 1.0  # 1s → 2s → 4s
 _REQUEST_TIMEOUT_SEC = 10
+
+# ---------------------------------------------------------------------------
+# SSRF guard
+# ---------------------------------------------------------------------------
+
+# Имена хостов, которые всегда блокируются независимо от настроек
+_BLOCKED_HOSTNAMES: frozenset[str] = frozenset({"localhost", "0.0.0.0", ""})
+
+
+def _is_safe_webhook_url(url: str, allow_local: bool = False) -> tuple[bool, str | None]:
+    """Проверяет URL на безопасность для использования в качестве webhook.
+
+    Блокирует:
+    - localhost / 0.0.0.0 / пустой хост
+    - mDNS .local домены
+    - IPv4 loopback (127.0.0.0/8), private (RFC1918), link-local (169.254.0.0/16)
+    - IPv6 loopback (::1) и link-local
+    - Схемы кроме http/https
+
+    Args:
+        url: URL для проверки.
+        allow_local: если True — пропускает проверку SSRF (для dev-режима).
+
+    Returns:
+        (is_safe, reject_reason) — is_safe=True если URL прошёл все проверки.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False, "only http/https allowed"
+
+    if allow_local:
+        return True, None
+
+    host = (parsed.hostname or "").lower()
+
+    if host in _BLOCKED_HOSTNAMES:
+        return False, f"localhost/empty host blocked ({host!r})"
+
+    if host.endswith(".local"):
+        return False, "mDNS .local hosts blocked"
+
+    # Попытка разобрать как IP-адрес (literal)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback:
+            return False, f"loopback IP blocked ({ip})"
+        if ip.is_link_local:
+            return False, f"link-local IP blocked ({ip})"
+        if ip.is_private:
+            return False, f"private/RFC1918 IP blocked ({ip})"
+    except ValueError:
+        pass  # не IP-литерал — продолжаем как hostname
+
+    return True, None
 
 
 class WebhookManager:
@@ -93,25 +150,34 @@ class WebhookManager:
     # Публичный API
     # ------------------------------------------------------------------
 
-    def register_webhook(self, url: str, events: list[str], secret: str = "") -> str:
+    def register_webhook(
+        self,
+        url: str,
+        events: list[str],
+        secret: str = "",
+        allow_local: bool = False,
+    ) -> str:
         """Регистрирует новый webhook и возвращает его ID.
 
         Args:
             url: целевой URL (должен начинаться с http:// или https://).
             events: список типов событий для фильтрации; [] = все события.
             secret: секрет для HMAC-SHA256; "" = без подписи.
+            allow_local: отключить SSRF-проверку (только для dev/self-hosted окружений).
+                         Соответствует настройке ``webhook_allow_local`` в settings.
 
         Returns:
             webhook_id (UUID4 строка).
 
         Raises:
-            ValueError: если url пустой или не является HTTP(S) URL.
+            ValueError: если url пустой, не является HTTP(S) URL, или отклонён SSRF-защитой.
         """
         url = url.strip()
         if not url:
             raise ValueError("URL не может быть пустым")
-        if not (url.startswith("http://") or url.startswith("https://")):
-            raise ValueError(f"Некорректный URL (нужен http:// или https://): {url!r}")
+        safe, reason = _is_safe_webhook_url(url, allow_local=allow_local)
+        if not safe:
+            raise ValueError(f"URL отклонён защитой SSRF ({reason}): {url!r}")
 
         webhook_id = str(uuid.uuid4())
         entry: dict[str, Any] = {
@@ -229,7 +295,9 @@ class WebhookManager:
             raise RuntimeError("events должен быть списком строк")
         events = [str(e) for e in events]
         secret = str(params.get("secret", ""))
-        webhook_id = self.register_webhook(url=url, events=events, secret=secret)
+        # webhook_allow_local: opt-in для dev-окружений с самохостинговыми сервисами
+        allow_local: bool = bool(params.get("webhook_allow_local", False))
+        webhook_id = self.register_webhook(url=url, events=events, secret=secret, allow_local=allow_local)
         return {"webhook_id": webhook_id}
 
     def handle_unregister_webhook(self, params: dict[str, Any]) -> dict[str, Any]:
