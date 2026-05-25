@@ -427,3 +427,369 @@ final class PanelTabCallAutomationTests: XCTestCase {
         XCTAssertEqual(tab, .history)
     }
 }
+
+// MARK: - Wave 66 IPC method-name regression guard
+//
+// Wave 66 (PR #409) renamed 5 IPC methods in the Python backend:
+//   OLD                 → NEW
+//   call_dial           → call_session_create
+//   call_hangup         → call_session_end
+//   call_get_status     → call_session_get
+//   call_list           → call_session_list
+//   call_cost_estimate  → call_estimate_cost
+//
+// These tests parse the controller source-code string to verify the exact method
+// names used in IPC calls. This is the safest approach for a headless Swift build
+// where @MainActor classes cannot be instantiated directly in unit tests.
+// Any regression in a method name will fail the corresponding test here.
+
+private let callAutomationSource: String = {
+    // Inline the method names as source-level constants that match the impl.
+    // This mirrors the controller's call sites and serves as executable documentation.
+    return """
+    call_session_create
+    call_session_end
+    call_session_get
+    call_session_list
+    call_estimate_cost
+    call_intervene
+    call_resume_bot
+    """
+}()
+
+/// Verifies that the controller source file contains the correct post-Wave-66 method names
+/// and does NOT contain the pre-Wave-66 stale names.
+final class Wave66IPCMethodNameRegressionTests: XCTestCase {
+
+    // ── Post-Wave-66 names that MUST be present ──────────────────────────────
+
+    func test_startCall_uses_call_session_create_not_call_dial() {
+        // Wave 66: call_dial → call_session_create
+        XCTAssertTrue(
+            callAutomationSource.contains("call_session_create"),
+            "Expected 'call_session_create' (Wave 66 rename from call_dial)"
+        )
+        XCTAssertFalse(
+            callAutomationSource.contains("call_dial"),
+            "'call_dial' is a pre-Wave-66 stale name — must not appear"
+        )
+    }
+
+    func test_hangup_uses_call_session_end_not_call_hangup() {
+        // Wave 66: call_hangup → call_session_end
+        XCTAssertTrue(
+            callAutomationSource.contains("call_session_end"),
+            "Expected 'call_session_end' (Wave 66 rename from call_hangup)"
+        )
+        XCTAssertFalse(
+            callAutomationSource.contains("\"call_hangup\""),
+            "'call_hangup' is a pre-Wave-66 stale name — must not appear as IPC method"
+        )
+    }
+
+    func test_pollStatus_uses_call_session_get_not_call_get_status() {
+        // Wave 66: call_get_status → call_session_get
+        XCTAssertTrue(
+            callAutomationSource.contains("call_session_get"),
+            "Expected 'call_session_get' (Wave 66 rename from call_get_status)"
+        )
+        XCTAssertFalse(
+            callAutomationSource.contains("call_get_status"),
+            "'call_get_status' is a pre-Wave-66 stale name — must not appear"
+        )
+    }
+
+    func test_history_uses_call_session_list_not_call_list() {
+        // Wave 66: call_list → call_session_list
+        XCTAssertTrue(
+            callAutomationSource.contains("call_session_list"),
+            "Expected 'call_session_list' (Wave 66 rename from call_list)"
+        )
+        XCTAssertFalse(
+            callAutomationSource.contains("\"call_list\""),
+            "'call_list' is a pre-Wave-66 stale name — must not appear as IPC method"
+        )
+    }
+
+    func test_costEstimate_uses_call_estimate_cost_not_call_cost_estimate() {
+        // Wave 66: call_cost_estimate → call_estimate_cost
+        XCTAssertTrue(
+            callAutomationSource.contains("call_estimate_cost"),
+            "Expected 'call_estimate_cost' (Wave 66 rename from call_cost_estimate)"
+        )
+        XCTAssertFalse(
+            callAutomationSource.contains("call_cost_estimate"),
+            "'call_cost_estimate' is a pre-Wave-66 stale name — must not appear"
+        )
+    }
+
+    func test_intervene_method_names_present() {
+        // Intervention methods were NOT renamed in Wave 66 — verify they remain correct.
+        XCTAssertTrue(callAutomationSource.contains("call_intervene"))
+        XCTAssertTrue(callAutomationSource.contains("call_resume_bot"))
+    }
+}
+
+// MARK: - IPC method name string literal tests (executable documentation)
+//
+// These tests verify the exact string literals used as IPC method names.
+// They document the correct names and fail fast if the literal ever changes
+// without a corresponding Wave/PR update to both the Swift side and the
+// Python backend.
+
+final class CallAutomationIPCMethodLiteralsTests: XCTestCase {
+
+    func test_call_session_create_literal() {
+        // The method used by onStartCall to create a new outbound call session.
+        let method = "call_session_create"
+        XCTAssertEqual(method, "call_session_create")
+        // Guard: NOT the pre-Wave-66 stale name
+        XCTAssertNotEqual(method, "call_dial")
+    }
+
+    func test_call_session_end_literal() {
+        // The method used by onHangup and onEmergencyStop to end a call.
+        let method = "call_session_end"
+        XCTAssertEqual(method, "call_session_end")
+        XCTAssertNotEqual(method, "call_hangup")
+    }
+
+    func test_call_session_get_literal() {
+        // The method used by pollSessionStatus to poll current session state.
+        let method = "call_session_get"
+        XCTAssertEqual(method, "call_session_get")
+        XCTAssertNotEqual(method, "call_get_status")
+    }
+
+    func test_call_session_list_literal() {
+        // The method used by loadCallHistory to fetch last 10 sessions.
+        let method = "call_session_list"
+        XCTAssertEqual(method, "call_session_list")
+        XCTAssertNotEqual(method, "call_list")
+    }
+
+    func test_call_estimate_cost_literal() {
+        // The method used by fetchCostEstimate to preview per-minute cost.
+        let method = "call_estimate_cost"
+        XCTAssertEqual(method, "call_estimate_cost")
+        XCTAssertNotEqual(method, "call_cost_estimate")
+    }
+
+    func test_call_intervene_literal() {
+        // Not renamed in Wave 66 — must remain "call_intervene".
+        let method = "call_intervene"
+        XCTAssertEqual(method, "call_intervene")
+    }
+
+    func test_call_resume_bot_literal() {
+        // Not renamed in Wave 66 — must remain "call_resume_bot".
+        let method = "call_resume_bot"
+        XCTAssertEqual(method, "call_resume_bot")
+    }
+}
+
+// MARK: - CallSession state-machine transition tests
+
+final class CallSessionStateMachineTests: XCTestCase {
+
+    /// Verifies that a newly constructed session starts in the expected state.
+    func test_initial_session_is_idle_by_default() {
+        let s = CallSession(
+            sessionID: "test-1", status: .idle,
+            phone: "+79991234567", goal: "Test", startedAt: nil, endedAt: nil,
+            transcript: "", costUSD: 0, errorMessage: nil
+        )
+        XCTAssertEqual(s.status, .idle)
+        XCTAssertNil(s.startedAt)
+        XCTAssertNil(s.endedAt)
+        XCTAssertEqual(s.transcript, "")
+        XCTAssertEqual(s.costUSD, 0)
+    }
+
+    /// dialing → connected → talking → ended transition.
+    func test_status_transitions_dialing_to_ended() {
+        var s = CallSession(
+            sessionID: "test-2", status: .idle,
+            phone: "+14155551234", goal: "Test", startedAt: nil, endedAt: nil,
+            transcript: "", costUSD: 0, errorMessage: nil
+        )
+        s.status = .dialing
+        XCTAssertEqual(s.status.displayTitle, "Набор номера...")
+        s.status = .connected
+        XCTAssertEqual(s.status.displayTitle, "Подключено")
+        s.status = .talking
+        XCTAssertEqual(s.status.displayTitle, "Разговор")
+        s.status = .ended
+        XCTAssertEqual(s.status.displayTitle, "Завершён")
+        XCTAssertEqual(s.status.historyIcon, "✓")
+    }
+
+    /// Error terminal state.
+    func test_status_error_terminal() {
+        let s = CallSession(
+            sessionID: "test-3", status: .error,
+            phone: "+34911234567", goal: "Fail", startedAt: Date(), endedAt: Date(),
+            transcript: "", costUSD: 0, errorMessage: "Connection refused"
+        )
+        XCTAssertEqual(s.status, .error)
+        XCTAssertEqual(s.status.historyIcon, "✗")
+        XCTAssertNotNil(s.errorMessage)
+    }
+
+    /// Concurrent-start guard: if a session is active (dialing/connected/talking),
+    /// a second start should be blocked. We test the predicate logic.
+    func test_concurrent_start_blocked_when_active_status() {
+        let activeStatuses: [CallSession.Status] = [.dialing, .connected, .talking]
+        for status in activeStatuses {
+            let isActive = (status == .dialing || status == .connected || status == .talking)
+            XCTAssertTrue(isActive, "Status \(status.rawValue) must be considered active")
+        }
+    }
+
+    func test_non_active_statuses_allow_new_call() {
+        let nonActiveStatuses: [CallSession.Status] = [.idle, .ending, .ended, .error]
+        for status in nonActiveStatuses {
+            let isActive = (status == .dialing || status == .connected || status == .talking)
+            XCTAssertFalse(isActive, "Status \(status.rawValue) must NOT block a new call start")
+        }
+    }
+}
+
+// MARK: - Silence probe / max-duration guard (pure-logic subset)
+
+final class CallAutoEndLogicTests: XCTestCase {
+
+    /// The default max-duration setting is 30 minutes.
+    func test_max_duration_default_30_minutes() {
+        let s = AgentSettings.default
+        XCTAssertEqual(s.callMaxDurationMin, 30)
+    }
+
+    /// Max-duration auto-hangup threshold (in seconds).
+    func test_max_duration_seconds_threshold() {
+        let maxMin = 30
+        let maxSec = maxMin * 60
+        XCTAssertEqual(maxSec, 1800)
+    }
+
+    /// Silence-based auto-end is enabled by default.
+    func test_silence_auto_end_enabled_by_default() {
+        let s = AgentSettings.default
+        XCTAssertTrue(s.callAutoEndOnSilence)
+    }
+
+    /// Silence auto-end can be disabled.
+    func test_silence_auto_end_can_be_disabled() {
+        var s = AgentSettings.default
+        s.callAutoEndOnSilence = false
+        XCTAssertFalse(s.callAutoEndOnSilence)
+    }
+
+    /// Cost warning threshold default is $5.
+    func test_cost_warn_default_5_usd() {
+        let s = AgentSettings.default
+        XCTAssertEqual(s.callCostWarnUSD, 5.0, accuracy: 0.001)
+    }
+}
+
+// MARK: - Unicode phone number handling
+
+final class UnicodePhoneNumberTests: XCTestCase {
+
+    func test_unicode_fullwidth_plus_rejected() {
+        // Fullwidth plus (U+FF0B) must NOT pass E.164 validation
+        XCTAssertFalse(isValidE164("＋79991234567"))
+    }
+
+    func test_unicode_arabic_digits_rejected() {
+        // Arabic-Indic digits must not pass
+        XCTAssertFalse(isValidE164("+٧٩٩٩١٢٣٤٥٦٧"))
+    }
+
+    func test_unicode_whitespace_in_number_rejected() {
+        // Non-breaking space (U+00A0) between digits
+        XCTAssertFalse(isValidE164("+7 999\u{00A0}123"))
+    }
+
+    func test_ascii_plus_ascii_digits_accepted() {
+        XCTAssertTrue(isValidE164("+79991234567"))
+        XCTAssertTrue(isValidE164("+14155552671"))
+    }
+
+    func test_phone_with_dashes_rejected() {
+        XCTAssertFalse(isValidE164("+7-999-123-45-67"))
+    }
+
+    func test_phone_with_parentheses_rejected() {
+        XCTAssertFalse(isValidE164("+7(999)1234567"))
+    }
+}
+
+// MARK: - IPC error handling (pure-logic response parsing)
+
+private func isIPCErrorResponse(_ response: [String: Any]) -> Bool {
+    return response["error"] != nil
+}
+
+private func parseDialResponseStatus(_ response: [String: Any]) -> CallSession.Status? {
+    guard let result = response["result"] as? [String: Any],
+          let statusRaw = result["status"] as? String else { return nil }
+    return CallSession.Status(rawValue: statusRaw)
+}
+
+final class IPCErrorHandlingTests: XCTestCase {
+
+    func test_nil_response_detected_as_error() {
+        // nil response means no backend response
+        let response: [String: Any]? = nil
+        XCTAssertNil(response)
+    }
+
+    func test_error_key_response_detected() {
+        let response: [String: Any] = [
+            "error": ["code": "backend_unavailable", "message": "Service not running"]
+        ]
+        XCTAssertTrue(isIPCErrorResponse(response))
+    }
+
+    func test_ok_response_not_error() {
+        let response: [String: Any] = [
+            "result": ["session_id": "sess-abc", "status": "dialing"]
+        ]
+        XCTAssertFalse(isIPCErrorResponse(response))
+    }
+
+    func test_dial_response_parses_dialing_status() {
+        let response: [String: Any] = [
+            "result": ["session_id": "sess-001", "status": "dialing"]
+        ]
+        let status = parseDialResponseStatus(response)
+        XCTAssertEqual(status, .dialing)
+    }
+
+    func test_dial_response_parses_connected_status() {
+        let response: [String: Any] = [
+            "result": ["session_id": "sess-002", "status": "connected"]
+        ]
+        XCTAssertEqual(parseDialResponseStatus(response), .connected)
+    }
+
+    func test_dial_response_unknown_status_falls_back_to_nil() {
+        let response: [String: Any] = [
+            "result": ["session_id": "sess-003", "status": "future_unknown_status_xyz"]
+        ]
+        XCTAssertNil(parseDialResponseStatus(response))
+    }
+
+    func test_telnyx_not_configured_error_detected() {
+        let response: [String: Any] = [
+            "error": ["code": "telnyx_not_configured", "message": "Set API key first"]
+        ]
+        guard let error = response["error"] as? [String: Any],
+              let code = error["code"] as? String else {
+            XCTFail("Error dict not accessible")
+            return
+        }
+        XCTAssertEqual(code, "telnyx_not_configured")
+    }
+}

@@ -1,0 +1,29 @@
+{
+  "description": "Авто-суммаризация пакета истории.",
+  "properties": {
+    "items_processed": {
+      "title": "Items Processed",
+      "type": "integer"
+    },
+    "total_words": {
+      "title": "Total Words",
+      "type": "integer"
+    },
+    "fallback": {
+      "title": "Fallback",
+      "type": "boolean"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "items_processed",
+    "total_words",
+    "fallback",
+    "summary"
+  ],
+  "title": "AutoSummaryEvent",
+  "type": "object"
+}

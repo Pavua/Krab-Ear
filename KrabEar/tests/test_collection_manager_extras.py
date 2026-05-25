@@ -214,7 +214,6 @@ class ConcurrentTestCase(unittest.TestCase):
         # After race: either collection exists or it doesn't — either is fine.
         # What matters is list_collections doesn't raise and is self-consistent.
         cols = self._mgr.list_collections()
-        names = {c["name"] for c in cols}
         # If CD was re-created after delete, it should appear once.
         count = sum(1 for c in cols if c["name"] == "CD")
         self.assertLessEqual(count, 1)

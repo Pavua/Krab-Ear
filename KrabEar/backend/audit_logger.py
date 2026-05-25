@@ -49,8 +49,20 @@ class AuditLogger:
         client_info: dict | None = None,
     ) -> None:
         """Записывает одну запись аудита."""
+        from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
         ts = datetime.now(timezone.utc).isoformat()
         success = bool(result.get("ok", False)) if isinstance(result, dict) else False
+
+        _add_bc(
+            category="audit",
+            message="ipc_request",
+            level="debug",
+            data={
+                "method": method,
+                "duration_ms": round(duration_ms, 2),
+                "ok": success,
+            },
+        )
 
         entry: dict[str, Any] = {
             "ts": ts,

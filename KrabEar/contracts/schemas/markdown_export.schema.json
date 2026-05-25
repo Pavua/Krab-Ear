@@ -1,0 +1,24 @@
+{
+  "description": "Экспорт истории в Markdown.",
+  "properties": {
+    "entries": {
+      "title": "Entries",
+      "type": "integer"
+    },
+    "chars": {
+      "title": "Chars",
+      "type": "integer"
+    },
+    "copy_to_clipboard": {
+      "title": "Copy To Clipboard",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "entries",
+    "chars",
+    "copy_to_clipboard"
+  ],
+  "title": "MarkdownExportEvent",
+  "type": "object"
+}

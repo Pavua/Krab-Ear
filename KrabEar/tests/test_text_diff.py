@@ -217,5 +217,129 @@ class TestTextDiffAnalyzerRussian(unittest.TestCase):
         self.assertGreater(result.similarity_ratio, 0.5)
 
 
+class TestTextDiffWave131(unittest.TestCase):
+    """Wave 131 required test cases for TextDiffAnalyzer."""
+
+    def setUp(self):
+        self.analyzer = TextDiffAnalyzer()
+
+    # ------------------------------------------------------------------
+    # test_identical_returns_empty_diff
+    # ------------------------------------------------------------------
+    def test_identical_returns_empty_diff(self):
+        result = self.analyzer.compute_diff("hello world", "hello world")
+        added = [c for c in result.changes if c.type != "unchanged"]
+        self.assertEqual(added, [])
+        self.assertEqual(result.words_added, 0)
+        self.assertEqual(result.words_removed, 0)
+
+    # ------------------------------------------------------------------
+    # test_word_inserted
+    # ------------------------------------------------------------------
+    def test_word_inserted(self):
+        result = self.analyzer.compute_diff("foo bar", "foo baz bar")
+        added = [c for c in result.changes if c.type == "added"]
+        self.assertEqual(result.words_added, 1)
+        self.assertTrue(any(c.text == "baz" for c in added))
+
+    # ------------------------------------------------------------------
+    # test_word_deleted
+    # ------------------------------------------------------------------
+    def test_word_deleted(self):
+        result = self.analyzer.compute_diff("alpha beta gamma", "alpha gamma")
+        removed = [c for c in result.changes if c.type == "removed"]
+        self.assertEqual(result.words_removed, 1)
+        self.assertTrue(any(c.text == "beta" for c in removed))
+
+    # ------------------------------------------------------------------
+    # test_word_replaced
+    # ------------------------------------------------------------------
+    def test_word_replaced(self):
+        result = self.analyzer.compute_diff("the old word here", "the new word here")
+        removed = [c for c in result.changes if c.type == "removed"]
+        added = [c for c in result.changes if c.type == "added"]
+        self.assertEqual(result.words_removed, 1)
+        self.assertEqual(result.words_added, 1)
+        self.assertTrue(any(c.text == "old" for c in removed))
+        self.assertTrue(any(c.text == "new" for c in added))
+
+    # ------------------------------------------------------------------
+    # test_unicode_words
+    # ------------------------------------------------------------------
+    def test_unicode_words(self):
+        result = self.analyzer.compute_diff("привет мир дела", "привет свет дела")
+        removed = [c for c in result.changes if c.type == "removed"]
+        added = [c for c in result.changes if c.type == "added"]
+        unchanged = [c for c in result.changes if c.type == "unchanged"]
+        self.assertTrue(any(c.text == "мир" for c in removed))
+        self.assertTrue(any(c.text == "свет" for c in added))
+        # "привет" and "дела" should be unchanged
+        self.assertTrue(any(c.text == "привет" for c in unchanged))
+        self.assertTrue(any(c.text == "дела" for c in unchanged))
+
+    def test_unicode_similarity_range(self):
+        result = self.analyzer.compute_diff("こんにちは 世界", "こんにちは 友達")
+        self.assertGreaterEqual(result.similarity_ratio, 0.0)
+        self.assertLessEqual(result.similarity_ratio, 1.0)
+
+    # ------------------------------------------------------------------
+    # test_handles_whitespace_changes
+    # ------------------------------------------------------------------
+    def test_handles_whitespace_changes(self):
+        """Extra whitespace collapses at word level — no crash, sensible results."""
+        result = self.analyzer.compute_diff("hello   world", "hello world")
+        # Both split to same two words → should report no meaningful diff
+        self.assertIsInstance(result, TextDiffResult)
+        self.assertEqual(result.words_added, 0)
+        self.assertEqual(result.words_removed, 0)
+
+    def test_handles_leading_trailing_whitespace(self):
+        result = self.analyzer.compute_diff("  hello world  ", "hello world")
+        self.assertIsInstance(result, TextDiffResult)
+        # str.split() strips leading/trailing, so word lists are identical
+        self.assertEqual(result.words_added, 0)
+        self.assertEqual(result.words_removed, 0)
+
+    def test_handles_newlines_as_whitespace(self):
+        """Newlines are treated as whitespace in word splitting."""
+        result = self.analyzer.compute_diff("line one\nline two", "line one line two")
+        self.assertIsInstance(result, TextDiffResult)
+        self.assertEqual(result.words_added, 0)
+        self.assertEqual(result.words_removed, 0)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_diff
+    # ------------------------------------------------------------------
+    def test_concurrent_diff(self):
+        """Concurrent calls on the same analyzer instance are safe."""
+        import threading
+        results = {}
+        errors = []
+
+        def worker(idx: int) -> None:
+            try:
+                orig = f"word{idx} stays removed{idx}"
+                rewr = f"word{idx} stays added{idx}"
+                res = self.analyzer.compute_diff(orig, rewr)
+                results[idx] = res
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        for idx, res in results.items():
+            removed = [c for c in res.changes if c.type == "removed"]
+            added = [c for c in res.changes if c.type == "added"]
+            self.assertEqual(res.words_removed, 1, f"thread {idx}")
+            self.assertEqual(res.words_added, 1, f"thread {idx}")
+            self.assertTrue(any(c.text == f"removed{idx}" for c in removed), f"thread {idx}")
+            self.assertTrue(any(c.text == f"added{idx}" for c in added), f"thread {idx}")
+
+
 if __name__ == "__main__":
     unittest.main()

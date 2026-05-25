@@ -220,5 +220,136 @@ class TestSessionTrackerMaxBuffer(unittest.TestCase):
         self.assertFalse(result["had_diarization"])
 
 
+class TestSessionTrackerRequiredCases(unittest.TestCase):
+    """Обязательные тест-кейсы Wave 134."""
+
+    def setUp(self):
+        self.tracker = SessionTracker()
+
+    # test_start_session_records_metadata
+    def test_start_session_records_metadata(self):
+        """start_session записывает device, preset, model в активную сессию."""
+        sid = self.tracker.start_session(
+            audio_device="Rode NT-USB",
+            quality_preset="max",
+            stt_model="whisper-large-v3",
+        )
+        result = self.tracker.end_session({})
+        self.assertIsNotNone(result)
+        self.assertEqual(result["session_id"], sid)
+        self.assertEqual(result["audio_device"], "Rode NT-USB")
+        self.assertEqual(result["quality_preset"], "max")
+        self.assertEqual(result["stt_model"], "whisper-large-v3")
+        self.assertIsNotNone(result["started_at"])
+        self.assertIsNotNone(result["ended_at"])
+
+    # test_end_session_finalizes
+    def test_end_session_finalizes(self):
+        """end_session: активная сессия становится None после завершения."""
+        self.tracker.start_session()
+        self.tracker.end_session({"duration_sec": 1.5, "paste_status": "ok"})
+        # Второй end без start → None
+        result = self.tracker.end_session({})
+        self.assertIsNone(result)
+
+    # test_get_session_by_id (через get_sessions фильтрация)
+    def test_get_session_by_id(self):
+        """Можно найти сессию по session_id в списке get_sessions."""
+        sid = self.tracker.start_session(audio_device="FocusRite")
+        self.tracker.end_session({"duration_sec": 3.0})
+        sessions = self.tracker.get_sessions(limit=10)
+        found = next((s for s in sessions if s["session_id"] == sid), None)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["audio_device"], "FocusRite")
+
+    # test_active_sessions_filter
+    def test_active_sessions_filter(self):
+        """Незавершённые сессии не попадают в get_sessions."""
+        # Стартуем но НЕ завершаем
+        self.tracker.start_session(audio_device="PendingDevice")
+        sessions = self.tracker.get_sessions()
+        # Активная сессия не должна быть в списке
+        device_names = [s.get("audio_device") for s in sessions]
+        self.assertNotIn("PendingDevice", device_names)
+
+    # test_persist_reload
+    def test_persist_reload(self):
+        """Данные в sessions.ndjson перечитываются корректно после записи."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = SessionTracker(data_dir=tmpdir)
+            sid = tracker.start_session(audio_device="Reload-Mic")
+            tracker.end_session({"duration_sec": 7.7, "paste_status": "ok"})
+
+            sessions_file = Path(tmpdir) / "sessions.ndjson"
+            lines = sessions_file.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0])
+            self.assertEqual(record["session_id"], sid)
+            self.assertAlmostEqual(record["duration_sec"], 7.7, places=3)
+            self.assertEqual(record["audio_device"], "Reload-Mic")
+
+    # test_unicode_device_name
+    def test_unicode_device_name(self):
+        """Имя устройства с кириллицей/emoji сохраняется без потерь."""
+        device_name = "Микрофон Краба 🎙️"
+        self.tracker.start_session(audio_device=device_name)
+        result = self.tracker.end_session({"duration_sec": 1.0})
+        self.assertEqual(result["audio_device"], device_name)
+
+        # И в NDJSON тоже
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker2 = SessionTracker(data_dir=tmpdir)
+            tracker2.start_session(audio_device=device_name)
+            tracker2.end_session({"duration_sec": 1.0})
+            data = (Path(tmpdir) / "sessions.ndjson").read_text(encoding="utf-8")
+            record = json.loads(data.strip())
+            self.assertEqual(record["audio_device"], device_name)
+
+    # test_concurrent_start_end
+    def test_concurrent_start_end(self):
+        """Параллельные завершения сессий не приводят к потере данных."""
+        import threading
+
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def run_session(device_name):
+            try:
+                tracker = SessionTracker()
+                tracker.start_session(audio_device=device_name)
+                rec = tracker.end_session({"duration_sec": 0.5, "paste_status": "ok"})
+                with lock:
+                    results.append(rec)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=run_session, args=(f"Device-{i}",)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Errors: {errors}")
+        self.assertEqual(len(results), 8)
+        for rec in results:
+            self.assertIsNotNone(rec["session_id"])
+            self.assertIsNotNone(rec["ended_at"])
+
+    # test_concurrent_start_end на одном экземпляре
+    def test_concurrent_shared_tracker(self):
+        """Shared SessionTracker: только последняя start_session видна end_session."""
+        # SessionTracker имеет одну активную сессию — sequential semantics ожидаемы.
+        tracker = SessionTracker()
+        # Последовательные пары должны работать без ошибок
+        for i in range(10):
+            tracker.start_session(audio_device=f"Dev-{i}")
+            r = tracker.end_session({"duration_sec": float(i)})
+            self.assertIsNotNone(r)
+        sessions = tracker.get_sessions(limit=100)
+        self.assertEqual(len(sessions), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

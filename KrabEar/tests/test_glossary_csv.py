@@ -9,7 +9,7 @@ KRAB_EAR_ROOT = os.path.join(PROJECT_ROOT, "KrabEar")
 if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 def _make_service_with_glossary(glossary: dict):
@@ -177,7 +177,8 @@ class TestExportGlossaryCsv(unittest.TestCase):
         result = svc._handle_export_glossary_csv({})
         self.assertTrue(result["ok"])
         # The CSV should be parseable back
-        import csv, io
+        import csv
+        import io
         reader = csv.reader(io.StringIO(result["csv"]))
         rows = list(reader)
         data_rows = [r for r in rows if r and r[0] != "source"]

@@ -16,7 +16,7 @@ import sys
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Project root on sys.path for standalone discovery
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,8 +28,6 @@ from core.stt_router import (  # noqa: E402
     score_adapter,
     score_adapters,
     select_adapter_scored,
-    _GIGAAM_DURATION_PENALTY_THRESHOLD_S,
-    _GIGAAM_DURATION_PENALTY,
 )
 
 
