@@ -311,5 +311,76 @@ class TestCalibratorDetailedRawPreserved(unittest.TestCase):
         self.assertEqual(score.calibrated, round(score.calibrated, 4))
 
 
+class TestCalibratorWave116Required(unittest.TestCase):
+    """Wave 116 — required named tests for ConfidenceCalibrator."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_min_max_clamping(self):
+        """Результат всегда зажат в [0.0, 1.0] при любых входных данных."""
+        # well below zero after penalties
+        low = self.cal.calibrate(-5.0, duration_sec=0.5, language="en", model="balanced")
+        self.assertGreaterEqual(low, 0.0)
+        # well above 1 after boost
+        high = self.cal.calibrate(5.0, duration_sec=120.0, language="ru", model="max")
+        self.assertLessEqual(high, 1.0)
+
+    def test_negative_value_clamped_to_zero(self):
+        """raw_confidence отрицательный → calibrated == 0.0."""
+        result = self.cal.calibrate(-0.3, duration_sec=5.0, language="ru", model="max")
+        self.assertEqual(result, 0.0)
+
+    def test_value_above_one_clamped_to_one(self):
+        """raw_confidence > 1.0 с длинным бустом → calibrated == 1.0."""
+        result = self.cal.calibrate(1.2, duration_sec=120.0, language="ru", model="max")
+        self.assertEqual(result, 1.0)
+
+    def test_linear_mapping(self):
+        """При нейтральных условиях (нет поправок) calibrated == raw."""
+        # 10s duration, primary language, non-balanced model → нет ни одной поправки
+        for raw in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            result = self.cal.calibrate(raw, duration_sec=10.0, language="ru", model="max")
+            self.assertAlmostEqual(result, raw, places=4,
+                                   msg=f"linear mapping failed for raw={raw}")
+
+    def test_unicode_metadata_preserved(self):
+        """Языковые строки с unicode символами не вызывают ошибок и не применяют penalty."""
+        # "russian" входит в PRIMARY_LANGUAGES → нет penalty
+        result = self.cal.calibrate(0.8, duration_sec=10.0, language="русский", model="max")
+        # "русский" не в PRIMARY_LANGUAGES → применяется penalty -0.05
+        self.assertAlmostEqual(result, 0.75, places=4)
+        # Убеждаемся, что нет исключений при unicode language
+        score = self.cal.calibrate_detailed(0.8, duration_sec=10.0, language="中文", model="max")
+        self.assertIsInstance(score.calibrated, float)
+        self.assertGreaterEqual(score.calibrated, 0.0)
+
+    def test_concurrent_calibrate(self):
+        """Параллельные вызовы calibrate не вызывают data race и возвращают корректные значения."""
+        import threading
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(100):
+                    val = self.cal.calibrate(0.8, duration_sec=10.0, language="ru", model="max")
+                    results.append(val)
+                    assert 0.0 <= val <= 1.0, f"Out of range: {val}"
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 500)
+        stats = self.cal.get_calibration_stats()
+        self.assertEqual(stats["total_calibrations"], 500)
+
+
 if __name__ == "__main__":
     unittest.main()
