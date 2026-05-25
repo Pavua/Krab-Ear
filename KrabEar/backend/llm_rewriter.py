@@ -377,7 +377,13 @@ class LLMRewriter:
                 action_id=entry.get("action_id"),
             )
             error_bus.push(err)
-        except Exception:  # never raise from rewriter
+        except Exception as e:  # noqa: BLE001  # never raise from rewriter
+            # Wave 222: surface push failures to Sentry instead of silent swallow
+            try:
+                from backend.observability import capture_exception
+                capture_exception(e, "_push_error_internal")
+            except Exception:
+                pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
     def _postprocess(self, content: str) -> str:
@@ -427,6 +433,8 @@ class LLMRewriter:
 
     def _rewrite_impl(self, text: str) -> LLMRewriteResult:
         """Внутренняя реализация rewrite() — обёрнута профайлером в rewrite()."""
+        from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular at import
+
         # 1. Валидация входа
         cleaned_input = (text or "").strip()
         if not cleaned_input:
@@ -434,8 +442,25 @@ class LLMRewriter:
                 ok=False, text=None, fallback_reason="empty_input", latency_ms=None
             )
 
+        _add_bc(
+            category="rewriter",
+            message="rewrite_start",
+            level="debug",
+            data={
+                "circuit_state": self._circuit.state,
+                "model": self._model,
+                "input_chars": len(cleaned_input),
+            },
+        )
+
         # 2. Circuit breaker check
         if not self._circuit.allow_request():
+            _add_bc(
+                category="rewriter",
+                message="rewrite_skipped",
+                level="info",
+                data={"reason": "circuit_open", "circuit_state": self._circuit.state},
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
@@ -563,6 +588,37 @@ class LLMRewriter:
             latency_ms = int((time.monotonic() - start) * 1000)
             self._last_latency_ms = latency_ms
 
+        # 5b. LM Studio Metal GPU stream context lost: HTTP 500 with
+        # "Stream(gpu, N) in current thread" in body. This is a transient
+        # Metal/MLX internal error that resolves after a brief pause — retry
+        # once with 2s delay before recording a circuit failure.
+        if response.status_code == 500 and "stream(gpu" in response.text.lower():
+            logger.warning(
+                "LM Studio Stream(gpu) context lost (transient Metal error), "
+                "sleeping 2s and retrying once model=%s base_url=%s",
+                self._model, self._base_url,
+            )
+            time.sleep(2)
+            start = time.monotonic()
+            try:
+                with self._post_lock:
+                    response = self._session.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                latency_ms = int((time.monotonic() - start) * 1000)
+                self._last_latency_ms = latency_ms
+            except (requests.Timeout, requests.ConnectionError, requests.RequestException):
+                pass
+            if response.status_code == 500 and "stream(gpu" in response.text.lower():
+                self._push_error(
+                    "rewriter.lm_studio_stream_gpu_lost",
+                    "Stream(gpu, N) context persists after retry — Metal GPU stream lost",
+                    severity="warn",
+                )
+
         # 5a. mlx_lm 0.31.3 bundled bug: HTTP 500 with UnboundLocalError on 'token'
         if response.status_code == 500 and "cannot access local variable 'token'" in response.text:
             logger.warning(
@@ -620,12 +676,33 @@ class LLMRewriter:
                     "rewriter.channel_error",
                     f"http_{response.status_code}: {body_preview}",
                 )
+            elif response.status_code == 500 and "stream(gpu" in body_preview.lower():
+                # Metal GPU stream context lost — already retried once in step 5b;
+                # push dedicated code (not rewriter.timeout) so Sentry can dedupe correctly.
+                self._push_error(
+                    "rewriter.lm_studio_stream_gpu_lost",
+                    f"HTTP 500 Stream(gpu) context lost: {body_preview}",
+                    severity="warn",
+                )
             elif response.status_code == 500 and (
                 "<html" in body_preview.lower() or "<!doctype" in body_preview.lower()
             ):
                 self._push_error(
                     "rewriter.lm_studio_500",
                     f"HTTP 500 HTML body: {body_preview}",
+                    severity="error",
+                )
+            elif (
+                "there is no stream(gpu" in body_preview.lower()
+                or "metal command stream" in body_preview.lower()
+            ):
+                # Wave 171 / BACKEND-J: Metal CommandStream corrupted by concurrent
+                # MLX/GigaAM GPU pressure.  LM Studio returns HTTP 400 with body
+                # "RuntimeError: There is no Stream(gpu, N) in current thread".
+                # Previously fell through to rewriter.timeout — now a distinct code.
+                self._push_error(
+                    "rewriter.gpu_stream_error",
+                    f"http_{response.status_code}: {body_preview}",
                     severity="error",
                 )
             else:
@@ -687,6 +764,18 @@ class LLMRewriter:
                     marker,
                 )
                 self._last_error = "chatbot_response"
+                _add_bc(
+                    category="rewriter",
+                    message="rewrite_finish",
+                    level="warning",
+                    data={
+                        "ok": False,
+                        "fallback_reason": "chatbot_response",
+                        "latency_ms": latency_ms,
+                        "circuit_state": self._circuit.state,
+                        "model": self._model,
+                    },
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="chatbot_response", latency_ms=latency_ms
                 )
@@ -702,6 +791,11 @@ class LLMRewriter:
                     ratio * 100,
                 )
                 self._last_error = "output_too_short"
+                self._push_error(
+                    "rewriter.output_ratio_fallback",
+                    f"output_too_short: ratio={ratio:.2f} input_len={input_len} output_len={output_len}",
+                    severity="info",
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="output_too_short", latency_ms=latency_ms
                 )
@@ -711,6 +805,11 @@ class LLMRewriter:
                     ratio * 100,
                 )
                 self._last_error = "output_too_long"
+                self._push_error(
+                    "rewriter.output_ratio_fallback",
+                    f"output_too_long: ratio={ratio:.2f} input_len={input_len} output_len={output_len}",
+                    severity="info",
+                )
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="output_too_long", latency_ms=latency_ms
                 )
@@ -718,6 +817,17 @@ class LLMRewriter:
         # 10. Success
         self._circuit.record_success()
         self._last_error = None
+        _add_bc(
+            category="rewriter",
+            message="rewrite_finish",
+            level="info",
+            data={
+                "ok": True,
+                "latency_ms": latency_ms,
+                "circuit_state": self._circuit.state,
+                "model": self._model,
+            },
+        )
         return LLMRewriteResult(
             ok=True, text=cleaned, fallback_reason=None, latency_ms=latency_ms
         )

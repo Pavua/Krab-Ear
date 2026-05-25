@@ -134,11 +134,17 @@ class FeatureFlags:
         """Устанавливает значение флага и сохраняет в файл.
 
         Args:
-            flag_name: Имя флага (строка без пробелов).
+            flag_name: Имя флага (непустая строка без пробелов/символов новой строки).
             enabled: True — включить, False — отключить.
+
+        Raises:
+            ValueError: если flag_name пустой, не является строкой, или содержит
+                        только пробельные символы (пробел, таб, новая строка и т.д.).
         """
-        if not flag_name or not isinstance(flag_name, str):
-            raise ValueError("Имя флага должно быть непустой строкой")
+        if not flag_name or not isinstance(flag_name, str) or not flag_name.strip() or flag_name != flag_name.strip():
+            raise ValueError(
+                "Имя флага должно быть непустой строкой без ведущих/завершающих пробельных символов"
+            )
         with self._lock:
             self._flags[flag_name] = bool(enabled)
             self._save()

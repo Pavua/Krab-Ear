@@ -1,0 +1,48 @@
+{
+  "description": "Результат потоковой транскрипции + перевода для живых субтитров.",
+  "properties": {
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "translation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Translation"
+    },
+    "start_ts": {
+      "title": "Start Ts",
+      "type": "number"
+    },
+    "end_ts": {
+      "title": "End Ts",
+      "type": "number"
+    },
+    "language_detected": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Language Detected"
+    }
+  },
+  "required": [
+    "text",
+    "start_ts",
+    "end_ts"
+  ],
+  "title": "LiveSubsResult",
+  "type": "object"
+}

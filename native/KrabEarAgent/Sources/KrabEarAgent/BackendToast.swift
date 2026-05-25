@@ -10,6 +10,14 @@
  в applicationDidFinishLaunching (когда startup latency приемлема), чтобы
  ColorSync transform выполнился один раз до первого show().
 
+ AGENT-M fix (Wave 266): show() вызывал label.sizeToFit() + panel.orderFront()
+ синхронно на main thread. sizeToFit() на первом Cyrillic/emoji message
+ запускает CoreText glyph-metrics build → блокирует >16ms → _doOrderWindow
+ AppHang. Решение: prewarmPanel() теперь также прогревает шрифтовой кэш
+ через sizeToFit() с representative Cyrillic string. show() выставляет позицию
+ ДО orderFront (пока панель скрыта), избегая layout при видимом окне.
+ Guard на nil window предотвращает crash при stale bundle (AGENT-K сестра).
+
  Связи модуля:
  1) HealthMonitor: вызывает show() из onHangDetected.
  2) main.swift: вызывает prewarmPanel() в applicationDidFinishLaunching,
@@ -27,43 +35,90 @@ final class BackendToast {
 
     private init() {}
 
-    /// Pre-warm NSWindow + NSVisualEffectView при app init.
+    /// Pre-warm NSWindow + NSVisualEffectView + CoreText font cache при app init.
     ///
-    /// ColorSync transform на macOS 26 выполняется синхронно при первом
-    /// attach к window (viewDidMoveToWindow). Вызов при startup позволяет
-    /// "оплатить" эту цену один раз в нечувствительный момент, после чего
-    /// последующие show() не блокируют main thread.
+    /// 1. ColorSync transform на macOS 26 выполняется синхронно при первом
+    ///    attach к window (viewDidMoveToWindow). Вызов при startup позволяет
+    ///    "оплатить" эту цену один раз в нечувствительный момент.
+    /// 2. AGENT-M: label.sizeToFit() с Cyrillic строкой прогревает CoreText
+    ///    glyph-metrics build при startup, чтобы show() не блокировал main thread.
+    /// 3. positionPanel() вызывается заранее, чтобы _doOrderWindow не делал
+    ///    layout при первом orderFront.
     ///
     /// Безопасно вызывать несколько раз — повторный вызов игнорируется.
     func prewarmPanel() {
         guard panel == nil else { return }
         createPanel()
+        guard let panel = panel,
+              let label = panel.contentView?.subviews.first as? NSTextField
+        else { return }
+
+        // Прогрев CoreText glyph cache: representative Cyrillic + Latin + emoji string.
+        // Это тот же шрифт (systemFont 13pt .medium), который используется в show().
+        label.stringValue = "Backend перезапущен ✓"
+        label.sizeToFit()
+        label.stringValue = ""
+
+        // Позиционируем ДО первого orderFront, чтобы при show() окно уже знало свои координаты.
+        positionPanel(panel)
+
         // orderFrontRegardless + немедленный orderOut заставляет AppKit
         // выполнить NSVisualEffectView layout и ColorSync transform,
         // после чего скрываем панель.
-        panel?.orderFrontRegardless()
-        panel?.orderOut(nil)
+        panel.orderFrontRegardless()
+        panel.orderOut(nil)
     }
 
     /// Показывает toast с заданным текстом на `duration` секунд.
     /// Повторный вызов до dismiss заменяет текст на новый.
+    ///
+    /// AGENT-M: позиционирование выполняется ДО orderFront пока окно скрыто,
+    /// избегая синхронного layout pass в _doOrderWindow на видимом окне.
+    /// Guard на nil window предотвращает crash при stale bundle (сестра AGENT-K).
     func show(_ message: String, duration: TimeInterval = 3.0) {
         dismissTimer?.invalidate()
 
         if panel == nil {
             createPanel()
         }
-        guard let panel = panel,
-              let label = panel.contentView?.subviews.first as? NSTextField
+        guard let panel = panel else { return }
+
+        guard let label = panel.contentView?.subviews.first as? NSTextField
         else { return }
 
+        // Если панель уже видима (repeat show) — только обновляем текст.
+        if panel.isVisible {
+            updateLabelAndScheduleDismiss(panel: panel, message: message, duration: duration)
+            return
+        }
+
         label.stringValue = message
+        // sizeToFit после прогрева в prewarmPanel() — быстро (glyph cache hit).
         label.sizeToFit()
 
+        // Позиционируем ПОКА панель скрыта — layout без CALayer commit на экране.
+        // AGENT-M: это ключевой момент — positionPanel до orderFront предотвращает
+        // синхронный layout в _doOrderWindow, который был источником AppHang.
         positionPanel(panel)
         panel.alphaValue = 1.0
+        // orderFront после позиционирования: _doOrderWindow только композитирует
+        // уже готовый CALayer, не делает layout заново.
         panel.orderFront(nil)
 
+        scheduleDismiss(duration: duration)
+    }
+
+    // MARK: - Private helpers
+
+    private func updateLabelAndScheduleDismiss(panel: NSPanel, message: String, duration: TimeInterval) {
+        guard let label = panel.contentView?.subviews.first as? NSTextField else { return }
+        label.stringValue = message
+        label.sizeToFit()
+        panel.alphaValue = 1.0
+        scheduleDismiss(duration: duration)
+    }
+
+    private func scheduleDismiss(duration: TimeInterval) {
         dismissTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.fadeOutAndHide()

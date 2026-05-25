@@ -318,5 +318,94 @@ class ReadabilityScorerExplicitRequirementsTestCase(unittest.TestCase):
         self.assertLessEqual(report.flesch_score, 100.0)
 
 
+class TestReadabilityScorerWave114(unittest.TestCase):
+    """Wave 114 — required named tests for ReadabilityScorer."""
+
+    def setUp(self) -> None:
+        self.scorer = ReadabilityScorer()
+
+    def test_simple_text_high_score(self) -> None:
+        """Very short words and sentences yield a high Flesch score (>= 50)."""
+        report = self.scorer.score("Я иду. Он тут. Мы дома.")
+        self.assertGreaterEqual(report.flesch_score, 50.0)
+
+    def test_complex_text_low_score(self) -> None:
+        """Long multi-syllable words yield a Flesch score < 60."""
+        text = (
+            "Многоуровневая архитектура распределённых нейронных трансформеров "
+            "обеспечивает эффективное семантическое представление лингвистических "
+            "признаков в пространстве высокоразмерных векторных вложений."
+        )
+        report = self.scorer.score(text)
+        self.assertLess(report.flesch_score, 60.0)
+
+    def test_empty_text(self) -> None:
+        """Empty string returns a zero report with no exception."""
+        report = self.scorer.score("")
+        self.assertEqual(report.word_count, 0)
+        self.assertEqual(report.sentence_count, 0)
+        self.assertEqual(report.flesch_score, 0.0)
+        self.assertEqual(report.longest_sentence, "")
+        self.assertEqual(report.shortest_sentence, "")
+
+    def test_single_word(self) -> None:
+        """Single word returns word_count=1, sentence_count=1, non-negative score."""
+        report = self.scorer.score("Привет")
+        self.assertEqual(report.word_count, 1)
+        self.assertEqual(report.sentence_count, 1)
+        self.assertGreaterEqual(report.flesch_score, 0.0)
+        self.assertIsInstance(report.vocabulary_level, str)
+
+    def test_russian_text_scoring(self) -> None:
+        """Russian text is scored without errors; word_count and sentence_count correct."""
+        text = "Сегодня хорошая погода. Мы идём гулять в парке."
+        report = self.scorer.score(text)
+        self.assertIsInstance(report, ReadabilityReport)
+        self.assertEqual(report.sentence_count, 2)
+        self.assertGreater(report.word_count, 0)
+        self.assertIn(report.vocabulary_level, {"simple", "moderate", "complex"})
+
+    def test_spanish_text_scoring(self) -> None:
+        """Spanish text (with accents) is scored without errors."""
+        text = "Hola amigo. Esto es una prueba sencilla. Buenos días."
+        report = self.scorer.score(text)
+        self.assertIsInstance(report, ReadabilityReport)
+        self.assertEqual(report.sentence_count, 3)
+        self.assertGreater(report.word_count, 0)
+        self.assertGreaterEqual(report.flesch_score, 0.0)
+
+    def test_count_sentences(self) -> None:
+        """Sentence count matches number of terminal punctuation marks."""
+        text = "Раз. Два! Три? Четыре."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 4)
+
+    def test_concurrent_score(self) -> None:
+        """ReadabilityScorer can be called concurrently from multiple threads."""
+        import threading
+
+        results = []
+        errors = []
+
+        def score_worker(idx: int) -> None:
+            try:
+                r = self.scorer.score(f"Предложение номер {idx}. Ещё одно предложение.")
+                results.append(r)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=score_worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Errors in threads: {errors}")
+        self.assertEqual(len(results), 20)
+        for r in results:
+            self.assertIsInstance(r, ReadabilityReport)
+            self.assertGreaterEqual(r.flesch_score, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

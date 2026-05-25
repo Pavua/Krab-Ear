@@ -347,5 +347,235 @@ class TestStatePersistence(unittest.TestCase):
             self.assertFalse(sched2._should_send(fixed_now))
 
 
+class TestWave138RecapScheduler(unittest.TestCase):
+    """Wave 138 — дополнительные тесты по спецификации задачи."""
+
+    # ------------------------------------------------------------------
+    # test_schedule_starts_at_configured_hour
+    # ------------------------------------------------------------------
+
+    def test_schedule_starts_at_configured_hour(self):
+        """_should_send возвращает True только в сконфигурированный час."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            for hour in (0, 8, 12, 20, 23):
+                with self.subTest(recap_time_hour=hour):
+                    fixed_now = datetime(2026, 5, 19, hour, 0, 0)
+                    sched, _, _ = _make_scheduler(
+                        tmpdir, recap_time_hour=hour, clock_fn=lambda dt=fixed_now: dt
+                    )
+                    self.assertTrue(sched._should_send(fixed_now))
+
+    def test_schedule_does_not_trigger_outside_configured_hour(self):
+        """_should_send возвращает False для любого другого часа."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            recap_hour = 20
+            wrong_now = datetime(2026, 5, 19, 10, 0, 0)
+            sched, _, _ = _make_scheduler(
+                tmpdir, recap_time_hour=recap_hour, clock_fn=lambda: wrong_now
+            )
+            self.assertFalse(sched._should_send(wrong_now))
+
+    # ------------------------------------------------------------------
+    # test_send_recap_invokes_email
+    # ------------------------------------------------------------------
+
+    def test_send_recap_invokes_email(self):
+        """send_recap вызывает email_sender.send с корректными аргументами."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            target_date = "2026-04-25"  # matches fake digest date
+            sched, sender, digest_gen = _make_scheduler(
+                tmpdir, recap_email_to="recipient@test.com"
+            )
+            result = sched.send_recap(target_date)
+
+            self.assertTrue(result["sent"])
+            sender.send.assert_called_once()
+            kwargs = sender.send.call_args.kwargs
+            self.assertEqual(kwargs["to"], "recipient@test.com")
+            self.assertIn(target_date, kwargs["subject"])
+            self.assertIn("body_html", kwargs)
+            self.assertIn("body_text", kwargs)
+            # HTML содержит дату дайджеста
+            self.assertIn(target_date, kwargs["body_html"])
+
+    def test_send_recap_calls_digest_generator(self):
+        """send_recap вызывает digest_generator.generate_digest с правильной датой."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, _, digest_gen = _make_scheduler(tmpdir)
+            sched.send_recap("2026-05-19")
+            digest_gen.generate_digest.assert_called_once()
+            call_kwargs = digest_gen.generate_digest.call_args.kwargs
+            self.assertEqual(call_kwargs["date_str"], "2026-05-19")
+
+    # ------------------------------------------------------------------
+    # test_skip_if_no_recordings
+    # ------------------------------------------------------------------
+
+    def test_skip_if_no_recordings(self):
+        """Дайджест с 0 записей всё равно отправляется, но email содержит пометку об отсутствии данных."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, digest_gen = _make_scheduler(tmpdir)
+
+            # Настраиваем пустой дайджест
+            empty_digest = MagicMock()
+            empty_digest.date = "2026-05-19"
+            empty_digest.total_recordings = 0
+            empty_digest.total_duration_min = 0
+            empty_digest.total_words = 0
+            empty_digest.languages_used = {}
+            empty_digest.top_topics = []
+            empty_digest.highlights = []
+            empty_digest.formatted_markdown = "# Дайджест 2026-05-19\n\nЗаписей нет."
+            digest_gen.generate_digest.return_value = empty_digest
+
+            result = sched.send_recap("2026-05-19")
+            # Отправка происходит даже при 0 записях (empty_note будет в HTML)
+            self.assertTrue(result["sent"])
+            # HTML содержит пустую пометку
+            html_body = sender.send.call_args.kwargs["body_html"]
+            self.assertIn("не найдено", html_body)
+
+    def test_skip_if_digest_generation_fails(self):
+        """Если генерация дайджеста падает — sent=False, email не отправляется."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, digest_gen = _make_scheduler(tmpdir)
+            digest_gen.generate_digest.side_effect = RuntimeError("Ошибка генерации")
+
+            result = sched.send_recap("2026-05-19")
+            self.assertFalse(result["sent"])
+            self.assertIn("digest_error", result["error"])
+            sender.send.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # test_handles_email_failure_gracefully
+    # ------------------------------------------------------------------
+
+    def test_handles_email_failure_gracefully(self):
+        """Ошибка отправки email не роняет backend — возвращается sent=False с деталями."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, _ = _make_scheduler(tmpdir)
+            sender.send.side_effect = OSError("SMTP connection reset")
+
+            result = sched.send_recap("2026-05-19")
+            self.assertFalse(result["sent"])
+            self.assertIsNotNone(result["error"])
+            self.assertIn("send_error", result["error"])
+            self.assertIn("SMTP connection reset", result["error"])
+
+    def test_handles_email_failure_state_not_updated(self):
+        """После ошибки email last_sent_date не обновляется — повтор возможен."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, _ = _make_scheduler(tmpdir)
+            sender.send.side_effect = ConnectionRefusedError("refused")
+
+            sched.send_recap("2026-05-19")
+            state = sched._load_state()
+            self.assertIsNone(state.get("last_sent_date"))
+
+    # ------------------------------------------------------------------
+    # test_concurrent_trigger_idempotent
+    # ------------------------------------------------------------------
+
+    def test_concurrent_trigger_idempotent(self):
+        """Одновременный вызов send_recap из нескольких потоков не вызывает краш."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, _ = _make_scheduler(tmpdir)
+            errors: list[Exception] = []
+            results: list[dict] = []
+            lock = threading.Lock()
+
+            def trigger() -> None:
+                try:
+                    r = sched.send_recap("2026-05-19")
+                    with lock:
+                        results.append(r)
+                except Exception as exc:
+                    with lock:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=trigger) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+            self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+            # Все вызовы вернули корректный dict
+            self.assertEqual(len(results), 5)
+            for r in results:
+                self.assertIn("sent", r)
+                self.assertIn("date", r)
+                self.assertIn("error", r)
+
+    def test_start_is_idempotent(self):
+        """Повторный вызов start() не создаёт дополнительных потоков."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, _, _ = _make_scheduler(tmpdir, enabled=True)
+            sched.start()
+            thread_before = sched._thread
+            sched.start()
+            thread_after = sched._thread
+            self.assertIs(thread_before, thread_after)
+            sched.stop()
+
+    # ------------------------------------------------------------------
+    # test_unicode_in_recap_body
+    # ------------------------------------------------------------------
+
+    def test_unicode_in_recap_body(self):
+        """Тела письма корректно содержат кириллицу, emoji и спецсимволы."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, digest_gen = _make_scheduler(tmpdir)
+
+            # Дайджест с юникод-содержимым
+            uni_digest = MagicMock()
+            uni_digest.date = "2026-05-19"
+            uni_digest.total_recordings = 3
+            uni_digest.total_duration_min = 7.5
+            uni_digest.total_words = 180
+            uni_digest.languages_used = {"ru": 2, "es": 1}
+            uni_digest.top_topics = ["переговоры 🤝", "бюджет €1000", "сроки — дедлайн"]
+            uni_digest.highlights = ["Обсудили план на квартал 📋.", "Договорились о встрече."]
+            uni_digest.formatted_markdown = "# Дайджест\n\nПереговоры 🤝 бюджет €1000"
+            digest_gen.generate_digest.return_value = uni_digest
+
+            result = sched.send_recap("2026-05-19")
+            self.assertTrue(result["sent"])
+
+            html_body = sender.send.call_args.kwargs["body_html"]
+            text_body = sender.send.call_args.kwargs["body_text"]
+
+            # Кириллица сохранена в HTML
+            self.assertIn("переговоры", html_body)
+            self.assertIn("🤝", html_body)
+            # Markdown body содержит спецсимволы
+            self.assertIn("€1000", text_body)
+            self.assertIn("🤝", text_body)
+
+    def test_unicode_subject_line(self):
+        """Тема письма корректно формируется с кириллицей."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sched, sender, _ = _make_scheduler(tmpdir)
+            sched.send_recap("2026-05-19")
+            subject = sender.send.call_args.kwargs["subject"]
+            # Тема содержит кириллические символы
+            self.assertIn("дайджест", subject)
+            self.assertIn("2026-05-19", subject)
+
+
 if __name__ == "__main__":
     unittest.main()

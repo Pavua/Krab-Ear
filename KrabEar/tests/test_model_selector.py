@@ -26,8 +26,10 @@ from core.model_selector import (
 )
 
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -324,6 +326,85 @@ class TestModelSelectionDataclass(unittest.TestCase):
         self.assertEqual(sel.reason, "test reason")
         self.assertEqual(sel.estimated_latency_ms, 500.0)
         self.assertEqual(sel.quality_tier, "balanced")
+
+
+class TestConcurrentSelect(unittest.TestCase):
+    """test_concurrent_select: select_model безопасен при параллельных вызовах."""
+
+    def test_concurrent_select(self) -> None:
+        """Множество потоков одновременно вызывают select_model — нет исключений."""
+        selector = SmartModelSelector()
+        results: list[ModelSelection] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            try:
+                quality = "max" if i % 2 == 0 else "balanced"
+                sel = selector.select_model(
+                    duration_sec=float(10 + i),
+                    quality=quality,
+                    is_preview=(i % 5 == 0),
+                    system_load=0.1 * (i % 10),
+                )
+                with lock:
+                    results.append(sel)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Exceptions in threads: {errors}")
+        self.assertEqual(len(results), 20)
+        for sel in results:
+            self.assertIsInstance(sel, ModelSelection)
+            self.assertIn(sel.quality_tier, ("balanced", "max"))
+
+
+class TestOverrideViaSettings(unittest.TestCase):
+    """test_override_via_settings: select_model respects patched settings values."""
+
+    def test_override_model_balanced(self) -> None:
+        """Патч settings.MODEL_BALANCED меняет выбранное имя модели."""
+        fake_balanced = "whisper-tiny-patched"
+        with patch.object(settings, "MODEL_BALANCED", fake_balanced):
+            selector = SmartModelSelector()
+            sel = selector.select_model(
+                duration_sec=5.0, quality="balanced", is_preview=False
+            )
+        self.assertEqual(sel.model_name, fake_balanced)
+        self.assertEqual(sel.quality_tier, "balanced")
+
+    def test_override_model_max_list(self) -> None:
+        """Патч MODEL_MAX_CANDIDATES меняет имя max-модели в результате."""
+        # model_max_list — это @property, патчим через MODEL_MAX_CANDIDATES
+        fake_max = "whisper-large-custom"
+        original = settings.MODEL_MAX_CANDIDATES
+        try:
+            settings.__dict__  # ensure mutable access
+            object.__setattr__(settings, "MODEL_MAX_CANDIDATES", fake_max)
+            selector = SmartModelSelector()
+            sel = selector.select_model(
+                duration_sec=7.0, quality="max", is_preview=False
+            )
+            self.assertEqual(sel.model_name, fake_max)
+            self.assertEqual(sel.quality_tier, "max")
+        finally:
+            object.__setattr__(settings, "MODEL_MAX_CANDIDATES", original)
+
+    def test_unknown_lang_defaults_to_balanced(self) -> None:
+        """Нераспознанное значение quality → fallback balanced (имитирует unknown lang)."""
+        selector = SmartModelSelector()
+        sel = selector.select_model(
+            duration_sec=30.0, quality="zh", is_preview=False
+        )
+        self.assertEqual(sel.quality_tier, "balanced")
+        self.assertEqual(sel.model_name, settings.MODEL_BALANCED)
 
 
 if __name__ == "__main__":

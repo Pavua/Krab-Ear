@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import os
+import threading
 import unittest
 
 # Ensure KrabEar package is importable when run standalone.
@@ -102,6 +103,90 @@ class TestSafeJsonDumps(unittest.TestCase):
         with self.assertLogs("core.parsing_utils", level=logging.WARNING) as cm:
             safe_json_dumps(object())
         self.assertTrue(any("JSON serialize failed" in line for line in cm.output))
+
+
+class TestParsingUtilsSpecNames(unittest.TestCase):
+    """Wave 115 — spec-named tests for explicit requirement coverage."""
+
+    def test_valid_json_parses_normal(self):
+        """Standard dict with mixed value types parses without error."""
+        data = '{"name": "Краб", "version": 2, "active": true, "score": 3.14}'
+        result = safe_json_loads(data)
+        self.assertEqual(result["name"], "Краб")
+        self.assertEqual(result["version"], 2)
+        self.assertIs(result["active"], True)
+        self.assertAlmostEqual(result["score"], 3.14)
+
+    def test_invalid_json_returns_default(self):
+        """Malformed JSON returns the supplied default without raising."""
+        self.assertIsNone(safe_json_loads("{{invalid}}"))
+        self.assertEqual(safe_json_loads("[unclosed", default=[]), [])
+        self.assertEqual(safe_json_loads("not json at all", default=42), 42)
+
+    def test_empty_string_returns_default(self):
+        """Empty string is treated as 'no data' and returns default."""
+        self.assertIsNone(safe_json_loads(""))
+        self.assertEqual(safe_json_loads("", default="fallback"), "fallback")
+        self.assertEqual(safe_json_loads(b"", default=0), 0)
+
+    def test_unicode_json(self):
+        """Unicode content (Cyrillic, CJK, emoji) round-trips correctly."""
+        payload = '{"ru": "привет мир", "es": "hola mundo", "emoji": "\\ud83e\\udd80"}'
+        result = safe_json_loads(payload)
+        self.assertEqual(result["ru"], "привет мир")
+        self.assertEqual(result["es"], "hola mundo")
+        # Also test dumps preserves unicode
+        dumped = safe_json_dumps({"кириллица": "тест", "数字": 123})
+        self.assertIn("кириллица", dumped)
+        self.assertIn("数字", dumped)
+
+    def test_nested_json(self):
+        """Deeply nested structures are parsed correctly."""
+        data = '{"a": {"b": {"c": {"d": [1, 2, {"e": "deep"}]}}}}'
+        result = safe_json_loads(data)
+        self.assertEqual(result["a"]["b"]["c"]["d"][2]["e"], "deep")
+        # Also test a nested list of objects
+        data2 = '[{"id": 1, "tags": ["x", "y"]}, {"id": 2, "tags": []}]'
+        result2 = safe_json_loads(data2)
+        self.assertEqual(len(result2), 2)
+        self.assertEqual(result2[0]["tags"], ["x", "y"])
+        self.assertEqual(result2[1]["tags"], [])
+
+    def test_logs_context_on_error(self):
+        """Context string appears in the warning log on parse failure."""
+        with self.assertLogs("core.parsing_utils", level=logging.WARNING) as cm:
+            safe_json_loads("{broken: json}", context="ipc_method/get_history")
+        all_output = "\n".join(cm.output)
+        self.assertIn("ipc_method/get_history", all_output)
+        self.assertIn("JSON parse failed", all_output)
+
+    def test_concurrent_parse(self):
+        """safe_json_loads must be thread-safe under concurrent load."""
+        payloads = [
+            ('{"idx": %d, "data": "value_%d"}' % (i, i), i)
+            for i in range(50)
+        ]
+        results = {}
+        errors = []
+
+        def parse_one(json_str, idx):
+            try:
+                obj = safe_json_loads(json_str, default=None)
+                results[idx] = obj
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=parse_one, args=(js, idx)) for js, idx in payloads]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertFalse(errors, f"Thread errors: {errors}")
+        self.assertEqual(len(results), 50)
+        for idx, obj in results.items():
+            self.assertIsNotNone(obj)
+            self.assertEqual(obj["idx"], idx)
 
 
 if __name__ == "__main__":

@@ -218,5 +218,67 @@ class TestPunctuationFixerExplicitRequirements(unittest.TestCase):
         self.assertTrue(len(result) > 0)
 
 
+class TestPunctuationFixerWave132(unittest.TestCase):
+    """Wave 132 required test cases."""
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_ru_comma_before_который_что(self):
+        """Запятая перед 'который'/'что' в придаточном не должна нарушаться/дублироваться."""
+        # Запятая уже есть — не должна дублироваться
+        text = "Я думаю, что всё хорошо."
+        result = self.fixer.fix(text, language="ru")
+        self.assertNotIn(",,", result, f"Двойная запятая недопустима: {result!r}")
+        self.assertIn("что", result, f"Слово 'что' должно сохраниться: {result!r}")
+
+        # Фраза с 'который' — запятая не должна дублироваться
+        text2 = "Книга, которую я читал, интересная."
+        result2 = self.fixer.fix(text2, language="ru")
+        self.assertNotIn(",,", result2)
+        self.assertIn("которую", result2)
+
+    def test_unicode_preserved(self):
+        """Unicode-символы (кириллица, спецзнаки) сохраняются без искажений."""
+        text = "Привет мир — всё хорошо."
+        result = self.fixer.fix(text, language="ru")
+        self.assertIn("Привет", result)
+        self.assertIn("—", result, f"Тире должно сохраниться: {result!r}")
+        self.assertIn("всё", result, f"'ё' должна сохраниться: {result!r}")
+
+        # Кириллические буквы с диакритикой не теряются
+        text_es = "¡Hola señor!"
+        result_es = self.fixer.fix(text_es, language="es")
+        self.assertIn("ñ", result_es, f"Буква ñ должна сохраниться: {result_es!r}")
+
+    def test_concurrent_fix(self):
+        """PunctuationFixer.fix() потокобезопасен при параллельных вызовах."""
+        import threading
+
+        results = {}
+        errors = []
+
+        def worker(idx, text, lang):
+            try:
+                results[idx] = self.fixer.fix(text, language=lang)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=worker, args=(i, f"тест номер {i} работает хорошо", "ru"))
+            for i in range(20)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Ошибки при параллельных вызовах: {errors}")
+        self.assertEqual(len(results), 20)
+        for idx, result in results.items():
+            self.assertIsInstance(result, str)
+            self.assertTrue(len(result) > 0, f"Пустой результат для idx={idx}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,5 +141,65 @@ class NullProviderTestCase(unittest.TestCase):
         self.assertFalse(provider.is_configured())
 
 
+class ProviderCaseInsensitiveTestCase(unittest.TestCase):
+    """Тесты нечувствительности CALL_PROVIDER к регистру."""
+
+    # 14 — CALL_PROVIDER="TELNYX" (uppercase) → TelnyxAdapter
+    def test_telnyx_uppercase_still_works(self) -> None:
+        provider = get_provider(_settings(CALL_PROVIDER="TELNYX"))
+        self.assertIsInstance(provider, TelnyxAdapter)
+
+    # 15 — CALL_PROVIDER="Twilio" (mixed case) → TwilioAdapter
+    def test_twilio_mixed_case_still_works(self) -> None:
+        provider = get_provider(_settings(CALL_PROVIDER="Twilio"))
+        self.assertIsInstance(provider, TwilioAdapter)
+
+    # 16 — CALL_PROVIDER=" telnyx " (whitespace) → TelnyxAdapter
+    def test_telnyx_with_whitespace_still_works(self) -> None:
+        provider = get_provider(_settings(CALL_PROVIDER=" telnyx "))
+        self.assertIsInstance(provider, TelnyxAdapter)
+
+
+class ProviderCredentialsTestCase(unittest.TestCase):
+    """Тесты передачи credentials в адаптер."""
+
+    # 17 — Telnyx credentials передаются в адаптер корректно
+    def test_telnyx_credentials_passed_correctly(self) -> None:
+        provider = get_provider(
+            _settings(
+                CALL_PROVIDER="telnyx",
+                TELNYX_API_KEY="real_api_key",
+                TELNYX_CONNECTION_ID="conn_abc",
+                TELNYX_FROM_NUMBER="+15550001111",
+            )
+        )
+        self.assertIsInstance(provider, TelnyxAdapter)
+        self.assertEqual(provider._api_key, "real_api_key")
+        self.assertEqual(provider._connection_id, "conn_abc")
+        self.assertEqual(provider._from_number, "+15550001111")
+
+    # 18 — Twilio credentials передаются в адаптер корректно
+    def test_twilio_credentials_passed_correctly(self) -> None:
+        provider = get_provider(
+            _settings(
+                CALL_PROVIDER="twilio",
+                TWILIO_ACCOUNT_SID="ACtest123",
+                TWILIO_AUTH_TOKEN="authtest456",
+                TWILIO_FROM_NUMBER="+15550009999",
+            )
+        )
+        self.assertIsInstance(provider, TwilioAdapter)
+        self.assertEqual(provider._account_sid, "ACtest123")
+        self.assertEqual(provider._auth_token, "authtest456")
+        self.assertEqual(provider._from_number, "+15550009999")
+
+    # 19 — NullCallProvider list_active_calls возвращает no_provider
+    def test_null_list_active_calls_no_provider(self) -> None:
+        provider = get_provider(_settings(CALL_PROVIDER="none"))
+        result = provider.list_active_calls()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "no_provider")
+
+
 if __name__ == "__main__":
     unittest.main()

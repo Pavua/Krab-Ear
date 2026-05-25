@@ -475,7 +475,13 @@ class AudioEngine:
                 action_id=entry.get("action_id"),
             )
             error_bus.push(err)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # Wave 222: surface push failures to Sentry instead of silent swallow
+            try:
+                from backend.observability import capture_exception
+                capture_exception(e, "_push_error_internal")
+            except Exception:
+                pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
     # ------------------------------------------------------------------
@@ -687,6 +693,23 @@ class AudioEngine:
 
         start_time = time.time()
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
+
+        try:
+            from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+            _add_bc(
+                category="transcription",
+                message="transcribe_start",
+                level="info",
+                data={
+                    "cleanup_profile": cleanup_profile,
+                    "is_preview": is_preview,
+                    "domain": domain,
+                    "lang_hint": lang_hint or "auto",
+                    "diarize": diarize,
+                },
+            )
+        except Exception:
+            pass  # telemetry must never break transcription
 
         # 1. Формирование динамического промпта.
         # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
@@ -999,6 +1022,24 @@ class AudioEngine:
                 calibrated_score.calibrated,
                 resolved_lang or "auto",
             )
+
+            try:
+                from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+                _add_bc(
+                    category="transcription",
+                    message="transcribe_finish",
+                    level="info",
+                    data={
+                        "duration_ms": int(duration * 1000),
+                        "confidence": round(calibrated_score.calibrated, 3),
+                        "language": result.get("language", resolved_lang) or "auto",
+                        "engine": result.get("engine", "mlx-whisper"),
+                        "llm_applied": bool(llm_result is not None and llm_result.ok),
+                        "is_preview": is_preview,
+                    },
+                )
+            except Exception:
+                pass  # telemetry must never break transcription
 
             return {
                 "text": text,
@@ -2406,10 +2447,10 @@ class AudioEngine:
         #   2. transcribe_longform() (fallback): pyannote VAD — требует HF token
         #      + принятие TOS на huggingface.co/pyannote/segmentation-3.0.
         #      Используется только если AudioChunker недоступен.
-        # Threshold 24s консервативный (gigaam падает на ~26s+).
+        # Threshold 30s: GigaAM shortform limit ~30s. Clips 24-30s stay shortform.
         _GIGAAM_MAX_CHUNK_SEC = 20.0  # с 5s запасом до hard limit ~25s
         duration_sec = len(audio_data_np) / 16000.0
-        use_longform = duration_sec > 24.0
+        use_longform = duration_sec > 30.0
         hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
 
         try:
@@ -2460,6 +2501,20 @@ class AudioEngine:
                 "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
                 duration_sec, use_longform, str(exc)[:200],
             )
+            # Detect HF cache miss: huggingface_hub raises LocalEntryNotFoundError /
+            # RepositoryNotFoundError / ConnectionError when model not cached offline.
+            exc_str = str(exc).lower()
+            _hf_cache_miss_keywords = (
+                "localentrynotfound", "repositorynotfound", "connection error",
+                "not found in cache", "gated repo", "access to model",
+                "cannot find the requested files",
+            )
+            if any(kw in exc_str for kw in _hf_cache_miss_keywords):
+                self._push_error(
+                    "stt.gigaam_hf_cache_miss",
+                    f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
+                    severity="warn",
+                )
             return {
                 "text": "",
                 "confidence": 0.0,

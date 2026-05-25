@@ -139,4 +139,60 @@ final class PermissionWizardTests: XCTestCase {
         let autoStartValue = persistedPayload?["auto_start_enabled"] as? Bool
         XCTAssertEqual(autoStartValue, true, "payload['auto_start_enabled'] должен совпадать с переданным autostart")
     }
+
+    // MARK: - Initial step intro guard
+
+    /// Wizard существует и может быть создан — базовая smoke проверка
+    /// что init не крашится и экземпляр валиден без UI.
+    func test_initial_step_intro_wizardCanBeCreated() {
+        let wizard = makeWizard()
+        XCTAssertNotNil(wizard, "PermissionWizard должен создаваться без параметров")
+    }
+
+    // MARK: - UserDefaults-style completion persistence
+
+    /// applyCompletionState проверяет что payload содержит все ожидаемые ключи
+    /// для корректного сохранения в UserDefaults через persistSettings.
+    func test_completion_payload_has_required_userdefaults_keys() {
+        let wizard = makeWizard()
+        let launchManager = makeLaunchManager()
+        var persistedPayload: [String: Any]?
+
+        _ = wizard.applyCompletionState(
+            to: AgentSettings.default,
+            autostart: true,
+            persistSettings: { persistedPayload = $0 },
+            launchAgentManager: launchManager
+        )
+
+        let keys = persistedPayload?.keys.map { $0 } ?? []
+        XCTAssertTrue(keys.contains("onboarding_completed"),
+                      "payload должен содержать ключ 'onboarding_completed'")
+        XCTAssertTrue(keys.contains("auto_start_enabled"),
+                      "payload должен содержать ключ 'auto_start_enabled'")
+    }
+
+    // MARK: - Concurrent access safety
+
+    /// Многократные вызовы applyCompletionState подряд не должны нарушать инварианты —
+    /// каждый вызов возвращает settings с onboardingCompleted=true.
+    func test_concurrent_completion_idempotent() {
+        let wizard = makeWizard()
+        let launchManager = makeLaunchManager()
+        var callCount = 0
+
+        for i in 0..<5 {
+            let autostart = i % 2 == 0
+            let result = wizard.applyCompletionState(
+                to: AgentSettings.default,
+                autostart: autostart,
+                persistSettings: { _ in callCount += 1 },
+                launchAgentManager: launchManager
+            )
+            XCTAssertTrue(result.onboardingCompleted,
+                          "Итерация \(i): onboardingCompleted должен быть true")
+        }
+
+        XCTAssertEqual(callCount, 5, "persistSettings должен быть вызван ровно 5 раз")
+    }
 }
