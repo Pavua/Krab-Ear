@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -381,6 +382,252 @@ class WebhookManagerIPCTestCase(unittest.TestCase):
     def test_ipc_unregister_missing_id_raises(self) -> None:
         with self.assertRaises(RuntimeError):
             self._mgr.handle_unregister_webhook({})
+
+
+class WebhookManagerFireOnEventTypeTestCase(unittest.TestCase):
+    """test_fire_on_event_type — fire_webhook вызывает доставку для нужного типа."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 28 — fire_webhook доставляет совпадающий тип события
+    def test_fire_on_event_type_matching(self) -> None:
+        self._mgr.register_webhook("https://example.com/hook", events=["stt.final"])
+        delivered: list[Any] = []
+
+        with patch.object(self._mgr, "_deliver_with_retry", side_effect=lambda *a, **k: delivered.append(a[1])):
+            self._mgr.fire_webhook("stt.final", {"text": "hello"})
+            time.sleep(0.05)
+
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0], "https://example.com/hook")
+
+    # 29 — fire_webhook пропускает несовпадающий тип события
+    def test_fire_on_event_type_not_matching(self) -> None:
+        self._mgr.register_webhook("https://example.com/hook", events=["stt.final"])
+        delivered: list[Any] = []
+
+        with patch.object(self._mgr, "_deliver_with_retry", side_effect=lambda *a, **k: delivered.append(a)):
+            self._mgr.fire_webhook("translation.done", {"text": "hello"})
+            time.sleep(0.05)
+
+        self.assertEqual(len(delivered), 0)
+
+    # 30 — fire_webhook с events=[] получает все типы событий
+    def test_fire_on_event_type_wildcard(self) -> None:
+        self._mgr.register_webhook("https://example.com/hook", events=[])
+        delivered: list[Any] = []
+
+        with patch.object(self._mgr, "_deliver_with_retry", side_effect=lambda *a, **k: delivered.append(a)):
+            self._mgr.fire_webhook("any.event", {})
+            time.sleep(0.05)
+
+        self.assertEqual(len(delivered), 1)
+
+
+class WebhookManagerSkipDisabledTestCase(unittest.TestCase):
+    """test_skip_disabled_webhook — отключённый webhook не получает события."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 31 — disabled webhook не вызывается при fire_webhook
+    def test_skip_disabled_webhook(self) -> None:
+        wid = self._mgr.register_webhook("https://example.com/hook", events=[])
+        # Отключаем webhook напрямую
+        with self._mgr._lock:
+            self._mgr._webhooks[wid]["enabled"] = False
+
+        delivered: list[Any] = []
+        with patch.object(self._mgr, "_deliver_with_retry", side_effect=lambda *a, **k: delivered.append(a)):
+            self._mgr.fire_webhook("stt.final", {})
+            time.sleep(0.05)
+
+        self.assertEqual(len(delivered), 0)
+
+    # 32 — включённый webhook после disabled=True получает события
+    def test_re_enabled_webhook_receives_events(self) -> None:
+        wid = self._mgr.register_webhook("https://example.com/hook", events=[])
+        with self._mgr._lock:
+            self._mgr._webhooks[wid]["enabled"] = False
+
+        # Включаем обратно
+        with self._mgr._lock:
+            self._mgr._webhooks[wid]["enabled"] = True
+
+        delivered: list[Any] = []
+        with patch.object(self._mgr, "_deliver_with_retry", side_effect=lambda *a, **k: delivered.append(a)):
+            self._mgr.fire_webhook("stt.final", {})
+            time.sleep(0.05)
+
+        self.assertEqual(len(delivered), 1)
+
+
+class WebhookManagerTimeoutTestCase(unittest.TestCase):
+    """test_timeout_handled_gracefully — timeout при доставке не роняет процесс."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 33 — сетевой timeout обрабатывается как ошибка, не исключение
+    def test_timeout_handled_gracefully(self) -> None:
+        from urllib.error import URLError
+
+        wid = self._mgr.register_webhook("https://example.com/hook", events=[])
+
+        def timeout_post(url, body, secret):
+            raise URLError("timed out")
+
+        with patch.object(self._mgr, "_post_once", side_effect=timeout_post):
+            with patch("backend.webhook_manager.time.sleep"):
+                # Не должно бросить исключение наружу
+                self._mgr._deliver_with_retry(wid, "https://example.com/hook", "", b"{}", "stt.final")
+
+        stats = self._mgr.get_webhook_stats(wid)
+        self.assertGreater(stats["failures"], 0)
+
+    # 34 — timeout не блокирует caller (доставка async в Thread)
+    def test_timeout_does_not_block_fire_webhook(self) -> None:
+        from urllib.error import URLError
+
+        self._mgr.register_webhook("https://example.com/hook", events=[])
+
+        slow_called = []
+
+        def slow_post(*args, **kwargs):
+            slow_called.append(True)
+            raise URLError("very slow")
+
+        with patch.object(self._mgr, "_post_once", side_effect=slow_post):
+            with patch("backend.webhook_manager.time.sleep"):
+                start = time.monotonic()
+                self._mgr.fire_webhook("stt.final", {})
+                elapsed = time.monotonic() - start
+
+        # fire_webhook должен вернуться немедленно (< 0.2s)
+        self.assertLess(elapsed, 0.2)
+
+
+class WebhookManagerConcurrentFireTestCase(unittest.TestCase):
+    """test_concurrent_fire_does_not_block — параллельная доставка не блокирует."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 35 — несколько fire_webhook из разных потоков не падают
+    def test_concurrent_fire_does_not_block(self) -> None:
+        for i in range(3):
+            self._mgr.register_webhook(f"https://example{i}.com/hook", events=[])
+
+        call_count = [0]
+        lock = threading.Lock()
+
+        def instant_post(*args, **kwargs):
+            with lock:
+                call_count[0] += 1
+            return 200
+
+        with patch.object(self._mgr, "_post_once", side_effect=instant_post):
+            threads = [
+                threading.Thread(target=self._mgr.fire_webhook, args=("stt.final", {}))
+                for _ in range(5)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=2.0)
+
+        # 5 fire_webhook calls × 3 webhooks = 15 deliveries
+        time.sleep(0.1)
+        self.assertEqual(call_count[0], 15)
+
+    # 36 — concurrent register + fire не вызывает RuntimeError
+    def test_concurrent_register_and_fire_safe(self) -> None:
+        errors = []
+
+        def register_loop():
+            for i in range(5):
+                try:
+                    self._mgr.register_webhook(f"https://reg{i}.com/hook", events=[])
+                except Exception as e:
+                    errors.append(e)
+
+        with patch.object(self._mgr, "_post_once", return_value=200):
+            reg_thread = threading.Thread(target=register_loop)
+            fire_thread = threading.Thread(
+                target=lambda: [self._mgr.fire_webhook("stt.final", {}) for _ in range(5)]
+            )
+            reg_thread.start()
+            fire_thread.start()
+            reg_thread.join(timeout=2.0)
+            fire_thread.join(timeout=2.0)
+
+        self.assertEqual(errors, [], f"Errors in threads: {errors}")
+
+
+class WebhookManagerURLValidationTestCase(unittest.TestCase):
+    """test_url_validation — SSRF guard: localhost, file://, invalid schemes rejected."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._mgr = _make_manager(self._tmpdir)
+
+    # 37 — file:// URL вызывает ValueError
+    def test_file_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("file:///etc/passwd", events=[])
+
+    # 38 — ftp:// URL вызывает ValueError
+    def test_ftp_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("ftp://example.com/hook", events=[])
+
+    # 39 — пустой URL вызывает ValueError
+    def test_empty_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("", events=[])
+
+    # 40 — пробельный URL вызывает ValueError
+    def test_whitespace_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("   ", events=[])
+
+    # 41 — http:// принимается
+    def test_http_url_accepted(self) -> None:
+        wid = self._mgr.register_webhook("http://example.com/hook", events=[])
+        self.assertIsNotNone(wid)
+
+    # 42 — https:// принимается
+    def test_https_url_accepted(self) -> None:
+        wid = self._mgr.register_webhook("https://secure.example.com/hook", events=[])
+        self.assertIsNotNone(wid)
+
+    # 43 — javascript: URL вызывает ValueError (SSRF / injection guard)
+    def test_javascript_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("javascript:alert(1)", events=[])
+
+    # 44 — data: URL вызывает ValueError
+    def test_data_url_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("data:text/plain,hello", events=[])
+
+    # NOTE: WebhookManager does NOT block localhost URLs by scheme check alone —
+    # the current implementation only validates http/https prefix. Tests 45-46
+    # document the current behavior (no SSRF localhost block at register time).
+    # A future hardening pass could add IP/hostname checks.
+    def test_localhost_http_currently_accepted(self) -> None:
+        """Документирует текущее поведение: localhost http:// принимается регистратором.
+
+        Если в будущем добавят SSRF guard, этот тест нужно обновить на assertRaises(ValueError).
+        """
+        # Should NOT raise with current implementation (no hostname SSRF check)
+        wid = self._mgr.register_webhook("http://localhost:9999/hook", events=[])
+        self.assertIsNotNone(wid)
 
 
 if __name__ == "__main__":
