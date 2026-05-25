@@ -226,5 +226,108 @@ class TestSearchHistoryThreadSafety(unittest.TestCase):
         self.assertEqual(len(mgr.get_recent_searches(limit=100)), 50)
 
 
+class TestSearchHistoryWave146(unittest.TestCase):
+    """Wave 146 — required named tests."""
+
+    # ------------------------------------------------------------------
+    # test_record_query
+    # ------------------------------------------------------------------
+    def test_record_query(self):
+        """record_search() сохраняет запрос с корректными полями."""
+        mgr = SearchHistoryManager()
+        mgr.record_search("тест запрос", results_count=42)
+        recent = mgr.get_recent_searches(limit=1)
+        self.assertEqual(len(recent), 1)
+        entry = recent[0]
+        self.assertEqual(entry["query"], "тест запрос")
+        self.assertEqual(entry["results_count"], 42)
+        self.assertIn("ts", entry)
+
+    # ------------------------------------------------------------------
+    # test_list_recent_queries
+    # ------------------------------------------------------------------
+    def test_list_recent_queries(self):
+        """get_recent_searches() возвращает записи от новых к старым."""
+        mgr = SearchHistoryManager()
+        for i in range(5):
+            mgr.record_search(f"query {i}")
+        recent = mgr.get_recent_searches(limit=10)
+        self.assertEqual(len(recent), 5)
+        self.assertEqual(recent[0]["query"], "query 4")
+        self.assertEqual(recent[-1]["query"], "query 0")
+
+    # ------------------------------------------------------------------
+    # test_max_history_capped
+    # ------------------------------------------------------------------
+    def test_max_history_capped(self):
+        """История не превышает _MAX_ENTRIES записей."""
+        from backend.search_history import _MAX_ENTRIES
+        mgr = SearchHistoryManager()
+        # Напрямую набиваем entries сверх лимита
+        for i in range(_MAX_ENTRIES + 50):
+            mgr._entries.append({"query": f"q{i}", "results_count": 0, "ts": "2026-01-01T00:00:00+00:00"})
+        # record_search срабатывает обрезка
+        mgr.record_search("trigger trim")
+        self.assertLessEqual(len(mgr._entries), _MAX_ENTRIES)
+
+    # ------------------------------------------------------------------
+    # test_unicode_query
+    # ------------------------------------------------------------------
+    def test_unicode_query(self):
+        """Кириллица, арабский, эмодзи не ломают хранение и извлечение."""
+        mgr = SearchHistoryManager()
+        queries = ["Привет мир", "مرحبا بالعالم", "こんにちは", "🎤🔊"]
+        for q in queries:
+            mgr.record_search(q)
+        recent = mgr.get_recent_searches(limit=10)
+        stored_queries = [e["query"] for e in recent]
+        for q in queries:
+            self.assertIn(q, stored_queries)
+
+    # ------------------------------------------------------------------
+    # test_persist_reload
+    # ------------------------------------------------------------------
+    def test_persist_reload(self):
+        """Запись сохраняется в файл и корректно загружается новым экземпляром."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr1 = SearchHistoryManager(data_dir=tmpdir)
+            mgr1.record_search("persist me", results_count=99)
+
+            mgr2 = SearchHistoryManager(data_dir=tmpdir)
+            recent = mgr2.get_recent_searches()
+            queries = [e["query"] for e in recent]
+            self.assertIn("persist me", queries)
+            match = next(e for e in recent if e["query"] == "persist me")
+            self.assertEqual(match["results_count"], 99)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_record
+    # ------------------------------------------------------------------
+    def test_concurrent_record(self):
+        """Параллельные вызовы record_search не вызывают ошибок гонки."""
+        import threading
+
+        mgr = SearchHistoryManager()
+        errors: list[Exception] = []
+
+        def worker(idx: int):
+            try:
+                for j in range(15):
+                    mgr.record_search(f"thread{idx}-q{j}", results_count=j)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Гонки в потоках: {errors}")
+        # 6 потоков × 15 запросов = 90
+        total = len(mgr.get_recent_searches(limit=200))
+        self.assertEqual(total, 90)
+
+
 if __name__ == "__main__":
     unittest.main()
