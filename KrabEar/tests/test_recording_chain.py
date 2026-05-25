@@ -303,5 +303,158 @@ class RecordingChainExtendedTestCase(unittest.TestCase):
             self._mgr.handle_get_chain({})
 
 
+class RecordingChainUnlinkTestCase(unittest.TestCase):
+    """Тесты для unlink_recording_from_chain."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = RecordingChainManager(store=self._store)
+
+    def test_unlink_removes_item_from_chain(self) -> None:
+        """unlink_recording_from_chain удаляет элемент из цепочки."""
+        chain_id = self._mgr.start_chain("Удаление")
+        self._mgr.add_to_chain(chain_id, "item-A")
+        self._mgr.add_to_chain(chain_id, "item-B")
+        removed = self._mgr.unlink_recording_from_chain(chain_id, "item-A")
+        self.assertTrue(removed)
+        data = self._mgr.get_chain(chain_id)
+        self.assertNotIn("item-A", data["item_ids"])
+        self.assertIn("item-B", data["item_ids"])
+
+    def test_unlink_nonexistent_item_idempotent(self) -> None:
+        """unlink_recording_from_chain возвращает False для отсутствующего элемента без ошибки."""
+        chain_id = self._mgr.start_chain("Идемпотентность unlink")
+        self._mgr.add_to_chain(chain_id, "item-X")
+        removed = self._mgr.unlink_recording_from_chain(chain_id, "item-GHOST")
+        self.assertFalse(removed)
+        # item-X должен остаться нетронутым
+        data = self._mgr.get_chain(chain_id)
+        self.assertIn("item-X", data["item_ids"])
+
+    def test_unlink_empty_chain(self) -> None:
+        """unlink_recording_from_chain на пустой цепочке — идемпотентно, без ошибки."""
+        chain_id = self._mgr.start_chain("Пустая цепочка")
+        removed = self._mgr.unlink_recording_from_chain(chain_id, "any-item")
+        self.assertFalse(removed)
+        data = self._mgr.get_chain(chain_id)
+        self.assertEqual(data["item_ids"], [])
+
+    def test_unlink_unknown_chain_raises(self) -> None:
+        """unlink_recording_from_chain для несуществующей цепочки выбрасывает KeyError."""
+        with self.assertRaises(KeyError):
+            self._mgr.unlink_recording_from_chain("no-such-chain", "item-1")
+
+    def test_concurrent_unlink_thread_safe(self) -> None:
+        """Параллельные unlink одного и того же элемента корректны (ровно 0 копий в итоге)."""
+        import threading
+
+        chain_id = self._mgr.start_chain("Конкурентность")
+        for i in range(10):
+            self._mgr.add_to_chain(chain_id, f"item-{i}")
+
+        errors: list[Exception] = []
+
+        def do_unlink(item_id: str) -> None:
+            try:
+                self._mgr.unlink_recording_from_chain(chain_id, item_id)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=do_unlink, args=(f"item-{i}",)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки при конкурентном unlink: {errors}")
+        data = self._mgr.get_chain(chain_id)
+        self.assertEqual(data["item_ids"], [])
+
+    def test_handle_unlink_recording_from_chain(self) -> None:
+        """IPC-обработчик handle_unlink_recording_from_chain возвращает ok+removed."""
+        chain_id = self._mgr.start_chain("IPC unlink")
+        self._mgr.add_to_chain(chain_id, "ipc-item")
+        result = self._mgr.handle_unlink_recording_from_chain(
+            {"chain_id": chain_id, "item_id": "ipc-item"}
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("removed"))
+
+    def test_handle_unlink_missing_chain_id_raises(self) -> None:
+        """handle_unlink_recording_from_chain без chain_id выбрасывает ValueError."""
+        with self.assertRaises(ValueError):
+            self._mgr.handle_unlink_recording_from_chain({"item_id": "x"})
+
+    def test_handle_unlink_missing_item_id_raises(self) -> None:
+        """handle_unlink_recording_from_chain без item_id выбрасывает ValueError."""
+        chain_id = self._mgr.start_chain("Без item_id")
+        with self.assertRaises(ValueError):
+            self._mgr.handle_unlink_recording_from_chain({"chain_id": chain_id})
+
+
+class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
+    """Wave 156: verify unlink_recording_from_chain is wired in BackendService dispatch table.
+
+    Also documents that the Swift agent does NOT yet call this method directly
+    (no Swift caller exists in native/KrabEarAgent/) — the IPC method is
+    exposed for future Swift UI integration. Python-level IPC is fully wired.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        self.tmpdir = tempfile.mkdtemp()
+        with patch("backend.service.AudioRecorder"), \
+             patch("backend.service.Transcriber"), \
+             patch("backend.service.Translator"), \
+             patch("backend.service.AutoBackupManager"):
+            from backend.service import BackendService
+            self.service = BackendService.__new__(BackendService)
+            from backend.state_store import StateStore
+            self.service.store = StateStore(data_dir=Path(self.tmpdir))
+            self.service._chains = RecordingChainManager(store=self.service.store)
+            # Build the dispatch table subset we need
+            self.service._handlers = {
+                "unlink_recording_from_chain":
+                    self.service._chains.handle_unlink_recording_from_chain,
+            }
+
+    def test_unlink_method_in_service_dispatch(self):
+        """unlink_recording_from_chain is callable via service._chains.handle_unlink."""
+        chain_id = self.service._chains.start_chain("dispatch-test-chain")
+        self.service._chains.add_to_chain(chain_id, "dispatch-item")
+        result = self.service._chains.handle_unlink_recording_from_chain(
+            {"chain_id": chain_id, "item_id": "dispatch-item"}
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("removed"))
+
+    def test_unlink_dispatch_handler_is_registered(self):
+        """The handler is present in the service._handlers dict."""
+        self.assertIn("unlink_recording_from_chain", self.service._handlers)
+
+    def test_no_swift_caller_documented(self):
+        """Documents that Swift agent has no caller for unlink_recording_from_chain yet.
+
+        The IPC method is wired Python-side (BackendService dispatch table line ~882).
+        Swift UI caller is pending — to be added in a future wave when the
+        recording chain UI is implemented in HistoryPanelController.
+        """
+        import subprocess
+        result = subprocess.run(
+            ["grep", "-r", "unlink_recording_from_chain",
+             "native/"],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).parent.parent.parent),
+        )
+        # No Swift caller found — confirmed absent
+        self.assertEqual(result.stdout.strip(), "",
+                         "Unexpected Swift caller found — update this test")
+
+
 if __name__ == "__main__":
     unittest.main()

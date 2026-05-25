@@ -445,5 +445,79 @@ class TestChunkAndMergeIntegration(unittest.TestCase):
         self.assertAlmostEqual(merged["end_sec"], total_sec, delta=1.0)
 
 
+# ---------------------------------------------------------------------------
+# 8. Concurrency — thread-safety
+# ---------------------------------------------------------------------------
+
+class TestChunkConcurrency(unittest.TestCase):
+    """AudioChunker должен быть thread-safe: параллельные вызовы не ломают результаты."""
+
+    def test_concurrent_chunking_thread_safe(self):
+        """Несколько потоков одновременно вызывают chunk() — результаты корректны."""
+        import threading
+
+        chunker = AudioChunker(min_silence_sec=0.3)
+        errors: list[Exception] = []
+        results: list[list] = []
+        lock = threading.Lock()
+
+        def worker(worker_id: int) -> None:
+            try:
+                # Каждый поток работает с независимым аудио
+                audio = _cat(_speech(20.0), _silence(0.5), _speech(20.0))
+                chunks = chunker.chunk(audio, SAMPLE_RATE, max_chunk_sec=30.0)
+                with lock:
+                    results.append(chunks)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        n_threads = 8
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        self.assertEqual(errors, [], msg=f"Ошибки в потоках: {errors}")
+        self.assertEqual(len(results), n_threads)
+
+        # Каждый поток должен вернуть >= 1 чанк и >1 для аудио с паузой
+        for chunks in results:
+            self.assertGreaterEqual(len(chunks), 1)
+
+    def test_concurrent_merge_results_thread_safe(self):
+        """merge_results() (статический метод) безопасен при параллельных вызовах."""
+        import threading
+
+        errors: list[Exception] = []
+        results: list[dict] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            try:
+                chunks = [
+                    {"text": f"слово_{i}", "start_sec": float(i), "end_sec": float(i + 1)}
+                    for i in range(10)
+                ]
+                merged = AudioChunker.merge_results(chunks)
+                with lock:
+                    results.append(merged)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 12)
+        for r in results:
+            self.assertEqual(r["chunk_count"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()

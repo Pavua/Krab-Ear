@@ -78,6 +78,8 @@ extension AgentAppDelegate {
                 }
             }
             await monitor.start()
+            // Wave 656: log first health ping milestone.
+            AgentRecoveryLogger.shared.logStage("first_health_ping")
         }
 
         self.healthMonitor = monitor

@@ -52,6 +52,17 @@ final class LiveSubtitlesOverlay: NSObject {
     private let maxEntries = 3
     private var fadeTimers: [UUID: Timer] = [:]
 
+    // MARK: - Test hooks (accessible via @testable import in unit tests)
+
+    /// Количество активных subtitle-записей (для unit-тестов).
+    var _testEntryCount: Int { entries.count }
+
+    /// Уровень окна панели (для unit-тестов).
+    var _testPanelLevel: NSWindow.Level { panel.level }
+
+    /// isMovableByWindowBackground (для unit-тестов).
+    var _testPanelIsDraggable: Bool { panel.isMovableByWindowBackground }
+
     /// Текущий event type из SSE (из строки "event: ..."), чтобы фильтровать data-строки.
     private var pendingSSEEventType: String? = nil
 
@@ -368,6 +379,11 @@ final class LiveSubtitlesOverlay: NSObject {
     }
 
     // MARK: - SSE Line Parsing
+
+    /// Internal SSE line handler — exposed for unit tests via @testable import.
+    func _testHandleSSELine(_ line: String) {
+        handleSSELine(line)
+    }
 
     private func handleSSELine(_ line: String) {
         if line.hasPrefix("event: ") {

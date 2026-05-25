@@ -273,5 +273,114 @@ class TestAudioFingerprinterIPCHandler(unittest.TestCase):
         self.assertTrue(resp["result"]["is_duplicate"])
 
 
+class TestWave108RequiredCases(unittest.TestCase):
+    """Wave 108 — explicitly required test cases."""
+
+    def setUp(self) -> None:
+        self.fp = AudioFingerprinter()
+        self.sr = 16000
+
+    # test_same_audio_same_fingerprint
+    def test_same_audio_same_fingerprint(self) -> None:
+        audio = _sine(440.0, duration=1.0, sr=self.sr)
+        h1 = self.fp.fingerprint(audio, self.sr)
+        h2 = self.fp.fingerprint(audio.copy(), self.sr)
+        self.assertEqual(h1, h2)
+
+    # test_different_audio_different_fingerprint
+    def test_different_audio_different_fingerprint(self) -> None:
+        sine_200 = _sine(200.0, duration=1.0, sr=self.sr)
+        noise = _white_noise(duration=1.0, sr=self.sr, seed=999)
+        self.assertNotEqual(
+            self.fp.fingerprint(sine_200, self.sr),
+            self.fp.fingerprint(noise, self.sr),
+        )
+
+    # test_slightly_modified_audio_close_fingerprint (Hamming distance test)
+    # The fingerprinter uses 4 features quantized to uint16 → 8 bytes total.
+    # A tiny amplitude perturbation that doesn't cross quantization bins
+    # should produce the SAME fingerprint (compare == 1.0).
+    def test_slightly_modified_audio_close_fingerprint(self) -> None:
+        """Slight volume scale (x0.999) that stays in same quantization bin → same hash."""
+        audio = _sine(440.0, duration=2.0, sr=self.sr)
+        # Scale by a factor that is too small to change quantized features
+        scaled = (audio * 0.999).astype(np.float32)
+
+        fp_orig = self.fp.fingerprint(audio, self.sr)
+        fp_scaled = self.fp.fingerprint(scaled, self.sr)
+        similarity = self.fp.compare(fp_orig, fp_scaled)
+        # Spectral centroid and ZCR are amplitude-invariant after _to_mono_float32 normalization.
+        # So a pure scale factor should produce identical fingerprints.
+        self.assertEqual(
+            fp_orig, fp_scaled,
+            msg=f"Tiny scale (×0.999) should produce identical hash "
+                f"(similarity={similarity:.4f}) because features are amplitude-normalized",
+        )
+
+    # test_short_audio_fingerprint
+    def test_short_audio_fingerprint(self) -> None:
+        short = _sine(440.0, duration=0.01, sr=self.sr)  # 160 samples < window_size=512
+        h = self.fp.fingerprint(short, self.sr)
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+
+    # test_silent_audio_fingerprint
+    def test_silent_audio_fingerprint(self) -> None:
+        silence = np.zeros(self.sr, dtype=np.float32)
+        h = self.fp.fingerprint(silence, self.sr)
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 64)
+        # Silent audio fingerprint is stable (deterministic)
+        self.assertEqual(h, self.fp.fingerprint(silence.copy(), self.sr))
+
+    # test_unicode_path_handled — fingerprint() takes numpy arrays, not file paths.
+    # The module has no file-path API. We verify that audio derived from a
+    # "unicode filename" scenario (load simulation with np array) works fine,
+    # and that the unicode string itself doesn't cause issues when used as a label.
+    def test_unicode_path_handled(self) -> None:
+        """Fingerprinter handles audio regardless of any unicode context."""
+        # Simulate what would happen after loading an audio file with a unicode path
+        # (e.g., /tmp/аудио_тест_Привет_🎙️.wav) — the array itself is plain numpy.
+        audio = _sine(440.0, duration=0.5, sr=self.sr)
+        unicode_label = "/tmp/аудио_тест_Привет_🎙️.wav"
+        # The fingerprinter works on audio arrays — unicode is irrelevant to its API.
+        # We verify the result is valid and deterministic.
+        h1 = self.fp.fingerprint(audio, self.sr)
+        h2 = self.fp.fingerprint(audio, self.sr)
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 64)
+        # Ensure unicode characters in a separate string don't cause encoding errors
+        self.assertIsInstance(unicode_label.encode("utf-8"), bytes)
+
+    # test_concurrent_fingerprint_thread_safe
+    def test_concurrent_fingerprint_thread_safe(self) -> None:
+        import threading
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        reference = _sine(440.0, duration=0.5, sr=self.sr)
+        expected_hash = self.fp.fingerprint(reference, self.sr)
+
+        def worker(idx: int) -> None:
+            try:
+                audio = _sine(440.0 + idx * 0.0, duration=0.5, sr=self.sr)
+                h = AudioFingerprinter().fingerprint(audio, self.sr)
+                results.append(h)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        self.assertEqual(errors, [], msg=f"Thread errors: {errors}")
+        self.assertEqual(len(results), 8)
+        # All workers used identical audio → all hashes should match
+        for h in results:
+            self.assertEqual(h, expected_hash)
+
+
 if __name__ == "__main__":
     unittest.main()

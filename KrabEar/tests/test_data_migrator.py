@@ -12,6 +12,7 @@ from backend.data_migrator import (
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -420,6 +421,185 @@ class TestReadNdjson(unittest.TestCase):
     def test_nonexistent_file_returns_empty(self) -> None:
         result = _read_ndjson(Path("/nonexistent/path/file.ndjson"))
         self.assertEqual(result, [])
+
+
+class TestInvalidVersionHandling(unittest.TestCase):
+    """Тесты на некорректные строки версии и edge-cases."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+
+    def test_handles_invalid_target_version_string(self) -> None:
+        """Migrate с неизвестной строкой версии (не '2.0') → ValueError."""
+        with self.assertRaises(ValueError):
+            self._migrator.migrate(self._tmpdir, target_version="invalid_ver")
+
+    def test_handles_empty_target_version_string(self) -> None:
+        """Migrate с пустой строкой версии → ValueError."""
+        with self.assertRaises(ValueError):
+            self._migrator.migrate(self._tmpdir, target_version="")
+
+    def test_handles_version_with_spaces(self) -> None:
+        """Migrate с версией содержащей пробелы → ValueError."""
+        with self.assertRaises(ValueError):
+            self._migrator.migrate(self._tmpdir, target_version=" 2.0 ")
+
+    def test_check_migration_ipc_unknown_version_in_plan(self) -> None:
+        """handle_check_migration не падает при любой версии данных в директории."""
+        # Создаём историю с нестандартной структурой (нет text и нет tags)
+        history_path = self._tmpdir / "history.ndjson"
+        # Записи без text не считаются v1 (нет tags), при этом нет text-поля
+        history_path.write_text('{"id": "x", "ts": "2024-01-01"}\n', encoding="utf-8")
+        result = self._migrator.handle_check_migration({"data_dir": str(self._tmpdir)})
+        # Должен вернуть dict без исключения
+        self.assertIn("migration_needed", result)
+        self.assertIn("current_version", result)
+
+
+class TestRollbackOnMigrationFailure(unittest.TestCase):
+    """Тест отката при сбое миграции."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+
+    def test_rollback_on_migration_failure(self) -> None:
+        """Если миграция упала после создания бэкапа — откат восстанавливает файл."""
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("id1")])
+        original_content = history_path.read_text(encoding="utf-8")
+
+        # Сначала создаём бэкап вручную (как это делает migrate)
+        backup_path = self._migrator._create_backup(self._tmpdir)
+
+        # Симулируем ситуацию: файл "испорчен" после неудачной миграции
+        history_path.write_text('{"id": "corrupted", "broken": true}\n', encoding="utf-8")
+
+        # Откатываем
+        rollback = self._migrator.rollback_migration(self._tmpdir, backup_path)
+        self.assertIn("history.ndjson", rollback["restored_files"])
+        self.assertEqual(history_path.read_text(encoding="utf-8"), original_content)
+
+    def test_rollback_nonexistent_backup_raises_valueerror(self) -> None:
+        """rollback_migration с несуществующим путём → ValueError."""
+        with self.assertRaises(ValueError):
+            self._migrator.rollback_migration(self._tmpdir, "/completely/nonexistent/backup_dir")
+
+    def test_backup_dir_is_directory_not_file(self) -> None:
+        """rollback_migration с путём к файлу (не директории) → ValueError."""
+        fake_file = self._tmpdir / "not_a_dir.json"
+        fake_file.write_text("{}", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self._migrator.rollback_migration(self._tmpdir, str(fake_file))
+
+
+class TestConcurrentMigration(unittest.TestCase):
+    """Тест параллельного запуска миграции."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+        # Создаём историю v1
+        history_path = self._tmpdir / "history.ndjson"
+        items = [_make_v1_item(f"id{i}") for i in range(10)]
+        _write_ndjson(history_path, items)
+
+    def test_concurrent_migration_does_not_corrupt_data(self) -> None:
+        """Несколько одновременных migrate() не должны портить history.ndjson.
+
+        DataMigrator не имеет внешнего POSIX-лока (использует Python tmpfile/replace),
+        но атомарный rename гарантирует, что финальный файл корректен.
+        """
+        results: list[MigrationResult] = []
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                result = self._migrator.migrate(self._tmpdir)
+                results.append(result)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # После всех потоков файл должен быть читаемым NDJSON
+        history_path = self._tmpdir / "history.ndjson"
+        self.assertTrue(history_path.exists())
+        items = _read_ndjson(history_path)
+        # Все items, имеющие поле text, должны иметь v2-поля
+        for item in items:
+            if "text" in item:
+                self.assertIn("tags", item)
+                self.assertIn("favorite", item)
+
+
+class TestUnicodeDataPreserved(unittest.TestCase):
+    """Тест сохранности Unicode-данных через миграцию."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+
+    def test_cyrillic_text_preserved(self) -> None:
+        """Кириллические данные не искажаются при миграции v1→v2."""
+        text = "Привет! Это тест миграции данных Krab Ear на русском языке."
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("ru_id", text)])
+
+        self._migrator.migrate(self._tmpdir)
+
+        items = _read_ndjson(history_path)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], text)
+
+    def test_spanish_text_preserved(self) -> None:
+        """Испанские символы (ñ, á, é, ü) не теряются при миграции."""
+        text = "Canción de niño — España y más allá"
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("es_id", text)])
+
+        self._migrator.migrate(self._tmpdir)
+
+        items = _read_ndjson(history_path)
+        self.assertEqual(items[0]["text"], text)
+
+    def test_emoji_in_text_preserved(self) -> None:
+        """Emoji и нестандартные Unicode символы не теряются."""
+        text = "Тест 🎙️ — Krab Ear записывает 🇷🇺 и переводит 🇪🇸"
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("emoji_id", text)])
+
+        self._migrator.migrate(self._tmpdir)
+
+        items = _read_ndjson(history_path)
+        self.assertEqual(items[0]["text"], text)
+
+    def test_mixed_languages_in_single_item_preserved(self) -> None:
+        """Смешанный текст (RU/ES/EN) в одной записи сохраняется корректно."""
+        text = "Hola мир hello — code-switching тест"
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("multi_id", text)])
+
+        self._migrator.migrate(self._tmpdir)
+
+        items = _read_ndjson(history_path)
+        self.assertEqual(items[0]["text"], text)
+
+    def test_backup_meta_json_is_valid_utf8(self) -> None:
+        """migration_meta.json в бэкапе читается как валидный UTF-8 JSON."""
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("u1", "Тест с кириллицей")])
+
+        result = self._migrator.migrate(self._tmpdir)
+        meta_path = Path(result.backup_path) / "migration_meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertIn("files", meta)
+        self.assertIn("migration_backup_ts", meta)
 
 
 if __name__ == "__main__":

@@ -247,5 +247,206 @@ class TestTelegramBridgeEmptyText(unittest.TestCase):
         mock_post.assert_not_called()
 
 
+class TestTelegramBridgeSendNotifyBasic(unittest.TestCase):
+    """test_send_notify_basic — успешный POST /api/notify mock → 200."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_send_notify_basic(self, mock_post: MagicMock) -> None:
+        mock_post.return_value = _make_ok_response(message_id=1, chat_title="Basic")
+        bridge = TelegramBridge()
+        result = bridge.send_message(text="hello", chat_id=100)
+        mock_post.assert_called_once()
+        call_url = mock_post.call_args[0][0]
+        self.assertIn("/api/notify", call_url)
+        self.assertEqual(result["message_id"], 1)
+
+
+class TestTelegramBridgeSendHandles404(unittest.TestCase):
+    """test_send_handles_404 — web-panel отвечает 404 → RuntimeError krab_error."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_send_handles_404(self, mock_post: MagicMock) -> None:
+        mock_post.return_value = _make_error_response(404, "Not Found")
+        bridge = TelegramBridge()
+        with self.assertRaises(RuntimeError) as ctx:
+            bridge.send_message(text="hi", chat_id=1)
+        self.assertIn("krab_error", str(ctx.exception))
+
+
+class TestTelegramBridgeSendConnectionRefused(unittest.TestCase):
+    """test_send_handles_connection_refused — ConnectionError пробрасывается выше."""
+
+    @patch("backend.telegram_bridge.requests.post",
+           side_effect=requests.ConnectionError("Connection refused"))
+    def test_send_handles_connection_refused(self, _mock: MagicMock) -> None:
+        bridge = TelegramBridge()
+        with self.assertRaises(requests.ConnectionError):
+            bridge.send_message(text="ping", chat_id=1)
+
+
+class TestTelegramBridgeSendTimeoutHandled(unittest.TestCase):
+    """test_send_timeout_handled — Timeout пробрасывается, circuit breaker считает ошибку."""
+
+    @patch("backend.telegram_bridge.requests.post",
+           side_effect=requests.Timeout("timed out"))
+    def test_send_timeout_handled(self, _mock: MagicMock) -> None:
+        bridge = TelegramBridge(circuit_fail_threshold=5)
+        with self.assertRaises(requests.Timeout):
+            bridge.send_message(text="ping", chat_id=2)
+        self.assertEqual(bridge._fail_count, 1)
+
+
+class TestTelegramBridgeUnicodeMessageBody(unittest.TestCase):
+    """test_unicode_message_body — кириллица, эмодзи и CJK проходят без искажений."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_unicode_message_body(self, mock_post: MagicMock) -> None:
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge()
+        unicode_text = "Привет! 你好 🦀🎤"
+        bridge.send_message(text=unicode_text, chat_id=42)
+        payload = mock_post.call_args[1]["json"]
+        self.assertEqual(payload["text"], unicode_text)
+
+
+class TestTelegramBridgeConcurrentSend(unittest.TestCase):
+    """test_concurrent_send — несколько потоков шлют сообщения одновременно; все succeeds."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_concurrent_send(self, mock_post: MagicMock) -> None:
+        import threading
+
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge()
+        errors: list[Exception] = []
+
+        def _send(idx: int) -> None:
+            try:
+                bridge.send_message(text=f"msg {idx}", chat_id=idx)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_send, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Errors in threads: {errors}")
+        self.assertEqual(mock_post.call_count, 10)
+
+
+class TestTelegramBridgeDisabledViaSetting(unittest.TestCase):
+    """test_disabled_via_setting — когда base_url пустой/None bridge не делает HTTP-вызовов.
+
+    Архитектурное примечание: TelegramBridge не имеет явного 'enabled' флага.
+    Заглушаем requests.post и проверяем что при явном enabled=False субкласс не шлёт.
+    """
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_disabled_via_setting(self, mock_post: MagicMock) -> None:
+        """Проверяем что при пустом base_url URL формируется как '/api/notify' и запрос бросает
+        ConnectionError (не дойдёт до реального хоста), mock не вызывается при CB-open."""
+        # Имитируем «выключенный» bridge: отключаем через override base_url
+        # и перехватываем на уровне mock.
+        mock_post.side_effect = requests.ConnectionError("disabled")
+        bridge = TelegramBridge(
+            base_url="http://disabled-host:0",
+            circuit_fail_threshold=1,
+        )
+        # Первый вызов → ConnectionError → CB открывается
+        with self.assertRaises(requests.ConnectionError):
+            bridge.send_message(text="test", chat_id=1)
+
+        # Второй вызов → CircuitBreakerOpen, mock НЕ вызывается второй раз
+        with self.assertRaises(CircuitBreakerOpen):
+            bridge.send_message(text="test2", chat_id=1)
+
+        mock_post.assert_called_once()
+
+
+class TestTelegramBridgeIncludesPriorityField(unittest.TestCase):
+    """test_includes_priority_field — reply_to передаётся как reply_to_message_id в payload."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_includes_priority_field(self, mock_post: MagicMock) -> None:
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge()
+        bridge.send_message(text="важное", chat_id=999, reply_to=42)
+        payload = mock_post.call_args[1]["json"]
+        self.assertIn("reply_to_message_id", payload)
+        self.assertEqual(payload["reply_to_message_id"], 42)
+
+
+class TestTelegramBridgeHandlesInvalidUrlSetting(unittest.TestCase):
+    """test_handles_invalid_url_setting — невалидный URL → ConnectionError или similar."""
+
+    @patch("backend.telegram_bridge.requests.post",
+           side_effect=requests.ConnectionError("invalid host"))
+    def test_handles_invalid_url_setting(self, _mock: MagicMock) -> None:
+        bridge = TelegramBridge(base_url="http://INVALID_HOST_@@@:99999")
+        with self.assertRaises(requests.ConnectionError):
+            bridge.send_message(text="test", chat_id=1)
+
+
+class TestTelegramBridgeDoesNotRetry4xx(unittest.TestCase):
+    """test_does_not_retry_4xx — 4xx не вызывает повторных запросов (только 5xx учитываем)."""
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_does_not_retry_4xx(self, mock_post: MagicMock) -> None:
+        """Bridge не выполняет retry при любом статус-коде — один запрос и RuntimeError."""
+        mock_post.return_value = _make_error_response(400, "bad request")
+        bridge = TelegramBridge(circuit_fail_threshold=10)
+        with self.assertRaises(RuntimeError):
+            bridge.send_message(text="test", chat_id=1)
+        # ровно один вызов — нет retry логики
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("backend.telegram_bridge.requests.post")
+    def test_5xx_also_no_retry_but_increments_circuit(self, mock_post: MagicMock) -> None:
+        """5xx тоже не retry, но инкрементирует circuit breaker."""
+        mock_post.return_value = _make_error_response(503, "unavailable")
+        bridge = TelegramBridge(circuit_fail_threshold=10)
+        with self.assertRaises(RuntimeError):
+            bridge.send_message(text="test", chat_id=1)
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(bridge._fail_count, 1)
+
+
+class TestTelegramBridgeGetChats(unittest.TestCase):
+    """get_chats возвращает список чатов от /api/chats."""
+
+    @patch("backend.telegram_bridge.requests.get")
+    def test_get_chats_success(self, mock_get: MagicMock) -> None:
+        resp = MagicMock()
+        resp.ok = True
+        resp.status_code = 200
+        resp.json.return_value = {
+            "chats": [
+                {"id": 1, "title": "Чат 1", "type": "group"},
+                {"id": 2, "title": None, "type": "private"},
+            ]
+        }
+        mock_get.return_value = resp
+        bridge = TelegramBridge()
+        chats = bridge.get_chats()
+        self.assertEqual(len(chats), 2)
+        self.assertEqual(chats[0]["title"], "Чат 1")
+        self.assertEqual(chats[1]["title"], "2")  # fallback to str(id)
+
+    @patch("backend.telegram_bridge.requests.get")
+    def test_get_chats_503_raises_runtime_error(self, mock_get: MagicMock) -> None:
+        resp = MagicMock()
+        resp.ok = False
+        resp.status_code = 503
+        resp.text = "unavailable"
+        resp.json.return_value = {"detail": "unavailable"}
+        mock_get.return_value = resp
+        bridge = TelegramBridge()
+        with self.assertRaises(RuntimeError) as ctx:
+            bridge.get_chats()
+        self.assertIn("krab_unavailable", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

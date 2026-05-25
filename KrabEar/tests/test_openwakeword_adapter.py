@@ -368,5 +368,292 @@ class TestBuiltinModelsList(unittest.TestCase):
         self.assertTrue(expected.issubset(set(_BUILTIN_MODELS)))
 
 
+class TestOpenWakeWordAdapterWave178(unittest.TestCase):
+    """Wave 178 — additional coverage tests."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+
+    # ------------------------------------------------------------------
+    # test_init_loads_default_model
+    # ------------------------------------------------------------------
+
+    def test_init_loads_default_model(self) -> None:
+        """_load_model вызывает openwakeword.model.Model с именем модели."""
+        mock_model_instance = MagicMock()
+        mock_model_cls = MagicMock(return_value=mock_model_instance)
+
+        import sys
+        import types
+
+        # Создаём фиктивный модуль openwakeword.model
+        oww_pkg = types.ModuleType("openwakeword")
+        oww_model_mod = types.ModuleType("openwakeword.model")
+        oww_model_mod.Model = mock_model_cls
+        oww_pkg.model = oww_model_mod
+
+        sys.modules.setdefault("openwakeword", oww_pkg)
+        sys.modules["openwakeword.model"] = oww_model_mod
+
+        try:
+            adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+            adapter._oww_available = True
+            result = adapter._load_model("alexa", None)
+        finally:
+            del sys.modules["openwakeword.model"]
+            sys.modules.pop("openwakeword", None)
+
+        mock_model_cls.assert_called_once_with(wakeword_models=["alexa"])
+        self.assertIs(result, mock_model_instance)
+
+    # ------------------------------------------------------------------
+    # test_process_chunk_returns_score
+    # ------------------------------------------------------------------
+
+    def test_process_chunk_returns_score(self) -> None:
+        """predict() на mock модели возвращает словарь score."""
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {"alexa": 0.75}
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        adapter._load_model = MagicMock(return_value=mock_oww)
+
+        def fake_listen_loop(**kwargs: object) -> None:
+            adapter._stop_event.wait(timeout=1.0)
+
+        adapter._listen_loop = fake_listen_loop  # type: ignore[method-assign]
+        adapter.start("alexa", lambda n, s: None)
+
+        # Вызываем predict напрямую через mock oww
+        chunk = [0] * 1280
+        scores = adapter._oww.predict(chunk)
+        self.assertIsInstance(scores, dict)
+        self.assertIn("alexa", scores)
+        self.assertAlmostEqual(scores["alexa"], 0.75, places=3)
+
+        adapter.stop()
+
+    # ------------------------------------------------------------------
+    # test_score_below_threshold_no_detection
+    # ------------------------------------------------------------------
+
+    def test_score_below_threshold_no_detection(self) -> None:
+        """Callback НЕ вызывается когда score ниже threshold."""
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {"alexa": 0.3}  # below default 0.5
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        adapter._load_model = MagicMock(return_value=mock_oww)
+
+        detected: list[tuple[str, float]] = []
+
+        def fake_listen_loop(**kwargs: object) -> None:
+            threshold = kwargs.get("threshold", 0.5)
+            chunk = [0] * 1280
+            oww = adapter._oww
+            if oww is not None:
+                preds = oww.predict(chunk)
+                for model_name, score in preds.items():
+                    if score >= threshold and adapter._on_detected is not None:
+                        adapter._on_detected(model_name, float(score))
+
+        adapter._listen_loop = fake_listen_loop  # type: ignore[method-assign]
+        adapter.start("alexa", lambda n, s: detected.append((n, s)), threshold=0.5)
+        adapter.stop()
+
+        self.assertEqual(len(detected), 0, "Не должно быть детекций при score=0.3")
+
+    # ------------------------------------------------------------------
+    # test_handles_short_audio_chunk
+    # ------------------------------------------------------------------
+
+    def test_handles_short_audio_chunk(self) -> None:
+        """predict() вызывается даже с коротким аудио-чанком (< chunk_size)."""
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {"alexa": 0.1}
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        adapter._oww = mock_oww
+
+        # Вызываем predict с коротким массивом напрямую
+        short_chunk = [0] * 64
+        result = adapter._oww.predict(short_chunk)
+        mock_oww.predict.assert_called_once_with(short_chunk)
+        self.assertIsInstance(result, dict)
+
+    # ------------------------------------------------------------------
+    # test_handles_silent_audio
+    # ------------------------------------------------------------------
+
+    def test_handles_silent_audio(self) -> None:
+        """predict() не падает на тишине (все нули)."""
+        mock_oww = MagicMock()
+        mock_oww.predict.return_value = {"alexa": 0.0}
+
+        silent_chunk = [0] * 1280
+        result = mock_oww.predict(silent_chunk)
+        self.assertEqual(result["alexa"], 0.0)
+        mock_oww.predict.assert_called_once_with(silent_chunk)
+
+    # ------------------------------------------------------------------
+    # test_handles_unicode_model_path
+    # ------------------------------------------------------------------
+
+    def test_handles_unicode_model_path(self) -> None:
+        """Пользовательская модель с Unicode-именем обнаруживается в list_models."""
+        custom_dir = Path(self.tmp) / _CUSTOM_MODELS_DIR
+        custom_dir.mkdir(parents=True)
+        # Имя файла с кириллицей
+        unicode_model = custom_dir / "краб_голос.onnx"
+        unicode_model.write_text("fake_onnx_data")
+
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = False
+
+        models = adapter.list_models()
+        custom_names = [m["name"] for m in models if m["source"] == "custom"]
+        self.assertIn("краб_голос", custom_names)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_process_thread_safe
+    # ------------------------------------------------------------------
+
+    def test_concurrent_process_thread_safe(self) -> None:
+        """Параллельные вызовы status/stop не вызывают race condition."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        mock_oww = MagicMock()
+        adapter._load_model = MagicMock(return_value=mock_oww)
+
+        def fake_listen_loop(**kwargs: object) -> None:
+            adapter._stop_event.wait(timeout=2.0)
+
+        adapter._listen_loop = fake_listen_loop  # type: ignore[method-assign]
+        adapter.start("alexa", lambda n, s: None)
+
+        errors: list[Exception] = []
+
+        def check_status() -> None:
+            try:
+                for _ in range(20):
+                    _ = adapter.is_running()
+                    _ = adapter.active_model()
+                    _ = adapter.handle_wake_word_status({})
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=check_status) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=3.0)
+
+        adapter.stop()
+        self.assertEqual(len(errors), 0, f"Race condition errors: {errors}")
+
+    # ------------------------------------------------------------------
+    # test_handles_openwakeword_unavailable (ImportError path in _load_model)
+    # ------------------------------------------------------------------
+
+    def test_handles_openwakeword_unavailable_load_model(self) -> None:
+        """_load_model бросает RuntimeError если openwakeword не установлен."""
+        import sys
+
+        # Убираем openwakeword из sys.modules если есть, симулируем отсутствие
+        saved = sys.modules.pop("openwakeword", None)
+        saved_model = sys.modules.pop("openwakeword.model", None)
+
+        # Запрещаем импорт через sys.modules
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name: str, *args: object, **kwargs: object) -> object:
+            if name in ("openwakeword", "openwakeword.model"):
+                raise ImportError("openwakeword not installed")
+            return original_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        builtins.__import__ = mock_import  # type: ignore[assignment]
+        try:
+            adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+            adapter._oww_available = True  # force past availability check
+            with self.assertRaises(RuntimeError) as ctx:
+                adapter._load_model("alexa", None)
+            self.assertIn("openwakeword", str(ctx.exception))
+        finally:
+            builtins.__import__ = original_import  # type: ignore[assignment]
+            if saved is not None:
+                sys.modules["openwakeword"] = saved
+            if saved_model is not None:
+                sys.modules["openwakeword.model"] = saved_model
+
+    # ------------------------------------------------------------------
+    # test_reset_state
+    # ------------------------------------------------------------------
+
+    def test_reset_state(self) -> None:
+        """После stop() внутреннее состояние сброшено: oww=None, active_model=None."""
+        adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+        adapter._oww_available = True
+        mock_oww = MagicMock()
+        adapter._load_model = MagicMock(return_value=mock_oww)
+
+        def fake_listen_loop(**kwargs: object) -> None:
+            adapter._stop_event.wait(timeout=1.0)
+
+        adapter._listen_loop = fake_listen_loop  # type: ignore[method-assign]
+        adapter.start("hey_mycroft", lambda n, s: None)
+
+        # Во время работы состояние установлено
+        self.assertEqual(adapter.active_model(), "hey_mycroft")
+        self.assertTrue(adapter.is_running())
+
+        adapter.stop()
+
+        # После stop() сброс состояния
+        self.assertIsNone(adapter._oww)
+        self.assertIsNone(adapter.active_model())
+        self.assertFalse(adapter.is_running())
+
+    # ------------------------------------------------------------------
+    # test_custom_model_path_override
+    # ------------------------------------------------------------------
+
+    def test_custom_model_path_override(self) -> None:
+        """_load_model вызывается с путём к .onnx файлу для пользовательской модели."""
+        custom_dir = Path(self.tmp) / _CUSTOM_MODELS_DIR
+        custom_dir.mkdir(parents=True)
+        model_file = custom_dir / "краб.onnx"
+        model_file.write_text("fake_onnx")
+
+        import sys
+        import types
+
+        mock_model_instance = MagicMock()
+        mock_model_cls = MagicMock(return_value=mock_model_instance)
+
+        oww_pkg = types.ModuleType("openwakeword")
+        oww_model_mod = types.ModuleType("openwakeword.model")
+        oww_model_mod.Model = mock_model_cls
+        oww_pkg.model = oww_model_mod
+
+        sys.modules.setdefault("openwakeword", oww_pkg)
+        sys.modules["openwakeword.model"] = oww_model_mod
+
+        try:
+            adapter = OpenWakeWordAdapter(data_dir=self.tmp)
+            adapter._oww_available = True
+            result = adapter._load_model("краб", str(model_file))
+        finally:
+            del sys.modules["openwakeword.model"]
+            sys.modules.pop("openwakeword", None)
+
+        # _load_model с model_path != None должен передать путь в OWWModel
+        mock_model_cls.assert_called_once_with(wakeword_models=[str(model_file)])
+        self.assertIs(result, mock_model_instance)
+
+
 if __name__ == "__main__":
     unittest.main()

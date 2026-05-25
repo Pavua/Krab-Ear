@@ -9,7 +9,7 @@ Covers:
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 # Ensure KrabEar package is importable
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -102,7 +102,6 @@ class TestRewrite401(unittest.TestCase):
 
     def test_401_response_pushes_unauthorized_error_code(self):
         """A 401 must push rewriter.unauthorized via error_bus."""
-        from backend.error_bus import KrabError
         rewriter, error_bus = self._make_rewriter_with_error_bus(api_key="")
         fake_401 = FakeResponse(
             status_code=401,

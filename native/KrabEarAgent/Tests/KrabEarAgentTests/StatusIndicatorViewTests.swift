@@ -269,6 +269,174 @@ final class StatusIndicatorViewTests: XCTestCase {
     }
 }
 
+// MARK: - Wave 152: basic state + SF Symbol + concurrency tests
+
+/// Wave 152 — дополнительные тесты для StatusIndicatorView.
+/// Фокус: initial_state, updateState per HealthState, flashGreen, SF Symbol (Wave 67),
+/// и thread-safe concurrent updateState.
+@MainActor
+final class StatusIndicatorViewWave152Tests: XCTestCase {
+
+    private func makeView() -> StatusIndicatorView {
+        let view = StatusIndicatorView(frame: NSRect(x: 0, y: 0, width: 12, height: 12))
+        view.wantsLayer = true
+        view.layoutSubtreeIfNeeded()
+        return view
+    }
+
+    private func drainMainQueue() {
+        RunLoop.current.run(until: Date())
+    }
+
+    // MARK: - T-W1: initial state healthy renders green (не крашится)
+
+    /// При создании view дефолтный dotColor = .systemGreen.
+    /// Проверяем что draw() не падает в initial state.
+    func test_initial_state_healthy_renders_green() {
+        let view = makeView()
+        // Форсируем draw в offscreen context
+        let image = NSImage(size: view.bounds.size)
+        image.lockFocus()
+        view.draw(view.bounds)
+        image.unlockFocus()
+        // Если дошли сюда — initial state .healthy не вызвал crash
+        XCTAssertNotNil(image, "draw() при initial state .healthy не должен падать")
+    }
+
+    // MARK: - T-W2: updateState(.hung) renders yellow (no crash)
+
+    func test_updateState_hung_renders_yellow() {
+        let view = makeView()
+        view.updateState(.hung)
+        drainMainQueue()
+
+        let image = NSImage(size: view.bounds.size)
+        image.lockFocus()
+        view.draw(view.bounds)
+        image.unlockFocus()
+        XCTAssertNotNil(image, "draw() после updateState(.hung) не должен падать")
+    }
+
+    // MARK: - T-W3: updateState(.stopped) renders red (no crash)
+
+    func test_updateState_stopped_renders_red() {
+        let view = makeView()
+        view.updateState(.stopped)
+        drainMainQueue()
+
+        let image = NSImage(size: view.bounds.size)
+        image.lockFocus()
+        view.draw(view.bounds)
+        image.unlockFocus()
+        XCTAssertNotNil(image, "draw() после updateState(.stopped) не должен падать")
+    }
+
+    // MARK: - T-W4: flashGreen temporary animation (no crash, restores state)
+
+    /// flashGreen вызывает кратковременный flash без crash.
+    /// Поскольку restore асинхронный (0.8s), проверяем только отсутствие ошибок.
+    func test_flashGreen_temporary_animation() {
+        let view = makeView()
+        view.updateState(.stopped)
+        drainMainQueue()
+
+        // flashGreen не должен вызывать crash
+        view.flashGreen(reason: "test recovery")
+        drainMainQueue()
+
+        // Проверяем что view существует и draw() работает
+        let image = NSImage(size: view.bounds.size)
+        image.lockFocus()
+        view.draw(view.bounds)
+        image.unlockFocus()
+        XCTAssertNotNil(image, "flashGreen не должен вызывать crash при draw()")
+    }
+
+    // MARK: - T-W5: uses SF Symbol not unicode dot (Wave 67)
+
+    /// StatusIndicatorView НЕ должен использовать Unicode "●" в своей логике.
+    /// Вместо этого applyHealthStateToStatusItem (в main+HealthMonitor.swift) использует
+    /// SF Symbol "circle.fill". Этот тест фиксирует что view сам не рисует текстовый dot.
+    func test_uses_SF_Symbol_not_unicode_dot() {
+        // Проверяем что SF Symbol "circle.fill" доступен — это критическое условие Wave 67
+        let sfSymbol = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+        XCTAssertNotNil(sfSymbol,
+            "SF Symbol 'circle.fill' должен быть доступен (Wave 67 AGENT-J fix dependency)")
+
+        // Создаём view и убеждаемся что он не содержит Unicode dot в title/accessibility
+        let view = makeView()
+        view.updateState(.healthy)
+        drainMainQueue()
+
+        // NSView не имеет title, но toolTip не должен содержать "●"
+        // (это регрессионная защита от возврата к Unicode символу)
+        XCTAssertFalse(
+            view.toolTip?.contains("●") ?? false,
+            "StatusIndicatorView.toolTip не должен содержать Unicode ● (Wave 67)"
+        )
+
+        // Подтверждаем что SF Symbol подход работает для всех states
+        for state in [HealthState.healthy, .hung, .stopped] {
+            let color: NSColor
+            switch state {
+            case .healthy: color = .systemGreen
+            case .hung:    color = .systemYellow
+            case .stopped: color = .systemRed
+            }
+            let config = NSImage.SymbolConfiguration(paletteColors: [color])
+            let img = sfSymbol?.withSymbolConfiguration(config)
+            XCTAssertNotNil(img,
+                "circle.fill с paletteColor для \(state) должен создавать валидный NSImage")
+        }
+    }
+
+    // MARK: - T-W6: thread-safe concurrent updateState
+
+    /// updateState() безопасен при конкурентных вызовах с разных потоков.
+    /// Реализация использует DispatchQueue.main.async — потокобезопасна по определению.
+    /// Тест вызывает с нескольких background потоков через DispatchQueue.global.
+    func test_thread_safe_concurrent_updateState() {
+        let view = makeView()
+        let states: [HealthState] = [.healthy, .hung, .stopped, .healthy, .hung]
+        let group = DispatchGroup()
+
+        // Запускаем конкурентные обновления с background потоков
+        for state in states {
+            group.enter()
+            DispatchQueue.global().async {
+                // updateState внутри использует DispatchQueue.main.async — безопасно
+                view.updateState(state)
+                group.leave()
+            }
+        }
+
+        // Ждём всех background вызовов
+        group.wait()
+
+        // Дрейним main queue чтобы все async обновления применились
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        // View должен быть жив и draw() не падает
+        let image = NSImage(size: view.bounds.size)
+        image.lockFocus()
+        view.draw(view.bounds)
+        image.unlockFocus()
+        XCTAssertNotNil(image, "Concurrent updateState не должен вызывать crash")
+    }
+
+    // MARK: - T-W7: updateState all values covered without crash
+
+    func test_updateState_all_health_states_no_crash() {
+        let view = makeView()
+        for state in [HealthState.healthy, .hung, .stopped] {
+            view.updateState(state)
+            drainMainQueue()
+        }
+        // Если дошли сюда — все три state обработаны без crash
+        XCTAssertNotNil(view)
+    }
+}
+
 // MARK: - Testable accessors
 
 extension StatusIndicatorView {

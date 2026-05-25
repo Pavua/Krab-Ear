@@ -437,5 +437,60 @@ class SpeechPaceDurationPreservedTestCase(unittest.TestCase):
         self.assertEqual(report.duration_sec, 0.0)
 
 
+class SpeechPaceWave132TestCase(unittest.TestCase):
+    """Wave 132 required test cases for SpeechPaceAnalyzer."""
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def test_unicode_words_counted(self) -> None:
+        """Unicode words (кириллица, испанские акценты) корректно считаются."""
+        # Кириллические слова
+        text_ru = "Ёжик бежит быстро через лес"
+        report_ru = self.analyzer.analyze(text_ru, duration_sec=5.0)
+        self.assertEqual(report_ru.word_count, 5, f"Ожидалось 5 слов: {report_ru.word_count}")
+
+        # Испанский с диакритикой
+        text_es = "niño señora árbol cómo está"
+        report_es = self.analyzer.analyze(text_es, duration_sec=5.0)
+        self.assertEqual(report_es.word_count, 5, f"Ожидалось 5 слов: {report_es.word_count}")
+
+        # Смешанный unicode
+        text_mix = "Привет hello señor мир"
+        report_mix = self.analyzer.analyze(text_mix, duration_sec=4.0)
+        self.assertEqual(report_mix.word_count, 4)
+
+    def test_concurrent_analyze(self) -> None:
+        """SpeechPaceAnalyzer.analyze() потокобезопасен при параллельных вызовах."""
+        import threading
+
+        results = {}
+        errors = []
+
+        texts = [
+            " ".join(["слово"] * (50 + i % 100))
+            for i in range(20)
+        ]
+
+        def worker(idx):
+            try:
+                report = self.analyzer.analyze(texts[idx], duration_sec=30.0)
+                results[idx] = report
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Ошибки при параллельных вызовах: {errors}")
+        self.assertEqual(len(results), 20)
+        for idx, report in results.items():
+            self.assertIsInstance(report, PaceReport)
+            self.assertGreater(report.words_per_minute, 0.0, f"WPM должен быть > 0 для idx={idx}")
+
+
 if __name__ == "__main__":
     unittest.main()

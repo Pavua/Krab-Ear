@@ -316,5 +316,59 @@ class TestActivityCalendarIpc(unittest.TestCase):
         self.assertTrue(callable(getattr(cal, "generate_calendar_svg", None)))
 
 
+# ---------------------------------------------------------------------------
+# Тесты unicode + concurrent
+# ---------------------------------------------------------------------------
+
+class TestUnicodeAndConcurrent(unittest.TestCase):
+
+    def setUp(self):
+        self.cal = ActivityCalendar()
+
+    def test_unicode_in_history(self):
+        """Unicode в text не ломает подсчёт слов и агрегацию."""
+        items = [
+            _make_item(0, text="Привет мир こんにちは 세계 😊", duration_sec=30.0),
+            _make_item(0, text="café naïve résumé", duration_sec=30.0),
+        ]
+        result = self.cal.generate_calendar(items, months=1)
+        today_key = date.today().isoformat()
+        da = result.days[today_key]
+        self.assertEqual(da.recordings, 2)
+        # "Привет мир こんにちは 세계 😊" = 5 words; "café naïve résumé" = 3
+        self.assertEqual(da.words, 8)
+
+    def test_concurrent_compute(self):
+        """Параллельный вызов generate_calendar безопасен (нет shared mutable state)."""
+        import threading
+
+        items = [_make_item(i % 15) for i in range(30)]
+        errors: list[Exception] = []
+        results: list = []
+        lock = threading.Lock()
+
+        def _run():
+            try:
+                r = self.cal.generate_calendar(items, months=1)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=_run) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), 6)
+        # Все результаты должны совпадать
+        first = results[0].total_active_days
+        for r in results[1:]:
+            self.assertEqual(r.total_active_days, first)
+
+
 if __name__ == "__main__":
     unittest.main()

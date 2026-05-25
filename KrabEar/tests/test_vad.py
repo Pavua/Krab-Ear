@@ -282,5 +282,80 @@ class TestVADAllSilentAllLoud(unittest.TestCase):
         self.assertGreater(result.speech_ratio, 0.7)
 
 
+class TestVADRequiredCoverage(unittest.TestCase):
+    """Явно-именованные тесты из спецификации Wave 109."""
+
+    def setUp(self):
+        self.vad = VoiceActivityDetector(margin_db=8.0, onset_frames=2, offset_frames=3)
+
+    def test_speech_detected_in_clear_audio(self):
+        """Громкий чистый тон → хотя бы один сегмент речи."""
+        audio = _make_tone(440, 2.0, amplitude=0.6)
+        result = self.vad.detect(audio, SR)
+        self.assertGreater(len(result.speech_segments), 0)
+        self.assertGreater(result.speech_ratio, 0.5)
+
+    def test_no_speech_in_silence(self):
+        """Абсолютная тишина → нет сегментов речи, ratio=0."""
+        audio = np.zeros(SR * 2, dtype=np.float32)
+        result = self.vad.detect(audio, SR)
+        self.assertEqual(len(result.speech_segments), 0)
+        self.assertAlmostEqual(result.speech_ratio, 0.0, places=2)
+
+    def test_handles_short_audio(self):
+        """Аудио менее одного фрейма (< 30 ms при SR=16000 → < 480 семплов) не падает."""
+        for n in (1, 10, 100, 479):
+            with self.subTest(n_samples=n):
+                tiny = np.full(n, 0.3, dtype=np.float32)
+                result = self.vad.detect(tiny, SR)
+                self.assertIsInstance(result, VADResult)
+                self.assertGreaterEqual(result.speech_ratio, 0.0)
+                self.assertLessEqual(result.speech_ratio, 1.0)
+
+    def test_threshold_adjustable(self):
+        """margin_db влияет на чувствительность: высокий margin уменьшает speech_ratio."""
+        # Сигнал с умеренной амплитудой (0.05) + фоновый шум (noise_level 1e-4)
+        noise = _make_silence(2.0, noise_level=1e-4)
+        signal = _make_tone(440, 2.0, amplitude=0.05)
+        mixed = noise + signal  # сложение, чтобы не перегружать
+        vad_sensitive = VoiceActivityDetector(margin_db=2.0, onset_frames=1, offset_frames=2)
+        vad_strict = VoiceActivityDetector(margin_db=50.0, onset_frames=1, offset_frames=2)
+        result_sensitive = vad_sensitive.detect(mixed, SR)
+        result_strict = vad_strict.detect(mixed, SR)
+        # Чувствительный VAD обнаруживает больше речи, строгий — меньше или нуль
+        self.assertGreaterEqual(
+            result_sensitive.speech_ratio,
+            result_strict.speech_ratio,
+        )
+
+    def test_concurrent_detect(self):
+        """Параллельные вызовы detect() из нескольких потоков не вызывают ошибок."""
+        import threading
+
+        errors: list[Exception] = []
+        all_results: list[VADResult | None] = [None] * 12
+
+        def run(idx: int):
+            try:
+                speech = _make_tone(440, 0.5, amplitude=0.5)
+                silence = _make_silence(0.5)
+                audio = np.concatenate([speech, silence])
+                all_results[idx] = self.vad.detect(audio, SR)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Ошибки в потоках: {errors}")
+        for i, res in enumerate(all_results):
+            self.assertIsNotNone(res, f"Поток {i}: нет результата")
+            self.assertGreaterEqual(res.speech_ratio, 0.0)  # type: ignore[union-attr]
+            self.assertLessEqual(res.speech_ratio, 1.0)  # type: ignore[union-attr]
+
+
 if __name__ == "__main__":
     unittest.main()

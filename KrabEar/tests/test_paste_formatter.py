@@ -437,5 +437,76 @@ class TestPasteFormatterExtraEdgeCases(unittest.TestCase):
         self.assertRegex(result, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
 
 
+class TestPasteFormatterWave114(unittest.TestCase):
+    """Wave 114 — required named tests for PasteFormatter."""
+
+    def setUp(self):
+        self.formatter = PasteFormatter(data_dir=None)
+
+    def test_format_plain_text(self):
+        """default/plain formatter returns text unchanged."""
+        text = "Plain transcript text here."
+        result = self.formatter.format_for_app(text, "default")
+        self.assertEqual(result, text)
+
+    def test_format_markdown(self):
+        """code_editor formatter wraps in block comment, preserving structure."""
+        text = "fix bug\nwrite tests"
+        result = self.formatter.format_for_app(text, "code_editor")
+        self.assertTrue(result.startswith("/*"))
+        self.assertIn("*/", result)
+        self.assertIn("// fix bug", result)
+        self.assertIn("// write tests", result)
+
+    def test_format_telegram(self):
+        """Telegram formatter strips trailing period and splits long text on newlines."""
+        # Short text — no split
+        short = "Привет"
+        result_short = self.formatter.format_for_app(short, "telegram")
+        self.assertNotIn("\n", result_short)
+        # Long text (>120 chars) — splits on sentence boundaries
+        long_text = "Первое предложение. Второе предложение. Третье предложение. И ещё одно тут."
+        result_long = self.formatter.format_for_app(long_text + " " + long_text, "telegram")
+        self.assertIn("\n", result_long)
+
+    def test_format_html_escapes(self):
+        """Default formatter passes through HTML-special characters untouched.
+
+        PasteFormatter is not an HTML renderer — it does not escape & < >.
+        We verify the text is returned verbatim by the default formatter.
+        """
+        html_text = "<b>bold</b> & <i>italic</i>"
+        result = self.formatter.format_for_app(html_text, "default")
+        self.assertEqual(result, html_text)
+
+    def test_format_email_signature(self):
+        """Email formatter appends 'С уважением' signature block."""
+        text = "Встреча перенесена на пятницу"
+        result = self.formatter.format_for_app(text, "email")
+        self.assertIn("С уважением", result)
+        self.assertTrue(result.startswith("Здравствуйте"))
+
+    def test_format_notes(self):
+        """Notes formatter prepends a timestamp header and uses bullet points."""
+        text = "Идея: автоматизировать отчёт. Проверить базу данных."
+        result = self.formatter.format_for_app(text, "notes")
+        self.assertRegex(result.splitlines()[0], r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]")
+        self.assertIn("•", result)
+
+    def test_unicode_preserved_across_formats(self):
+        """Unicode characters (RU/ES/emoji) survive all built-in formatters."""
+        text = "Привет мир. Hola mundo. Проверка émoji \U0001f600."
+        for app in ("default", "telegram", "email", "notes", "code_editor"):
+            result = self.formatter.format_for_app(text, app)
+            self.assertIn("Привет", result, msg=f"app={app}")
+            self.assertIn("Hola", result, msg=f"app={app}")
+
+    def test_unknown_format_falls_back_to_plain(self):
+        """Unknown app name falls back to default (text returned as-is)."""
+        text = "Текст для неизвестного приложения."
+        result = self.formatter.format_for_app(text, "totally_unknown_xyz_app")
+        self.assertEqual(result, text)
+
+
 if __name__ == "__main__":
     unittest.main()
