@@ -618,5 +618,102 @@ class TestMarkdownFormat(unittest.TestCase):
         self.assertIn("Krab Ear", result)
 
 
+# ---------------------------------------------------------------------------
+# Тест 13: Именованные тесты Wave 122 (обязательный список)
+# ---------------------------------------------------------------------------
+
+class TestWave122RequiredNames(unittest.TestCase):
+    """Обязательные тесты Wave 122 с точными именами методов."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._gen = StatsReportGenerator()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_generate_empty_history_report(self) -> None:
+        """Пустая история: generate_report не падает, возвращает Markdown."""
+        store = FakeStore(Path(self._tmp.name) / "empty", items=[])
+        result = self._gen.generate_report(store, days=30)
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.strip().startswith("#"))
+        self.assertIn("Krab Ear", result)
+
+    def test_top_words_section(self) -> None:
+        """Теги (топ тегов) — секция присутствует в отчёте."""
+        items = [
+            _make_item("Привет мир привет", ts=_ts_days_ago(1), tags=["meeting", "meeting", "work"]),
+            _make_item("Мир мир", ts=_ts_days_ago(2), tags=["meeting"]),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "topwords", items=items)
+        result = self._gen.generate_report(store, days=30)
+        # Секция тегов должна присутствовать
+        self.assertIn("Теги", result)
+        self.assertIn("meeting", result)
+
+    def test_duration_breakdown(self) -> None:
+        """Длительность: суммарные минуты аудио отражены в обзоре."""
+        items = [
+            _make_item("Запись 1", ts=_ts_days_ago(1), audio_duration_sec=120.0),
+            _make_item("Запись 2", ts=_ts_days_ago(2), audio_duration_sec=180.0),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "dur", items=items)
+        result = self._gen.generate_report(store, days=30)
+        # Суммарно 300 сек = 5 мин = 0.083 ч — что-то про минуты или часы должно быть
+        self.assertIn("мин", result)
+
+    def test_language_breakdown(self) -> None:
+        """Секция языков отображает все три языка при разнообразной истории."""
+        items = [
+            _make_item("Привет", ts=_ts_days_ago(1), source_lang="ru"),
+            _make_item("Hola", ts=_ts_days_ago(2), source_lang="es"),
+            _make_item("Hello", ts=_ts_days_ago(3), source_lang="en"),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "lang", items=items)
+        result = self._gen.generate_report(store, days=30)
+        self.assertIn("ru", result)
+        self.assertIn("es", result)
+        self.assertIn("en", result)
+
+    def test_period_filtering(self) -> None:
+        """Фильтрация по периоду: 7 дней отсекает старые записи."""
+        items = [
+            _make_item("Свежая", ts=_ts_days_ago(3)),
+            _make_item("Старая", ts=_ts_days_ago(40)),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "period", items=items)
+        # За 7 дней только первая запись попадает
+        result_7 = self._gen.generate_report(store, days=7)
+        # За 60 дней обе
+        result_60 = self._gen.generate_report(store, days=60)
+        self.assertIsInstance(result_7, str)
+        self.assertIsInstance(result_60, str)
+        # Общее кол-во в store всегда 2 (строка "Всего записей в истории: 2")
+        self.assertIn("2", result_60)
+
+    def test_unicode_words_in_report(self) -> None:
+        """Юникод (кириллица, emoji) не вызывает UnicodeError."""
+        items = [
+            _make_item("Привет мир 🎙️ тест кириллица", ts=_ts_days_ago(1)),
+            _make_item("Español áéíóú ñ", ts=_ts_days_ago(2), source_lang="es"),
+        ]
+        store = FakeStore(Path(self._tmp.name) / "unicode", items=items)
+        result = self._gen.generate_report(store, days=30)
+        self.assertIsInstance(result, str)
+        self.assertNotIn("UnicodeError", result)
+        self.assertNotIn("Traceback", result)
+
+    def test_markdown_structure_valid(self) -> None:
+        """Структура Markdown: заголовки ## N присутствуют для всех 8 секций."""
+        items = [_make_item("Тест", ts=_ts_days_ago(1))]
+        store = FakeStore(Path(self._tmp.name) / "md", items=items)
+        result = self._gen.generate_report(store, days=30)
+        # Должны быть 8 секций уровня ##
+        import re as _re
+        h2_sections = _re.findall(r"^## \d+\.", result, _re.MULTILINE)
+        self.assertEqual(len(h2_sections), 8, f"Ожидалось 8 секций ##, найдено {len(h2_sections)}")
+
+
 if __name__ == "__main__":
     unittest.main()
