@@ -504,5 +504,106 @@ class TestTranscriptContextAutoGlossary(unittest.TestCase):
         self.assertNotIn("Glossary:", prompt)
 
 
+# ── TestAutoGlossaryWave133 ───────────────────────────────────────────────────
+# Explicitly-named tests matching Wave 133 spec.
+
+class TestAutoGlossaryWave133(unittest.TestCase):
+    """Named tests matching wave133 task spec."""
+
+    def test_build_empty_history_returns_empty(self):
+        """build() on empty history must return []."""
+        store = _FakeStore(items=[])
+        builder = AutoGlossaryBuilder(store=store)
+        self.assertEqual(builder.build(), [])
+
+    def test_extract_proper_nouns_only(self):
+        """Only proper nouns / capitalised terms are included."""
+        items = [
+            _make_item("Python Django Flask используются"),
+            _make_item("Python популярен"),
+        ]
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store)
+        result = builder.build()
+        for term in result:
+            self.assertTrue(
+                _is_capitalized_or_multiword(term),
+                f"Non-proper term in glossary: {term!r}",
+            )
+
+    def test_dedup_glossary_words(self):
+        """Same term appearing in multiple records must deduplicate."""
+        items = [_make_item("TensorFlow применяется")] * 10
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store)
+        result = builder.build(top_n=50)
+        # No duplicates in output
+        self.assertEqual(len(result), len(set(result)))
+
+    def test_unicode_terms(self):
+        """Cyrillic / non-ASCII proper-noun terms are handled correctly."""
+        items = [
+            _make_item("Яндекс — российская компания"),
+            _make_item("Яндекс крупная IT-фирма"),
+        ]
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store)
+        result = builder.build()
+        self.assertIsInstance(result, list)
+        # Returned terms must be plain strings (no encoding corruption)
+        for term in result:
+            self.assertIsInstance(term, str)
+
+    def test_max_terms_respected(self):
+        """build(top_n=N) must never return more than N terms."""
+        items = [_make_item(f"Term{i} встречается часто") for i in range(100)]
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store)
+        for top_n in (1, 5, 10, 20):
+            result = builder.build(top_n=top_n, force=True)
+            self.assertLessEqual(len(result), top_n, f"Exceeded top_n={top_n}")
+
+    def test_concurrent_build(self):
+        """Concurrent build() calls must not raise or corrupt cache."""
+        import concurrent.futures
+        items = [_make_item("Python Django Flask используются")]
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store, refresh_hours=0.0)
+
+        errors = []
+
+        def _build():
+            try:
+                builder.build(force=True)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futs = [pool.submit(_build) for _ in range(16)]
+            for f in concurrent.futures.as_completed(futs):
+                f.result()
+
+        self.assertEqual(errors, [], f"Concurrent build raised: {errors}")
+
+    def test_handles_corrupted_cache(self):
+        """Corrupted disk cache must not crash build(); falls back to rebuild."""
+        import tempfile
+        import shutil
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            cache_file.write_text("}{CORRUPTED{{", encoding="utf-8")
+            items = [_make_item("Python используется")]
+            store = _FakeStore(items=items)
+            builder = AutoGlossaryBuilder(store=store, data_dir=Path(tmpdir))
+            # Init loaded corrupted file — cache should be empty
+            self.assertEqual(builder.get_cached(), [])
+            # build() must succeed despite corruption
+            result = builder.build()
+            self.assertIsInstance(result, list)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

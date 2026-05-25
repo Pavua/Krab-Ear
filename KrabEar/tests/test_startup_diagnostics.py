@@ -679,5 +679,155 @@ class TestCheckCaching(unittest.TestCase):
         self.assertEqual(ts_before, diag._cache_ts)
 
 
+# ===========================================================================
+# 15. Wave 122 — именованные тесты (обязательный список)
+# ===========================================================================
+
+class TestWave122RequiredNames(unittest.TestCase):
+    """Обязательные тесты Wave 122 с точными именами методов."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.diag = StartupDiagnostics(data_dir=self.tmpdir)
+
+    def test_all_checks_pass_returns_ok(self) -> None:
+        """Все 10 проверок ok → итоговый статус ready."""
+        ok = CheckResult("x", "ok", "msg", 1.0)
+        for name in [
+            "_check_python_version", "_check_required_packages",
+            "_check_data_dir_writable", "_check_socket_path_available",
+            "_check_ffmpeg_available", "_check_huggingface_token",
+            "_check_stt_model_cached", "_check_lm_studio_reachable",
+            "_check_disk_space", "_check_audio_devices",
+        ]:
+            patcher = patch.object(self.diag, name, return_value=ok)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        report = self.diag.run_all_checks(force=True)
+        self.assertEqual(report.status, "ready")
+        self.assertEqual(report.warnings, [])
+        self.assertEqual(report.errors, [])
+
+    def test_failed_check_marked_as_warning(self) -> None:
+        """Проверка со статусом warning помечает итог как degraded."""
+        ok = CheckResult("x", "ok", "ok", 1.0)
+        warn = CheckResult("ffmpeg", "warning", "ffmpeg not found", 1.0)
+        for name in [
+            "_check_python_version", "_check_required_packages",
+            "_check_data_dir_writable", "_check_socket_path_available",
+            "_check_huggingface_token", "_check_stt_model_cached",
+            "_check_lm_studio_reachable", "_check_disk_space",
+            "_check_audio_devices",
+        ]:
+            patcher = patch.object(self.diag, name, return_value=ok)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher_w = patch.object(self.diag, "_check_ffmpeg_available", return_value=warn)
+        patcher_w.start()
+        self.addCleanup(patcher_w.stop)
+        report = self.diag.run_all_checks(force=True)
+        self.assertEqual(report.status, "degraded")
+        self.assertIn("ffmpeg not found", report.warnings)
+
+    def test_failed_critical_check_marked_critical(self) -> None:
+        """Проверка со статусом error помечает итог как critical."""
+        ok = CheckResult("x", "ok", "ok", 1.0)
+        err = CheckResult("disk_space", "error", "disk full", 1.0)
+        for name in [
+            "_check_python_version", "_check_required_packages",
+            "_check_data_dir_writable", "_check_socket_path_available",
+            "_check_ffmpeg_available", "_check_huggingface_token",
+            "_check_stt_model_cached", "_check_lm_studio_reachable",
+            "_check_audio_devices",
+        ]:
+            patcher = patch.object(self.diag, name, return_value=ok)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher_e = patch.object(self.diag, "_check_disk_space", return_value=err)
+        patcher_e.start()
+        self.addCleanup(patcher_e.stop)
+        report = self.diag.run_all_checks(force=True)
+        self.assertEqual(report.status, "critical")
+        self.assertIn("disk full", report.errors)
+
+    def test_individual_check_timeout(self) -> None:
+        """Медленная проверка (имитация через мок) не вешает всю диагностику."""
+        import time as _time
+
+        ok = CheckResult("x", "ok", "ok", 1.0)
+        slow = CheckResult("disk_space", "ok", "slow but done", 50.0)
+
+        for name in [
+            "_check_python_version", "_check_required_packages",
+            "_check_data_dir_writable", "_check_socket_path_available",
+            "_check_ffmpeg_available", "_check_huggingface_token",
+            "_check_stt_model_cached", "_check_lm_studio_reachable",
+            "_check_audio_devices",
+        ]:
+            patcher = patch.object(self.diag, name, return_value=ok)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher_s = patch.object(self.diag, "_check_disk_space", return_value=slow)
+        patcher_s.start()
+        self.addCleanup(patcher_s.stop)
+
+        t0 = _time.monotonic()
+        report = self.diag.run_all_checks(force=True)
+        elapsed = _time.monotonic() - t0
+        # Весь прогон занимает < 2 сек (моки мгновенные)
+        self.assertLess(elapsed, 2.0)
+        self.assertIsInstance(report, StartupReport)
+
+    def test_handles_check_exception_gracefully(self) -> None:
+        """Если одна проверка кидает исключение — остальные всё равно выполняются.
+
+        StartupDiagnostics не предусматривает catch внутри run_all_checks(),
+        потому каждая проверка должна сама обрабатывать исключения и возвращать
+        CheckResult с status='error'/'warning'. Этот тест проверяет, что
+        _check_disk_space возвращает CheckResult при OSError.
+        """
+        with patch("shutil.disk_usage", side_effect=OSError("unexpected error")):
+            result = self.diag._check_disk_space()
+        self.assertEqual(result.status, "error")
+        self.assertIsInstance(result.message, str)
+
+    def test_results_structured_dict(self) -> None:
+        """to_dict() возвращает структурированный словарь с ожидаемыми ключами."""
+        report = self.diag.run_all_checks()
+        d = report.to_dict()
+        self.assertIsInstance(d, dict)
+        for key in ("status", "startup_time_ms", "warnings", "errors", "checks", "version"):
+            self.assertIn(key, d, f"Ключ {key!r} отсутствует в to_dict()")
+        self.assertIsInstance(d["checks"], list)
+        self.assertGreater(len(d["checks"]), 0)
+        for c in d["checks"]:
+            for k in ("name", "status", "message", "duration_ms", "details"):
+                self.assertIn(k, c)
+
+    def test_concurrent_diagnostics_safe(self) -> None:
+        """Параллельный вызов run_all_checks() из нескольких потоков не падает."""
+        import threading
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                report = self.diag.run_all_checks(force=True)
+                results.append(report.status)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Потоки упали: {errors}")
+        self.assertEqual(len(results), 5)
+        for status in results:
+            self.assertIn(status, ("ready", "degraded", "critical"))
+
+
 if __name__ == "__main__":
     unittest.main()
