@@ -506,6 +506,24 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # rewriter.gpu_stream_error — LM Studio Metal CommandStream corrupted by
+    # concurrent MLX / GigaAM GPU pressure. Body contains:
+    #   "There is no Stream(gpu, N) in current thread"
+    #   "Metal command stream" corruption variants
+    # Root cause: Wave 167 / BACKEND-J Sentry issue (2026-05-18 ~21:41, 2 events).
+    # Was previously misclassified as rewriter.timeout (catch-all else branch).
+    # Circuit breaker correctly opens on 10 consecutive 400s, but the Sentry event
+    # was misleading — now splits into a distinct issue for proper triage.
+    # Action: open LM Studio to restart the model and clear the Metal context.
+    "rewriter.gpu_stream_error": {
+        "user_msg_ru": "LM Studio: ошибка GPU-потока. Попробуй перезапустить модель в LM Studio.",
+        "actionable": True,
+        "action_id": "open_lm_studio_settings",
+        "action_label": "Открыть LM Studio",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
+
     # ── Wave 78 (Wave 205): 5 production-discovered codes ────────────────────
 
     # stt.gigaam_hf_cache_miss — GigaAM longform path requires pyannote/segmentation-3.0
@@ -575,6 +593,54 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "action_label": "",
         "severity": "warn",
         "dedupe_seconds": 60,
+    },
+
+    # ── Wave 490: Phase B Wave 82 — 3 HIGH priority codes ────────────────────
+
+    # disk.critical — DiskSpaceMonitor detected free space below critical threshold
+    # (< 1 GB). Separate from disk.low_space (warn-only). This triggers a critical
+    # user alert — backend may lose writes. Dedupe 600s (10 min) to avoid spam.
+    # Production evidence: disk hit 0.22 GB on 2026-05-22.
+    "disk.critical": {
+        "user_msg_ru": (
+            "🔴 КРИТИЧНО: меньше 1 GB на диске — backend может потерять записи. "
+            "Очисти место немедленно."
+        ),
+        "actionable": True,
+        "action_id": "open_logs",
+        "action_label": "Открыть папку логов",
+        "severity": "critical",
+        "dedupe_seconds": 600,
+    },
+
+    # system.proc_cmdline_permission — psutil.process_iter() raised PermissionError
+    # or SystemError when reading process cmdline on macOS Sequoia (KERN_PROCARGS2
+    # blocked for sandboxed processes). Causes silent failure of memory analytics.
+    # 6 ERROR crashes observed 2026-05-13. Dedupe 3600s (1 hour) — one alert per session.
+    "system.proc_cmdline_permission": {
+        "user_msg_ru": (
+            "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2). "
+            "Аналитика памяти недоступна."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 3600,
+    },
+
+    # startup.stt_model_cache_miss — Whisper HF model not found in local cache.
+    # First transcription will stall for several minutes while downloading.
+    # Recurring on 2026-05-22/23. Dedupe 86400s (1 day) — one toast per startup cycle.
+    "startup.stt_model_cache_miss": {
+        "user_msg_ru": (
+            "Модель Whisper отсутствует в кэше — первая транскрибация задержится на минуты."
+        ),
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 86400,
     },
 
     # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────
