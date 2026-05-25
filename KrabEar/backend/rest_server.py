@@ -5,6 +5,7 @@ OpenAPI 3.0 документация доступна по адресу /api/doc
 """
 
 import atexit
+import hmac
 import json
 import math
 import os
@@ -161,7 +162,14 @@ def require_api_key(f):
                 _log_unauthorized(request.path)
                 return jsonify({"error": "Missing or invalid Authorization header"}), 401
             token = auth_header[len("Bearer "):]
-            if token != api_key:
+            try:
+                match = hmac.compare_digest(
+                    (token or "").encode("utf-8"),
+                    (api_key or "").encode("utf-8"),
+                )
+            except Exception:
+                match = False
+            if not match:
                 _log_unauthorized(request.path)
                 return jsonify({"error": "Invalid API key"}), 401
         # Mode 3: auth disabled — pass through
