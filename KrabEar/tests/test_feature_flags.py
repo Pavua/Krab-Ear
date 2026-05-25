@@ -248,6 +248,51 @@ class TestFeatureFlagsIPC(unittest.TestCase):
         self.assertIn("ts", result)
 
 
+class TestFeatureFlagsWhitespaceValidation(unittest.TestCase):
+    """Wave 159: set_flag rejects whitespace-only flag names."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ff = FeatureFlags(data_dir=self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_set_flag_whitespace_only_rejected(self) -> None:
+        """Имя из одних пробелов должно вызывать ValueError."""
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("   ", True)
+
+    def test_set_flag_empty_rejected(self) -> None:
+        """Пустая строка вызывает ValueError (уже проходило — проверяем regression)."""
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("", True)
+
+    def test_set_flag_tab_only_rejected(self) -> None:
+        """Имя из одного таба должно вызывать ValueError."""
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("\t", True)
+
+    def test_set_flag_newline_only_rejected(self) -> None:
+        """Имя из символа новой строки должно вызывать ValueError."""
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("\n", True)
+
+    def test_set_flag_with_leading_space_rejected(self) -> None:
+        """Имя с ведущим пробелом отклоняется (не нормализуется).
+
+        Решение: reject, а не normalize — имена флагов должны быть строгими
+        идентификаторами без пробелов. Caller обязан передавать clean name.
+        """
+        with self.assertRaises(ValueError):
+            self.ff.set_flag("  my_flag", True)
+
+    def test_set_flag_valid_name_still_works(self) -> None:
+        """Обычное имя без пробелов продолжает работать."""
+        self.ff.set_flag("valid_flag", True)
+        self.assertTrue(self.ff.is_enabled("valid_flag"))
+
+
 class TestFeatureFlagsListAll(unittest.TestCase):
     """list_flags() включает и встроенные, и пользовательские флаги."""
 
