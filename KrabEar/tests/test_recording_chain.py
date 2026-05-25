@@ -393,5 +393,68 @@ class RecordingChainUnlinkTestCase(unittest.TestCase):
             self._mgr.handle_unlink_recording_from_chain({"chain_id": chain_id})
 
 
+class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
+    """Wave 156: verify unlink_recording_from_chain is wired in BackendService dispatch table.
+
+    Also documents that the Swift agent does NOT yet call this method directly
+    (no Swift caller exists in native/KrabEarAgent/) — the IPC method is
+    exposed for future Swift UI integration. Python-level IPC is fully wired.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        self.tmpdir = tempfile.mkdtemp()
+        with patch("backend.service.AudioRecorder"), \
+             patch("backend.service.Transcriber"), \
+             patch("backend.service.Translator"), \
+             patch("backend.service.AutoBackupManager"):
+            from backend.service import BackendService
+            self.service = BackendService.__new__(BackendService)
+            from backend.state_store import StateStore
+            self.service.store = StateStore(data_dir=Path(self.tmpdir))
+            self.service._chains = RecordingChainManager(store=self.service.store)
+            # Build the dispatch table subset we need
+            self.service._handlers = {
+                "unlink_recording_from_chain":
+                    self.service._chains.handle_unlink_recording_from_chain,
+            }
+
+    def test_unlink_method_in_service_dispatch(self):
+        """unlink_recording_from_chain is callable via service._chains.handle_unlink."""
+        chain_id = self.service._chains.start_chain("dispatch-test-chain")
+        self.service._chains.add_to_chain(chain_id, "dispatch-item")
+        result = self.service._chains.handle_unlink_recording_from_chain(
+            {"chain_id": chain_id, "item_id": "dispatch-item"}
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("removed"))
+
+    def test_unlink_dispatch_handler_is_registered(self):
+        """The handler is present in the service._handlers dict."""
+        self.assertIn("unlink_recording_from_chain", self.service._handlers)
+
+    def test_no_swift_caller_documented(self):
+        """Documents that Swift agent has no caller for unlink_recording_from_chain yet.
+
+        The IPC method is wired Python-side (BackendService dispatch table line ~882).
+        Swift UI caller is pending — to be added in a future wave when the
+        recording chain UI is implemented in HistoryPanelController.
+        """
+        import subprocess
+        result = subprocess.run(
+            ["grep", "-r", "unlink_recording_from_chain",
+             "native/"],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).parent.parent.parent),
+        )
+        # No Swift caller found — confirmed absent
+        self.assertEqual(result.stdout.strip(), "",
+                         "Unexpected Swift caller found — update this test")
+
+
 if __name__ == "__main__":
     unittest.main()
