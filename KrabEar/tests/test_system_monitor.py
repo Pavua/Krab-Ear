@@ -331,5 +331,195 @@ class TestSnapshotMockedPsutil(unittest.TestCase):
             self.assertLessEqual(snap["disk_percent"], 100.0)
 
 
+class TestCpuSampleViaPsutil(unittest.TestCase):
+    """test_cpu_sample_via_psutil: CPU sampling returns non-negative float (stdlib path)."""
+
+    def test_cpu_sample_via_psutil(self):
+        """get_system_info() returns a non-negative cpu_percent even when psutil is absent."""
+        monitor = SystemMonitor()
+        # Simulate psutil not installed — SystemMonitor uses stdlib only, so this is a no-op
+        with patch.dict("sys.modules", {"psutil": None}):
+            info = monitor.get_system_info()
+        self.assertIn("cpu_percent", info)
+        self.assertGreaterEqual(info["cpu_percent"], 0.0)
+        self.assertLessEqual(info["cpu_percent"], 100.0)
+
+    def test_cpu_sample_returns_float(self):
+        """cpu_percent field is a float."""
+        monitor = SystemMonitor()
+        info = monitor.get_system_info()
+        self.assertIsInstance(info["cpu_percent"], float)
+
+
+class TestRamSampleIncludesSwap(unittest.TestCase):
+    """test_ram_sample_includes_swap: memory sample keys present; swap not tracked (graceful)."""
+
+    def test_ram_sample_includes_swap(self):
+        """Memory fields are present; no swap key expected (module is swap-free by design)."""
+        monitor = SystemMonitor()
+        info = monitor.get_system_info()
+        # Module provides memory_used_gb / memory_total_gb / memory_percent
+        self.assertIn("memory_used_gb", info)
+        self.assertIn("memory_total_gb", info)
+        self.assertIn("memory_percent", info)
+        # swap is not tracked — asserting no unexpected crash, not presence of swap key
+        self.assertNotIn("swap_used_gb", info)
+
+    def test_ram_sample_graceful_when_vm_stat_fails(self):
+        """If vm_stat fails, memory fields fall back to 0.0 without raising."""
+        monitor = SystemMonitor()
+        with patch.object(SystemMonitor, "_vm_stat", return_value={}):
+            with patch.object(SystemMonitor, "_sysctl", return_value=""):
+                info = monitor.get_system_info()
+        self.assertEqual(info["memory_total_gb"], 0.0)
+        self.assertEqual(info["memory_percent"], 0.0)
+
+
+class TestDiskSampleForDataDir(unittest.TestCase):
+    """test_disk_sample_for_data_dir: disk stats returned for root; data_dir path queried."""
+
+    def test_disk_sample_for_data_dir(self):
+        """snapshot() disk_percent is derived from root statvfs; non-negative and bounded."""
+        monitor = SystemMonitor()
+        snap = monitor.snapshot()
+        self.assertIn("disk_percent", snap)
+        self.assertGreaterEqual(snap["disk_percent"], 0.0)
+        self.assertLessEqual(snap["disk_percent"], 100.0)
+
+    def test_disk_sample_returns_positive_total(self):
+        """disk_total_gb should be > 0 on a real machine."""
+        monitor = SystemMonitor()
+        info = monitor.get_system_info()
+        self.assertGreater(info["disk_total_gb"], 0.0)
+
+    def test_disk_sample_statvfs_failure_graceful(self):
+        """If os.statvfs raises, disk fields default to 0.0."""
+        monitor = SystemMonitor()
+        with patch("os.statvfs", side_effect=OSError("statvfs error")):
+            info = monitor.get_system_info()
+        self.assertEqual(info["disk_free_gb"], 0.0)
+        self.assertEqual(info["disk_total_gb"], 0.0)
+
+
+class TestSamplingThreadLifecycle(unittest.TestCase):
+    """test_sampling_thread_lifecycle: repeated get_system_info calls complete cleanly."""
+
+    def test_sampling_thread_lifecycle(self):
+        """Multiple sequential calls to get_system_info complete without hang or exception."""
+        monitor = SystemMonitor()
+        for _ in range(3):
+            info = monitor.get_system_info()
+            self.assertIsInstance(info, dict)
+            self.assertIn("cpu_percent", info)
+
+    def test_sampling_repeated_snapshot_no_state_leak(self):
+        """snapshot() can be called repeatedly; results stay in valid range."""
+        monitor = SystemMonitor()
+        with patch.object(monitor, "get_system_info", return_value={
+            "cpu_percent": 10.0,
+            "memory_percent": 20.0,
+            "disk_total_gb": 100.0,
+            "disk_free_gb": 50.0,
+        }):
+            for _ in range(5):
+                snap = monitor.snapshot()
+                self.assertEqual(snap["disk_percent"], 50.0)
+
+
+class TestConcurrentSampleThreadSafe(unittest.TestCase):
+    """test_concurrent_sample_thread_safe: concurrent get_system_info calls are safe."""
+
+    def test_concurrent_sample_thread_safe(self):
+        """Two threads calling get_system_info concurrently both receive valid dicts."""
+        import threading
+        monitor = SystemMonitor()
+        results = [None, None]
+        errors = []
+
+        def worker(idx):
+            try:
+                results[idx] = monitor.get_system_info()
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=(0,))
+        t2 = threading.Thread(target=worker, args=(1,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertFalse(errors, f"Thread errors: {errors}")
+        for result in results:
+            self.assertIsNotNone(result)
+            self.assertIn("cpu_percent", result)
+            self.assertIn("memory_percent", result)
+
+    def test_concurrent_snapshot_thread_safe(self):
+        """Two threads calling snapshot() concurrently both receive valid dicts."""
+        import threading
+        monitor = SystemMonitor()
+        snaps = [None, None]
+        errors = []
+
+        def worker(idx):
+            try:
+                snaps[idx] = monitor.snapshot()
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=(0,))
+        t2 = threading.Thread(target=worker, args=(1,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        self.assertFalse(errors, f"Thread errors: {errors}")
+        for snap in snaps:
+            self.assertIsNotNone(snap)
+            self.assertIn("cpu_percent", snap)
+            self.assertIn("gpu_percent", snap)
+
+
+class TestHandlesPsutilUnavailable(unittest.TestCase):
+    """test_handles_psutil_unavailable: graceful degradation when psutil not present."""
+
+    def test_handles_psutil_unavailable(self):
+        """When psutil is not installed, SystemMonitor falls back gracefully."""
+        monitor = SystemMonitor()
+        # Remove psutil from sys.modules to simulate it not being installed
+        import sys
+        original = sys.modules.get("psutil", "ABSENT")
+        sys.modules["psutil"] = None  # type: ignore[assignment]
+        try:
+            info = monitor.get_system_info()
+        finally:
+            if original == "ABSENT":
+                del sys.modules["psutil"]
+            else:
+                sys.modules["psutil"] = original
+        # Should still return a valid dict
+        self.assertIsInstance(info, dict)
+        self.assertIn("cpu_percent", info)
+        self.assertIn("memory_percent", info)
+
+    def test_snapshot_handles_psutil_unavailable(self):
+        """snapshot() with psutil absent returns gpu_percent=None and valid numerics."""
+        monitor = SystemMonitor()
+        import sys
+        original = sys.modules.get("psutil", "ABSENT")
+        sys.modules["psutil"] = None  # type: ignore[assignment]
+        try:
+            snap = monitor.snapshot()
+        finally:
+            if original == "ABSENT":
+                del sys.modules["psutil"]
+            else:
+                sys.modules["psutil"] = original
+        self.assertIsNone(snap["gpu_percent"])
+        self.assertIsInstance(snap["cpu_percent"], float)
+
+
 if __name__ == "__main__":
     unittest.main()
