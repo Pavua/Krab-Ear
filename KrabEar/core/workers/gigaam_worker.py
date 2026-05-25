@@ -41,6 +41,54 @@ from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
+# Wave 525: singleton guard — один процесс gigaam_worker на всю систему.
+# Если уже запущен другой экземпляр → новый exit(0) немедленно.
+# Использует эксклюзивный fcntl flock на PID-файл вместо pgrep (race-free).
+# ---------------------------------------------------------------------------
+
+def _acquire_singleton_lock() -> None:
+    """Попытка захватить эксклюзивный lock на PID-файл.
+
+    При успехе — пишет PID и возвращает управление (lock держится до exit).
+    При неудаче (другой воркер уже держит lock) — печатает предупреждение в stderr
+    и завершает процесс с кодом 0 (не ошибка — просто не нужен дубликат).
+    """
+    import fcntl
+    import tempfile
+
+    lock_path = os.path.join(
+        tempfile.gettempdir(), "krab_ear_gigaam_worker.lock"
+    )
+    try:
+        # Открываем/создаём PID-файл. Держим fd открытым всё время жизни процесса —
+        # при завершении (нормальном или по сигналу) ядро автоматически снимет flock.
+        fd = open(lock_path, "w")  # noqa: WPS515  — intentionally kept open
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd.write(str(os.getpid()))
+        fd.flush()
+        # Не закрываем fd — пока процесс живёт, lock держится.
+        # CPython держит fd в глобальном __builtins__ GC, поэтому не нужен глобал,
+        # но для явности сохраним в module-level переменную.
+        globals()["_singleton_lock_fd"] = fd
+    except OSError:
+        # LOCK_NB → EWOULDBLOCK если другой процесс держит lock.
+        existing_pid = "(unknown)"
+        try:
+            with open(lock_path) as _lf:
+                existing_pid = _lf.read().strip()
+        except Exception:
+            pass
+        sys.stderr.write(
+            f"gigaam_worker: singleton guard — уже запущен PID {existing_pid}, "
+            "этот экземпляр завершается (duplicate prevention, Wave 525)\n"
+        )
+        sys.stderr.flush()
+        sys.exit(0)
+
+
+_acquire_singleton_lock()
+
+# ---------------------------------------------------------------------------
 # Memory tracing — opt-in via KRAB_EAR_TRACE_GIGAAM_MEM=1
 # Zero overhead when env var absent: the check happens once at module load.
 # ---------------------------------------------------------------------------

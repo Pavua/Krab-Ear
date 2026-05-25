@@ -377,6 +377,12 @@ class AudioEngine:
 
         # Warmup GigaAM в background если enabled — избегаем cold-start latency
         # на первой диктовке (subprocess spawn + model load = ~30 сек).
+        # Wave 525: persist the flag so all later call-sites (chain-building,
+        # _transcribe_gigaam) also honour the "no GigaAM here" contract —
+        # skip_gigaam_warmup previously only blocked the startup thread, not
+        # on-demand adapter creation triggered by real transcription requests.
+        self._skip_gigaam: bool = skip_gigaam_warmup
+
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
         # subprocess'а — он проксирует через BackendService IPC (Wave 69).
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
@@ -1637,6 +1643,7 @@ class AudioEngine:
             getattr(settings, "STT_GIGAAM_ENABLED", False)
             and _effective_lang == "ru"
             and self._GIGAAM_MARKER not in self._unavailable_models
+            and not getattr(self, "_skip_gigaam", False)  # Wave 525: REST-engine guard
         ):
             gigaam_adapter = self._router.get_gigaam_adapter() if self._router is not None else None
             if gigaam_adapter is not None:
@@ -2407,6 +2414,14 @@ class AudioEngine:
             RuntimeError: если адаптер не удалось получить из router.
             Exception: любая ошибка транскрибации пробрасывается вверх для fallback chain.
         """
+        # Wave 525: REST-engine (skip_gigaam=True) must never reach here because
+        # the chain-builder already excludes GIGAAM_MARKER.  If somehow called
+        # directly, raise immediately so the fallback chain uses Whisper.
+        if getattr(self, "_skip_gigaam", False):
+            raise RuntimeError(
+                "GigaAM вызван на REST-engine (skip_gigaam=True) — это баг; "
+                "используй BackendService IPC для GigaAM транскрибации"
+            )
         adapter = self._router.get_gigaam_adapter() if self._router is not None else None
         if adapter is None:
             raise RuntimeError(
