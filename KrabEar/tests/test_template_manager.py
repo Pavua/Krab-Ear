@@ -314,6 +314,102 @@ class TestTemplateManagerEdgeCases(unittest.TestCase):
         self.assertEqual(result["category"], "custom_cat")
 
 
+class TestTemplateManagerExportImport(unittest.TestCase):
+    """JSON roundtrip: экспорт и импорт пользовательских шаблонов."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def test_export_templates_as_json_roundtrip(self):
+        """Добавленные шаблоны сохраняются в JSON и восстанавливаются корректно."""
+        self.tm.add_template("export_tpl_1", "Текст первого шаблона {var}", "test")
+        self.tm.add_template("export_tpl_2", "Второй шаблон без переменных", "test")
+
+        # Симулируем экспорт: читаем templates.json напрямую
+        filepath = Path(self.tmpdir) / "templates.json"
+        exported_json = filepath.read_text(encoding="utf-8")
+        exported = json.loads(exported_json)
+
+        # Проверяем структуру экспорта
+        self.assertIsInstance(exported, list)
+        names = {t["name"] for t in exported}
+        self.assertIn("export_tpl_1", names)
+        self.assertIn("export_tpl_2", names)
+        # Встроенные не попадают в файл (они not builtin)
+        builtin_names = {"greeting_ru", "farewell_ru", "email_signature"}
+        for bn in builtin_names:
+            self.assertNotIn(bn, names)
+
+    def test_import_via_new_instance_roundtrip(self):
+        """Шаблоны корректно восстанавливаются через новый экземпляр (импорт)."""
+        self.tm.add_template("import_tpl", "Импорт: {name} — {title}", "roundtrip")
+
+        # Симулируем импорт: создаём новый TemplateManager с той же директорией
+        tm_imported = TemplateManager(data_dir=self.tmpdir)
+        templates = tm_imported.get_templates()
+        found = [t for t in templates if t["name"] == "import_tpl"]
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["text"], "Импорт: {name} — {title}")
+        self.assertEqual(found[0]["category"], "roundtrip")
+
+    def test_json_roundtrip_preserves_unicode(self):
+        """JSON roundtrip сохраняет Unicode (кириллица, спецсимволы)."""
+        text = "Шаблон с кириллицей и спецсимволами: ©®™ {имя}"
+        self.tm.add_template("unicode_json_tpl", text)
+
+        tm2 = TemplateManager(data_dir=self.tmpdir)
+        found = [t for t in tm2.get_templates() if t["name"] == "unicode_json_tpl"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["text"], text)
+
+    def test_json_file_ensure_ascii_false(self):
+        """Файл templates.json содержит Unicode напрямую (не escape-последовательности)."""
+        self.tm.add_template("ascii_test", "Привет, мир!")
+        filepath = Path(self.tmpdir) / "templates.json"
+        raw = filepath.read_text(encoding="utf-8")
+        # ensure_ascii=False — кириллица не должна экранироваться как \\uXXXX
+        self.assertIn("Привет", raw)
+        self.assertNotIn("\\u041f", raw.lower())  # П = П
+
+
+class TestTemplateManagerBuiltinProtection(unittest.TestCase):
+    """Встроенные шаблоны нельзя «окончательно» удалить — они возвращаются."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.tm = TemplateManager(data_dir=self.tmpdir)
+
+    def test_remove_builtin_removes_from_current_session(self):
+        """remove_template(builtin) возвращает True и убирает из текущего _load()."""
+        # Builtin-шаблоны возвращаются из _load(), но не записаны в файл.
+        # remove_template работает по принципу «убрать из _load() + сохранить»
+        # Результат зависит от реализации: файл сохраняется без него, но при
+        # следующем _load() builtin снова появляется (т.к. не в файле).
+        before = {t["name"] for t in self.tm.get_templates()}
+        self.assertIn("greeting_ru", before)
+
+        # После remove — из следующего get_templates() builtin вернётся снова,
+        # если пользовательский файл не «затеняет» его.
+        # Поведение: remove возвращает True (нашёл), но builtin появляется вновь.
+        removed = self.tm.remove_template("greeting_ru")
+        self.assertTrue(removed)
+        # builtin снова виден, т.к. не сохранён в файл — _load() добавляет его обратно
+        after = {t["name"] for t in self.tm.get_templates()}
+        self.assertIn("greeting_ru", after)
+
+    def test_custom_template_can_be_deleted_permanently(self):
+        """Пользовательский шаблон удаляется навсегда."""
+        self.tm.add_template("deletable_custom", "Можно удалить")
+        removed = self.tm.remove_template("deletable_custom")
+        self.assertTrue(removed)
+        # Проверяем через новый экземпляр — файл обновлён
+        tm2 = TemplateManager(data_dir=self.tmpdir)
+        names = {t["name"] for t in tm2.get_templates()}
+        self.assertNotIn("deletable_custom", names)
+
+
 class TestTemplateManagerThreadSafety(unittest.TestCase):
     """Тесты потокобезопасности (базовые)."""
 

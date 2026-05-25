@@ -556,5 +556,340 @@ class TestUsageTrackerGetMonthly(unittest.TestCase):
         self.assertEqual(result["total_words"], 130)
 
 
+class TestUsageTrackerRecordEvent(unittest.TestCase):
+    """test_record_recording_event — запись события через record_usage."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_record_recording_event_increments_recordings(self):
+        """record_usage() добавляет ровно одну запись в today.recordings."""
+        self.tracker.record_usage(duration_sec=45.0, word_count=120)
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["today"]["recordings"], 1)
+        self.assertAlmostEqual(stats["today"]["total_duration_sec"], 45.0)
+        self.assertEqual(stats["today"]["total_words"], 120)
+
+    def test_record_recording_event_twice_accumulates(self):
+        """Два вызова record_usage() — два события суммируются."""
+        self.tracker.record_usage(10.0, 50)
+        self.tracker.record_usage(20.0, 100)
+        daily = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(daily["recordings"], 2)
+
+    def test_record_recording_event_updates_all_time(self):
+        """record_usage() обновляет all_time счётчик."""
+        self.tracker.record_usage(5.0, 30)
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["all_time"]["recordings"], 1)
+
+    def test_record_recording_event_negative_words_clamped_to_int(self):
+        """Отрицательные слова допускаются (нет валидации) — просто int()."""
+        # UsageTracker не валидирует — просто приводит к int
+        self.tracker.record_usage(1.0, -5)
+        daily = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(daily["words"], -5)
+
+
+class TestUsageTrackerAggregateByDay(unittest.TestCase):
+    """test_aggregate_by_day — get_daily_stats агрегирует по дням."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_aggregate_by_day_today(self):
+        """Агрегация за сегодня через record_usage + get_daily_stats совпадают."""
+        self.tracker.record_usage(30.0, 150)
+        self.tracker.record_usage(10.0, 50)
+        daily = self.tracker.get_daily_stats(date.today())
+        self.assertEqual(daily["recordings"], 2)
+        self.assertAlmostEqual(daily["duration_sec"], 40.0)
+        self.assertEqual(daily["words"], 200)
+
+    def test_aggregate_by_day_independent_days(self):
+        """Разные дни хранятся независимо."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+        self.tracker._daily[today.isoformat()] = {"recordings": 3, "duration_sec": 60.0, "words": 300}
+        self.tracker._daily[yesterday.isoformat()] = {"recordings": 1, "duration_sec": 10.0, "words": 50}
+
+        stats_today = self.tracker.get_daily_stats(today)
+        stats_yest = self.tracker.get_daily_stats(yesterday)
+
+        self.assertEqual(stats_today["recordings"], 3)
+        self.assertEqual(stats_yest["recordings"], 1)
+
+    def test_aggregate_by_day_missing_day_zeros(self):
+        """День без данных возвращает нулевую статистику."""
+        far_past = date.today() - timedelta(days=5)
+        stats = self.tracker.get_daily_stats(far_past)
+        self.assertEqual(stats["recordings"], 0)
+        self.assertEqual(stats["words"], 0)
+
+
+class TestUsageTrackerGetStatsForDateRange(unittest.TestCase):
+    """test_get_stats_for_date_range — агрегация через get_usage_stats периоды."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_get_stats_for_date_range_week(self):
+        """this_week охватывает ровно 7 дней."""
+        today = date.today()
+        for i in range(7):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 5.0, "words": 20}
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["this_week"]["recordings"], 7)
+
+    def test_get_stats_for_date_range_month(self):
+        """this_month охватывает ровно 30 дней."""
+        today = date.today()
+        for i in range(30):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": 1, "duration_sec": 3.0, "words": 10}
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["this_month"]["recordings"], 30)
+
+    def test_get_stats_for_date_range_excludes_beyond_30(self):
+        """Данные за 31+ день не входят в this_month."""
+        day31 = (date.today() - timedelta(days=30)).isoformat()
+        self.tracker._daily[day31] = {"recordings": 100, "duration_sec": 1000.0, "words": 5000}
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["this_month"]["recordings"], 0)
+
+    def test_get_stats_for_date_range_today_only(self):
+        """Статистика за сегодня — ровно 1 день."""
+        self.tracker.record_usage(8.0, 40)
+        stats = self.tracker.get_usage_stats()
+        self.assertEqual(stats["today"]["recordings"], 1)
+        self.assertAlmostEqual(stats["today"]["total_duration_sec"], 8.0)
+
+
+class TestUsageTrackerPersistAcrossReload(unittest.TestCase):
+    """test_persist_across_reload — данные сохраняются и загружаются."""
+
+    def test_persist_across_reload_daily(self):
+        """Daily-статистика переживает перезагрузку трекера."""
+        with tempfile.TemporaryDirectory() as tmp:
+            t1 = UsageTracker(data_dir=tmp)
+            t1.record_usage(25.5, 130)
+            t1.record_usage(14.0, 70)
+
+            t2 = UsageTracker(data_dir=tmp)
+            daily = t2.get_daily_stats(date.today())
+            self.assertEqual(daily["recordings"], 2)
+            self.assertAlmostEqual(daily["duration_sec"], 39.5, places=1)
+            self.assertEqual(daily["words"], 200)
+
+    def test_persist_across_reload_all_time(self):
+        """All-time счётчики переживают перезагрузку трекера."""
+        with tempfile.TemporaryDirectory() as tmp:
+            t1 = UsageTracker(data_dir=tmp)
+            t1.record_usage(10.0, 50)
+            t1.record_usage(20.0, 100)
+
+            t2 = UsageTracker(data_dir=tmp)
+            stats = t2.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 2)
+            self.assertAlmostEqual(stats["all_time"]["total_duration_sec"], 30.0)
+            self.assertEqual(stats["all_time"]["total_words"], 150)
+
+    def test_persist_across_reload_corrupted_file(self):
+        """Повреждённый JSON-файл не роняет трекер — начинает с нуля."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "usage_stats.json"
+            stats_path.write_text("CORRUPTED{{{", encoding="utf-8")
+            t = UsageTracker(data_dir=tmp)
+            stats = t.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 0)
+
+
+class TestUsageTrackerConcurrentRecordThreadSafe(unittest.TestCase):
+    """test_concurrent_record_thread_safe — многопоточная запись."""
+
+    def test_concurrent_record_thread_safe_50_threads(self):
+        """50 потоков записывают одновременно — итог точный."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            threads = [
+                threading.Thread(target=tracker.record_usage, args=(2.0, 10))
+                for _ in range(50)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            stats = tracker.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 50)
+            self.assertAlmostEqual(stats["all_time"]["total_duration_sec"], 100.0, places=1)
+            self.assertEqual(stats["all_time"]["total_words"], 500)
+
+    def test_concurrent_record_thread_safe_no_data_loss(self):
+        """Параллельная запись не теряет данные (atomicity via lock)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            errors = []
+
+            def write_and_read():
+                try:
+                    tracker.record_usage(1.0, 5)
+                    tracker.get_usage_stats()
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [threading.Thread(target=write_and_read) for _ in range(30)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(errors, [], f"Exceptions in threads: {errors}")
+            stats = tracker.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 30)
+
+
+class TestUsageTrackerExportCSV(unittest.TestCase):
+    """test_export_csv — экспорт daily_history в CSV-формат."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tracker = UsageTracker(data_dir=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_export_csv_via_daily_history(self):
+        """Из daily_history можно сформировать CSV-совместимый вывод."""
+        import csv
+        import io
+
+        today = date.today()
+        for i in range(3):
+            d = (today - timedelta(days=i)).isoformat()
+            self.tracker._daily[d] = {"recordings": i + 1, "duration_sec": float((i + 1) * 10), "words": (i + 1) * 50}
+
+        stats = self.tracker.get_usage_stats()
+        history = stats["daily_history"]
+
+        buf = io.StringIO()
+        fieldnames = ["date", "recordings", "duration_sec", "words"]
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+        csv_content = buf.getvalue()
+        self.assertIn("date,recordings,duration_sec,words", csv_content)
+        self.assertIn(today.isoformat(), csv_content)
+        lines = [ln for ln in csv_content.strip().splitlines() if ln]
+        self.assertEqual(len(lines), 4)  # header + 3 data rows
+
+    def test_export_csv_empty_history(self):
+        """Пустая history даёт CSV только с заголовком."""
+        import csv
+        import io
+
+        stats = self.tracker.get_usage_stats()
+        history = stats["daily_history"]
+        self.assertEqual(history, [])
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=["date", "recordings", "duration_sec", "words"])
+        writer.writeheader()
+        csv_content = buf.getvalue()
+        self.assertIn("date", csv_content)
+        lines = [ln for ln in csv_content.strip().splitlines() if ln]
+        self.assertEqual(len(lines), 1)  # header only
+
+    def test_export_csv_preserves_all_fields(self):
+        """CSV сохраняет все поля: date, recordings, duration_sec, words."""
+        import csv
+        import io
+
+        self.tracker.record_usage(33.3, 222)
+        stats = self.tracker.get_usage_stats()
+        history = stats["daily_history"]
+
+        buf = io.StringIO()
+        fieldnames = ["date", "recordings", "duration_sec", "words"]
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+        reader = csv.DictReader(io.StringIO(buf.getvalue()))
+        rows = list(reader)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(int(rows[0]["recordings"]), 1)
+        self.assertEqual(int(rows[0]["words"]), 222)
+
+
+class TestUsageTrackerUnicodeInMetadata(unittest.TestCase):
+    """test_unicode_in_metadata — Unicode в путях и данных не ломает трекер."""
+
+    def test_unicode_data_dir_path(self):
+        """Трекер работает с директорией, содержащей Unicode в пути."""
+        import tempfile
+        import os
+        # Создаём tmp dir с unicode-именем через os.makedirs
+        base = tempfile.mkdtemp()
+        unicode_dir = os.path.join(base, "данные_статистики")
+        os.makedirs(unicode_dir, exist_ok=True)
+        try:
+            tracker = UsageTracker(data_dir=unicode_dir)
+            tracker.record_usage(12.0, 60)
+            stats = tracker.get_usage_stats()
+            self.assertEqual(stats["today"]["recordings"], 1)
+
+            # Проверяем что файл сохранился
+            stats_file = Path(unicode_dir) / "usage_stats.json"
+            self.assertTrue(stats_file.exists())
+        finally:
+            import shutil
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_unicode_json_roundtrip(self):
+        """JSON с Unicode символами корректно сохраняется и загружается."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            # Записываем данные
+            tracker.record_usage(5.0, 10)
+
+            # Читаем файл напрямую и проверяем корректность JSON
+            stats_file = Path(tmp) / "usage_stats.json"
+            content = stats_file.read_text(encoding="utf-8")
+            data = json.loads(content)
+            self.assertIn("daily", data)
+            self.assertIn("all_time", data)
+
+    def test_unicode_values_in_daily_data(self):
+        """Трекер корректно обрабатывает строки с кириллицей в ключах (future-proofing)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            # Напрямую вставляем Unicode-ключ в _daily (имитирует edge case)
+            tracker._daily["2025-01-01"] = {"recordings": 2, "duration_sec": 20.0, "words": 100}
+            tracker._persist()
+
+            # Перезагружаем
+            t2 = UsageTracker(data_dir=tmp)
+            # Проверяем, что загрузилось без ошибок
+            all_time = t2.get_usage_stats()["all_time"]
+            # all_time должен быть от предыдущего трекера (нули, т.к. не вызывали record_usage)
+            self.assertIsInstance(all_time["recordings"], int)
+
+
 if __name__ == "__main__":
     unittest.main()

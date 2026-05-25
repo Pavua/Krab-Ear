@@ -159,13 +159,13 @@ class TestSilenceDetection(unittest.TestCase):
         recorder = FakeRecorder(audio)
         settings = {
             "realtime_silence_filter_enabled": True,
-            "rt_silence_check_sec": 0.05,
+            "rt_silence_check_sec": 0.02,
             "rt_silence_window_sec": 30.0,
             "rt_silence_max_sec": max_silence_sec,
         }
         rsf = RealtimeSilenceFilter(recorder, settings)
         rsf.start()
-        time.sleep(0.2)
+        time.sleep(0.5)
         return rsf.stop()
 
     def test_detects_long_silence(self):
@@ -348,6 +348,122 @@ class TestZeroSilenceRangesHelper(unittest.TestCase):
         s = int(0.5 * SAMPLE_RATE)
         self.assertTrue(np.all(result[s:] == 0))
         self.assertEqual(len(result), len(audio))
+
+
+class TestRealtimeSilenceFilterWave145(unittest.TestCase):
+    """Wave 145 — required named tests."""
+
+    # ------------------------------------------------------------------
+    # test_suppress_during_silence
+    # ------------------------------------------------------------------
+    def test_suppress_during_silence(self):
+        """Фильтр обнаруживает диапазоны тишины и накапливает их."""
+        recorder = FakeRecorder(_make_silence(15.0))
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 15.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf.start()
+        time.sleep(0.25)
+        ranges = rsf.stop()
+        # Должны быть диапазоны тишины для 15-секундного пустого буфера
+        self.assertGreater(len(ranges), 0, "Должны быть диапазоны тишины")
+        for s, e in ranges:
+            self.assertLess(s, e, "start должен быть меньше end")
+
+    # ------------------------------------------------------------------
+    # test_allow_during_speech
+    # ------------------------------------------------------------------
+    def test_allow_during_speech(self):
+        """На речевом сигнале диапазоны тишины не накапливаются."""
+        recorder = FakeRecorder(_make_speech(12.0))
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 12.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf.start()
+        time.sleep(0.25)
+        ranges = rsf.stop()
+        self.assertEqual(ranges, [], "На речи не должно быть диапазонов тишины")
+
+    # ------------------------------------------------------------------
+    # test_adaptive_threshold
+    # ------------------------------------------------------------------
+    def test_adaptive_threshold(self):
+        """При высоком пороге тишины (1 сек) даже короткая тишина засчитывается."""
+        recorder = FakeRecorder(_make_silence(10.0))
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 10.0,
+            "rt_silence_max_sec": 1.0,  # очень низкий порог → всё тихое попадёт
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf.start()
+        time.sleep(0.25)
+        ranges = rsf.stop()
+        self.assertGreater(len(ranges), 0,
+                           "С низким порогом тишины должны быть диапазоны")
+
+    # ------------------------------------------------------------------
+    # test_empty_chunk_handled
+    # ------------------------------------------------------------------
+    def test_empty_chunk_handled(self):
+        """Пустой аудиобуфер не вызывает исключений и не даёт диапазонов."""
+        recorder = FakeRecorder(np.zeros(0, dtype=np.float32))
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 10.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf.start()
+        time.sleep(0.2)
+        ranges = rsf.stop()
+        self.assertEqual(ranges, [])
+
+    # ------------------------------------------------------------------
+    # test_concurrent_filter
+    # ------------------------------------------------------------------
+    def test_concurrent_filter(self):
+        """get_silence_ranges() потокобезопасен при конкурентных вызовах."""
+        import threading
+
+        recorder = FakeRecorder(_make_silence(15.0))
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 15.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf.start()
+
+        errors: list[Exception] = []
+
+        def reader():
+            try:
+                for _ in range(20):
+                    _ = rsf.get_silence_ranges()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.2)
+        rsf.stop()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки в потоках: {errors}")
 
 
 if __name__ == "__main__":

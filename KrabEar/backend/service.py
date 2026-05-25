@@ -18,14 +18,12 @@ from backend.template_manager import TemplateManager
 from backend.search_history import SearchHistoryManager
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
-from backend.timeline_export import TimelineExporter
 from backend.auto_deduplication import AutoDeduplicator
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
 from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
 from backend.playback_tracker import PlaybackTracker
-from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.sentiment_trends import SentimentTrendAnalyzer
 from backend.transcription_queue import TranscriptionQueue
@@ -33,7 +31,6 @@ from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
-from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
@@ -45,11 +42,9 @@ from backend.sharing_manager import SharingManager
 from backend.realtime_partial import RealtimePartialTranscriber
 from backend.semantic_search import SemanticSearcher, keyword_fallback_search
 from core.word_timing import WordTimingAnalyzer
-from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
 from core.abbreviation_expander import AbbreviationExpander
 from core.audio_fingerprint import AudioFingerprinter
-from core.hallucination_manager import HallucinationManager
 from core.normalization_profiles import NormalizationProfileRegistry
 from backend.webhook_manager import WebhookManager
 from backend.stats_report import StatsReportGenerator
@@ -87,6 +82,7 @@ from backend.usage_tracker import UsageTracker
 from backend.session_tracker import SessionTracker
 from backend.speaker_manager import SpeakerManager
 from backend.history_service import HistoryService
+from backend.apple_integration_service import AppleIntegrationService
 from backend.error_reporter import ErrorReporter
 from backend.recording_scheduler import RecordingScheduler
 from backend.recording_merger import RecordingMerger
@@ -95,7 +91,10 @@ from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
+from backend.analytics_service import AnalyticsService
 from backend.call_session_service import CallSessionService
+from backend.text_processing_service import TextProcessingService
+from backend.text_scoring_service import TextScoringService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -112,6 +111,7 @@ from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_silence_probe import CallSilenceProbe
 from backend.call_auto_end import CallAutoEnd
+from backend.health_check_service import HealthCheckService
 from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
@@ -127,7 +127,6 @@ from backend.observability import (
     init_sentry,
     install_signal_handlers,
 )
-from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
@@ -267,6 +266,13 @@ class BackendService:
         if self.transcriber is not None:
             self.transcriber._error_bus = self._error_bus
 
+        # Wire error_bus into mlx_subprocess module for stt.mlx_watchdog_hang push
+        try:
+            import core.mlx_subprocess as _mlx_sub  # noqa: PLC0415
+            _mlx_sub._error_bus = self._error_bus
+        except Exception:  # noqa: BLE001
+            pass
+
         self._llm_probe: LLMHttpProbe | None = None
         if self._llm_rewriter is not None:
             _settings_dict = self._settings_svc.cached_settings()
@@ -380,11 +386,9 @@ class BackendService:
         self._quality_trends = QualityTrendAnalyzer()
         self._activity_calendar = ActivityCalendar()
         self._stats_report = StatsReportGenerator()
-        self._speaker_statistics = SpeakerStatisticsAnalyzer()
         self._recording_insights = RecordingInsightsGenerator()
         self._keyword_cloud_gen = KeywordCloudGenerator()
         self._integrity_checker = IntegrityChecker()
-        self._hallucination_manager = HallucinationManager(data_dir=self.store.data_dir)
         self._text_comparator = TextComparator()
         self._term_extractor = TermExtractor()
         self._readability_scorer = ReadabilityScorer()
@@ -392,7 +396,6 @@ class BackendService:
         self._auto_title_generator = AutoTitleGenerator()
         self._context_memory = ContextMemory(window_size=50)
         self._transcription_scorer = TranscriptionScorer()
-        self._speech_pace_analyzer = SpeechPaceAnalyzer()
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
@@ -416,7 +419,6 @@ class BackendService:
             data_dir=self.store.data_dir,
             enabled=settings.PASTE_APP_MEMORY_ENABLED,
         )
-        self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
@@ -424,6 +426,22 @@ class BackendService:
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
+        self._text_processing_svc = TextProcessingService(
+            readability_scorer=self._readability_scorer,
+            transcription_scorer=self._transcription_scorer,
+            emotion_detector=self._emotion_detector,
+            text_comparator=self._text_comparator,
+            abbreviation_expander=self._abbreviation_expander,
+            text_postprocessor=self._text_postprocessor,
+            store=self.store,
+            llm_rewriter=self._llm_rewriter,
+        )
+        self._text_scoring_svc = TextScoringService(
+            llm_rewriter=self._llm_rewriter,
+            term_extractor=self._term_extractor,
+            auto_title_generator=self._auto_title_generator,
+            get_runtime_setting=self._get_runtime_setting,
+        )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
@@ -432,7 +450,6 @@ class BackendService:
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
         self._metadata_enricher = MetadataEnricher()
-        self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
@@ -447,6 +464,14 @@ class BackendService:
             quality_trends=self._quality_trends,
             audio_fingerprinter=self._audio_fingerprinter,
             word_timing_analyzer=self._word_timing_analyzer,
+            store=self.store,
+        )
+        self._analytics_svc = AnalyticsService(
+            analytics_dashboard=self._analytics_dashboard,
+            sentiment_trends=self._sentiment_trends,
+            activity_calendar=self._activity_calendar,
+            keyword_cloud_gen=self._keyword_cloud_gen,
+            timeline_view=self._timeline_view,
             store=self.store,
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
@@ -477,6 +502,10 @@ class BackendService:
             circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
             circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
         )
+        # Apple integration service (Telegram bridge + osascript integrations).
+        self._apple_integration_svc = AppleIntegrationService(
+            telegram_bridge=self._telegram_bridge,
+        )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
         # Realtime partial transcription (запускается при start_recording).
@@ -488,9 +517,6 @@ class BackendService:
 
         # Реестр асинхронных задач транскрибации (transcribe_paths_async).
         self._job_tracker = JobTracker()
-        self._calendar_linker = CalendarLinker(
-            cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
-        )
         # Проверяем авто-бэкап при старте
         try:
             self._auto_backup.check_and_backup()
@@ -534,6 +560,24 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+
+        # HealthCheckService — делегат диагностических IPC-методов.
+        # Использует уже инициализированные collaborators.
+        self._health_check_svc = HealthCheckService(
+            store=self.store,
+            health_checker=self._health_checker,
+            startup_diagnostics=self._startup_diagnostics,
+            integrity_checker=self._integrity_checker,
+            llm_probe=getattr(self, "_llm_probe", None),
+            metrics_collector=getattr(self, "_metrics_collector", None),
+            transcriber=self.transcriber,
+            llm_rewriter=self._llm_rewriter,
+            settings_svc=self._settings_svc,
+            start_time=self._start_time,
+            app_version=APP_VERSION,
+            recorder=self.recorder,
+            last_stt_engine_ref=[self._last_stt_engine or ""],
+        )
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -705,6 +749,20 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    def _handle_remove_from_semantic_index(self, params: dict) -> dict:
+        """Удаляет элемент из семантического индекса.
+
+        Params:
+            item_id — str, идентификатор элемента для удаления (обязателен)
+        Returns:
+            {"removed": bool}
+        """
+        item_id = (params.get("item_id") or "").strip()
+        if not item_id:
+            raise ValueError("item_id обязателен")
+        removed = self._semantic_searcher.remove_item(item_id)
+        return {"removed": removed}
+
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
@@ -757,7 +815,6 @@ class BackendService:
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
             "add_history_item": self._history.handle_add_history_item,  # VERIFIED: called from Swift (main, HistoryPanel)
-            "transcribe_paths": self._handle_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "transcribe_paths_async": self._handle_transcribe_paths_async,  # PR #14: фоновый job + прогресс
             "get_transcribe_progress": self._handle_get_transcribe_progress,  # PR #14: опрос прогресса job'а
             "cancel_transcribe_job": self._handle_cancel_transcribe_job,  # PR #14: запрос отмены job'а
@@ -784,8 +841,8 @@ class BackendService:
             "list_all_tags": self._history.handle_list_all_tags,
             "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
-            "summarize_text": self._handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
-            "summarize_item": self._handle_summarize_item,  # LLM summary для элемента истории по ID
+            "summarize_text": self._text_processing_svc.handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
+            "summarize_item": self._text_processing_svc.handle_summarize_item,  # LLM summary для элемента истории по ID
             "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
             "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
             "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
@@ -808,8 +865,6 @@ class BackendService:
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
-            "get_disk_status": self._handle_get_disk_status,  # текущий статус дискового пространства
-            "get_storage_breakdown": self._handle_get_storage_breakdown,  # разбивка использования диска по компонентам
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
             "get_auto_backup_status": lambda p: self._auto_backup.get_auto_backup_status(),  # статус авто-резервного копирования
@@ -852,7 +907,7 @@ class BackendService:
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
-            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
+            "warmup_rewriter": self._handle_warmup_rewriter,  # → TextScoringService
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
@@ -879,22 +934,23 @@ class BackendService:
             "get_chain": self._chains.handle_get_chain,  # получить цепочку с деталями
             "list_chains": self._chains.handle_list_chains,  # список цепочек
             "merge_chain_text": self._chains.handle_merge_chain_text,  # объединённый текст цепочки
+            "unlink_recording_from_chain": self._chains.handle_unlink_recording_from_chain,  # убрать запись из цепочки
             "schedule_recording": self._recording_scheduler.handle_schedule_recording,  # запланировать запись на определённое время
             "cancel_scheduled_recording": self._recording_scheduler.handle_cancel_scheduled_recording,  # отменить запланированную запись
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
-            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
-            "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
+            "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
+            "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "get_sentiment_trends": self._analytics_svc.handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
-            "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
-            "compare_texts": self._handle_compare_texts,  # сравнение двух текстов/транскрипций
+            "extract_terms": self._handle_extract_terms,  # → TextScoringService
+            "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
-            "score_readability": self._handle_score_readability,  # оценка читабельности текста транскрибации
+            "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
             "score_transcription": self._handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
@@ -903,23 +959,22 @@ class BackendService:
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._audio_analytics_svc.handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
-            "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
+            "get_keyword_cloud": self._analytics_svc.handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
+            "revoke_share_link": self._sharing.handle_revoke_share_link,  # отозвать пакет шаринга по токену (Wave 158)
             "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
-            "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
+            "generate_auto_title": self._handle_generate_auto_title,  # → TextScoringService
             # форматирование текста под целевое приложение (telegram, notes, email и др.)
             "format_for_paste": self._paste_formatter.handle_format_for_paste,
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
-            "extract_learning_vocabulary": self._handle_extract_learning_vocabulary,  # режим изучения языков: извлечение словаря из двуязычных транскрипций
-            "generate_flashcards": self._handle_generate_flashcards,  # режим изучения языков: генерация флеш-карточек
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
-            "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "get_analytics_dashboard": self._analytics_svc.handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
@@ -928,14 +983,14 @@ class BackendService:
             "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
             "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
             "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
-            "detect_emotion": self._handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
+            "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
-            "expand_abbreviations": self._handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
-            "remove_abbreviation": self._handle_remove_abbreviation,  # удалить аббревиатуру
-            "list_abbreviations": self._handle_list_abbreviations,  # список аббревиатур для языка
+            "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
+            "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
+            "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
             "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
             "configure_obsidian_sync": self._obsidian_sync.handle_configure,  # настроить Obsidian vault для синхронизации транскрипций
             "run_obsidian_sync": self._obsidian_sync.handle_sync,  # синхронизировать записи истории с Obsidian vault
@@ -946,8 +1001,8 @@ class BackendService:
             "get_playback_stats": self._playback_tracker.handle_get_playback_stats,
             "get_most_replayed": self._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
             # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
-            "post_process_text": self._handle_post_process_text,
-            "list_post_process_steps": self._handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
+            "post_process_text": self._text_processing_svc.handle_post_process_text,
+            "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
             "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
@@ -958,8 +1013,7 @@ class BackendService:
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
-            "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
-            "export_timeline": self._handle_export_timeline,  # экспорт временной шкалы записей в SVG, JSON или iCal
+            "get_timeline_view": self._analytics_svc.handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
@@ -997,6 +1051,7 @@ class BackendService:
             # --- plugins ---
             "list_plugins": self._plugin_manager.handle_list_plugins,  # список обнаруженных плагинов
             "get_plugin_info": self._plugin_manager.handle_get_plugin_info,  # информация о конкретном плагине
+            "unload_plugin": self._plugin_manager.handle_unload_plugin,  # полная выгрузка плагина из памяти
             # --- feature flags ---
             "get_feature_flags": self._feature_flags.handle_get_feature_flags,  # получить все feature-флаги с описаниями
             "set_feature_flag": self._feature_flags.handle_set_feature_flag,  # установить значение feature-флага
@@ -1017,17 +1072,13 @@ class BackendService:
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
-            # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
-            "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
-            # --- Apple Notes integration (Phase D.4) ---
-            "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
-            # --- Apple Reminders integration (Phase D.4) ---
-            "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
-            # --- Apple Calendar integration (Phase D.4) ---
-            "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
-            # --- iMessage integration (Phase D.4) ---
-            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
-            "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
+            # --- Apple / Telegram integrations (AppleIntegrationService) ---
+            "send_to_telegram": self._apple_integration_svc.handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            "create_apple_note": self._apple_integration_svc.handle_create_apple_note,  # создать заметку в Apple Notes через osascript
+            "create_apple_reminder": self._apple_integration_svc.handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
+            "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
+            "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._call_session_service.handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._call_session_service.handle_call_session_get,  # получить сессию по id
@@ -1049,6 +1100,7 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
+            "remove_from_semantic_index": self._handle_remove_from_semantic_index,  # удалить элемент из семантического индекса
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
@@ -1191,18 +1243,7 @@ class BackendService:
         )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-        return {
-            "status": "ok",
-            "service": "krabear-backend",
-            "version": APP_VERSION,
-            "uptime_sec": round(time.monotonic() - self._start_time, 1),
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
-            "history_count": history_count,
-        }
+        return self._health_check_svc.handle_ping(params)
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         started = self.recorder.start()
@@ -1786,6 +1827,9 @@ class BackendService:
         # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
         if tp.get("engine"):
             self._last_stt_engine = str(tp["engine"])
+            # Синхронизируем shared ref для HealthCheckService.
+            if hasattr(self, "_health_check_svc"):
+                self._health_check_svc._last_stt_engine_ref[0] = self._last_stt_engine
         confidence = tp.get("confidence", 0.0)
         add_breadcrumb(
             category="transcription",
@@ -2255,60 +2299,11 @@ class BackendService:
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
-        try:
-            diarization_device = str(self.transcriber.engine._resolve_diarization_device())
-        except Exception:
-            diarization_device = "unknown"
-
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-
-        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
-        try:
-            profiler_report = performance_profiler.get_profile_report()
-        except Exception as exc:
-            logger = logging.getLogger("KrabEar.Backend.Service")
-            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
-            profiler_report = {
-                "methods": {},
-                "slowest_methods": [],
-                "total_profiled_time_sec": 0.0,
-                "error": str(exc),
-            }
-
-        return {
-            "system": {
-                "python_version": sys.version,
-                "platform": platform.platform(),
-                "uptime_sec": time.monotonic() - self._start_time,
-            },
-            "stt": {
-                "model_balanced": settings.MODEL_BALANCED,
-                "model_max": settings.MODEL_MAX_CANDIDATES,
-                "quality_profile": self.transcriber.engine.quality_profile,
-                "current_model": self.transcriber.engine.current_model,
-                "diarization_enabled": settings.DIARIZATION_ENABLED,
-                "diarization_device": diarization_device,
-                "last_engine": self._last_stt_engine,
-            },
-            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
-            "history": {
-                "total_items": history_count,
-                "data_dir": str(self.store.data_dir),
-                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
-            },
-            "settings_cache": {
-                "ttl_sec": self._settings_svc._cache_ttl,
-                "cached": self._settings_svc._cache is not None,
-            },
-            "profiler": profiler_report,
-        }
+        return self._health_check_svc.handle_get_diagnostics(params)
 
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
         """Агрегированный health check всех ключевых подсистем бэкенда."""
-        return self._health_checker.check_all()
+        return self._health_check_svc.handle_health_check(params)
 
     # ------------------------------------------------------------------
     # Phase B.1 — error bus + LLM probe handlers
@@ -2377,7 +2372,14 @@ class BackendService:
         # proc_cmdline raises PermissionError → wrapped as SystemError by the
         # psutil C ext, which bubbles out before any inner try/except. Iterate
         # bare and fetch fields manually under a wide except.
-        for proc in psutil.process_iter():
+        try:
+            proc_iter = list(psutil.process_iter())
+        except (PermissionError, SystemError, OSError) as exc:
+            # Wave 490: Sequoia KERN_PROCARGS2 blocks process_iter at the top level.
+            # Push system.proc_cmdline_permission and return gracefully.
+            self._push_proc_cmdline_permission_error(exc)
+            return {"ok": True, "processes": []}
+        for proc in proc_iter:
             try:
                 cmd = " ".join(proc.cmdline() or [])
                 if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
@@ -2396,6 +2398,36 @@ class BackendService:
                 continue
 
         return {"ok": True, "processes": matches}
+
+    def _push_proc_cmdline_permission_error(self, exc: Exception) -> None:
+        """Push system.proc_cmdline_permission error to error_bus. Never raises.
+
+        Wave 490: Sequoia KERN_PROCARGS2 blocks psutil.process_iter() with
+        PermissionError/SystemError. Push once per hour (dedupe_seconds=3600).
+        """
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("system.proc_cmdline_permission", {})
+            err = KrabError(
+                severity="error",
+                component="system",
+                code="system.proc_cmdline_permission",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2).",
+                ),
+                message_debug=f"psutil.process_iter raised {type(exc).__name__}: {exc}",
+                timestamp=datetime.now(timezone.utc),
+                context={"exc_type": type(exc).__name__, "exc_msg": str(exc)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            if hasattr(self, "_error_bus") and self._error_bus is not None:
+                self._error_bus.push(err)
+        except Exception:
+            pass  # never raise from error reporting path
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
@@ -2638,14 +2670,7 @@ class BackendService:
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
         """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
-        if self._llm_rewriter is None:
-            return {"reachable": False, "latency_ms": 0, "model": None}
-        ok = self._llm_rewriter.warmup()
-        return {
-            "reachable": bool(ok),
-            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
-            "model": getattr(self._llm_rewriter, "_model", None),
-        }
+        return self._health_check_svc.handle_probe_llm_http(params)
 
     def _handle_warmup_stt(self, params: dict) -> dict:
         """Ручной запуск STT warmup — полезен после смены профиля или модели.
@@ -2667,29 +2692,8 @@ class BackendService:
         return self.transcriber.engine.warmup()
 
     def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Ручной запуск LLM rewriter warmup probe.
-
-        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
-
-        Params:
-            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
-
-        Returns:
-            {
-              "ok": bool,          # True если HTTP 200
-              "latency_ms": int,   # время ответа в мс
-              "error": str | None, # описание ошибки или None
-              "model": str | None  # имя используемой модели
-            }
-        """
-        if self._llm_rewriter is None:
-            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
-        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
-        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
-        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
-        result["model"] = getattr(self._llm_rewriter, "_model", None)
-        return result
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_warmup_rewriter(params)
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
@@ -2702,8 +2706,7 @@ class BackendService:
 
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает результаты диагностики при старте бэкенда."""
-        report = self._startup_diagnostics.run_all_checks()
-        return report.to_dict()
+        return self._health_check_svc.handle_get_startup_diagnostics(params)
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -2825,49 +2828,6 @@ class BackendService:
                 "network_mode": settings.get("network_mode", "offline_default"),
             },
         }
-
-    def _handle_summarize_text(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Локальный lightweight-summary для длинных заметок/транскриптов."""
-        text = str(params.get("text", "")).strip()
-        if not text:
-            raise RuntimeError("text обязателен")
-        mode = str(params.get("mode", "summary_short")).strip() or "summary_short"
-        max_points = int(params.get("max_points", 3) or 3)
-        max_points = max(1, min(max_points, 12))
-        summary = self._summarize_text_locally(text=text, mode=mode, max_points=max_points)
-        return {
-            "mode": summary["mode"],
-            "summary": summary["summary"],
-            "bullets": summary["bullets"],
-            "source_chars": len(text),
-        }
-
-    @staticmethod
-    def _summarize_text_locally(text: str, mode: str, max_points: int) -> dict[str, Any]:
-        """Простая эвристика summary без внешних зависимостей."""
-        normalized = " ".join(text.replace("\r", "\n").split())
-        if not normalized:
-            return {"mode": mode, "summary": "", "bullets": []}
-
-        chunks = []
-        for raw in re.split(r"(?<=[.!?])\s+", normalized):
-            sentence = raw.strip()
-            if sentence:
-                chunks.append(sentence)
-        if not chunks:
-            chunks = [normalized]
-
-        if mode == "summary_detailed":
-            bullets = chunks[:max_points]
-            summary = " ".join(chunks[: min(len(chunks), max_points + 1)])
-        else:
-            # Короткий summary: первая смысловая фраза + маркеры.
-            head = chunks[0]
-            bullets = chunks[1: 1 + max_points]
-            if not bullets:
-                bullets = chunks[:max_points]
-            summary = head
-        return {"mode": mode, "summary": summary, "bullets": bullets}
 
     def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список моделей доступных в LM Studio через /api/v1/models.
@@ -3071,60 +3031,6 @@ class BackendService:
 
         return adapters
 
-    def _generate_summary(self, text: str) -> str | None:
-        """Генерирует краткое LLM-summary для длинного текста. Возвращает None если LLM недоступен."""
-        if self._llm_rewriter is None:
-            return None
-        try:
-            result = self._llm_rewriter.summarize(text, max_sentences=3)
-            if result.ok and result.text:
-                logger.info("LLM summary сгенерировано (%d мс)", result.latency_ms or 0)
-                return result.text
-            logger.debug("LLM summary не удалось: %s", result.fallback_reason)
-            return None
-        except Exception as exc:
-            logger.warning("Ошибка генерации LLM summary: %s", exc)
-            return None
-
-    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует LLM-summary для элемента истории по ID."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        # Найти элемент в истории
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = None
-        for item in items:
-            if item.id == item_id:
-                target = item
-                break
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        if len(text) < 50:
-            raise RuntimeError("Текст слишком короткий для summary")
-
-        summary = self._generate_summary(text)
-        if summary is None:
-            # Fallback на локальный summary
-            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
-            return {
-                "id": item_id,
-                "summary": local["summary"],
-                "llm": False,
-                "source_chars": len(text),
-            }
-
-        return {
-            "id": item_id,
-            "summary": summary,
-            "llm": True,
-            "source_chars": len(text),
-        }
-
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
         item_id = str(params.get("id", "")).strip()
@@ -3253,6 +3159,43 @@ class BackendService:
 
     def _handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств."""
+        # Poll-flood detection: >10 calls/sec → push ipc.audio_device_poll_flood breadcrumb.
+        # Uses a simple sliding 1-second window tracked via _audio_device_call_times deque.
+        _now = time.monotonic()
+        _call_times = getattr(self, "_audio_device_call_times", None)
+        if _call_times is None:
+            import collections  # noqa: PLC0415
+            _call_times = collections.deque()
+            self._audio_device_call_times: "collections.deque[float]" = _call_times
+        _call_times.append(_now)
+        # Drop entries older than 1 second
+        while _call_times and (_now - _call_times[0]) > 1.0:
+            _call_times.popleft()
+        if len(_call_times) > 10:
+            _bus = getattr(self, "_error_bus", None)
+            if _bus is not None:
+                try:
+                    from backend.error_bus import KrabError  # noqa: PLC0415
+                    from backend.error_codes import ERROR_REGISTRY  # noqa: PLC0415
+                    from datetime import datetime, timezone  # noqa: PLC0415
+                    _entry = ERROR_REGISTRY.get("ipc.audio_device_poll_flood", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="ipc",
+                        code="ipc.audio_device_poll_flood",
+                        message_user=_entry.get("user_msg_ru", "IPC: audio device poll flood"),
+                        message_debug=(
+                            f"list_audio_inputs called {len(_call_times)}× in last 1s "
+                            "(poll flood — check Swift audio device picker refresh rate)"
+                        ),
+                        timestamp=datetime.now(timezone.utc),
+                        context={"calls_per_sec": len(_call_times)},
+                        actionable=_entry.get("actionable", False),
+                        action_id=_entry.get("action_id"),
+                    )
+                    _bus.push(_err)
+                except Exception:  # noqa: BLE001
+                    pass
         items = self._list_audio_inputs()
         default_input_id = None
         for item in items:
@@ -3264,14 +3207,6 @@ class BackendService:
             "count": len(items),
             "default_input_id": default_input_id,
         }
-
-    def _handle_get_disk_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий статус дискового пространства (немедленная проверка)."""
-        return self._disk_monitor.check_now()
-
-    def _handle_get_storage_breakdown(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает разбивку использования диска по компонентам (NDJSON, transcripts, audio)."""
-        return self.store.get_storage_breakdown()
 
     def _handle_get_audio_devices(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств (обёртка для GUI)."""
@@ -3306,13 +3241,6 @@ class BackendService:
                 "error": str(exc),
                 "devices": self._list_audio_inputs(),
             }
-
-    def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Синхронная транскрибация списка файлов (CLI/legacy путь).
-
-        Делегирует в `_transcribe_paths_core` без progress/cancel коллбеков.
-        """
-        return self._transcribe_paths_core(params)
 
     def _transcribe_paths_core(
         self,
@@ -4456,60 +4384,12 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов."""
-        p1_start = params.get("period1_start")
-        p1_end = params.get("period1_end")
-        p2_start = params.get("period2_start")
-        p2_end = params.get("period2_end")
-        if not all([p1_start, p1_end, p2_start, p2_end]):
-            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
-        report = _compare_periods_fn(
-            store=self.store,
-            period1_start=p1_start,
-            period1_end=p1_end,
-            period2_start=p2_start,
-            period2_end=p2_end,
-        )
-        return {
-            "period1": {
-                "recordings": report.period1.recordings,
-                "duration_sec": report.period1.duration_sec,
-                "words": report.period1.words,
-                "avg_confidence": report.period1.avg_confidence,
-                "languages": report.period1.languages,
-            },
-            "period2": {
-                "recordings": report.period2.recordings,
-                "duration_sec": report.period2.duration_sec,
-                "words": report.period2.words,
-                "avg_confidence": report.period2.avg_confidence,
-                "languages": report.period2.languages,
-            },
-            "recordings_change_pct": report.recordings_change_pct,
-            "duration_change_pct": report.duration_change_pct,
-            "confidence_change": report.confidence_change,
-            "new_languages": report.new_languages,
-            "summary": report.summary,
-        }
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_compare_periods(params)
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
-        months = int(params.get("months", 12))
-        months = max(1, min(months, 24))
-        include_svg = bool(params.get("include_svg", False))
-        cell_size = int(params.get("cell_size", 12))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        calendar = self._activity_calendar.generate_calendar(items, months=months)
-        result = calendar.to_dict()
-        if include_svg:
-            result["svg"] = self._activity_calendar.generate_calendar_svg(
-                items, months=months, cell_size=cell_size
-            )
-        return result
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_activity_calendar(params)
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -4527,15 +4407,8 @@ class BackendService:
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-        return self._sentiment_trends.to_dict(report)
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_sentiment_trends(params)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -4547,22 +4420,7 @@ class BackendService:
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Проверяет целостность файлов данных Krab Ear."""
-        report = self._integrity_checker.check_integrity(self.store.data_dir)
-        return {
-            "status": report.status,
-            "total_items": report.total_items,
-            "orphaned_tombstones": report.orphaned_tombstones,
-            "invalid_json_lines": report.invalid_json_lines,
-            "checks": [
-                {
-                    "name": c.name,
-                    "status": c.status,
-                    "message": c.message,
-                    "auto_fixable": c.auto_fixable,
-                }
-                for c in report.checks
-            ],
-        }
+        return self._health_check_svc.handle_check_integrity(params)
 
     def _handle_repair_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Исправляет автоматически устраняемые проблемы целостности данных."""
@@ -4575,47 +4433,8 @@ class BackendService:
         }
 
     def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает ключевые термины из текста."""
-        text = params.get("text", "")
-        language = params.get("language", "ru")
-        if not text:
-            return {"terms": []}
-        terms = self._term_extractor.extract_terms(text, language=language)
-        return {
-            "terms": [
-                {
-                    "term": t.term,
-                    "score": t.score,
-                    "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
-                }
-                for t in terms
-            ]
-        }
-
-    def _handle_compare_texts(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает два текста или две записи истории по ID."""
-        item_id_1 = params.get("item_id_1")
-        item_id_2 = params.get("item_id_2")
-        text1 = params.get("text1", "")
-        text2 = params.get("text2", "")
-
-        if item_id_1 and item_id_2:
-            result = self._text_comparator.compare_items(item_id_1, item_id_2, self.store)
-        else:
-            result = self._text_comparator.compare_texts(text1, text2)
-
-        return {
-            "similarity": result.similarity,
-            "text_1": result.text_1,
-            "text_2": result.text_2,
-            "common_phrases": result.common_phrases,
-            "unique_to_1": result.unique_to_1,
-            "unique_to_2": result.unique_to_2,
-            "word_count_diff": result.word_count_diff,
-            "summary": result.summary,
-        }
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_extract_terms(params)
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние контекстной памяти STT.
@@ -4638,88 +4457,9 @@ class BackendService:
             "window_size": 50,
         }
 
-    def _handle_score_readability(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Оценивает читабельность текста транскрибации."""
-        text = params.get("text", "")
-        if not text:
-            return {
-                "flesch_score": 0.0,
-                "avg_sentence_length": 0.0,
-                "avg_word_length": 0.0,
-                "vocabulary_level": "simple",
-                "sentence_count": 0,
-                "word_count": 0,
-                "longest_sentence": "",
-                "shortest_sentence": "",
-            }
-        report = self._readability_scorer.score(text)
-        return {
-            "flesch_score": report.flesch_score,
-            "avg_sentence_length": report.avg_sentence_length,
-            "avg_word_length": report.avg_word_length,
-            "vocabulary_level": report.vocabulary_level,
-            "sentence_count": report.sentence_count,
-            "word_count": report.word_count,
-            "longest_sentence": report.longest_sentence,
-            "shortest_sentence": report.shortest_sentence,
-        }
-
-    def _handle_score_transcription(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Оценивает качество транскрибации и возвращает балл 0–100 с оценкой A–F.
-
-        Params:
-            text (str): транскрибированный текст.
-            confidence (float): уверенность STT-модели, 0.0–1.0.
-            duration_sec (float): длительность аудио в секундах.
-            has_diarization (bool, optional): была ли применена диаризация. Default False.
-            has_llm_enhancement (bool, optional): был ли применён LLM-рерайтер. Default False.
-
-        Returns:
-            Словарь с полями QualityScore: overall_score, grade, factors, recommendations.
-        """
-        text = params.get("text", "")
-        confidence = float(params.get("confidence", 0.0))
-        duration_sec = float(params.get("duration_sec", 0.0))
-        has_diarization = bool(params.get("has_diarization", False))
-        has_llm_enhancement = bool(params.get("has_llm_enhancement", False))
-
-        result = self._transcription_scorer.score(
-            text=text,
-            confidence=confidence,
-            duration_sec=duration_sec,
-            has_diarization=has_diarization,
-            has_llm_enhancement=has_llm_enhancement,
-        )
-        return {
-            "overall_score": result.overall_score,
-            "grade": result.grade,
-            "factors": result.factors,
-            "recommendations": result.recommendations,
-        }
-
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cloud_words = self._keyword_cloud_gen.generate_cloud(
-            items, max_words=max_words, language=language
-        )
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
-        }
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_keyword_cloud(params)
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
@@ -5093,136 +4833,14 @@ end tell'''
     # ── Timeline view ────────────────────────────────────────────────────────
 
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Группирует историю транскрипций по временным блокам (timeline).
-
-        Параметры:
-          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
-          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
-        """
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-        include_heatmap = bool(params.get("include_heatmap", False))
-        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        result: dict[str, Any] = {
-            "blocks": [b.to_dict() for b in blocks],
-            "total_blocks": len(blocks),
-            "group_by": group_by,
-        }
-
-        if include_heatmap:
-            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
-            result["activity_heatmap"] = heatmap
-
-        return result
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_timeline_view(params)
 
     # ── Timeline export ──────────────────────────────────────────────────────
 
-    def _handle_export_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Экспортирует временную шкалу записей в SVG, JSON или iCalendar.
-
-        Параметры:
-          - format: str — формат экспорта: "svg", "json", "ical" (по умолчанию "json").
-          - group_by: str — гранулярность блоков: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - svg_width: int — ширина SVG в пикселях (по умолчанию 1200, только для format=svg).
-          - svg_height: int — высота SVG в пикселях (по умолчанию 400, только для format=svg).
-
-        Ответ:
-          - content: str — экспортированный контент.
-          - format: str — фактический формат экспорта.
-          - total_blocks: int — количество блоков.
-          - mime_type: str — MIME-тип контента.
-        """
-        fmt = str(params.get("format", "json")).strip().lower()
-        if fmt not in ("svg", "json", "ical"):
-            raise ValueError(
-                f"Неизвестный формат экспорта: {fmt!r}. Допустимые: svg, json, ical"
-            )
-
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        blocks_dicts = [b.to_dict() for b in blocks]
-
-        if fmt == "svg":
-            svg_width = max(200, int(params.get("svg_width", 1200)))
-            svg_height = max(100, int(params.get("svg_height", 400)))
-            content = self._timeline_exporter.export_svg(
-                blocks_dicts, width=svg_width, height=svg_height
-            )
-            mime_type = "image/svg+xml"
-        elif fmt == "ical":
-            content = self._timeline_exporter.export_ical(blocks_dicts)
-            mime_type = "text/calendar"
-        else:
-            content = self._timeline_exporter.export_json(blocks_dicts)
-            mime_type = "application/json"
-
-        return {
-            "content": content,
-            "format": fmt,
-            "total_blocks": len(blocks_dicts),
-            "mime_type": mime_type,
-        }
-
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует автоматический заголовок для транскрибации.
-
-        Параметры:
-            text (str): текст транскрибации (обязательный).
-            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
-            max_length (int): максимальная длина заголовка (по умолчанию 50).
-            with_date (bool): если true и timestamp указан — включает дату.
-            items (list): список записей для пакетной генерации (альтернатива text).
-
-        Ответ (одиночный):
-            {title: str}
-
-        Ответ (пакетный):
-            {titles: [{id, title, generated_at}]}
-        """
-        # Пакетный режим
-        items = params.get("items")
-        if items is not None:
-            if not isinstance(items, list):
-                raise ValueError("Параметр 'items' должен быть списком")
-            titles = self._auto_title_generator.batch_generate(items)
-            return {"titles": titles}
-
-        # Одиночный режим
-        text = str(params.get("text", "") or "")
-        timestamp = str(params.get("timestamp", "") or "")
-        max_length = int(params.get("max_length", 50))
-        with_date = bool(params.get("with_date", False))
-
-        if not text:
-            return {"title": "Запись"}
-
-        if with_date and timestamp:
-            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
-        else:
-            title = self._auto_title_generator.generate_title(text, max_length=max_length)
-
-        return {"title": title}
-
-    def _handle_extract_learning_vocabulary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: extract_learning_vocabulary — извлечение словаря из двуязычных транскрипций."""
-        params_with_store = dict(params)
-        params_with_store.setdefault("store", self.store)
-        return self._language_learning.handle_extract_learning_vocabulary(params_with_store)
-
-    def _handle_generate_flashcards(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: generate_flashcards — генерация флеш-карточек для изучения языка."""
-        params_with_store = dict(params)
-        params_with_store.setdefault("store", self.store)
-        return self._language_learning.handle_generate_flashcards(params_with_store)
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_generate_auto_title(params)
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
@@ -5231,16 +4849,8 @@ end tell'''
         return self._language_learning.handle_get_learning_stats(params_with_store)
 
     def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
-
-        Параметры:
-            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
-
-        Возвращает:
-            overview, today, trends, languages, quality, engagement, storage, performance
-        """
-        days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
+        """Stub: делегирует в AnalyticsService (Wave 392)."""
+        return self._analytics_svc.handle_get_analytics_dashboard(params)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
@@ -5277,29 +4887,6 @@ end tell'''
             "current_topic": current_topic,
         }
 
-    def _handle_detect_emotion(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: detect_emotion — эвристическое определение эмоции в тексте транскрипции.
-
-        Параметры:
-            text     (str) — исходный текст для анализа.
-            language (str) — язык текста ("ru", "es", "en"). По умолчанию "ru".
-
-        Возвращает:
-            primary_emotion, confidence, indicators, exclamation_count,
-            question_count, caps_ratio
-        """
-        text = str(params.get("text", ""))
-        language = str(params.get("language", "ru"))
-        result = self._emotion_detector.detect(text, language=language)
-        return {
-            "primary_emotion": result.primary_emotion,
-            "confidence": result.confidence,
-            "indicators": result.indicators,
-            "exclamation_count": result.exclamation_count,
-            "question_count": result.question_count,
-            "caps_ratio": result.caps_ratio,
-        }
-
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.
 
@@ -5331,87 +4918,6 @@ end tell'''
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
-
-    def _handle_expand_abbreviations(self, params: dict) -> dict:
-        """IPC: expand_abbreviations — раскрыть аббревиатуры в тексте транскрипции.
-
-        Params:
-            text (str): Исходный текст.
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"expanded": str, "changed": bool}
-        """
-        text = str(params.get("text", ""))
-        language = str(params.get("language", "ru"))
-        expanded = self._abbreviation_expander.expand(text, language=language)
-        return {"expanded": expanded, "changed": expanded != text}
-
-    def _handle_remove_abbreviation(self, params: dict) -> dict:
-        """IPC: remove_abbreviation — удалить аббревиатуру.
-
-        Params:
-            abbr (str): Аббревиатура.
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"removed": bool}
-        """
-        abbr = str(params.get("abbr", "")).strip()
-        language = str(params.get("language", "ru"))
-        removed = self._abbreviation_expander.remove_abbreviation(abbr, language=language)
-        return {"removed": removed}
-
-    def _handle_list_abbreviations(self, params: dict) -> dict:
-        """IPC: list_abbreviations — список аббревиатур для языка.
-
-        Params:
-            language (str, optional): Код языка (по умолчанию "ru").
-
-        Returns:
-            {"abbreviations": list[dict], "language": str, "count": int}
-        """
-        language = str(params.get("language", "ru"))
-        abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
-        return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
-
-    # ── Text post-processing IPC handlers ──────────────────────────────────────
-
-    def _handle_post_process_text(self, params: dict) -> dict:
-        """IPC: post_process_text — прогнать текст через конвейер пост-обработки.
-
-        Params:
-            text  (str)       — исходный текст для обработки.
-            steps (list[str]) — список имён шагов в нужном порядке.
-                                Если не указан, применяется цепочка по умолчанию:
-                                [strip_whitespace, fix_punctuation, normalize_entities].
-
-        Возвращает:
-            text           — обработанный текст.
-            steps_applied  — список имён выполненных шагов.
-            changes_count  — число шагов, изменивших текст.
-        """
-        text = str(params.get("text", ""))
-        steps = params.get("steps")  # None → цепочка по умолчанию
-        if steps is not None and not isinstance(steps, list):
-            raise ValueError("Параметр 'steps' должен быть списком строк или null")
-        if steps is not None:
-            steps = [str(s) for s in steps]
-
-        result = self._text_postprocessor.process(text, steps=steps)
-        return {
-            "text": result.text,
-            "steps_applied": result.steps_applied,
-            "changes_count": result.changes_count,
-        }
-
-    def _handle_list_post_process_steps(self, params: dict) -> dict:
-        """IPC: list_post_process_steps — список доступных шагов пост-обработки.
-
-        Возвращает:
-            steps — список имён доступных шагов.
-        """
-        return {"steps": self._text_postprocessor.list_steps()}
 
     def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: select_model — умный выбор STT-модели на основе условий.
@@ -5505,6 +5011,10 @@ end tell'''
             dict: total_checked, duplicates_found, chars_saved, dedup_rate.
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
+
+    def _handle_score_transcription(self, params: dict) -> dict:
+        """Delegated to TextProcessingService."""
+        return self._text_processing_svc.handle_score_transcription(params)
 
 
 class IPCServer:
@@ -5670,9 +5180,15 @@ def configure_logging(data_dir: Path) -> None:
     else:
         formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
+    from logging.handlers import RotatingFileHandler as _RotatingFileHandler
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path, encoding="utf-8"),
+        _RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ]
     for h in handlers:
         h.setFormatter(formatter)

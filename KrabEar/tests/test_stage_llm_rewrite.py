@@ -202,6 +202,7 @@ class TestLLMRewriteSettingsKey(unittest.TestCase):
         """should_run passes 'llm_rewrite_enabled' as the settings key."""
         rewriter = _mock_rewriter()
         calls = []
+
         def capturing_settings(key, default=None):
             calls.append(key)
             return True

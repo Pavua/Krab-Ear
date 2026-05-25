@@ -171,5 +171,80 @@ class TestCheckSilencePublicMethod(unittest.TestCase):
         self.assertFalse(result["is_silent"])
 
 
+class TestWave185Requirements(unittest.TestCase):
+    """Additional tests required by Wave 185 task spec."""
+
+    def setUp(self) -> None:
+        self.probe = CallSilenceProbe()
+
+    def test_no_silence_during_speech(self) -> None:
+        """Continuous speech audio never triggers silence detection."""
+        speech = _make_noise(15.0, amp=0.3)  # -10 dBFS well above -40 dB threshold
+        self.assertFalse(
+            self.probe.detect_silence_window(speech, duration_sec=10.0)
+        )
+
+    def test_silence_above_10s_triggers(self) -> None:
+        """11 seconds of pure silence triggers the detector."""
+        audio = _make_silence(11.0)
+        self.assertTrue(
+            self.probe.detect_silence_window(audio, duration_sec=10.0)
+        )
+
+    def test_intermittent_silence_below_threshold_no_trigger(self) -> None:
+        """Alternating speech/silence chunks where no contiguous tail >= 10s is silent."""
+        # Pattern: 3s noise, 5s silence, 3s noise, 5s silence — tail ends with noise
+        chunk_noise = _make_noise(3.0, amp=0.3)
+        chunk_silence = _make_silence(5.0)
+        audio = np.concatenate([
+            chunk_noise,
+            chunk_silence,
+            chunk_noise,
+            chunk_silence,
+            chunk_noise,  # ends with noise → tail is not all-silent
+        ])
+        self.assertFalse(
+            self.probe.detect_silence_window(audio, duration_sec=10.0)
+        )
+
+    def test_empty_audio_handled(self) -> None:
+        """Empty numpy array returns False without raising."""
+        audio = np.array([], dtype=np.float32)
+        result = self.probe.detect_silence_window(audio, duration_sec=10.0)
+        self.assertFalse(result)
+
+    def test_concurrent_probe(self) -> None:
+        """Multiple threads calling detect_silence_window concurrently is safe."""
+        import threading
+        audio_silence = _make_silence(12.0)
+        audio_noise = _make_noise(12.0, amp=0.3)
+        results: list[bool] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def _worker(audio: np.ndarray, expected: bool) -> None:
+            try:
+                r = self.probe.detect_silence_window(audio, duration_sec=10.0)
+                with lock:
+                    results.append(r == expected)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_worker, args=(audio_silence, True)),
+            threading.Thread(target=_worker, args=(audio_noise, False)),
+            threading.Thread(target=_worker, args=(audio_silence, True)),
+            threading.Thread(target=_worker, args=(audio_noise, False)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertTrue(all(results), f"Unexpected results: {results}")
+
+
 if __name__ == "__main__":
     unittest.main()

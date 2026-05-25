@@ -46,12 +46,22 @@ enum SentryConfig {
             return
         }
 
+        // Читаем версию из Bundle один раз: CFBundleShortVersionString → releaseName,
+        // CFBundleVersion → dist. Это гарантирует, что Sentry events всегда
+        // несут корректные поля даже если caller передал release: nil.
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let bundleBuild   = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        let resolvedRelease = release ?? bundleVersion.map { "krab-ear@\($0)" }
+        let resolvedDist    = bundleBuild ?? bundleVersion ?? "unknown"
+
         SentrySDK.start { options in
             options.dsn = dsn
             options.environment = environment
-            if let release {
-                options.releaseName = release
+            if let r = resolvedRelease {
+                options.releaseName = r
             }
+            // dist = build number / version string; distinguishes builds within the same release.
+            options.dist = resolvedDist
             // 5% traces — баланс между coverage и privacy.
             options.tracesSampleRate = 0.05
             // Не отправлять PII (IP, username, headers с токенами).

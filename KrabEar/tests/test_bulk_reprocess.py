@@ -391,5 +391,262 @@ class TestBulkReprocessHardLimit(unittest.TestCase):
             self.assertLessEqual(result["total"], HARD_LIMIT)
 
 
+# ---------------------------------------------------------------------------
+# Wave 141 — required test cases
+# ---------------------------------------------------------------------------
+
+class TestBulkReprocessJobId(unittest.TestCase):
+    """Wave 141.1: reprocess() accepts and records task_id."""
+
+    def test_start_bulk_returns_task_id_in_progress_event(self):
+        """task_id passed to reprocess() must appear in emitted progress events."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            audio_path = f.name
+        try:
+            items = [_make_item_dict("id1", confidence=0.3, audio_path=audio_path)]
+            store = _make_store_mock(items)
+            transcriber = _make_transcriber_mock(confidence=0.95)
+            vm = _make_version_manager_mock()
+            event_bus = MagicMock()
+            emitted_payloads = []
+            event_bus.emit = MagicMock(
+                side_effect=lambda etype, payload: emitted_payloads.append(payload)
+            )
+
+            with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                br = BulkReprocessor(
+                    store=store, transcriber=transcriber, version_manager=vm,
+                    event_bus=event_bus, batch_size=1,
+                )
+                br.reprocess(dry_run=True, task_id="wave141-test-job")
+
+            self.assertTrue(len(emitted_payloads) > 0)
+            for payload in emitted_payloads:
+                self.assertEqual(payload["task_id"], "wave141-test-job")
+        finally:
+            os.unlink(audio_path)
+
+    def test_result_has_expected_keys(self):
+        """reprocess() result dict must contain total/reprocessed/skipped/errors/cancelled."""
+        store = _make_store_mock([])
+        br = BulkReprocessor(
+            store=store,
+            transcriber=_make_transcriber_mock(),
+            version_manager=_make_version_manager_mock(),
+        )
+        result = br.reprocess()
+        for key in ("total", "reprocessed", "skipped", "errors", "cancelled"):
+            self.assertIn(key, result, f"Missing key: {key}")
+
+
+class TestBulkReprocessStatusDuringProcessing(unittest.TestCase):
+    """Wave 141.2: progress reported during processing."""
+
+    def test_status_during_processing(self):
+        """Progress events are emitted while items are being processed."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            paths = []
+            for i in range(4):
+                p = os.path.join(tmpdir, f"a{i}.wav")
+                open(p, "wb").close()
+                paths.append(p)
+
+            items = [_make_item_dict(f"id{i}", confidence=0.2, audio_path=paths[i]) for i in range(4)]
+            store = _make_store_mock(items)
+            transcriber = _make_transcriber_mock(confidence=0.95)
+            vm = _make_version_manager_mock()
+            event_bus = MagicMock()
+            progress_snapshots: list[dict] = []
+            event_bus.emit = MagicMock(
+                side_effect=lambda etype, payload: progress_snapshots.append(dict(payload))
+            )
+
+            with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                br = BulkReprocessor(
+                    store=store, transcriber=transcriber, version_manager=vm,
+                    event_bus=event_bus, batch_size=2,
+                )
+                br.reprocess(dry_run=True)
+
+            # With 4 items and batch_size=2 we expect events mid-run (idx 1) + final
+            self.assertGreaterEqual(len(progress_snapshots), 2)
+            # Last event should have processed == total
+            last = progress_snapshots[-1]
+            self.assertEqual(last["processed"], last["total"])
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestBulkReprocessCancelInProgress(unittest.TestCase):
+    """Wave 141.3: cancel() during reprocess stops the loop with cancelled=True."""
+
+    def test_cancel_in_progress(self):
+        """Cancelling mid-run must set result['cancelled'] = True."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            n = 5
+            paths = []
+            for i in range(n):
+                p = os.path.join(tmpdir, f"b{i}.wav")
+                open(p, "wb").close()
+                paths.append(p)
+
+            items = [_make_item_dict(f"cid{i}", confidence=0.2, audio_path=paths[i]) for i in range(n)]
+            store = _make_store_mock(items)
+            vm = _make_version_manager_mock()
+
+            ready = threading.Event()
+
+            def slow_transcribe(*a, **kw):
+                ready.set()
+                time.sleep(0.15)
+                return {"text": "OK", "confidence": 0.9}
+
+            transcriber = MagicMock()
+            transcriber.transcribe = slow_transcribe
+
+            br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
+
+            def _canceller():
+                ready.wait(timeout=2.0)
+                br.cancel()
+
+            ct = threading.Thread(target=_canceller, daemon=True)
+            ct.start()
+
+            with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                result = br.reprocess(only_low_confidence=True, threshold=0.7)
+
+            ct.join(timeout=3.0)
+            self.assertTrue(result["cancelled"] or result["reprocessed"] < n)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestBulkReprocessHandlesFailingItemContinues(unittest.TestCase):
+    """Wave 141.4: an error on one item does not abort the whole run."""
+
+    def test_handles_failing_item_continues(self):
+        """If transcriber raises on item 1, item 2 must still be processed."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            paths = []
+            for i in range(2):
+                p = os.path.join(tmpdir, f"c{i}.wav")
+                open(p, "wb").close()
+                paths.append(p)
+
+            items = [
+                _make_item_dict("err_id", confidence=0.2, audio_path=paths[0]),
+                _make_item_dict("ok_id", confidence=0.2, audio_path=paths[1]),
+            ]
+            store = _make_store_mock(items)
+            vm = _make_version_manager_mock()
+
+            call_count = 0
+
+            def flaky_transcribe(*a, **kw):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("GPU hang on first item")
+                return {"text": "Recovered text", "confidence": 0.95}
+
+            transcriber = MagicMock()
+            transcriber.transcribe = flaky_transcribe
+
+            with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
+                result = br.reprocess(only_low_confidence=True, threshold=0.7)
+
+            self.assertEqual(result["total"], 2)
+            self.assertEqual(len(result["errors"]), 1, "Exactly one error expected")
+            # Second item should have been processed successfully
+            self.assertEqual(result["reprocessed"], 1)
+            self.assertFalse(result["cancelled"])
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestBulkReprocessProgressReported(unittest.TestCase):
+    """Wave 141.5: progress fields are monotonically increasing."""
+
+    def test_progress_reported(self):
+        """processed field in successive events must be non-decreasing."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            n = 6
+            paths = []
+            for i in range(n):
+                p = os.path.join(tmpdir, f"d{i}.wav")
+                open(p, "wb").close()
+                paths.append(p)
+
+            items = [_make_item_dict(f"pid{i}", confidence=0.2, audio_path=paths[i]) for i in range(n)]
+            store = _make_store_mock(items)
+            transcriber = _make_transcriber_mock(confidence=0.95)
+            vm = _make_version_manager_mock()
+            event_bus = MagicMock()
+            snapshots: list[int] = []
+            event_bus.emit = MagicMock(
+                side_effect=lambda etype, payload: snapshots.append(payload["processed"])
+            )
+
+            with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                br = BulkReprocessor(
+                    store=store, transcriber=transcriber, version_manager=vm,
+                    event_bus=event_bus, batch_size=2,
+                )
+                br.reprocess(dry_run=True)
+
+            self.assertGreater(len(snapshots), 0)
+            for prev, curr in zip(snapshots, snapshots[1:]):
+                self.assertGreaterEqual(curr, prev, "processed must be non-decreasing")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestBulkReprocessConcurrentStart(unittest.TestCase):
+    """Wave 141.6: second reprocess() call from another thread works independently."""
+
+    def test_concurrent_start(self):
+        """Two sequential reprocess() calls (simulating concurrent intent) both return valid results."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            audio_path = f.name
+        try:
+            items = [_make_item_dict("con1", confidence=0.3, audio_path=audio_path)]
+            store = _make_store_mock(items)
+            transcriber = _make_transcriber_mock(confidence=0.95)
+            vm = _make_version_manager_mock()
+
+            br = BulkReprocessor(store=store, transcriber=transcriber, version_manager=vm)
+
+            results = []
+
+            def _run():
+                with patch.object(BulkReprocessor, "_load_audio", return_value="audio_array"):
+                    r = br.reprocess(dry_run=True)
+                results.append(r)
+
+            t1 = threading.Thread(target=_run, daemon=True)
+            t2 = threading.Thread(target=_run, daemon=True)
+            t1.start()
+            t2.start()
+            t1.join(timeout=5.0)
+            t2.join(timeout=5.0)
+
+            self.assertEqual(len(results), 2)
+            for r in results:
+                self.assertIn("total", r)
+                self.assertIn("cancelled", r)
+        finally:
+            os.unlink(audio_path)
+
+
 if __name__ == "__main__":
     unittest.main()

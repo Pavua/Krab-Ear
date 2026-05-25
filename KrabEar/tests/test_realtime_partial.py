@@ -369,6 +369,137 @@ class TestRealtimePartialSessionIsolation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestRealtimePartialSilenceFilter
+# ---------------------------------------------------------------------------
+
+class TestRealtimePartialSilenceFilter(unittest.TestCase):
+    """Verify that no event is emitted when silence filter suppresses audio."""
+
+    def test_no_emit_when_silence(self):
+        """When snapshot_audio returns a zero-energy (silence) array,
+        transcribe_preview returns empty text -> no partial event emitted.
+
+        This mirrors the RealtimeSilenceFilter contract: silent chunks
+        produce empty transcription, so the worker must skip emit.
+        """
+        bus = _make_bus()
+        # Zero-energy buffer => silence
+        silent_audio = np.zeros(16000 * 3, dtype=np.float32)
+        recorder = MagicMock()
+        recorder.snapshot_audio.return_value = (silent_audio, 3.0)
+
+        transcriber = MagicMock()
+        # Silence filter effect: transcriber returns empty text for silent audio
+        transcriber.transcribe_preview.return_value = {"text": ""}
+
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=bus,
+            interval_sec=0.1,
+            buffer_sec=8.0,
+        )
+        rpt.start(session_id="silence-test")
+        time.sleep(0.5)
+        rpt.stop(timeout_sec=2.0)
+
+        partial_calls = [
+            c for c in bus.emit.call_args_list
+            if c.args[0] == _REALTIME_PARTIAL_TYPE
+        ]
+        self.assertEqual(len(partial_calls), 0, "No emit expected on silent audio")
+
+
+# ---------------------------------------------------------------------------
+# TestRealtimePartialThreadSafety
+# ---------------------------------------------------------------------------
+
+class TestRealtimePartialThreadSafety(unittest.TestCase):
+
+    def test_thread_starts_and_stops_clean(self):
+        """start() and stop() must complete without deadlock or exception."""
+        bus = _make_bus()
+        recorder = _make_recorder(duration_sec=5.0)
+        transcriber = _make_transcriber(text="Чистый запуск")
+
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=bus,
+            interval_sec=0.1,
+        )
+
+        # Repeat start/stop cycle to confirm clean lifecycle
+        for _ in range(3):
+            rpt.start(session_id="clean-lifecycle")
+            self.assertTrue(rpt.is_running)
+            rpt.stop(timeout_sec=2.0)
+            self.assertFalse(rpt.is_running)
+
+    def test_concurrent_start_stop_safe(self):
+        """Multiple threads calling start/stop concurrently must not crash."""
+        bus = _make_bus()
+        recorder = _make_recorder(duration_sec=5.0)
+        transcriber = _make_transcriber(text="Конкурентный тест")
+
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=bus,
+            interval_sec=0.2,
+        )
+
+        errors: list[Exception] = []
+
+        def _start_stop() -> None:
+            try:
+                rpt.start(session_id="concurrent-ss")
+                time.sleep(0.05)
+                rpt.stop(timeout_sec=1.0)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_start_stop) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(len(errors), 0, f"Errors in concurrent start/stop: {errors}")
+
+    def test_handles_engine_exception_gracefully(self):
+        """Worker must survive repeated transcriber exceptions and remain running."""
+        bus = _make_bus()
+        # Ensure sufficient duration delta so worker passes the < 0.5s guard
+        recorder = MagicMock()
+        # Each call returns increasing duration to bypass progress guard
+        call_count = [0]
+
+        def _snapshot(*_a, **_kw):
+            call_count[0] += 1
+            # Return increasing duration so the "no new data" guard is skipped
+            return (np.zeros(16000, dtype=np.float32), float(call_count[0]) * 2.0)
+
+        recorder.snapshot_audio.side_effect = _snapshot
+
+        transcriber = MagicMock()
+        transcriber.transcribe_preview.side_effect = RuntimeError("GPU exploded")
+
+        rpt = RealtimePartialTranscriber(
+            transcriber=transcriber,
+            recorder=recorder,
+            event_bus=bus,
+            interval_sec=0.1,
+        )
+        rpt.start(session_id="exception-test")
+        time.sleep(0.5)
+        self.assertTrue(rpt.is_running, "Worker should still run despite exceptions")
+        rpt.stop(timeout_sec=2.0)
+        # Transcriber must have been called multiple times (engine kept retrying)
+        self.assertGreater(transcriber.transcribe_preview.call_count, 1)
+
+
+# ---------------------------------------------------------------------------
 # Constants sanity
 # ---------------------------------------------------------------------------
 

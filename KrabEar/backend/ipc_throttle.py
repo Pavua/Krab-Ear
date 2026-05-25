@@ -4,7 +4,7 @@
 через алгоритм token bucket (token bucket algorithm).
 
 Категории методов и их лимиты (вызовов/минуту):
-  heavy  — 5/min  : transcribe_paths, export, summarize (тяжёлые фоновые операции)
+  heavy  — 5/min  : export, summarize (тяжёлые фоновые операции)
   medium — 30/min : search, statistics (поиск и аналитика)
   light  — 120/min: ping, get_settings, start/stop_recording (и все остальные)
 
@@ -25,7 +25,6 @@ from typing import Dict, Set
 # Тяжёлые методы: CPU/GPU-интенсивные фоновые операции.
 # start/stop_recording не включаем — это обычные пользовательские действия.
 HEAVY_METHODS: Set[str] = {
-    "transcribe_paths",         # импорт и транскрибация файлов
     "preview_transcribe_paths",  # предпросмотр транскрибации
     "summarize_text",           # LLM суммаризация текста
     "summarize_item",           # LLM суммаризация элемента истории
@@ -71,8 +70,6 @@ MEDIUM_METHODS: Set[str] = {
     "get_error_report",         # отчёт об ошибках
     "get_error_stats",          # статистика ошибок
     "health_check",             # health check подсистем
-    "get_disk_status",          # статус дискового пространства
-    "get_storage_breakdown",    # разбивка использования диска
 }
 
 # Методы, полностью исключённые из throttling.

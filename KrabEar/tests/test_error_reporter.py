@@ -289,5 +289,135 @@ class ErrorReporterSummaryOrderTestCase(unittest.TestCase):
         self.assertEqual(stats["by_component"]["llm"], 1)
 
 
+class ErrorReporterWave97TestCase(unittest.TestCase):
+    """Wave 97 required tests — names match task spec exactly."""
+
+    # test_record_single_error_per_component
+    def test_record_single_error_per_component(self) -> None:
+        reporter = ErrorReporter()
+        for cat in ("stt", "llm", "translation", "ipc", "audio", "storage", "other"):
+            reporter.report_error(cat, "SomeError", f"msg from {cat}")
+        stats = reporter.get_error_stats()
+        # Each known component has exactly one error
+        for cat in ("stt", "llm", "translation", "ipc", "audio", "storage", "other"):
+            self.assertEqual(stats["by_component"].get(cat, 0), 1, f"component {cat!r} count wrong")
+        self.assertEqual(stats["total"], 7)
+
+    # test_buffer_caps_at_max_size
+    def test_buffer_caps_at_max_size(self) -> None:
+        reporter = ErrorReporter(max_size=5)
+        for i in range(12):
+            reporter.report_error("stt", "E", f"msg {i}")
+        recent = reporter.get_recent_errors(limit=100)
+        self.assertEqual(len(recent), 5)
+        # Oldest messages (msg 0..6) must be evicted; newest (msg 7..11) must remain
+        messages = {e.message for e in recent}
+        for evicted in (f"msg {i}" for i in range(7)):
+            self.assertNotIn(evicted, messages)
+
+    # test_count_aggregates_correctly_by_type
+    def test_count_aggregates_correctly_by_type(self) -> None:
+        reporter = ErrorReporter()
+        reporter.report_error("stt", "TimeoutError", "t1")
+        reporter.report_error("llm", "TimeoutError", "t2")
+        reporter.report_error("ipc", "TimeoutError", "t3")
+        reporter.report_error("audio", "ConnectionError", "c1")
+        reporter.report_error("audio", "ConnectionError", "c2")
+        stats = reporter.get_error_stats()
+        self.assertEqual(stats["by_type"]["TimeoutError"], 3)
+        self.assertEqual(stats["by_type"]["ConnectionError"], 2)
+
+    # test_query_top_errors_by_count
+    def test_query_top_errors_by_count(self) -> None:
+        reporter = ErrorReporter()
+        for _ in range(7):
+            reporter.report_error("stt", "TimeoutError", "t")
+        for _ in range(3):
+            reporter.report_error("llm", "ValueError", "v")
+        for _ in range(1):
+            reporter.report_error("ipc", "IOError", "i")
+        stats = reporter.get_error_stats()
+        by_type = stats["by_type"]
+        # Find top error type
+        top_type = max(by_type, key=lambda k: by_type[k])
+        self.assertEqual(top_type, "TimeoutError")
+        self.assertEqual(by_type[top_type], 7)
+        # by_component ranking
+        by_comp = stats["by_component"]
+        top_comp = max(by_comp, key=lambda k: by_comp[k])
+        self.assertEqual(top_comp, "stt")
+
+    # test_clear_buffer
+    def test_clear_buffer(self) -> None:
+        reporter = ErrorReporter()
+        for i in range(10):
+            reporter.report_error("stt", "E", f"msg {i}")
+        self.assertEqual(reporter.get_error_stats()["total"], 10)
+        reporter.clear()
+        self.assertEqual(reporter.get_error_stats()["total"], 0)
+        self.assertEqual(reporter.get_recent_errors(), [])
+        # Can still add after clear
+        reporter.report_error("llm", "E", "after clear")
+        self.assertEqual(reporter.get_error_stats()["total"], 1)
+
+    # test_concurrent_record
+    def test_concurrent_record(self) -> None:
+        reporter = ErrorReporter(max_size=1000)
+        records = []
+        lock = threading.Lock()
+
+        def worker(component: str) -> None:
+            for i in range(20):
+                rec = reporter.report_error(component, "E", f"{component}-{i}")
+                with lock:
+                    records.append(rec)
+
+        threads = [threading.Thread(target=worker, args=(c,)) for c in ("stt", "llm", "ipc", "audio", "storage")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # 5 threads × 20 = 100 records returned
+        self.assertEqual(len(records), 100)
+        # All returned objects are ErrorRecord instances
+        self.assertTrue(all(isinstance(r, ErrorRecord) for r in records))
+        # Buffer contains at most 100 items (within max_size=1000)
+        stats = reporter.get_error_stats()
+        self.assertEqual(stats["total"], 100)
+
+    # test_handles_unicode_error_messages
+    def test_handles_unicode_error_messages(self) -> None:
+        reporter = ErrorReporter()
+        unicode_msg = "Ошибка STT: невозможно декодировать аудио — неверный формат"
+        emoji_msg = "Error 🎤🔴: microphone disconnected"
+        rtl_msg = "خطأ في التعرف على الكلام"
+        reporter.report_error("stt", "UnicodeError", unicode_msg)
+        reporter.report_error("audio", "DeviceError", emoji_msg)
+        reporter.report_error("other", "LanguageError", rtl_msg)
+        recent = reporter.get_recent_errors(limit=3)
+        messages = [e.message for e in recent]
+        self.assertIn(unicode_msg, messages)
+        self.assertIn(emoji_msg, messages)
+        self.assertIn(rtl_msg, messages)
+        # to_dict() round-trips correctly
+        d = recent[0].to_dict()
+        self.assertIsInstance(d["message"], str)
+
+    # test_record_with_traceback_truncation
+    def test_record_with_traceback_truncation(self) -> None:
+        """ErrorReporter converts message to str — very long strings are accepted without crash."""
+        reporter = ErrorReporter()
+        # Simulate a traceback stored in message field (common pattern)
+        long_traceback = "Traceback (most recent call last):\n" + ("  File 'x.py', line 1, in <module>\n" * 100) + "RuntimeError: boom"
+        rec = reporter.report_error("stt", "RuntimeError", long_traceback, context={"traceback_len": len(long_traceback)})
+        self.assertIsInstance(rec.message, str)
+        self.assertEqual(rec.message, long_traceback)
+        self.assertEqual(rec.context["traceback_len"], len(long_traceback))
+        # Buffer still works normally after long message
+        stats = reporter.get_error_stats()
+        self.assertEqual(stats["total"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

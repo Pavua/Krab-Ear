@@ -408,5 +408,141 @@ class HandleGetVocabularySuggestionsTestCase(unittest.TestCase):
         self.assertEqual(result["scanned_items"], 0)
 
 
+class BreadcrumbTranslateSelectionTestCase(unittest.TestCase):
+    """Проверяет что handle_translate_selection добавляет Sentry breadcrumb."""
+
+    def _call_with_mock_breadcrumb(self, params: dict) -> list[dict]:
+        """Вызывает handle_translate_selection и возвращает список пойманных breadcrumbs."""
+        calls: list[dict] = []
+        import backend.translation_service as ts_mod
+
+        original = ts_mod.add_breadcrumb
+
+        def capture(**kwargs: object) -> None:
+            calls.append(dict(kwargs))
+
+        ts_mod.add_breadcrumb = capture  # type: ignore[assignment]
+        try:
+            svc, _, _ = _make_service()
+            svc.handle_translate_selection(params)
+        finally:
+            ts_mod.add_breadcrumb = original
+        return calls
+
+    def test_breadcrumb_fired_on_non_empty_text(self) -> None:
+        """Непустой текст → breadcrumb category='translation' message='translate_selection'."""
+        calls = self._call_with_mock_breadcrumb({"text": "Привет мир", "source_lang": "ru", "target_lang": "es"})
+        self.assertEqual(len(calls), 1)
+        bc = calls[0]
+        self.assertEqual(bc["category"], "translation")
+        self.assertEqual(bc["message"], "translate_selection")
+        data = bc["data"]
+        self.assertEqual(data["source_lang"], "ru")
+        self.assertEqual(data["target_lang"], "es")
+        self.assertEqual(data["char_count"], len("Привет мир"))
+        self.assertIn("duration_ms", data)
+
+    def test_no_breadcrumb_on_empty_text(self) -> None:
+        """Пустой текст → ранний возврат, breadcrumb не добавляется."""
+        calls = self._call_with_mock_breadcrumb({"text": ""})
+        self.assertEqual(len(calls), 0)
+
+    def test_breadcrumb_char_count_is_private(self) -> None:
+        """Breadcrumb не содержит сам текст — только char_count."""
+        secret = "секретный текст для перевода"
+        calls = self._call_with_mock_breadcrumb({"text": secret})
+        if calls:
+            data = calls[0]["data"]
+            self.assertNotIn(secret, str(data))
+            self.assertEqual(data["char_count"], len(secret))
+
+
+class BreadcrumbSetGlossaryItemTestCase(unittest.TestCase):
+    """Проверяет breadcrumb при handle_set_translation_glossary_item."""
+
+    def _call_with_mock_breadcrumb(self, params: dict) -> list[dict]:
+        calls: list[dict] = []
+        import backend.translation_service as ts_mod
+
+        original = ts_mod.add_breadcrumb
+
+        def capture(**kwargs: object) -> None:
+            calls.append(dict(kwargs))
+
+        ts_mod.add_breadcrumb = capture  # type: ignore[assignment]
+        try:
+            svc, _, _ = _make_service()
+            svc.handle_set_translation_glossary_item(params)
+        finally:
+            ts_mod.add_breadcrumb = original
+        return calls
+
+    def test_breadcrumb_fired_on_valid_pair(self) -> None:
+        """Добавление пары → breadcrumb category='translation' message='set_translation_glossary_item'."""
+        calls = self._call_with_mock_breadcrumb({"source": "Краб", "target": "Krab"})
+        self.assertEqual(len(calls), 1)
+        bc = calls[0]
+        self.assertEqual(bc["category"], "translation")
+        self.assertEqual(bc["message"], "set_translation_glossary_item")
+        data = bc["data"]
+        self.assertIn("source_char_count", data)
+        self.assertIn("target_char_count", data)
+        self.assertIn("glossary_size", data)
+
+    def test_breadcrumb_no_text_in_data(self) -> None:
+        """Breadcrumb не содержит source/target строки — только char counts."""
+        secret_source = "СекретноеСлово"
+        calls = self._call_with_mock_breadcrumb({"source": secret_source, "target": "SecretWord"})
+        if calls:
+            data = calls[0]["data"]
+            self.assertNotIn(secret_source, str(data))
+            self.assertEqual(data["source_char_count"], len(secret_source))
+
+
+class BreadcrumbGetGlossarySuggestionsTestCase(unittest.TestCase):
+    """Проверяет breadcrumb при handle_get_glossary_suggestions."""
+
+    def _call_with_mock_breadcrumb(self, params: dict, history: list | None = None) -> list[dict]:
+        calls: list[dict] = []
+        import backend.translation_service as ts_mod
+
+        original = ts_mod.add_breadcrumb
+
+        def capture(**kwargs: object) -> None:
+            calls.append(dict(kwargs))
+
+        ts_mod.add_breadcrumb = capture  # type: ignore[assignment]
+        try:
+            svc, _, _ = _make_service(history_items=history or [])
+            svc.handle_get_glossary_suggestions(params)
+        finally:
+            ts_mod.add_breadcrumb = original
+        return calls
+
+    def test_breadcrumb_fired_with_metadata(self) -> None:
+        """handle_get_glossary_suggestions → breadcrumb с metadata полями."""
+        calls = self._call_with_mock_breadcrumb({"scan_limit": 10}, history=[])
+        self.assertEqual(len(calls), 1)
+        bc = calls[0]
+        self.assertEqual(bc["category"], "translation")
+        self.assertEqual(bc["message"], "get_glossary_suggestions")
+        data = bc["data"]
+        self.assertIn("scanned_items", data)
+        self.assertIn("total_candidates", data)
+        self.assertIn("returned", data)
+        self.assertIn("current_glossary_size", data)
+
+    def test_breadcrumb_no_transcript_text(self) -> None:
+        """Breadcrumb не содержит тексты транскрипций."""
+        history = [
+            {"source_text": "секретная транскрипция", "translated_text": "secret transcript"},
+        ]
+        calls = self._call_with_mock_breadcrumb({}, history=history)
+        if calls:
+            data_str = str(calls[0]["data"])
+            self.assertNotIn("секретная", data_str)
+            self.assertNotIn("secret transcript", data_str)
+
+
 if __name__ == "__main__":
     unittest.main()

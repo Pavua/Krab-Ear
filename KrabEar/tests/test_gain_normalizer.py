@@ -322,5 +322,117 @@ class TestIdempotency(unittest.TestCase):
         self.assertLessEqual(peak, 1.0 + 1e-6)
 
 
+# ---------------------------------------------------------------------------
+# Тест 9: Wave 130 — обязательные кейсы
+# ---------------------------------------------------------------------------
+
+class TestWave130RequiredCases(unittest.TestCase):
+    """Wave 130: дополнительные кейсы по спецификации."""
+
+    def setUp(self):
+        self.normalizer = GainNormalizer()
+
+    # test_normalize_to_target_db
+    def test_normalize_to_target_db(self):
+        """Выходной RMS точно попадает в target_db (±2 дБ)."""
+        for target in (-30.0, -20.0, -14.0):
+            audio = _sine(amplitude=0.05, duration=2.0)
+            result = self.normalizer.normalize(audio, target_db=target)
+            self.assertAlmostEqual(
+                result.output_rms_db, target, delta=2.0,
+                msg=f"target={target}: RMS={result.output_rms_db:.2f}",
+            )
+
+    # test_silent_audio_no_clipping
+    def test_silent_audio_no_clipping(self):
+        """Тишина не порождает клиппинга и не меняет сигнал."""
+        result = self.normalizer.normalize(_silence(1.0))
+        self.assertEqual(result.clipped_samples, 0)
+        peak = float(np.max(np.abs(result.audio))) if len(result.audio) else 0.0
+        self.assertLessEqual(peak, 1.0 + 1e-6)
+
+    # test_loud_audio_attenuated
+    def test_loud_audio_attenuated(self):
+        """Громкий сигнал аттенюируется: peak выхода ≤ peak входа."""
+        audio = _loud(amplitude=0.95, duration=1.0)
+        result = self.normalizer.normalize(audio, target_db=-30.0)
+        peak_in = float(np.max(np.abs(audio)))
+        peak_out = float(np.max(np.abs(result.audio)))
+        self.assertLessEqual(peak_out, peak_in + 1e-6,
+                             msg=f"peak_in={peak_in:.3f}, peak_out={peak_out:.3f}")
+        self.assertLess(result.gain_applied_db, 0.0)
+
+    # test_handles_short_audio
+    def test_handles_short_audio(self):
+        """Очень короткое аудио (1-10 семплов) обрабатывается без исключений."""
+        for n in (1, 5, 10):
+            audio = np.full(n, 0.1, dtype=np.float32)
+            result = self.normalizer.normalize(audio, target_db=-20.0)
+            self.assertIsInstance(result, GainResult)
+            self.assertEqual(len(result.audio), n)
+
+    # test_empty_audio_returns_empty
+    def test_empty_audio_returns_empty(self):
+        """Пустой массив возвращает пустой GainResult без исключений."""
+        empty = np.array([], dtype=np.float32)
+        result = self.normalizer.normalize(empty)
+        self.assertIsInstance(result, GainResult)
+        self.assertEqual(len(result.audio), 0)
+        self.assertEqual(result.clipped_samples, 0)
+
+    # test_target_db_clamped_to_safe_range
+    def test_target_db_clamped_to_safe_range(self):
+        """Экстремальные target_db не вызывают исключений и не приводят к
+        бесконечным значениям или NaN в результате."""
+        audio = _sine(amplitude=0.1, duration=1.0)
+        for extreme_target in (-80.0, 0.0, 6.0):
+            result = self.normalizer.normalize(audio, target_db=extreme_target)
+            self.assertFalse(
+                np.any(np.isnan(result.audio)),
+                msg=f"NaN at target_db={extreme_target}",
+            )
+            self.assertFalse(
+                np.any(np.isinf(result.audio)),
+                msg=f"Inf at target_db={extreme_target}",
+            )
+            peak = float(np.max(np.abs(result.audio))) if len(result.audio) else 0.0
+            self.assertLessEqual(peak, 1.0 + 1e-6,
+                                 msg=f"Clipping at target_db={extreme_target}")
+
+    # test_concurrent_normalize
+    def test_concurrent_normalize(self):
+        """Параллельные вызовы normalize() из нескольких потоков не конкурируют
+        за состояние и возвращают правильные независимые результаты."""
+        import threading
+
+        errors: list[Exception] = []
+        results: list[GainResult] = []
+        lock = threading.Lock()
+
+        def worker(amplitude: float) -> None:
+            try:
+                audio = _sine(amplitude=amplitude, duration=1.0)
+                r = self.normalizer.normalize(audio, target_db=-20.0)
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        amplitudes = [0.01, 0.05, 0.1, 0.2, 0.5]
+        threads = [threading.Thread(target=worker, args=(a,)) for a in amplitudes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(len(errors), 0, f"Thread errors: {errors}")
+        self.assertEqual(len(results), len(amplitudes))
+        for r in results:
+            self.assertFalse(np.any(np.isnan(r.audio)))
+            peak = float(np.max(np.abs(r.audio)))
+            self.assertLessEqual(peak, 1.0 + 1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

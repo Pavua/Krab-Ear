@@ -86,6 +86,49 @@ final class AgentLogger: @unchecked Sendable {
         }
     }
 
+    // MARK: - Rotation
+
+    /// Максимальный размер лог-файла до ротации (5 MB).
+    private let maxBytes: UInt64 = 5 * 1024 * 1024
+    /// Количество хранимых резервных копий после ротации.
+    private let backupCount: Int = 3
+
+    /// Ротирует лог, если его размер превышает maxBytes.
+    /// Должна вызываться только внутри serial queue.
+    private func rotateIfNeeded() {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let fileSize = attrs[.size] as? UInt64,
+              fileSize >= maxBytes else { return }
+
+        // Закрываем текущий хэндл перед переименованием.
+        try? handle?.close()
+        handle = nil
+
+        let base = fileURL.deletingPathExtension()
+        let ext  = fileURL.pathExtension.isEmpty ? "" : ".\(fileURL.pathExtension)"
+
+        // Сдвигаем .1→.2, .2→.3 … и удаляем самый старый.
+        for i in stride(from: backupCount - 1, through: 1, by: -1) {
+            let src  = URL(fileURLWithPath: "\(base.path).\(i)\(ext)")
+            let dest = URL(fileURLWithPath: "\(base.path).\(i + 1)\(ext)")
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try? FileManager.default.removeItem(at: dest)
+            }
+            if FileManager.default.fileExists(atPath: src.path) {
+                try? FileManager.default.moveItem(at: src, to: dest)
+            }
+        }
+        // .log → .1.log
+        let rotated = URL(fileURLWithPath: "\(base.path).1\(ext)")
+        if FileManager.default.fileExists(atPath: rotated.path) {
+            try? FileManager.default.removeItem(at: rotated)
+        }
+        try? FileManager.default.moveItem(at: fileURL, to: rotated)
+
+        // Пересоздаём основной файл и открываем хэндл.
+        openHandle()
+    }
+
     /// Форматирует и пишет строку лога. Вызывает reopen + одну повторную попытку при сбое.
     private func write(level: String, message: String) {
         queue.async {
@@ -97,6 +140,9 @@ final class AgentLogger: @unchecked Sendable {
             if self.handle == nil {
                 self.openHandle()
             }
+
+            // Проверяем размер перед записью и ротируем при необходимости.
+            self.rotateIfNeeded()
 
             guard let h = self.handle else {
                 // Нет хэндла — fallback в stderr, чтобы debug это увидел.

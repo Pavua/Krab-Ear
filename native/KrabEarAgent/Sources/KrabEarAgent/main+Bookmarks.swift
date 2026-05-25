@@ -37,30 +37,40 @@ extension AgentAppDelegate {
     // MARK: - Bookmark creation
 
     func createBookmarkDuringRecording() {
-        // 1. Получаем текущее состояние записи (session_id + elapsed_sec)
-        guard let stateData = try? callWithRecovery(method: "get_recording_state", params: [:]) else {
-            logger.warn("Не удалось получить состояние записи для закладки")
-            return
-        }
+        // Offload both IPC calls off the main thread to prevent >2s AppHang
+        // (AGENT-3 pattern: sync callWithRecovery on main thread blocks runloop).
+        // Wave 188 fix: mirror the Task.detached pattern from main+HotkeyRecording.swift.
+        let ipc = self.ipcClient
+        let log = self.logger
+        Task.detached { [weak self] in
+            // 1. Получаем текущее состояние записи (session_id + elapsed_sec)
+            guard let stateData = try? await ipc.callAsync(method: "get_recording_state", params: [:]) else {
+                log.warn("Не удалось получить состояние записи для закладки")
+                return
+            }
 
-        let sessionId = (stateData["session_id"] as? String) ?? "__live__"
-        let offsetSec = (stateData["elapsed_sec"] as? Double) ?? 0.0
+            let result = (stateData["result"] as? [String: Any]) ?? stateData
+            let sessionId = (result["session_id"] as? String) ?? "__live__"
+            let offsetSec = (result["elapsed_sec"] as? Double) ?? 0.0
 
-        // 2. Создаём закладку
-        let params: [String: Any] = [
-            "session_id": sessionId,
-            "offset_sec": offsetSec,
-            "note": "",
-        ]
-        guard (try? callWithRecovery(method: "add_bookmark", params: params)) != nil else {
-            logger.warn("Ошибка создания закладки")
-            return
-        }
+            // 2. Создаём закладку
+            let bookmarkParams: [String: Any] = [
+                "session_id": sessionId,
+                "offset_sec": offsetSec,
+                "note": "",
+            ]
+            guard (try? await ipc.callAsync(method: "add_bookmark", params: bookmarkParams)) != nil else {
+                log.warn("Ошибка создания закладки")
+                return
+            }
 
-        let offsetFormatted = Self.formatOffsetSec(offsetSec)
-        logger.info("Закладка создана в \(offsetFormatted) (session: \(sessionId))")
-        DispatchQueue.main.async { [weak self] in
-            self?.showTemporaryBookmarkMessage(offsetFormatted)
+            log.info("Закладка создана в \(offsetSec)s (session: \(sessionId))")
+            await MainActor.run {
+                // formatOffsetSec is a static method on @MainActor-isolated class,
+                // so call it from within MainActor.run where it is safe.
+                let offsetFormatted = AgentAppDelegate.formatOffsetSec(offsetSec)
+                self?.showTemporaryBookmarkMessage(offsetFormatted)
+            }
         }
     }
 

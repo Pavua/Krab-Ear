@@ -377,6 +377,12 @@ class AudioEngine:
 
         # Warmup GigaAM в background если enabled — избегаем cold-start latency
         # на первой диктовке (subprocess spawn + model load = ~30 сек).
+        # Wave 525: persist the flag so all later call-sites (chain-building,
+        # _transcribe_gigaam) also honour the "no GigaAM here" contract —
+        # skip_gigaam_warmup previously only blocked the startup thread, not
+        # on-demand adapter creation triggered by real transcription requests.
+        self._skip_gigaam: bool = skip_gigaam_warmup
+
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
         # subprocess'а — он проксирует через BackendService IPC (Wave 69).
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
@@ -475,7 +481,13 @@ class AudioEngine:
                 action_id=entry.get("action_id"),
             )
             error_bus.push(err)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # Wave 222: surface push failures to Sentry instead of silent swallow
+            try:
+                from backend.observability import capture_exception
+                capture_exception(e, "_push_error_internal")
+            except Exception:
+                pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
     # ------------------------------------------------------------------
@@ -687,6 +699,23 @@ class AudioEngine:
 
         start_time = time.time()
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
+
+        try:
+            from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+            _add_bc(
+                category="transcription",
+                message="transcribe_start",
+                level="info",
+                data={
+                    "cleanup_profile": cleanup_profile,
+                    "is_preview": is_preview,
+                    "domain": domain,
+                    "lang_hint": lang_hint or "auto",
+                    "diarize": diarize,
+                },
+            )
+        except Exception:
+            pass  # telemetry must never break transcription
 
         # 1. Формирование динамического промпта.
         # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
@@ -999,6 +1028,24 @@ class AudioEngine:
                 calibrated_score.calibrated,
                 resolved_lang or "auto",
             )
+
+            try:
+                from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+                _add_bc(
+                    category="transcription",
+                    message="transcribe_finish",
+                    level="info",
+                    data={
+                        "duration_ms": int(duration * 1000),
+                        "confidence": round(calibrated_score.calibrated, 3),
+                        "language": result.get("language", resolved_lang) or "auto",
+                        "engine": result.get("engine", "mlx-whisper"),
+                        "llm_applied": bool(llm_result is not None and llm_result.ok),
+                        "is_preview": is_preview,
+                    },
+                )
+            except Exception:
+                pass  # telemetry must never break transcription
 
             return {
                 "text": text,
@@ -1596,6 +1643,7 @@ class AudioEngine:
             getattr(settings, "STT_GIGAAM_ENABLED", False)
             and _effective_lang == "ru"
             and self._GIGAAM_MARKER not in self._unavailable_models
+            and not getattr(self, "_skip_gigaam", False)  # Wave 525: REST-engine guard
         ):
             gigaam_adapter = self._router.get_gigaam_adapter() if self._router is not None else None
             if gigaam_adapter is not None:
@@ -2366,6 +2414,14 @@ class AudioEngine:
             RuntimeError: если адаптер не удалось получить из router.
             Exception: любая ошибка транскрибации пробрасывается вверх для fallback chain.
         """
+        # Wave 525: REST-engine (skip_gigaam=True) must never reach here because
+        # the chain-builder already excludes GIGAAM_MARKER.  If somehow called
+        # directly, raise immediately so the fallback chain uses Whisper.
+        if getattr(self, "_skip_gigaam", False):
+            raise RuntimeError(
+                "GigaAM вызван на REST-engine (skip_gigaam=True) — это баг; "
+                "используй BackendService IPC для GigaAM транскрибации"
+            )
         adapter = self._router.get_gigaam_adapter() if self._router is not None else None
         if adapter is None:
             raise RuntimeError(
@@ -2406,10 +2462,10 @@ class AudioEngine:
         #   2. transcribe_longform() (fallback): pyannote VAD — требует HF token
         #      + принятие TOS на huggingface.co/pyannote/segmentation-3.0.
         #      Используется только если AudioChunker недоступен.
-        # Threshold 24s консервативный (gigaam падает на ~26s+).
+        # Threshold 30s: GigaAM shortform limit ~30s. Clips 24-30s stay shortform.
         _GIGAAM_MAX_CHUNK_SEC = 20.0  # с 5s запасом до hard limit ~25s
         duration_sec = len(audio_data_np) / 16000.0
-        use_longform = duration_sec > 24.0
+        use_longform = duration_sec > 30.0
         hf_token = settings.STT_GIGAAM_HF_TOKEN or ""
 
         try:
@@ -2460,6 +2516,20 @@ class AudioEngine:
                 "GigaAM transcribe failed (duration=%.1fs, longform=%s): %s",
                 duration_sec, use_longform, str(exc)[:200],
             )
+            # Detect HF cache miss: huggingface_hub raises LocalEntryNotFoundError /
+            # RepositoryNotFoundError / ConnectionError when model not cached offline.
+            exc_str = str(exc).lower()
+            _hf_cache_miss_keywords = (
+                "localentrynotfound", "repositorynotfound", "connection error",
+                "not found in cache", "gated repo", "access to model",
+                "cannot find the requested files",
+            )
+            if any(kw in exc_str for kw in _hf_cache_miss_keywords):
+                self._push_error(
+                    "stt.gigaam_hf_cache_miss",
+                    f"GigaAM HF cache miss (duration={duration_sec:.1f}s): {str(exc)[:300]}",
+                    severity="warn",
+                )
             return {
                 "text": "",
                 "confidence": 0.0,

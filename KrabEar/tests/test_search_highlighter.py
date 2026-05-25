@@ -349,5 +349,125 @@ class SearchHighlighterHelperTests(unittest.TestCase):
         self.assertNotIn("**on**", result)
 
 
+class SearchHighlighterWave131Tests(unittest.TestCase):
+    """Wave 131 required test cases for SearchHighlighter."""
+
+    def setUp(self) -> None:
+        self.h = SearchHighlighter()
+
+    # ------------------------------------------------------------------
+    # test_single_word_match_highlighted
+    # ------------------------------------------------------------------
+    def test_single_word_match_highlighted(self) -> None:
+        result = self.h.highlight("the quick brown fox", "quick")
+        self.assertIn("**quick**", result)
+        self.assertNotIn("**the**", result)
+        self.assertNotIn("**brown**", result)
+
+    # ------------------------------------------------------------------
+    # test_multiple_matches
+    # ------------------------------------------------------------------
+    def test_multiple_matches(self) -> None:
+        result = self.h.highlight("cat on a cat mat", "cat")
+        self.assertEqual(result.count("**cat**"), 2)
+        self.assertNotIn("**on**", result)
+        self.assertNotIn("**mat**", result)
+
+    # ------------------------------------------------------------------
+    # test_no_match_unchanged
+    # ------------------------------------------------------------------
+    def test_no_match_unchanged(self) -> None:
+        text = "nothing relevant here"
+        result = self.h.highlight(text, "zzzmissing")
+        self.assertEqual(result, text)
+        self.assertNotIn("**", result)
+
+    # ------------------------------------------------------------------
+    # test_case_insensitive_match
+    # ------------------------------------------------------------------
+    def test_case_insensitive_match(self) -> None:
+        result = self.h.highlight("UPPER lower MiXeD", "upper")
+        self.assertIn("**UPPER**", result)
+        result2 = self.h.highlight("Hello World", "WORLD")
+        self.assertIn("**World**", result2)
+
+    # ------------------------------------------------------------------
+    # test_unicode_query
+    # ------------------------------------------------------------------
+    def test_unicode_query(self) -> None:
+        result = self.h.highlight("привет мир и снова привет", "мир")
+        self.assertIn("**мир**", result)
+        # Surrounding cyrillic words untouched
+        self.assertIn("привет", result)
+
+    # ------------------------------------------------------------------
+    # test_html_escape_safe (no XSS)
+    # ------------------------------------------------------------------
+    def test_html_escape_safe(self) -> None:
+        """highlight_html must not allow script injection (XSS)."""
+        malicious_text = '<script>alert("xss")</script> safe word here'
+        result = self.h.highlight_html(malicious_text, "safe")
+        # Script tag must be escaped
+        self.assertNotIn("<script>", result)
+        self.assertIn("&lt;script&gt;", result)
+        # Query match should still be highlighted
+        self.assertIn('<span class="highlight">safe</span>', result)
+
+    def test_html_escape_ampersand_and_quotes(self) -> None:
+        """Ampersand and quotes in text are escaped in HTML output."""
+        result = self.h.highlight_html('find "this" & that', "find")
+        self.assertIn("&amp;", result)
+        self.assertIn("&quot;", result)
+        self.assertIn('<span class="highlight">find</span>', result)
+
+    def test_html_escape_no_double_escape_in_highlight(self) -> None:
+        """When query itself contains HTML-special chars, they are escaped in result."""
+        # '&' in query — html.escape("&") = "&amp;" so the pattern should still match
+        result = self.h.highlight_html("a & b are here", "&")
+        # The escaped form &amp; should be wrapped in a span
+        self.assertIn("<span", result)
+
+    # ------------------------------------------------------------------
+    # test_empty_query
+    # ------------------------------------------------------------------
+    def test_empty_query(self) -> None:
+        text = "some text"
+        self.assertEqual(self.h.highlight(text, ""), text)
+        self.assertEqual(self.h.highlight(text, "   "), text)
+        # HTML path: empty query escapes but no spans
+        html_result = self.h.highlight_html("a < b", "")
+        self.assertIn("&lt;", html_result)
+        self.assertNotIn("<span", html_result)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_highlight
+    # ------------------------------------------------------------------
+    def test_concurrent_highlight(self) -> None:
+        """Concurrent calls from multiple threads return correct results."""
+        import threading
+        results = {}
+        errors = []
+
+        def worker(idx: int) -> None:
+            try:
+                text = f"word{idx} middle word{idx}"
+                query = f"word{idx}"
+                res = self.h.highlight(text, query)
+                results[idx] = res
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        for idx, res in results.items():
+            marker = f"**word{idx}**"
+            self.assertEqual(res.count(marker), 2, f"thread {idx}: expected 2 occurrences in {res!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
