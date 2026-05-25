@@ -332,5 +332,133 @@ class TestGetSpeechRatioEdge(unittest.TestCase):
         self.assertAlmostEqual(ratio, 1.0, places=2)
 
 
+class TestAlternatingSilenceSpeech(unittest.TestCase):
+    """test_alternating_silence_speech — чередующиеся регионы."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_alternating_silence_speech(self):
+        """Многократное чередование речи и тишины порождает соответствующее число регионов тишины."""
+        segments = []
+        for _ in range(4):
+            segments.append(_make_speech(0.3))
+            segments.append(_make_silence(0.4))
+        audio = _concat(*segments)
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        # Должно быть 4 региона тишины (по одному после каждого речевого блока)
+        self.assertEqual(len(regions), 4)
+
+    def test_alternating_starts_with_silence(self):
+        """Тишина в начале тоже считается отдельным регионом."""
+        audio = _concat(
+            _make_silence(0.3),
+            _make_speech(0.3),
+            _make_silence(0.3),
+            _make_speech(0.3),
+        )
+        regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+        self.assertEqual(len(regions), 2)
+
+
+class TestThresholdSensitivity(unittest.TestCase):
+    """test_threshold_sensitivity — влияние порога тишины."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_low_threshold_treats_quiet_as_speech(self):
+        """При очень низком пороге (-70 dB) тихий сигнал (-50 dB) считается речью."""
+        quiet = _make_speech(1.0, amplitude=0.003)  # ~-50 dB RMS
+        regions = self.detector.detect_silence(quiet, SAMPLE_RATE, threshold_db=-70.0)
+        self.assertEqual(len(regions), 0, "очень низкий порог — речь не должна быть тишиной")
+
+    def test_medium_threshold_default_behavior(self):
+        """Средний порог (-40 dB): нормальная речь (0.5 амплитуды) — речь."""
+        speech = _make_speech(1.0, amplitude=0.5)
+        regions = self.detector.detect_silence(speech, SAMPLE_RATE, threshold_db=-40.0)
+        self.assertEqual(len(regions), 0)
+
+    def test_high_threshold_treats_speech_as_silence(self):
+        """При очень высоком пороге (-10 dB) нормальная речь детектируется как тишина."""
+        speech = _make_speech(1.0, amplitude=0.1)  # ~-20 dB RMS (ниже -10 dB порога)
+        regions = self.detector.detect_silence(speech, SAMPLE_RATE, threshold_db=-10.0)
+        self.assertGreater(len(regions), 0, "высокий порог — тихая речь становится тишиной")
+
+    def test_threshold_increases_more_silence(self):
+        """Повышение порога увеличивает суммарную длину тишины."""
+        audio = _make_speech(2.0, amplitude=0.05)
+        regions_low = self.detector.detect_silence(audio, SAMPLE_RATE, threshold_db=-60.0)
+        regions_high = self.detector.detect_silence(audio, SAMPLE_RATE, threshold_db=-20.0)
+        total_low = sum(r.duration_sec for r in regions_low)
+        total_high = sum(r.duration_sec for r in regions_high)
+        self.assertGreaterEqual(total_high, total_low)
+
+
+class TestMinSilenceDurationFilter(unittest.TestCase):
+    """test_min_silence_duration_filter — короткая тишина игнорируется при trim."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_short_silence_not_trimmed(self):
+        """Очень короткая ведущая тишина (50 ms) < min_silence_sec (500 ms) — не обрезается."""
+        tiny_silence = _make_silence(0.05)
+        speech = _make_speech(1.0)
+        audio = _concat(tiny_silence, speech)
+        original_len = len(audio)
+        trimmed = self.detector.trim_silence(audio, SAMPLE_RATE, min_silence_sec=0.5)
+        self.assertAlmostEqual(len(trimmed), original_len, delta=int(0.1 * SAMPLE_RATE))
+
+    def test_long_silence_is_trimmed(self):
+        """Длинная ведущая тишина (1.0 s) > min_silence_sec (0.3 s) — обрезается."""
+        long_silence = _make_silence(1.0)
+        speech = _make_speech(1.0)
+        audio = _concat(long_silence, speech)
+        trimmed = self.detector.trim_silence(audio, SAMPLE_RATE, min_silence_sec=0.3)
+        self.assertLess(len(trimmed), len(audio))
+
+    def test_exact_boundary_min_silence(self):
+        """Тишина ровно на границе min_silence_sec — обрезается."""
+        border_silence = _make_silence(0.5)
+        speech = _make_speech(1.0)
+        audio = _concat(border_silence, speech)
+        trimmed = self.detector.trim_silence(audio, SAMPLE_RATE, min_silence_sec=0.5)
+        # Должно быть заметно короче, чем оригинал
+        self.assertLess(len(trimmed), len(audio) - int(0.2 * SAMPLE_RATE))
+
+
+class TestConcurrentDetect(unittest.TestCase):
+    """test_concurrent_detect_thread_safe — потокобезопасность detect_silence."""
+
+    def setUp(self):
+        self.detector = SilenceDetector()
+
+    def test_concurrent_detect_thread_safe(self):
+        """Параллельный вызов detect_silence из нескольких потоков не вызывает ошибок."""
+        import threading
+
+        errors: list[Exception] = []
+        results: list[list] = [[] for _ in range(10)]
+
+        def run(idx: int):
+            try:
+                audio = _concat(_make_speech(0.3), _make_silence(0.4), _make_speech(0.3))
+                regions = self.detector.detect_silence(audio, SAMPLE_RATE)
+                results[idx] = regions
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Ошибки в потоках: {errors}")
+        for i, res in enumerate(results):
+            self.assertEqual(len(res), 1, f"Поток {i}: ожидался 1 регион тишины")
+
+
 if __name__ == "__main__":
     unittest.main()
