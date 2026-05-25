@@ -93,6 +93,10 @@ class StartupDiagnostics:
         self._cached_report: StartupReport | None = None
         self._cache_ts: float = 0.0
 
+        # Late-injected by BackendService after construction (Wave 490).
+        # If None, startup.stt_model_cache_miss errors are not pushed to error bus.
+        self._error_bus: Any | None = None
+
     # ------------------------------------------------------------------
     # Публичный метод
     # ------------------------------------------------------------------
@@ -390,6 +394,8 @@ class StartupDiagnostics:
             # Стандартное расположение кэша HF: ~/.cache/huggingface/hub/
             hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
             if not hf_cache.exists():
+                # Wave 490: push startup.stt_model_cache_miss to error bus
+                self._push_stt_cache_miss_error(model_name)
                 return CheckResult(
                     name="stt_model_cached",
                     status="warning",
@@ -411,6 +417,8 @@ class StartupDiagnostics:
                     duration_ms=elapsed,
                     details={"model": model_name, "cached": True, "cache_dir": str(model_dir)},
                 )
+            # Wave 490: push startup.stt_model_cache_miss to error bus
+            self._push_stt_cache_miss_error(model_name)
             return CheckResult(
                 name="stt_model_cached",
                 status="warning",
@@ -566,3 +574,39 @@ class StartupDiagnostics:
                 duration_ms=(time.monotonic() - t0) * 1000.0,
                 details={"count": 0},
             )
+
+    # ------------------------------------------------------------------
+    # Error bus helpers (Wave 490)
+    # ------------------------------------------------------------------
+
+    def _push_stt_cache_miss_error(self, model_name: str) -> None:
+        """Push startup.stt_model_cache_miss to error bus. Never raises.
+
+        Wave 490: fired when Whisper HF model is not cached locally.
+        Dedupe 86400s ensures at most one toast per day.
+        """
+        error_bus = self._error_bus
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("startup.stt_model_cache_miss", {})
+            err = KrabError(
+                severity="warn",
+                component="startup",
+                code="startup.stt_model_cache_miss",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Модель Whisper отсутствует в кэше — первая транскрибация задержится на минуты.",
+                ),
+                message_debug=f"STT model not cached: {model_name}",
+                timestamp=datetime.now(timezone.utc),
+                context={"model": model_name},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("StartupDiagnostics: startup.stt_model_cache_miss push failed")
