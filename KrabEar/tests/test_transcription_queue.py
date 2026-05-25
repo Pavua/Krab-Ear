@@ -6,8 +6,11 @@
 
 import sys
 import os
-import unittest
+import tempfile
+import threading
 import time
+import unittest
+from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -445,7 +448,6 @@ class TestTranscriptionQueueThreadSafety(unittest.TestCase):
 
     def test_concurrent_enqueue(self):
         """Одновременное добавление заданий должно быть безопасно."""
-        import threading
         job_ids = []
         lock = threading.Lock()
 
@@ -472,7 +474,6 @@ class TestTranscriptionQueueThreadSafety(unittest.TestCase):
         for i in range(5):
             self.queue.enqueue(f"/path/to/audio{i}.mp3")
 
-        import threading
         processed = []
         lock = threading.Lock()
 
@@ -567,6 +568,105 @@ class TestTranscriptionQueuePeek(unittest.TestCase):
         self.queue.enqueue("/path/to/audio2.mp3", priority=5)
         result = self.queue.peek()
         self.assertEqual(result["job_id"], job_id_1)
+
+
+class TestTranscriptionQueuePersistence(unittest.TestCase):
+    """Wave 159: опциональная персистентность TranscriptionQueue."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._persist_path = Path(self._tmp.name) / "queue.ndjson"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_persistence_disabled_by_default(self) -> None:
+        """Без persist_path файл не создаётся — полностью in-memory."""
+        q = TranscriptionQueue()
+        q.enqueue("/tmp/audio.mp3")
+        # Нет аргумента persist_path — никаких файлов на диске
+        self.assertFalse(self._persist_path.exists())
+
+    def test_enqueue_persists_to_disk(self) -> None:
+        """enqueue() с persist_path создаёт NDJSON-файл."""
+        q = TranscriptionQueue(persist_path=self._persist_path)
+        q.enqueue("/tmp/audio.mp3")
+        self.assertTrue(self._persist_path.exists())
+        content = self._persist_path.read_text(encoding="utf-8").strip()
+        self.assertTrue(len(content) > 0)
+
+    def test_load_pending_at_init(self) -> None:
+        """Pending-задания восстанавливаются при создании нового экземпляра."""
+        q1 = TranscriptionQueue(persist_path=self._persist_path)
+        jid1 = q1.enqueue("/tmp/audio1.mp3", priority=3, label="Meeting")
+        jid2 = q1.enqueue("/tmp/audio2.mp3", priority=5)
+
+        # Новый экземпляр читает файл
+        q2 = TranscriptionQueue(persist_path=self._persist_path)
+        stats = q2.get_queue_stats()
+        self.assertEqual(stats["pending"], 2)
+
+        s1 = q2.get_status(jid1)
+        self.assertEqual(s1["file_path"], "/tmp/audio1.mp3")
+        self.assertEqual(s1["priority"], 3)
+        self.assertEqual(s1["label"], "Meeting")
+        self.assertEqual(s1["status"], STATUS_PENDING)
+
+        s2 = q2.get_status(jid2)
+        self.assertEqual(s2["file_path"], "/tmp/audio2.mp3")
+
+    def test_dequeue_removes_from_disk(self) -> None:
+        """После cancel() задание исчезает из persisted файла."""
+        q1 = TranscriptionQueue(persist_path=self._persist_path)
+        jid = q1.enqueue("/tmp/audio.mp3")
+        q1.cancel(jid)
+
+        # Новый экземпляр не должен видеть это задание как pending
+        q2 = TranscriptionQueue(persist_path=self._persist_path)
+        self.assertEqual(q2.get_queue_stats()["pending"], 0)
+
+    def test_completed_job_not_restored(self) -> None:
+        """Completed/failed задания не персистируются и не восстанавливаются."""
+        q1 = TranscriptionQueue(persist_path=self._persist_path)
+        jid = q1.enqueue("/tmp/audio.mp3")
+        q1.mark_completed(jid, result={"text": "hello"})
+
+        q2 = TranscriptionQueue(persist_path=self._persist_path)
+        self.assertEqual(q2.get_queue_stats()["pending"], 0)
+        self.assertEqual(q2.get_queue_stats()["total"], 0)
+
+    def test_corrupted_persist_file_handled_gracefully(self) -> None:
+        """Повреждённый файл не роняет инициализацию — graceful degradation."""
+        self._persist_path.write_text(
+            '{"job_id":"abc"}\nNOT_JSON_LINE\n{"broken":',
+            encoding="utf-8",
+        )
+        # Не должно бросать исключений
+        q = TranscriptionQueue(persist_path=self._persist_path)
+        # Валидная строка ("abc") не восстанавливается т.к. нет обязательных полей;
+        # главное — инициализация не упала
+        self.assertIsNotNone(q)
+
+    def test_concurrent_save_safe(self) -> None:
+        """Конкурентные enqueue() с persist_path не вызывают гонок/краш."""
+        q = TranscriptionQueue(persist_path=self._persist_path)
+        errors: list[Exception] = []
+
+        def worker(idx: int) -> None:
+            try:
+                q.enqueue(f"/tmp/audio{idx}.mp3")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Исключения при конкурентном save: {errors}")
+        # Все задания должны быть в очереди
+        self.assertEqual(q.get_queue_stats()["pending"], 10)
 
 
 if __name__ == "__main__":
