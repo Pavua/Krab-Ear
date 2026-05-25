@@ -525,5 +525,114 @@ class TestMergeMetadataEdgeCases(unittest.TestCase):
         self.assertFalse(result["deleted_originals"])
 
 
+class TestMergerRequiredNames(unittest.TestCase):
+    """Тесты с именами, заданными в Wave 139 task spec."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    def test_merge_two_items_concatenates(self) -> None:
+        """Объединение двух записей конкатенирует тексты."""
+        self._add("cat1", "First fragment", ts="2026-04-12T09:00:00")
+        self._add("cat2", "Second fragment", ts="2026-04-12T09:01:00")
+        result = self.merger.merge_items(["cat1", "cat2"], self.store)
+        self.assertIn("First fragment", result["text"])
+        self.assertIn("Second fragment", result["text"])
+
+    def test_metadata_preserved(self) -> None:
+        """Метаданные (source_lang, target_lang, tags) сохраняются в результате."""
+        self._add(
+            "mp1", "Hola mundo",
+            ts="2026-04-12T09:00:00",
+            source_lang="es",
+            target_lang="ru",
+            tags=["call", "important"],
+        )
+        self._add("mp2", "Buenos días", ts="2026-04-12T09:01:00")
+        result = self.merger.merge_items(["mp1", "mp2"], self.store)
+        self.assertEqual(result["source_lang"], "es")
+        self.assertEqual(result["target_lang"], "ru")
+        self.assertIn("call", result["tags"])
+        self.assertIn("important", result["tags"])
+
+    def test_duration_summed(self) -> None:
+        """Длительности суммируются в итоговой записи."""
+        self._add("ds1", "A", ts="2026-04-12T09:00:00", audio_duration_sec=12.3)
+        self._add("ds2", "B", ts="2026-04-12T09:01:00", audio_duration_sec=7.7)
+        result = self.merger.merge_items(["ds1", "ds2"], self.store)
+        self.assertAlmostEqual(result["audio_duration_sec"], 20.0, places=2)
+
+    def test_original_items_marked_merged(self) -> None:
+        """При delete_originals=True оба оригинальных ID отмечаются как удалённые."""
+        self._add("om1", "Original one", ts="2026-04-12T09:00:00")
+        self._add("om2", "Original two", ts="2026-04-12T09:01:00")
+        result = self.merger.merge_items(
+            ["om1", "om2"], self.store, delete_originals=True
+        )
+        self.assertTrue(result["deleted_originals"])
+        self.assertIn("om1", self.store._deleted)
+        self.assertIn("om2", self.store._deleted)
+        self.assertCountEqual(result["merged_from"], ["om1", "om2"])
+
+    def test_unicode_preserved(self) -> None:
+        """Кириллица и спецсимволы сохраняются в объединённом тексте."""
+        self._add("up1", "Привет мир — первая запись!", ts="2026-04-12T09:00:00")
+        self._add("up2", "Hasta la vista — вторая запись!", ts="2026-04-12T09:01:00")
+        result = self.merger.merge_items(["up1", "up2"], self.store)
+        self.assertIn("Привет мир", result["text"])
+        self.assertIn("Hasta la vista", result["text"])
+        self.assertIn("вторая запись", result["text"])
+
+    def test_handles_single_item_no_merge(self) -> None:
+        """Один элемент — merge_items выбрасывает ValueError (нельзя слить одно)."""
+        self._add("si1", "Solo item")
+        with self.assertRaises(ValueError):
+            self.merger.merge_items(["si1"], self.store)
+
+    def test_concurrent_merge_safe(self) -> None:
+        """Параллельные вызовы merge_items с разными парами ID не конфликтуют."""
+        import threading
+
+        pairs = [
+            (f"th{idx}a", f"th{idx}b", f"Pair {idx} alpha", f"Pair {idx} beta")
+            for idx in range(6)
+        ]
+        for idx, (a_id, b_id, a_text, b_text) in enumerate(pairs):
+            self._add(a_id, a_text, ts=f"2026-04-12T0{idx}:00:00")
+            self._add(b_id, b_text, ts=f"2026-04-12T0{idx}:01:00")
+
+        errors: list[Exception] = []
+        results: list[dict] = []
+        lock = threading.Lock()
+
+        def run(a_id: str, b_id: str) -> None:
+            try:
+                r = self.merger.merge_items([a_id, b_id], self.store)
+                with lock:
+                    results.append(r)
+            except Exception as e:
+                with lock:
+                    errors.append(e)
+
+        threads = [
+            threading.Thread(target=run, args=(a_id, b_id))
+            for a_id, b_id, *_ in pairs
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], msg=str(errors))
+        self.assertEqual(len(results), 6)
+        for r in results:
+            self.assertIn("text", r)
+            self.assertIn("merged_from", r)
+
+
 if __name__ == "__main__":
     unittest.main()
