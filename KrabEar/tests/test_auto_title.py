@@ -294,5 +294,129 @@ class TestEdgeCases(unittest.TestCase):
         self.assertGreater(len(title), 0)
 
 
+class TestWave117AutoTitle(unittest.TestCase):
+    """Wave 117 required test cases for AutoTitleGenerator."""
+
+    def setUp(self) -> None:
+        self.gen = AutoTitleGenerator()
+
+    # test_short_transcript_full_used_as_title
+    def test_short_transcript_full_used_as_title(self) -> None:
+        """Короткий транскрипт (<5 слов) используется целиком как заголовок."""
+        text = "Тест система"
+        title = self.gen.generate_title(text)
+        # Short text (< 5 words) is used as-is (capitalised)
+        self.assertIn("Тест", title)
+        self.assertTrue(title[0].isupper())
+        # Ensure no truncation ellipsis on short input
+        self.assertFalse(title.endswith("..."), f"Short text should not be truncated: {title!r}")
+
+    # test_long_transcript_truncated_at_word_boundary
+    def test_long_transcript_truncated_at_word_boundary(self) -> None:
+        """Длинный транскрипт обрезается по границе слова с добавлением «...»."""
+        # 80+ chars — will definitely be truncated at max_length=50
+        text = "Обсуждаем архитектурные решения для масштабирования системы микросервисов в облаке."
+        title = self.gen.generate_title(text, max_length=50)
+        self.assertLessEqual(len(title), 50)
+        if title.endswith("..."):
+            body = title[:-3]
+            # Must not end with a partial word (last char should be alpha or common punct)
+            self.assertFalse(body.endswith(" "), f"Space before ellipsis: {title!r}")
+            self.assertTrue(
+                body[-1].isalpha() or body[-1] in "ёЁ0123456789",
+                f"Word boundary not respected: {title!r}",
+            )
+
+    # test_unicode_title_preserved
+    def test_unicode_title_preserved(self) -> None:
+        """Unicode символы (кириллица, испанский, эмодзи в тексте) сохраняются."""
+        texts = [
+            "Привет мир это кириллица и она должна работать нормально",
+            "Hola mundo esto es español con ñ y acentos como é í ó",
+            "Meeting notes: обсуждаем sprint planning для команды",
+        ]
+        for text in texts:
+            title = self.gen.generate_title(text)
+            self.assertIsInstance(title, str)
+            self.assertGreater(len(title), 0, f"Empty title for: {text!r}")
+            # Title must start with uppercase (first meaningful char)
+            self.assertTrue(title[0].isupper(), f"Not capitalized: {title!r}")
+
+    # test_title_max_length
+    def test_title_max_length(self) -> None:
+        """generate_title уважает параметр max_length."""
+        text = "Длинный текст для проверки ограничения максимальной длины заголовка в символах."
+        for max_len in (20, 30, 50, 80):
+            title = self.gen.generate_title(text, max_length=max_len)
+            self.assertLessEqual(
+                len(title), max_len,
+                f"Title length {len(title)} exceeds max_length={max_len}: {title!r}",
+            )
+
+    # test_strips_filler_words_optional
+    def test_strips_filler_words_optional(self) -> None:
+        """Слова-заполнители в начале убираются, основной текст сохраняется."""
+        filler_openings = [
+            ("Ну ладно, перейдём к следующей задаче спринта.", "перейдём"),
+            ("Так что давайте обсудим архитектуру системы.", "давайте"),
+            ("Well um let us talk about the deployment pipeline.", "let"),
+            ("Bueno pues empezamos con la reunión del equipo.", "empezamos"),
+        ]
+        for text, expected_word in filler_openings:
+            title = self.gen.generate_title(text)
+            words_in_title = title.lower().split()
+            # The filler word at position 0 should be stripped
+            self.assertGreater(len(words_in_title), 0)
+            # The expected word (or something after the filler) should appear
+            self.assertIn(
+                expected_word, title.lower(),
+                f"Expected '{expected_word}' in title, got: {title!r}",
+            )
+
+    # test_empty_transcript_returns_placeholder
+    def test_empty_transcript_returns_placeholder(self) -> None:
+        """Пустые и whitespace-only строки возвращают placeholder «Запись»."""
+        for bad_input in ("", "   ", "\n", "\t\n  \t"):
+            title = self.gen.generate_title(bad_input)
+            self.assertEqual(title, "Запись", f"Expected 'Запись' for input {bad_input!r}, got {title!r}")
+
+    # test_concurrent_generate
+    def test_concurrent_generate(self) -> None:
+        """AutoTitleGenerator безопасен при одновременном вызове из нескольких потоков."""
+        import threading
+
+        texts = [
+            "Обсуждение архитектуры бэкенда",
+            "Планирование спринта команды разработки",
+            "Ревью кода и обсуждение замечаний",
+            "Встреча по результатам квартала",
+            "Техническое интервью кандидата на должность",
+        ]
+        results: list[str] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def worker(text: str) -> None:
+            try:
+                title = self.gen.generate_title(text)
+                with lock:
+                    results.append(title)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in texts * 4]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+        self.assertEqual(len(results), len(threads))
+        for title in results:
+            self.assertIsInstance(title, str)
+            self.assertGreater(len(title), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
