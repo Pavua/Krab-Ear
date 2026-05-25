@@ -660,5 +660,136 @@ class TestSummaryProfileApplyDefaults(unittest.TestCase):
         self.assertTrue(result["llm"])
 
 
+class TestApplyProfileToTextViaLLM(unittest.TestCase):
+    """test_apply_profile_to_text_via_llm: profile system_prompt is used in LLM call."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_apply_profile_to_text_via_llm(self):
+        """Profile system_prompt is forwarded to the LLM rewriter call."""
+        rw = _ok_rewriter("РЕЗЮМЕ: Итог.\nТЕЗИСЫ:\n- Тезис 1")
+        svc = _make_history_service(self.tmp, llm_rewriter=rw)
+        ids = _add_items(svc, ["Текст для резюмирования."])
+        result = svc.handle_auto_summarize_batch({"ids": ids, "profile": "detailed"})
+        # Verify LLM was called and profile was applied
+        self.assertTrue(rw.summarize.called)
+        call_prompt = rw.summarize.call_args[0][0]
+        # The "detailed" profile's system_prompt should appear in the prompt
+        detailed_profile_keyword = "аналитик"
+        self.assertIn(detailed_profile_keyword, call_prompt.lower())
+        self.assertEqual(result.get("profile"), "detailed")
+
+    def test_apply_bullet_points_profile_to_text_via_llm(self):
+        """bullet_points profile injects its own system_prompt into the LLM call."""
+        rw = _ok_rewriter("РЕЗЮМЕ: Список.\nТЕЗИСЫ:\n- Пункт 1\n- Пункт 2")
+        svc = _make_history_service(self.tmp, llm_rewriter=rw)
+        ids = _add_items(svc, ["Длинный текст для маркированного резюме."])
+        svc.handle_auto_summarize_batch({"ids": ids, "profile": "bullet_points"})
+        call_prompt = rw.summarize.call_args[0][0]
+        # bullet_points prompt mentions "маркированного" or "список"
+        self.assertTrue(
+            "маркир" in call_prompt.lower() or "список" in call_prompt.lower(),
+            "bullet_points prompt missing list keyword"
+        )
+
+
+class TestUnicodeProfileName(unittest.TestCase):
+    """test_unicode_profile_name: unicode names persist and retrieve correctly."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+        self.mgr = SummaryProfileManager(data_dir=self.tmp)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_unicode_profile_name(self):
+        """Profile with a unicode name (Cyrillic) is stored and retrieved correctly."""
+        name = "профиль_краткий"
+        self.mgr.add_custom_profile(name, "Краткое резюме.", 100)
+        p = self.mgr.get_profile(name)
+        self.assertEqual(p.name, name)
+        self.assertFalse(p.builtin)
+
+    def test_unicode_profile_name_persists(self):
+        """Unicode profile name survives a JSON round-trip."""
+        name = "日本語プロファイル"
+        self.mgr.add_custom_profile(name, "Unicode prompt.", 150)
+        mgr2 = SummaryProfileManager(data_dir=self.tmp)
+        p = mgr2.get_profile(name)
+        self.assertEqual(p.name, name)
+
+    def test_unicode_in_prompt_persists(self):
+        """Unicode prompt content (emoji, CJK, Cyrillic) survives JSON save/load."""
+        prompt = "Резюмируй: 🎙️ 주요 포인트 정리. Кратко."
+        self.mgr.add_custom_profile("unicode_prompt", prompt, 100)
+        mgr2 = SummaryProfileManager(data_dir=self.tmp)
+        p = mgr2.get_profile("unicode_prompt")
+        self.assertEqual(p.system_prompt, prompt)
+
+
+class TestPersistReloadCustomProfiles(unittest.TestCase):
+    """test_persist_reload_custom_profiles: custom profiles survive manager restart."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_persist_reload_custom_profiles(self):
+        """Custom profiles written by one manager are readable by a fresh manager."""
+        mgr1 = SummaryProfileManager(data_dir=self.tmp)
+        mgr1.add_custom_profile("save_me", "Save prompt.", 200, "Fmt save.")
+        mgr1.add_custom_profile("save_me_2", "Another prompt.", 300)
+
+        mgr2 = SummaryProfileManager(data_dir=self.tmp)
+        p1 = mgr2.get_profile("save_me")
+        p2 = mgr2.get_profile("save_me_2")
+        self.assertEqual(p1.system_prompt, "Save prompt.")
+        self.assertEqual(p1.format_instructions, "Fmt save.")
+        self.assertEqual(p2.max_tokens, 300)
+
+    def test_persist_reload_preserves_builtin_false(self):
+        """Reloaded custom profiles have builtin=False."""
+        mgr1 = SummaryProfileManager(data_dir=self.tmp)
+        mgr1.add_custom_profile("reloaded", "My prompt.", 150)
+
+        mgr2 = SummaryProfileManager(data_dir=self.tmp)
+        p = mgr2.get_profile("reloaded")
+        self.assertFalse(p.builtin)
+
+    def test_persist_reload_after_delete(self):
+        """Deleted profile does not reappear after manager restart."""
+        mgr1 = SummaryProfileManager(data_dir=self.tmp)
+        mgr1.add_custom_profile("will_delete", "Delete me.", 100)
+        mgr1.remove_custom_profile("will_delete")
+
+        mgr2 = SummaryProfileManager(data_dir=self.tmp)
+        with self.assertRaises(KeyError):
+            mgr2.get_profile("will_delete")
+
+    def test_persist_reload_empty_when_no_file(self):
+        """Manager with empty data dir starts with 0 custom profiles."""
+        mgr = SummaryProfileManager(data_dir=self.tmp)
+        custom = [p for p in mgr.list_profiles() if not p["builtin"]]
+        self.assertEqual(len(custom), 0)
+
+    def test_persist_reload_corrupted_json_graceful(self):
+        """Corrupted JSON file is handled gracefully; manager starts with 0 custom profiles."""
+        profiles_path = self.tmp / "summary_profiles.json"
+        profiles_path.write_text("{ corrupted json [[[", encoding="utf-8")
+        mgr = SummaryProfileManager(data_dir=self.tmp)
+        custom = [p for p in mgr.list_profiles() if not p["builtin"]]
+        self.assertEqual(len(custom), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
