@@ -272,5 +272,82 @@ class TestQualityScoreEdge(unittest.TestCase):
         self.assertIsInstance(report.duration_sec, float)
 
 
+class TestWave108RequiredCases(unittest.TestCase):
+    """Wave 108 — explicitly required test cases."""
+
+    # test_rms_on_sine_wave: RMS of sine = amplitude / sqrt(2)
+    def test_rms_on_sine_wave(self):
+        amplitude = 0.4
+        audio = _sine(freq=440.0, amplitude=amplitude, duration=2.0)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        expected = amplitude / math.sqrt(2)
+        self.assertAlmostEqual(report.rms_level, expected, delta=0.005,
+                               msg=f"RMS должен быть ~{expected:.4f} для синусоиды амплитудой {amplitude}")
+
+    # test_peak_on_clipped_signal: peak == 1.0 for saturated signal
+    def test_peak_on_clipped_signal(self):
+        audio = np.clip(_sine(amplitude=2.0, duration=1.0), -1.0, 1.0)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertAlmostEqual(report.peak_level, 1.0, delta=1e-6)
+        self.assertGreater(report.clipping_ratio, 0.5)
+
+    # test_snr_on_pure_signal_high: clean signal has high SNR
+    def test_snr_on_pure_signal_high(self):
+        signal = _sine(amplitude=0.5, duration=3.0)
+        noise = _noise(duration=3.0, amplitude=0.001)
+        audio = signal + noise
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertGreater(report.snr_estimate_db, 20.0,
+                           msg="Чистый сигнал с малым шумом должен давать SNR > 20 dB")
+
+    # test_clipping_ratio_detected: clipping_ratio > 0 when samples >= 0.99
+    def test_clipping_ratio_detected(self):
+        audio = np.full(SR * 2, 0.999, dtype=np.float32)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertGreater(report.clipping_ratio, 0.99,
+                           msg="Сигнал 0.999 должен детектироваться как 100% клиппинг")
+
+    # test_silence_ratio_on_silent_audio: silence_ratio → 1.0 for zeros
+    def test_silence_ratio_on_silent_audio(self):
+        audio = _silence(duration=2.0)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertGreater(report.silence_ratio, 0.99,
+                           msg="Полная тишина должна давать silence_ratio близкий к 1.0")
+
+    # test_empty_audio_returns_zero_metrics: empty array → zeros, no crash
+    def test_empty_audio_returns_zero_metrics(self):
+        report = AudioQualityAnalyzer().analyze(np.array([], dtype=np.float32), SR)
+        self.assertEqual(report.rms_level, 0.0)
+        self.assertEqual(report.peak_level, 0.0)
+        self.assertEqual(report.clipping_ratio, 0.0)
+        self.assertEqual(report.duration_sec, 0.0)
+
+    # test_concurrent_analyze_thread_safe: multiple threads, no crash/race
+    def test_concurrent_analyze_thread_safe(self):
+        import threading
+        results: list = []
+        errors: list = []
+
+        def worker(idx: int) -> None:
+            try:
+                amp = 0.1 + 0.05 * (idx % 5)
+                audio = _sine(freq=440.0 + idx * 10, amplitude=amp, duration=1.0)
+                report = AudioQualityAnalyzer().analyze(audio, SR)
+                results.append(report.rms_level)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        self.assertEqual(errors, [], msg=f"Thread errors: {errors}")
+        self.assertEqual(len(results), 8)
+        for rms in results:
+            self.assertGreater(rms, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
