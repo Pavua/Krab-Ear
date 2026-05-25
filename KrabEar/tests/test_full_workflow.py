@@ -33,6 +33,14 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+# Wave 732: all tests in this module must run on the same xdist worker in order.
+# test_full_workflow uses sequential class-level state (cls.item_ids) that
+# accumulates across test_01→test_50; parallel dispatch breaks this invariant
+# (Wave 718 root cause — pytest --dist=loadgroup splits unittest.TestCase methods
+# across workers, so cls state per worker becomes empty for downstream tests).
+pytestmark = pytest.mark.xdist_group("full_workflow")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
