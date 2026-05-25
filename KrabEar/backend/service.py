@@ -97,6 +97,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.text_processing_service import TextProcessingService
+from backend.text_scoring_service import TextScoringService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -441,6 +442,12 @@ class BackendService:
             text_postprocessor=self._text_postprocessor,
             store=self.store,
             llm_rewriter=self._llm_rewriter,
+        )
+        self._text_scoring_svc = TextScoringService(
+            llm_rewriter=self._llm_rewriter,
+            term_extractor=self._term_extractor,
+            auto_title_generator=self._auto_title_generator,
+            get_runtime_setting=self._get_runtime_setting,
         )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
         self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
@@ -882,7 +889,7 @@ class BackendService:
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
-            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
+            "warmup_rewriter": self._handle_warmup_rewriter,  # → TextScoringService
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
@@ -922,7 +929,7 @@ class BackendService:
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
-            "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
+            "extract_terms": self._handle_extract_terms,  # → TextScoringService
             "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
             "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
@@ -942,7 +949,7 @@ class BackendService:
             "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
-            "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
+            "generate_auto_title": self._handle_generate_auto_title,  # → TextScoringService
             # форматирование текста под целевое приложение (telegram, notes, email и др.)
             "format_for_paste": self._paste_formatter.handle_format_for_paste,
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
@@ -2408,7 +2415,14 @@ class BackendService:
         # proc_cmdline raises PermissionError → wrapped as SystemError by the
         # psutil C ext, which bubbles out before any inner try/except. Iterate
         # bare and fetch fields manually under a wide except.
-        for proc in psutil.process_iter():
+        try:
+            proc_iter = list(psutil.process_iter())
+        except (PermissionError, SystemError, OSError) as exc:
+            # Wave 490: Sequoia KERN_PROCARGS2 blocks process_iter at the top level.
+            # Push system.proc_cmdline_permission and return gracefully.
+            self._push_proc_cmdline_permission_error(exc)
+            return {"ok": True, "processes": []}
+        for proc in proc_iter:
             try:
                 cmd = " ".join(proc.cmdline() or [])
                 if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
@@ -2427,6 +2441,36 @@ class BackendService:
                 continue
 
         return {"ok": True, "processes": matches}
+
+    def _push_proc_cmdline_permission_error(self, exc: Exception) -> None:
+        """Push system.proc_cmdline_permission error to error_bus. Never raises.
+
+        Wave 490: Sequoia KERN_PROCARGS2 blocks psutil.process_iter() with
+        PermissionError/SystemError. Push once per hour (dedupe_seconds=3600).
+        """
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("system.proc_cmdline_permission", {})
+            err = KrabError(
+                severity="error",
+                component="system",
+                code="system.proc_cmdline_permission",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2).",
+                ),
+                message_debug=f"psutil.process_iter raised {type(exc).__name__}: {exc}",
+                timestamp=datetime.now(timezone.utc),
+                context={"exc_type": type(exc).__name__, "exc_msg": str(exc)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            if hasattr(self, "_error_bus") and self._error_bus is not None:
+                self._error_bus.push(err)
+        except Exception:
+            pass  # never raise from error reporting path
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
@@ -2698,29 +2742,8 @@ class BackendService:
         return self.transcriber.engine.warmup()
 
     def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Ручной запуск LLM rewriter warmup probe.
-
-        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
-
-        Params:
-            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
-
-        Returns:
-            {
-              "ok": bool,          # True если HTTP 200
-              "latency_ms": int,   # время ответа в мс
-              "error": str | None, # описание ошибки или None
-              "model": str | None  # имя используемой модели
-            }
-        """
-        if self._llm_rewriter is None:
-            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
-        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
-        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
-        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
-        result["model"] = getattr(self._llm_rewriter, "_model", None)
-        return result
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_warmup_rewriter(params)
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
@@ -4538,24 +4561,8 @@ class BackendService:
         }
 
     def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает ключевые термины из текста."""
-        text = params.get("text", "")
-        language = params.get("language", "ru")
-        if not text:
-            return {"terms": []}
-        terms = self._term_extractor.extract_terms(text, language=language)
-        return {
-            "terms": [
-                {
-                    "term": t.term,
-                    "score": t.score,
-                    "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
-                }
-                for t in terms
-            ]
-        }
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_extract_terms(params)
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние контекстной памяти STT.
@@ -5002,44 +5009,8 @@ end tell'''
         return result
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует автоматический заголовок для транскрибации.
-
-        Параметры:
-            text (str): текст транскрибации (обязательный).
-            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
-            max_length (int): максимальная длина заголовка (по умолчанию 50).
-            with_date (bool): если true и timestamp указан — включает дату.
-            items (list): список записей для пакетной генерации (альтернатива text).
-
-        Ответ (одиночный):
-            {title: str}
-
-        Ответ (пакетный):
-            {titles: [{id, title, generated_at}]}
-        """
-        # Пакетный режим
-        items = params.get("items")
-        if items is not None:
-            if not isinstance(items, list):
-                raise ValueError("Параметр 'items' должен быть списком")
-            titles = self._auto_title_generator.batch_generate(items)
-            return {"titles": titles}
-
-        # Одиночный режим
-        text = str(params.get("text", "") or "")
-        timestamp = str(params.get("timestamp", "") or "")
-        max_length = int(params.get("max_length", 50))
-        with_date = bool(params.get("with_date", False))
-
-        if not text:
-            return {"title": "Запись"}
-
-        if with_date and timestamp:
-            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
-        else:
-            title = self._auto_title_generator.generate_title(text, max_length=max_length)
-
-        return {"title": title}
+        """Delegated to TextScoringService."""
+        return self._text_scoring_svc.handle_generate_auto_title(params)
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
