@@ -414,5 +414,116 @@ class TestSemanticSearchLazyLoad(unittest.TestCase):
             self.assertIsNone(model)
 
 
+class TestSemanticSearchWave137(unittest.TestCase):
+    """Wave 137 additional tests: unicode, empty-index, remove, concurrent."""
+
+    def _make_searcher(self, tmpdir):
+        searcher = SemanticSearcher(
+            data_dir=Path(tmpdir),
+            model_name="test-model",
+            enabled=True,
+        )
+        searcher._model = _make_fake_model(dim=8)
+        searcher._model_loaded = True
+        return searcher
+
+    def test_unicode_query_text(self):
+        """Unicode query (Cyrillic + Spanish) encodes without error."""
+        tmpdir = tempfile.mkdtemp()
+        searcher = self._make_searcher(tmpdir)
+        searcher.index_item("ru1", "Привет мир — тест поиска")
+        searcher.index_item("es1", "Hola mundo — búsqueda semántica")
+        searcher.index_item("mixed", "Café résumé naïve")
+
+        results = searcher.search("Привет búsqueda", top_k=3)
+        self.assertIsInstance(results, list)
+        for r in results:
+            self.assertIn("id", r)
+            self.assertIn("score", r)
+
+    def test_empty_index_returns_empty(self):
+        """search() on a freshly-created (empty) index returns []."""
+        tmpdir = tempfile.mkdtemp()
+        searcher = self._make_searcher(tmpdir)
+        # No items indexed
+        results = searcher.search("anything", top_k=5)
+        self.assertEqual(results, [])
+
+    def test_remove_doc_from_index(self):
+        """Removing a document from the index excludes it from future searches."""
+        import numpy as np
+        tmpdir = tempfile.mkdtemp()
+        searcher = self._make_searcher(tmpdir)
+        searcher.index_item("keep", "Текст который остаётся в индексе")
+        searcher.index_item("remove_me", "Документ для удаления из индекса")
+
+        # Manually remove "remove_me" from the in-memory index (SemanticSearcher
+        # has no public remove API — simulate by direct state manipulation, as
+        # the class exposes _index / _embeddings for this purpose)
+        with searcher._index_lock:
+            if "remove_me" in searcher._index:
+                idx = searcher._index.index("remove_me")
+                searcher._index.pop(idx)
+                searcher._embeddings = np.delete(searcher._embeddings, idx, axis=0)
+
+        results = searcher.search("документ удаление", top_k=10)
+        result_ids = [r["id"] for r in results]
+        self.assertNotIn("remove_me", result_ids)
+        self.assertIn("keep", result_ids)
+
+    def test_concurrent_index_search(self):
+        """Concurrent index + search calls do not raise exceptions."""
+        import threading
+        tmpdir = tempfile.mkdtemp()
+        searcher = self._make_searcher(tmpdir)
+
+        errors = []
+
+        def do_index(n):
+            try:
+                for i in range(5):
+                    searcher.index_item(f"thread{n}_item{i}", f"Текст {n} номер {i}")
+            except Exception as exc:
+                errors.append(exc)
+
+        def do_search():
+            try:
+                for _ in range(5):
+                    searcher.search("Текст номер", top_k=3)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=do_index, args=(i,)) for i in range(3)]
+        threads += [threading.Thread(target=do_search) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Concurrent errors: {errors}")
+
+    def test_handles_encoder_unavailable_gracefully(self):
+        """When encoder is unavailable, search/index return safe empty values."""
+        tmpdir = tempfile.mkdtemp()
+        searcher = SemanticSearcher(
+            data_dir=Path(tmpdir),
+            model_name="nonexistent-model-xyz",
+            enabled=True,
+        )
+        # Simulate model load failure
+        searcher._model_error = "model_load_failed"
+        searcher._model_loaded = False
+        searcher._model = None
+
+        ok = searcher.index_item("id1", "Текст для индексации")
+        self.assertFalse(ok)
+
+        results = searcher.search("запрос", top_k=5)
+        self.assertEqual(results, [])
+
+        status = searcher.status()
+        self.assertEqual(status["model_error"], "model_load_failed")
+
+
 if __name__ == "__main__":
     unittest.main()
