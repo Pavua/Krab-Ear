@@ -144,6 +144,7 @@ class MLXWatchdog:
                 self.crashes_count,
             )
             _notify_sentry_timeout(model_name, elapsed, self.crashes_count)
+            _push_watchdog_hang(model_name, elapsed, self.crashes_count)
             raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
 
         # Поток завершился — проверяем результат
@@ -236,3 +237,47 @@ def _notify_sentry_timeout(
             )
     except Exception:  # noqa: BLE001
         pass  # telemetry никогда не должна ломать основной поток
+
+
+def _push_watchdog_hang(
+    model_name: str,
+    elapsed_sec: float,
+    crash_count: int,
+) -> None:
+    """Push stt.mlx_watchdog_hang KrabError via module-level error bus (no-op if absent).
+
+    The error bus reference is injected at runtime by BackendService after init:
+      mlx_subprocess._error_bus = self._error_bus
+    Falls back silently when not wired (tests, standalone usage).
+    """
+    try:
+        error_bus = globals().get("_error_bus")
+        if error_bus is None:
+            return
+        from backend.error_bus import KrabError  # noqa: PLC0415
+        from backend.error_codes import ERROR_REGISTRY  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+        entry = ERROR_REGISTRY.get("stt.mlx_watchdog_hang", {})
+        err = KrabError(
+            severity=entry.get("severity", "critical"),
+            component="stt",
+            code="stt.mlx_watchdog_hang",
+            message_user=entry.get("user_msg_ru", "MLX watchdog: GPU hang"),
+            message_debug=(
+                f"MLXWatchdog: timeout after {elapsed_sec:.1f}s "
+                f"(model={model_name}, total_crashes={crash_count})"
+            ),
+            timestamp=datetime.now(timezone.utc),
+            context={"model": model_name, "elapsed_sec": round(elapsed_sec, 2),
+                     "crash_count": crash_count},
+            actionable=entry.get("actionable", False),
+            action_id=entry.get("action_id"),
+        )
+        error_bus.push(err)
+    except Exception:  # noqa: BLE001
+        pass  # telemetry никогда не должна ломать основной поток
+
+
+# Module-level error bus reference — injected by BackendService after construction.
+# Pattern mirrors how engine._error_bus is wired in service.py __init__.
+_error_bus: "object | None" = None  # type: ignore[assignment]

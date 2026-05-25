@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -487,7 +485,6 @@ class TestPhaseE(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def _make_phase_d_dict(self, text="Привет мир.", translated="", translation_mode="off"):
-        from unittest.mock import MagicMock
         translation = TranslationResult(
             text=translated,
             status="not_requested" if translation_mode == "off" else "ok",

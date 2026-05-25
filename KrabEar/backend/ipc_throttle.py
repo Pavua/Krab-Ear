@@ -71,8 +71,6 @@ MEDIUM_METHODS: Set[str] = {
     "get_error_report",         # отчёт об ошибках
     "get_error_stats",          # статистика ошибок
     "health_check",             # health check подсистем
-    "get_disk_status",          # статус дискового пространства
-    "get_storage_breakdown",    # разбивка использования диска
 }
 
 # Методы, полностью исключённые из throttling.

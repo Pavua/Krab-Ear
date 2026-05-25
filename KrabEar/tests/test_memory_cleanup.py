@@ -11,7 +11,7 @@ import sys
 import os
 import types
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
 # Path bootstrap

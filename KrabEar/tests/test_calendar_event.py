@@ -16,7 +16,8 @@ from backend.service import BackendService
 def _make_service():
     """Return a BackendService with minimal fake collaborators."""
     from backend.state_store import StateStore
-    import tempfile, pathlib
+    import tempfile
+    import pathlib
 
     tmp = pathlib.Path(tempfile.mkdtemp())
     store = StateStore(data_dir=tmp)

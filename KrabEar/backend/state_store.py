@@ -96,7 +96,13 @@ class StateStore:
                 action_id=entry.get("action_id"),
             )
             error_bus.push(err)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # Wave 222: surface push failures to Sentry instead of silent swallow
+            try:
+                from backend.observability import capture_exception
+                capture_exception(e, "_push_error_internal")
+            except Exception:
+                pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
     @contextmanager
@@ -552,12 +558,25 @@ class StateStore:
 
     def compact_with_stats(self) -> dict[str, int]:
         """Компактирует историю и возвращает детальную статистику."""
+        from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+
         with self._lock():
             before = self._history_stats_unlocked()
+            _add_bc(
+                category="history",
+                message="compact_start",
+                level="info",
+                data={
+                    "active_count": int(before["active_count"]),
+                    "history_lines": int(before["history_lines"]),
+                    "tombstones_lines": int(before["tombstones_lines"]),
+                    "total_bytes": int(before["total_bytes"]),
+                },
+            )
             self._compact_unlocked()
             after = self._history_stats_unlocked()
 
-        return {
+        stats = {
             "before_active_count": int(before["active_count"]),
             "before_history_lines": int(before["history_lines"]),
             "before_tombstones_lines": int(before["tombstones_lines"]),
@@ -570,6 +589,17 @@ class StateStore:
             "after_total_bytes": int(after["total_bytes"]),
             "reclaimed_bytes": int(before["total_bytes"]) - int(after["total_bytes"]),
         }
+        _add_bc(
+            category="history",
+            message="compact_finish",
+            level="info",
+            data={
+                "items_compacted": stats["before_active_count"],
+                "reclaimed_bytes": stats["reclaimed_bytes"],
+                "after_active_count": stats["after_active_count"],
+            },
+        )
+        return stats
 
     def get_history_stats(self) -> dict[str, int]:
         """Возвращает сводку состояния журналов истории."""

@@ -28,7 +28,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.integrity_checker import (
     IntegrityChecker,
-    IntegrityReport,
     RepairResult,
     REQUIRED_ITEM_FIELDS,
 )

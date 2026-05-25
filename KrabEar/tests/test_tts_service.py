@@ -256,5 +256,190 @@ class TTSHandlerTestCase(unittest.TestCase):
         self.assertEqual(result["wav_bytes_b64"], "")
 
 
+# ── Engine-specific routing tests ─────────────────────────────────────────────
+
+class TTSEngineRoutingTestCase(unittest.TestCase):
+    """Tests verifying which engine is invoked for RU vs EN text."""
+
+    @patch("backend.tts_service.settings")
+    def test_ru_text_uses_silero(self, mock_settings: MagicMock) -> None:
+        """RU text + TTS_ENABLED=True must call _synthesize_silero first."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = False
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = None  # simulate loaded (attempted), but _synthesize_silero is mocked
+
+        with patch.object(svc, "_synthesize_silero", return_value=fake_wav) as mock_silero, \
+             patch.object(svc, "_synthesize_kokoro", return_value=None) as mock_kokoro:
+            result = svc.synthesize_speech("Привет мир это русский текст", language="ru")
+
+        mock_silero.assert_called_once()
+        mock_kokoro.assert_not_called()
+        self.assertEqual(result, fake_wav)
+
+    @patch("backend.tts_service.settings")
+    def test_en_text_uses_kokoro(self, mock_settings: MagicMock) -> None:
+        """EN text + TTS_ENABLED=True must call _synthesize_kokoro first."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = False
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        svc = TTSService()
+
+        with patch.object(svc, "_synthesize_kokoro", return_value=fake_wav) as mock_kokoro, \
+             patch.object(svc, "_synthesize_silero", return_value=None):
+            result = svc.synthesize_speech("Hello world this is English text", language="en")
+
+        mock_kokoro.assert_called_once()
+        self.assertEqual(result, fake_wav)
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_silero_unavailable_falls_back_kokoro(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """For EN: Kokoro unavailable -> Silero -> say fallback chain."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = TTSService()
+        with patch.object(svc, "_synthesize_kokoro", return_value=None), \
+             patch.object(svc, "_synthesize_silero", return_value=None):
+            result = svc.synthesize_speech("Hello world test fallback", language="en")
+
+        # All ML engines returned None -> macOS say
+        mock_say.assert_called_once()
+        self.assertEqual(result, fake_wav)
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_unknown_lang_falls_back_to_say(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Language='en', both ML engines None -> must reach macOS say."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = TTSService()
+        svc._silero_attempted = True
+        svc._silero = None
+        svc._kokoro_attempted = True
+        svc._kokoro = None
+
+        result = svc.synthesize_speech("unknown language test", language="en")
+        mock_say.assert_called_once()
+        self.assertEqual(result, fake_wav)
+
+    @patch("backend.tts_service.settings")
+    def test_all_engines_unavailable_returns_error(
+        self, mock_settings: MagicMock
+    ) -> None:
+        """All engines None + TTS_FALLBACK_SAY=False -> returns b''."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = False
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        svc = TTSService()
+        with patch.object(svc, "_synthesize_silero", return_value=None), \
+             patch.object(svc, "_synthesize_kokoro", return_value=None):
+            result = svc.synthesize_speech("Привет мир", language="ru")
+
+        self.assertEqual(result, b"")
+
+    @patch("backend.tts_service.settings")
+    def test_language_auto_detection(self, mock_settings: MagicMock) -> None:
+        """Language='auto' detects RU vs EN correctly."""
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = False
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        svc = TTSService()
+
+        # RU auto-detect
+        with patch.object(svc, "_synthesize_silero", return_value=fake_wav) as mock_silero:
+            result = svc.synthesize_speech("Привет мир это автодетект языка", language="auto")
+        mock_silero.assert_called_once()
+        self.assertEqual(result, fake_wav)
+
+        # EN auto-detect
+        with patch.object(svc, "_synthesize_kokoro", return_value=fake_wav) as mock_kokoro:
+            result = svc.synthesize_speech("Hello world auto language detection", language="auto")
+        mock_kokoro.assert_called_once()
+        self.assertEqual(result, fake_wav)
+
+    @patch("backend.tts_service.settings")
+    @patch("backend.tts_service._say_to_wav")
+    def test_concurrent_speak(
+        self, mock_say: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Concurrent synthesize_speech calls must not raise or corrupt results."""
+        import threading
+
+        mock_settings.TTS_ENABLED = False
+        mock_settings.TTS_FALLBACK_SAY = True
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+        mock_settings.TTS_SILERO_VOICE = "baya"
+        mock_settings.TTS_KOKORO_MODEL = "hexgrad/Kokoro-82M"
+        mock_settings.SAY_VOICE = ""
+
+        fake_wav = _make_wav_bytes()
+        mock_say.return_value = fake_wav
+
+        svc = TTSService()
+        results: list[bytes] = []
+        errors: list[Exception] = []
+
+        def _speak(text: str) -> None:
+            try:
+                wav = svc.synthesize_speech(text, language="auto")
+                results.append(wav)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_speak, args=(f"Текст {i}",))
+            for i in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertEqual(len(errors), 0, f"Errors in concurrent speak: {errors}")
+        self.assertEqual(len(results), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

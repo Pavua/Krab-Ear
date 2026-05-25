@@ -1,0 +1,57 @@
+{
+  "$defs": {
+    "HotwordMatch": {
+      "properties": {
+        "word": {
+          "title": "Word",
+          "type": "string"
+        },
+        "position": {
+          "title": "Position",
+          "type": "integer"
+        },
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "context": {
+          "title": "Context",
+          "type": "string"
+        }
+      },
+      "required": [
+        "word",
+        "position",
+        "category",
+        "context"
+      ],
+      "title": "HotwordMatch",
+      "type": "object"
+    }
+  },
+  "description": "Событие: горячие слова найдены в транскрипции.",
+  "properties": {
+    "history_id": {
+      "title": "History Id",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "matches": {
+      "items": {
+        "$ref": "#/$defs/HotwordMatch"
+      },
+      "title": "Matches",
+      "type": "array"
+    }
+  },
+  "required": [
+    "history_id",
+    "text",
+    "matches"
+  ],
+  "title": "HotwordDetected",
+  "type": "object"
+}

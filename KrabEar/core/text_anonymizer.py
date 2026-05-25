@@ -12,6 +12,25 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ── Luhn checksum helper ─────────────────────────────────────────────────────
+
+def _passes_luhn(digits: str) -> bool:
+    """Verify number passes Luhn algorithm (mod 10 checksum)."""
+    try:
+        nums = [int(d) for d in digits]
+    except ValueError:
+        return False
+    checksum = 0
+    parity = len(nums) % 2
+    for i, num in enumerate(nums):
+        if i % 2 == parity:
+            num *= 2
+            if num > 9:
+                num -= 9
+        checksum += num
+    return checksum % 10 == 0
+
+
 # ── Датаклассы результата ────────────────────────────────────────────────────
 
 @dataclass
@@ -145,6 +164,11 @@ class TextAnonymizer:
         matches: list[tuple[int, int, str, str, str]] = []  # (start, end, original, replacement, category)
         for name, pattern, replacement in selected_rules:
             for m in pattern.finditer(text):
+                if name == "credit_card":
+                    # Validate via Luhn checksum — skip non-card 16-digit sequences
+                    digits = re.sub(r"[\s\-]", "", m.group(0))
+                    if not _passes_luhn(digits):
+                        continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
         if not matches:
