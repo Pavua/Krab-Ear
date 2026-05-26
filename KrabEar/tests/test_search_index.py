@@ -478,5 +478,53 @@ class TestSearchIndexWave111(unittest.TestCase):
         self.assertNotIn("nohit2", ids)
 
 
+class TestW1036Fixes(unittest.TestCase):
+    """W1036 F3 + F5 regression tests."""
+
+    def _make(self, item_id, text):
+        return {"id": item_id, "text": text, "source_text": "", "translated_text": ""}
+
+    # ------------------------------------------------------------------
+    # F3: Spanish diacritics must not break tokenization
+    # ------------------------------------------------------------------
+    def test_spanish_comunicacion_tokenized_as_one_word(self):
+        """'Comunicación' must be indexed as a single token, not split at 'ó'."""
+        tokens = _tokenize("Comunicación")
+        # Must be exactly one token; the old regex produced ['comunicaci', 'n']
+        self.assertEqual(len(tokens), 1, f"Expected 1 token, got: {tokens}")
+        self.assertIn("comunicación", tokens)
+
+    def test_spanish_diacritics_searchable(self):
+        """Items containing Spanish diacritics must be found by search."""
+        idx = SearchIndex()
+        idx.build_index([self._make("es1", "Comunicación en español")])
+        results = idx.search("comunicación")
+        ids = [r.item_id for r in results]
+        self.assertIn("es1", ids)
+
+    def test_spanish_accent_chars_tokenized(self):
+        """á, é, í, ó, ú, ñ, ü must all be included in tokens."""
+        for word in ["café", "niño", "así", "corazón", "flügelhorn"]:
+            tokens = _tokenize(word)
+            self.assertEqual(len(tokens), 1, f"'{word}' should be 1 token, got: {tokens}")
+
+    # ------------------------------------------------------------------
+    # F5: limit < 0 must return empty list, not a tail slice
+    # ------------------------------------------------------------------
+    def test_negative_limit_returns_empty(self):
+        """search() with limit=-1 must return [] not a tail slice."""
+        idx = SearchIndex()
+        idx.build_index([self._make("1", "привет мир")])
+        results = idx.search("привет", limit=-1)
+        self.assertEqual(results, [], f"Expected [], got: {results}")
+
+    def test_negative_limit_large_returns_empty(self):
+        """search() with limit=-100 must also return []."""
+        idx = SearchIndex()
+        idx.build_index([self._make("1", "привет мир"), self._make("2", "привет тест")])
+        results = idx.search("привет", limit=-100)
+        self.assertEqual(results, [])
+
+
 if __name__ == "__main__":
     unittest.main()
