@@ -92,6 +92,12 @@ class ArchiveManager:
     def archive_items(self, item_ids: list[str], store: Any | None = None) -> ArchiveResult:
         """Перемещает записи из активной истории в архив.
 
+        Порядок операций (write-first, delete-second):
+        1. Запись добавляется в архив.
+        2. Запись удаляется из активной истории.
+        При сбое удаления (шаг 2) выполняется откат: архив перезаписывается
+        без только что добавленной записи, чтобы не допустить дублирования.
+
         Args:
             item_ids: Список ID записей для архивирования.
             store: StateStore (по умолчанию используется self._store).
@@ -120,8 +126,35 @@ class ArchiveManager:
                 item_dict = item.to_dict() if hasattr(item, "to_dict") else item
                 item_dict = dict(item_dict)
                 item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+                # Шаг 1: записываем в архив первым делом.
                 self._append_ndjson(self._archive_path, item_dict)
-                _store.delete_history_item(clean_id)
+
+                # Шаг 2: удаляем из активной истории.
+                # При сбое — откатываем архивную запись.
+                try:
+                    _store.delete_history_item(clean_id)
+                except Exception as exc:
+                    logger.error(
+                        "archive_items: не удалось удалить id=%s из активной истории, "
+                        "откатываем архивную запись: %s",
+                        clean_id,
+                        exc,
+                    )
+                    # Откат: перечитываем архив и убираем только что добавленную запись.
+                    try:
+                        existing = self._read_archive()
+                        rollback = [r for r in existing if r.get("id") != clean_id]
+                        self._rewrite_archive(rollback)
+                    except Exception as rb_exc:
+                        logger.critical(
+                            "archive_items: откат не удался для id=%s — запись может "
+                            "присутствовать в обоих хранилищах: %s",
+                            clean_id,
+                            rb_exc,
+                        )
+                    continue
+
                 archived_count += 1
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
@@ -133,6 +166,13 @@ class ArchiveManager:
 
     def unarchive_items(self, item_ids: list[str], store: Any | None = None) -> dict[str, Any]:
         """Восстанавливает записи из архива обратно в активную историю.
+
+        Порядок операций (restore-first, remove-second):
+        1. Запись добавляется в активную историю.
+        2. Архив перезаписывается без восстановленных записей.
+        При сбое перезаписи архива (шаг 2) все успешно восстановленные записи уже
+        находятся в активной истории; архив содержит их копии — логируем CRITICAL
+        для последующего ручного устранения.
 
         Args:
             item_ids: Список ID записей для восстановления.
@@ -148,6 +188,8 @@ class ArchiveManager:
 
         unarchived_count = 0
         not_found: list[str] = []
+        # Записи, успешно восстановленные в активную историю (для отката архива).
+        restored_ids: set[str] = set()
 
         with self._lock:
             all_archived = self._read_archive()
@@ -158,7 +200,7 @@ class ArchiveManager:
                 item_id = item.get("id", "")
                 if item_id in ids_set:
                     found_ids.add(item_id)
-                    # Восстанавливаем без поля archived_at
+                    # Шаг 1: восстанавливаем в активную историю без поля archived_at.
                     restore_dict = {k: v for k, v in item.items() if k != "archived_at"}
                     try:
                         _store.add_history_item(
@@ -172,15 +214,32 @@ class ArchiveManager:
                             translation_status=restore_dict.get("translation_status", "not_requested"),
                             translation_engine=restore_dict.get("translation_engine", ""),
                         )
+                        restored_ids.add(item_id)
                         unarchived_count += 1
+                        # Успешно восстановлено — не включаем в remaining.
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
+                        # Восстановление не удалось — оставляем в архиве.
                         remaining.append(item)
                 else:
                     remaining.append(item)
 
             not_found = sorted(ids_set - found_ids)
-            self._rewrite_archive(remaining)
+
+            # Шаг 2: перезаписываем архив без успешно восстановленных записей.
+            # При сбое — записи уже в активной истории, но архив содержит их копии.
+            if restored_ids:
+                try:
+                    self._rewrite_archive(remaining)
+                except Exception as exc:
+                    logger.critical(
+                        "unarchive_items: не удалось перезаписать архив после восстановления "
+                        "%d записей (ids=%s). Записи существуют в обоих хранилищах — "
+                        "требуется ручное устранение: %s",
+                        len(restored_ids),
+                        sorted(restored_ids),
+                        exc,
+                    )
 
         return {"unarchived_count": unarchived_count, "not_found": not_found}
 
