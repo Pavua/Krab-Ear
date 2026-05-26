@@ -1662,8 +1662,14 @@ class AudioEngine:
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
         # EN-оптимизирован и пробуется перед SenseVoice (которая RU+эмоция).
-        # Гейт по settings.PARAKEET_ENABLED. При сбое маркер помечается недоступным.
-        if settings.PARAKEET_ENABLED and self._PARAKEET_MARKER not in self._unavailable_models:
+        # Гейт по settings.PARAKEET_ENABLED И языку: только "en" или "auto".
+        # Для "ru"/"es" Parakeet возвращает мусор и глушит chain — W1303 F3.
+        # (аналогично GigaAM gate выше: _effective_lang == "ru")
+        if (
+            settings.PARAKEET_ENABLED
+            and _effective_lang in {"en", "auto"}
+            and self._PARAKEET_MARKER not in self._unavailable_models
+        ):
             if len(candidates) >= 1:
                 candidates = [candidates[0], self._PARAKEET_MARKER] + candidates[1:]
             else:
