@@ -345,6 +345,7 @@ def build_dispatch_table(
         "semantic_search": svc._handle_semantic_search,  # семантический поиск по истории через embeddings
         "semantic_search_status": svc._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
         "semantic_search_reindex": svc._handle_semantic_search_reindex,  # переиндексировать всю историю
+        "semantic_search_reset": svc._handle_semantic_search_reset,  # сброс зафиксированной ошибки загрузки модели (W884-E3)
         # --- LM Studio model discovery ---
         "list_llm_models": svc._llm_ops_svc.handle_list_llm_models,  # список моделей из LM Studio /v1/models (W783: LLMOpsService)
         # --- Quick word replacement (Cmd+Shift+R) ---
