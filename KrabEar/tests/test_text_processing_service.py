@@ -404,6 +404,43 @@ class TestAbbreviationHandlers(unittest.TestCase):
         mocks["abbreviation_expander"].list_abbreviations.assert_called_once_with(language="ru")
         self.assertEqual(result["language"], "ru")
 
+    def test_add_abbreviation(self) -> None:
+        svc, mocks = _make_service()
+        result = svc.handle_add_abbreviation({"abbr": "т.н.", "expansion": "так называемый", "language": "ru"})
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "т.н.", "так называемый", language="ru", flags=""
+        )
+        self.assertTrue(result["added"])
+        self.assertEqual(result["abbr"], "т.н.")
+        self.assertEqual(result["language"], "ru")
+
+    def test_add_abbreviation_with_flags(self) -> None:
+        svc, mocks = _make_service()
+        result = svc.handle_add_abbreviation(
+            {"abbr": "кг.", "expansion": "килограмм", "language": "ru", "flags": "no_after_digit"}
+        )
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "кг.", "килограмм", language="ru", flags="no_after_digit"
+        )
+        self.assertTrue(result["added"])
+
+    def test_add_abbreviation_default_language(self) -> None:
+        svc, mocks = _make_service()
+        svc.handle_add_abbreviation({"abbr": "т.д.", "expansion": "так далее"})
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "т.д.", "так далее", language="ru", flags=""
+        )
+
+    def test_add_abbreviation_missing_abbr_raises(self) -> None:
+        svc, _ = _make_service()
+        with self.assertRaises(ValueError):
+            svc.handle_add_abbreviation({"expansion": "что-то"})
+
+    def test_add_abbreviation_missing_expansion_raises(self) -> None:
+        svc, _ = _make_service()
+        with self.assertRaises(ValueError):
+            svc.handle_add_abbreviation({"abbr": "т.н."})
+
 
 # ===========================================================================
 # post_process_text / list_post_process_steps
