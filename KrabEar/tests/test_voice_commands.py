@@ -17,12 +17,20 @@ from core.voice_commands import VoiceCommandProcessor  # noqa: E402
 
 
 def _make_proc(enabled: bool = True, languages=None) -> VoiceCommandProcessor:
-    """Фабрика: создаёт процессор с заданными настройками."""
+    """Фабрика: создаёт процессор с заданными настройками.
+
+    NOTE: strict_mode=False (legacy) so that tests covering single-word
+    ambiguous triggers («точка», «period», «coma», etc.) continue to pass.
+    These tests document the legacy behaviour, which remains available via
+    non-strict mode. For strict-mode behaviour see test_voice_commands_w1256_ambiguous.py.
+    """
     if languages is None:
         languages = ["ru", "es", "en"]
     settings = {
         "voice_commands_enabled": enabled,
         "voice_commands_languages": languages,
+        # Legacy mode: all single-word triggers active (W1256: strict=True is the new default)
+        "voice_commands_strict_mode": False,
     }
     return VoiceCommandProcessor(settings_get=lambda k, d: settings.get(k, d))
 
