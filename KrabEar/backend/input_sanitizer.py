@@ -18,6 +18,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _PATH_FIELDS = frozenset(
     {
         "path",
+        "file",
         "file_path",
         "audio_path",
         "import_path",
@@ -26,6 +27,7 @@ _PATH_FIELDS = frozenset(
         "output_path",
         "transcript_path",
         "ndjson_path",
+        "vault_path",
     }
 )
 
