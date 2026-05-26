@@ -35,6 +35,7 @@ from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
 from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
+from backend.text_processing_service import TextProcessingService
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
 from backend.language_learning import LanguageLearningManager
@@ -428,6 +429,26 @@ class BackendService:
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
+        # W1026 F1 — run data migration at startup if v1.0 store detected.
+        # Soft-fail: log + continue, never crash the backend.
+        try:
+            if self._data_migrator.check_migration_needed(self.store.data_dir):
+                _plan = self._data_migrator.get_migration_plan(self.store.data_dir)
+                logger.info("data_migrator: migration needed — plan: %s", _plan)
+                _mig_result = self._data_migrator.migrate(self.store.data_dir)
+                logger.info(
+                    "data_migrator: migration complete %s → %s "
+                    "(migrated=%d skipped=%d backup=%s)",
+                    _mig_result.from_version,
+                    _mig_result.to_version,
+                    _mig_result.items_migrated,
+                    _mig_result.items_skipped,
+                    _mig_result.backup_path,
+                )
+            else:
+                logger.debug("data_migrator: schema up-to-date, no migration needed")
+        except Exception:
+            logger.exception("data_migrator: startup migration failed (continuing with current schema)")
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         self._text_processing_svc = TextProcessingService(
             readability_scorer=self._readability_scorer,
@@ -1148,6 +1169,7 @@ class BackendService:
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
+            "rollback_migration": self._data_migrator.handle_rollback_migration,  # откат миграции из резервной копии
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
