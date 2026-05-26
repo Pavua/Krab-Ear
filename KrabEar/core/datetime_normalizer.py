@@ -558,6 +558,8 @@ class DateTimeNormalizer:
                     day = int(day_str)
                 except ValueError:
                     return m.group(0)
+            if not (1 <= day <= 31):
+                return m.group(0)
             month = _ES_MONTHS.get(month_str)
             if month is None:
                 return m.group(0)

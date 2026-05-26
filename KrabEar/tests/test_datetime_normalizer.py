@@ -170,6 +170,26 @@ class TestDateTimeNormalizerEsDate(unittest.TestCase):
         result = self._es("tercero de marzo")
         self.assertIn("03.03", result)
 
+    def test_es_date_day_zero_preserved(self):
+        """Day=0 is out of range → original text preserved (W1110 F9)."""
+        # «0 de noviembre» — synthesised edge case, day=0 should not convert
+        result = self._es("0 de noviembre")
+        self.assertNotIn("00.11", result)
+        self.assertIn("0 de noviembre", result)
+
+    def test_es_date_day_32_preserved(self):
+        """Day=32 is out of range → original text preserved (W1110 F9)."""
+        result = self._es("32 de enero")
+        self.assertNotIn("32.01", result)
+        self.assertIn("32 de enero", result)
+
+    def test_es_date_valid_range_converted(self):
+        """Day within 1-31 is normalised correctly (boundary check, W1110 F9)."""
+        result = self._es("1 de enero")
+        self.assertIn("01.01", result)
+        result31 = self._es("31 de enero")
+        self.assertIn("31.01", result31)
+
 
 class TestDateTimeNormalizerEsTime(unittest.TestCase):
     """Spanish time expressions → HH:MM."""
