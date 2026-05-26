@@ -123,6 +123,7 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
+from backend.audit_logger import AuditLogger
 
 import argparse
 from datetime import datetime, timedelta
@@ -550,6 +551,10 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+
+        # Audit logger — структурированный журнал IPC-запросов (NDJSON, ежедневная ротация 7 дней)
+        # Всегда включён (core observability). Флашится при shutdown через GracefulShutdownHandler.
+        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -1286,12 +1291,28 @@ class BackendService:
                 level="info",
             )
 
+        _t0 = time.monotonic()
         try:
             result = handler(params)
-            return {"id": request_id, "ok": True, "result": result}
+            response = {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
-            return self._error(request_id, "internal_error", str(exc))
+            response = self._error(request_id, "internal_error", str(exc))
+
+        # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
+        try:
+            _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            if not _privacy_on:
+                self._audit_logger.log_request(
+                    method=method,
+                    params=params if isinstance(params, dict) else {},
+                    result=response,
+                    duration_ms=(time.monotonic() - _t0) * 1000,
+                )
+        except Exception:
+            pass  # audit logging никогда не должен ронять IPC-ответ
+
+        return response
 
     _BATCH_MAX_REQUESTS = 50
 
