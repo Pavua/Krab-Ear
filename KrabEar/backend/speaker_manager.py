@@ -18,7 +18,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -51,12 +51,20 @@ class SpeakerManager:
     _FINGERPRINTS_FILENAME = "speaker_fingerprints.json"
     AUTO_REGISTER_MIN_CONFIDENCE: float = 0.50
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        *,
+        settings_provider: Callable[[], dict] | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._aliases: dict[str, str] = {}
         self._fingerprints: dict[str, list[float]] = {}
         self._auto_speaker_counter: int = 0
         self._embedding_model: Any = None
+        # Optional callable returning current settings dict; used to check
+        # privacy_mode_enabled before persisting biometric voice embeddings.
+        self._settings_provider: Callable[[], dict] | None = settings_provider
         if data_dir is not None:
             self._path: Path | None = Path(data_dir) / self._FILENAME
             self._fingerprints_path: Path | None = (
@@ -67,6 +75,15 @@ class SpeakerManager:
         else:
             self._path = None
             self._fingerprints_path = None
+
+    def _is_privacy_mode(self) -> bool:
+        """Возвращает True если privacy_mode_enabled активен в runtime settings."""
+        if self._settings_provider is None:
+            return False
+        try:
+            return bool(self._settings_provider().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     def _load(self) -> None:
         if self._path is None or not self._path.exists():
@@ -114,6 +131,11 @@ class SpeakerManager:
 
     def _save_fingerprints(self) -> None:
         if self._fingerprints_path is None:
+            return
+        if self._is_privacy_mode():
+            _log.info(
+                "speaker_manager: skipping fingerprint persist (privacy mode active)"
+            )
             return
         try:
             self._fingerprints_path.parent.mkdir(parents=True, exist_ok=True)

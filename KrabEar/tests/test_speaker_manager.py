@@ -662,5 +662,108 @@ class TestSpeakerManagerWave92(unittest.TestCase):
         self.assertEqual(sid2, "Speaker_1")
 
 
+class TestSpeakerManagerPrivacyMode(unittest.TestCase):
+    """W951 HIGH F2: voice embeddings must not be persisted when privacy_mode_enabled."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_register_speaker_skips_persist_in_privacy_mode(self):
+        """Fingerprint file must NOT be written when privacy_mode_enabled=True."""
+        import numpy as np
+
+        mgr = SpeakerManager(
+            data_dir=self.tmpdir,
+            settings_provider=lambda: {"privacy_mode_enabled": True},
+        )
+        emb = np.ones(512, dtype=np.float32)
+        sid = mgr.register_speaker("TestUser", emb)
+
+        # In-memory state should be intact
+        self.assertIn(sid, mgr.get_all_fingerprints())
+
+        # On-disk file must NOT exist — privacy gate suppressed _save_fingerprints
+        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
+        self.assertFalse(
+            fp_path.exists(),
+            "speaker_fingerprints.json must not be written when privacy mode is active",
+        )
+
+    def test_register_speaker_persists_when_privacy_mode_off(self):
+        """Fingerprint file IS written when privacy_mode_enabled=False (baseline)."""
+        import numpy as np
+
+        mgr = SpeakerManager(
+            data_dir=self.tmpdir,
+            settings_provider=lambda: {"privacy_mode_enabled": False},
+        )
+        emb = np.ones(512, dtype=np.float32)
+        mgr.register_speaker("TestUser", emb)
+
+        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
+        self.assertTrue(
+            fp_path.exists(),
+            "speaker_fingerprints.json must be written when privacy mode is off",
+        )
+
+    def test_register_speaker_persists_without_settings_provider(self):
+        """Default (no settings_provider) should persist fingerprints as before."""
+        import numpy as np
+
+        mgr = SpeakerManager(data_dir=self.tmpdir)
+        emb = np.ones(512, dtype=np.float32)
+        mgr.register_speaker("AnonUser", emb)
+
+        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
+        self.assertTrue(
+            fp_path.exists(),
+            "speaker_fingerprints.json must be written when no settings_provider given",
+        )
+
+    def test_update_fingerprint_skips_persist_in_privacy_mode(self):
+        """update_fingerprint must not persist when privacy mode is active."""
+        import numpy as np
+
+        # First register without privacy mode
+        mgr = SpeakerManager(
+            data_dir=self.tmpdir,
+            settings_provider=lambda: {"privacy_mode_enabled": False},
+        )
+        emb0 = np.ones(512, dtype=np.float32)
+        sid = mgr.register_speaker("User", emb0)
+        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
+        mtime_after_register = fp_path.stat().st_mtime
+
+        # Now switch to privacy mode and update fingerprint
+        mgr2 = SpeakerManager(
+            data_dir=self.tmpdir,
+            settings_provider=lambda: {"privacy_mode_enabled": True},
+        )
+        emb1 = np.zeros(512, dtype=np.float32)
+        emb1[0] = 1.0
+        mgr2.update_fingerprint(sid, emb1)
+
+        # File mtime must NOT change (privacy gate blocked the write)
+        mtime_after_update = fp_path.stat().st_mtime
+        self.assertEqual(
+            mtime_after_register,
+            mtime_after_update,
+            "speaker_fingerprints.json must not be rewritten when privacy mode is active",
+        )
+
+    def test_is_privacy_mode_handles_provider_exception(self):
+        """_is_privacy_mode returns False gracefully when provider raises."""
+        def broken_provider():
+            raise RuntimeError("settings unavailable")
+
+        mgr = SpeakerManager(settings_provider=broken_provider)
+        # Should not raise; defaults to False (non-private, safe fallback)
+        self.assertFalse(mgr._is_privacy_mode())
+
+
 if __name__ == "__main__":
     unittest.main()
