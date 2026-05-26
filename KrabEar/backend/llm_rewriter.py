@@ -461,6 +461,11 @@ class LLMRewriter:
                 level="info",
                 data={"reason": "circuit_open", "circuit_state": self._circuit.state},
             )
+            self._push_error(
+                "rewriter.circuit_open",
+                f"circuit open — skipping rewrite; state={self._circuit.state}",
+                severity="warn",
+            )
             return LLMRewriteResult(
                 ok=False, text=None, fallback_reason="circuit_open", latency_ms=None
             )
@@ -703,6 +708,21 @@ class LLMRewriter:
                 self._push_error(
                     "rewriter.gpu_stream_error",
                     f"http_{response.status_code}: {body_preview}",
+                    severity="error",
+                )
+            elif response.status_code == 422 or (
+                response.status_code in (400, 422)
+                and (
+                    "model has not started loading" in body_preview.lower()
+                    or "model is not loaded" in body_preview.lower()
+                    or "not loaded" in body_preview.lower()
+                )
+            ):
+                # W774: LM Studio returns HTTP 422 (or 400 with "not loaded" body)
+                # when the selected model was never started by the user.
+                self._push_error(
+                    "rewriter.model_unloaded",
+                    f"http_{response.status_code}: model not loaded — {body_preview}",
                     severity="error",
                 )
             else:
