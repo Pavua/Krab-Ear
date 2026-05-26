@@ -29,7 +29,6 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
-from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -67,6 +66,7 @@ class RecordingCoreService:
         action_items_extractor: Any,
         transcription_counter_ref: list,  # [int] mutable box so BackendService sees updates
         last_stt_engine_ref: list,        # [str|None] mutable box
+        auto_deduplicator: Any = None,    # W1247: AutoDeduplicator — None disables dedup
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -84,6 +84,10 @@ class RecordingCoreService:
         self._action_items_extractor = action_items_extractor
         self._transcription_counter_ref = transcription_counter_ref
         self._last_stt_engine_ref = last_stt_engine_ref
+        self._auto_deduplicator = auto_deduplicator
+
+        # W1247: lock that serialises dedup-check + persist to prevent concurrent-insert race
+        self._persist_lock = threading.Lock()
 
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
@@ -98,9 +102,6 @@ class RecordingCoreService:
         # Realtime partial transcriber state
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
-
-        # Realtime silence filter state (W878 — wired from dead code)
-        self._rt_silence_filter: RealtimeSilenceFilter | None = None
 
         # Async transcription jobs
         self._job_tracker = JobTracker()
@@ -139,19 +140,6 @@ class RecordingCoreService:
     # ------------------------------------------------------------------ #
 
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        # Apply selected_input_device from settings before starting (W1327 F2 HIGH).
-        # Uses cached_settings() — runtime-safe per Wave 58 lesson.
-        _settings_pre = self._settings_svc.cached_settings()
-        _selected_device = _settings_pre.get("selected_input_device", None)
-        if _selected_device is not None and hasattr(self.recorder, "set_device"):
-            try:
-                self.recorder.set_device(_selected_device)
-            except Exception as _dev_err:
-                logger.warning(
-                    "Не удалось применить аудиоустройство %r: %s",
-                    _selected_device,
-                    _dev_err,
-                )
         started = self.recorder.start()
         if not started:
             with self._preview_lock:
@@ -206,20 +194,6 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
-
-        # W878: wire RealtimeSilenceFilter — was instantiated nowhere (dead code audit bug).
-        # Disabled by default (realtime_silence_filter_enabled=False); enabled via settings.
-        try:
-            self._rt_silence_filter = RealtimeSilenceFilter(
-                recorder=self.recorder,
-                settings=settings,
-                event_bus_emit=event_bus.emit,
-            )
-            self._rt_silence_filter.start()
-        except Exception:
-            logger.exception("Не удалось запустить RealtimeSilenceFilter")
-            self._rt_silence_filter = None
-
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -236,7 +210,6 @@ class RecordingCoreService:
         stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
         _rt_session_id = phase_a["rt_session_id"]
         sr = phase_a["sr"]
-        _silence_ranges = phase_a.get("silence_ranges") or []
 
         # Phase B: audio quality guards (silence + background)
         phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
@@ -246,8 +219,8 @@ class RecordingCoreService:
         silence_detected = phase_b["silence_detected"]
         background_guard_rejected = phase_b["background_guard_rejected"]
 
-        # Phase C: STT execution (pass silence_ranges for pre-zeroing silent segments)
-        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr, silence_ranges=_silence_ranges)
+        # Phase C: STT execution
+        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
         transcribe_payload = phase_c["transcribe_payload"]
 
         # Phase D: post-processing
@@ -285,7 +258,7 @@ class RecordingCoreService:
             if hasattr(self.recorder, "snapshot_rms")
             else 0.0
         )
-        active_session = self._session_tracker.get_active_session()
+        active_session = self._session_tracker._active_session
         session_id = (active_session.get("session_id", "__live__") if active_session else "__live__")
         elapsed_sec = 0.0
         if hasattr(self.recorder, "get_duration_sec"):
@@ -322,40 +295,10 @@ class RecordingCoreService:
 
     def handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
         """Синхронная транскрибация списка файлов (CLI/legacy путь)."""
-        _t0 = time.monotonic()
-        file_count = len(params.get("paths", [])) if isinstance(params.get("paths"), list) else 0
-        try:
-            result = self._transcribe_paths_core(params)
-            add_breadcrumb(
-                category="recording",
-                message="transcribe_paths",
-                level="info",
-                data={
-                    "ok": True,
-                    "file_count": file_count,
-                    "processed": result.get("processed", 0),
-                    "error_count": len(result.get("errors") or []),
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            return result
-        except Exception as exc:
-            add_breadcrumb(
-                category="recording",
-                message="transcribe_paths",
-                level="error",
-                data={
-                    "ok": False,
-                    "file_count": file_count,
-                    "error_type": type(exc).__name__,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            raise
+        return self._transcribe_paths_core(params)
 
     def handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
         """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу."""
-        _t0 = time.monotonic()
         raw_paths = params.get("paths", [])
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
@@ -365,23 +308,10 @@ class RecordingCoreService:
             for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
         ]
         selected: list[str] = []
-        rejected_paths: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(resolved.is_relative_to(root) for root in allowed_roots):
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
                 selected.append(str(resolved))
-            else:
-                rejected_paths.append(p)
-                logger.warning(
-                    "transcribe_paths_async: path outside allowlist: %s", p
-                )
-        if rejected_paths and not selected:
-            return {
-                "ok": False,
-                "error": "all_paths_rejected",
-                "rejected_paths": rejected_paths,
-                "message": f"Все {len(rejected_paths)} путей отклонены: за пределами допустимых корней",
-            }
         try:
             audio_paths = self._collect_audio_paths(selected) if selected else []
         except Exception:
@@ -509,22 +439,7 @@ class RecordingCoreService:
             daemon=True,
         )
         thread.start()
-        add_breadcrumb(
-            category="recording",
-            message="transcribe_paths_async",
-            level="info",
-            data={
-                "ok": True,
-                "job_id": job_id,
-                "file_count": total_files,
-                "rejected_count": len(rejected_paths),
-                "duration_ms": round((time.monotonic() - _t0) * 1000),
-            },
-        )
-        result: dict[str, Any] = {"job_id": job_id}
-        if rejected_paths:
-            result["rejected_paths"] = rejected_paths
-        return result
+        return {"job_id": job_id}
 
     def handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние async-job'а."""
@@ -584,7 +499,7 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(resolved.is_relative_to(root) for root in allowed_roots):
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
@@ -612,20 +527,6 @@ class RecordingCoreService:
             "by_ext": by_ext,
             "total_bytes": total_bytes,
         }
-
-    def handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Обновляет paste_status для записи истории (Swift вызывает после вставки).
-
-        Логически принадлежит RecordingCoreService: paste — финальный шаг цикла
-        запись → транскрипция → вставка. store.set_paste_status вызывается и внутри
-        этого сервиса (phase_e) — централизация здесь убирает дублирование.
-        """
-        item_id = str(params.get("id", "")).strip()
-        paste_status = str(params.get("paste_status", "failed")).strip() or "failed"
-        ok = self.store.set_paste_status(item_id=item_id, paste_status=paste_status)
-        if not ok:
-            raise RuntimeError("Не удалось обновить paste_status")
-        return {"updated": True, "id": item_id, "paste_status": paste_status}
 
     # ------------------------------------------------------------------ #
     # Preview worker (used by CallAssistService too via reset/start fns)  #
@@ -836,7 +737,7 @@ class RecordingCoreService:
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
-        """Stop preview worker, stop realtime partial, stop silence filter, stop recorder."""
+        """Stop preview worker, stop realtime partial, stop recorder."""
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
         if self._rt_partial is not None:
@@ -846,16 +747,6 @@ class RecordingCoreService:
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
             finally:
                 self._rt_partial = None
-
-        # W878: collect silence ranges before stopping recorder
-        silence_ranges: list[tuple[float, float]] = []
-        if self._rt_silence_filter is not None:
-            try:
-                silence_ranges = self._rt_silence_filter.stop()
-            except Exception:
-                logger.exception("Ошибка при остановке RealtimeSilenceFilter")
-            finally:
-                self._rt_silence_filter = None
 
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
@@ -916,7 +807,6 @@ class RecordingCoreService:
             "stop_tail_trim_ms": stop_tail_trim_ms,
             "rt_session_id": rt_session_id,
             "sr": sr,
-            "silence_ranges": silence_ranges,
         }
 
     def _stop_recording_phase_b(
@@ -1009,7 +899,6 @@ class RecordingCoreService:
         audio: Any,
         duration_sec: float,
         sr: dict[str, Any],
-        silence_ranges: list[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
         """Load vocabulary/context/glossary and run the transcriber."""
         quality_profile = sr["quality_profile"]
@@ -1060,8 +949,6 @@ class RecordingCoreService:
             },
         )
 
-        _phase_c_settings = self._settings_svc.cached_settings()
-        _diarize_enabled = _phase_c_settings.get("diarization_enabled", False)
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -1070,9 +957,6 @@ class RecordingCoreService:
             extra_vocabulary=user_vocabulary if user_vocabulary else None,
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
-            silence_ranges=silence_ranges if silence_ranges else None,
-            settings=_phase_c_settings,
-            diarize=True if _diarize_enabled else None,
         )
 
         return {"transcribe_payload": transcribe_payload}
@@ -1223,32 +1107,57 @@ class RecordingCoreService:
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
 
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-        )
-        # Инвалидируем кэш автоглоссария — новые слова сразу используются в STT-промпте.
-        if self._auto_glossary is not None:
-            try:
-                self._auto_glossary.invalidate()
-            except Exception as _ag_inv_exc:
-                logger.warning("auto_glossary invalidate error after stop_recording persist: %s", _ag_inv_exc)
+        # W1247: auto-dedup guard — serialised under _persist_lock to prevent
+        # concurrent-insert race (W1243 F5).  Privacy check first (W1243 F4).
+        with self._persist_lock:
+            if (
+                self._auto_deduplicator is not None
+                and not settings.get("privacy_mode_enabled", False)
+                and settings.get("auto_dedup_enabled", False)
+            ):
+                _ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                try:
+                    dup_result = self._auto_deduplicator.check_duplicate(
+                        text=display_text,
+                        timestamp=_ts,
+                        store=self.store,
+                    )
+                    if dup_result.is_duplicate:
+                        logger.info(
+                            "auto_dedup: skipping near-duplicate item (sim=%.3f, original=%s)",
+                            dup_result.similarity,
+                            dup_result.duplicate_of,
+                        )
+                        return {
+                            "status": "ok",
+                            "skipped": "duplicate",
+                            "duplicate_of": dup_result.duplicate_of,
+                            "similarity": dup_result.similarity,
+                        }
+                except Exception:
+                    logger.exception("auto_dedup: check_duplicate raised — proceeding with persist")
+
+            item = self.store.add_history_item(
+                text=display_text,
+                paste_status="failed",
+                source_text=text,
+                translated_text=translated_text,
+                translation_mode=translation.mode,
+                source_lang=translation.source_lang,
+                target_lang=translation.target_lang,
+                translation_status=translation_status,
+                translation_engine=translation.engine,
+                cleaned_text=tp.get("cleaned_text", ""),
+                llm_applied=bool(tp.get("llm_applied", False)),
+                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+                diarization=diarization_data,
+                audio_duration_sec=duration_sec if duration_sec else None,
+                confidence=confidence if confidence else None,
+                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+            )
+        # _persist_lock released; item is now committed to store
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1396,7 +1305,7 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(resolved.is_relative_to(root) for root in allowed_roots):
+            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
@@ -1423,14 +1332,25 @@ class RecordingCoreService:
                     pass
 
                 import_lang_hint = lang_hint if lang_hint else "auto"
-                transcribe_payload = self.transcriber.transcribe(
-                    audio_path,
-                    quality_profile=quality_profile,
-                    cleanup_profile=cleanup_profile,
-                    lang_hint=import_lang_hint,
-                    extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                    progress_callback=progress_callback,
-                )
+                if progress_callback is not None:
+                    self.transcriber.engine.set_quality_profile(quality_profile)
+                    transcribe_payload = self.transcriber.engine.transcribe(
+                        audio_path,
+                        cleanup_profile=cleanup_profile,
+                        is_preview=False,
+                        domain="casual",
+                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                        lang_hint=import_lang_hint,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    transcribe_payload = self.transcriber.transcribe(
+                        audio_path,
+                        quality_profile=quality_profile,
+                        cleanup_profile=cleanup_profile,
+                        lang_hint=import_lang_hint,
+                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                    )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
@@ -1453,43 +1373,71 @@ class RecordingCoreService:
                 final_text = translated_text if (translate_and_paste and translated_text) else text
                 display_text = self._format_text_with_speakers(final_text, diarization_data)
 
-                history_item = self.store.add_history_item(
-                    text=display_text,
-                    paste_status="failed",
-                    source_text=text,
-                    translated_text=translated_text,
-                    translation_mode=translation.mode,
-                    source_lang=translation.source_lang,
-                    target_lang=translation.target_lang,
-                    translation_status=translation.status,
-                    translation_engine=translation.engine,
-                    diarization=diarization_data,
-                    audio_duration_sec=audio_duration_sec,
-                    emotion=(
-                        transcribe_payload.get("emotion")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("emotion"), str)
-                        else None
-                    ),
-                    word_timestamps=(
-                        transcribe_payload.get("word_timestamps")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("word_timestamps"), list)
-                        else None
-                    ),
-                    speaker_turns=(
-                        transcribe_payload.get("speaker_turns")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("speaker_turns"), list)
-                        else None
-                    ),
-                )
-                # Инвалидируем кэш автоглоссария после persist импортированного файла.
-                if self._auto_glossary is not None:
-                    try:
-                        self._auto_glossary.invalidate()
-                    except Exception as _ag_inv_exc2:
-                        logger.warning("auto_glossary invalidate error after transcribe_paths persist: %s", _ag_inv_exc2)
+                # W1247: auto-dedup guard for batch import path — same constraints as
+                # _stop_recording_phase_e (privacy first, then enabled flag, then check).
+                _skip_dup = False
+                with self._persist_lock:
+                    if (
+                        self._auto_deduplicator is not None
+                        and not settings.get("privacy_mode_enabled", False)
+                        and settings.get("auto_dedup_enabled", False)
+                    ):
+                        _ts_import = time.strftime("%Y-%m-%dT%H:%M:%S")
+                        try:
+                            _dup_result = self._auto_deduplicator.check_duplicate(
+                                text=display_text,
+                                timestamp=_ts_import,
+                                store=self.store,
+                            )
+                            if _dup_result.is_duplicate:
+                                logger.info(
+                                    "auto_dedup: batch import skipping duplicate (sim=%.3f, path=%s)",
+                                    _dup_result.similarity,
+                                    audio_path,
+                                )
+                                _skip_dup = True
+                        except Exception:
+                            logger.exception(
+                                "auto_dedup: check_duplicate raised during batch import — proceeding"
+                            )
+
+                    if not _skip_dup:
+                        history_item = self.store.add_history_item(
+                            text=display_text,
+                            paste_status="failed",
+                            source_text=text,
+                            translated_text=translated_text,
+                            translation_mode=translation.mode,
+                            source_lang=translation.source_lang,
+                            target_lang=translation.target_lang,
+                            translation_status=translation.status,
+                            translation_engine=translation.engine,
+                            diarization=diarization_data,
+                            audio_duration_sec=audio_duration_sec,
+                            emotion=(
+                                transcribe_payload.get("emotion")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("emotion"), str)
+                                else None
+                            ),
+                            word_timestamps=(
+                                transcribe_payload.get("word_timestamps")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("word_timestamps"), list)
+                                else None
+                            ),
+                            speaker_turns=(
+                                transcribe_payload.get("speaker_turns")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("speaker_turns"), list)
+                                else None
+                            ),
+                        )
+                # _persist_lock released
+
+                if _skip_dup:
+                    self._safe_callback(on_file_done, file_index, None, "duplicate_skipped")
+                    continue
 
                 summary: str | None = None
                 if len(final_text) > 500:
