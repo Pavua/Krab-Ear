@@ -1,0 +1,376 @@
+"""Unit tests — AppleIntegrationService (6 IPC handlers).
+
+Handlers under test:
+  - handle_send_to_telegram      — send text to Telegram via TelegramBridge
+  - handle_list_telegram_chats   — list Telegram chats via TelegramBridge
+  - handle_create_apple_note     — create Apple Note via osascript
+  - handle_create_apple_reminder — create Apple Reminder via osascript
+  - handle_create_calendar_event — create Apple Calendar event via osascript
+  - handle_send_imessage         — send iMessage via osascript
+
+All collaborators are mocked; subprocess.run is patched to avoid real osascript calls.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.apple_integration_service import AppleIntegrationService  # noqa: E402
+from backend.telegram_bridge import CircuitBreakerOpen  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_service(bridge=None) -> AppleIntegrationService:
+    return AppleIntegrationService(telegram_bridge=bridge or MagicMock())
+
+
+def _completed(returncode=0, stdout="note id 1", stderr=""):
+    """Return a fake subprocess.CompletedProcess."""
+    cp = MagicMock()
+    cp.returncode = returncode
+    cp.stdout = stdout
+    cp.stderr = stderr
+    return cp
+
+
+# ---------------------------------------------------------------------------
+# handle_send_to_telegram
+# ---------------------------------------------------------------------------
+
+class TestHandleSendToTelegram(unittest.TestCase):
+
+    def test_happy_path_returns_bridge_result(self):
+        bridge = MagicMock()
+        bridge.send_message.return_value = {
+            "message_id": 42,
+            "sent_at": "2026-05-26T10:00:00",
+            "chat_title": "Dev Chat",
+        }
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            result = svc.handle_send_to_telegram({"text": "hello", "chat_id": 123})
+        self.assertEqual(result["message_id"], 42)
+        bridge.send_message.assert_called_once_with(text="hello", chat_id=123, reply_to=None)
+
+    def test_string_chat_id_passed_through(self):
+        bridge = MagicMock()
+        bridge.send_message.return_value = {"message_id": 1, "sent_at": "", "chat_title": ""}
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            svc.handle_send_to_telegram({"text": "hi", "chat_id": "@mychannel"})
+        bridge.send_message.assert_called_once_with(
+            text="hi", chat_id="@mychannel", reply_to=None
+        )
+
+    def test_reply_to_parsed_as_int(self):
+        bridge = MagicMock()
+        bridge.send_message.return_value = {"message_id": 2, "sent_at": "", "chat_title": ""}
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            svc.handle_send_to_telegram({"text": "reply", "chat_id": 1, "reply_to": "99"})
+        bridge.send_message.assert_called_once_with(text="reply", chat_id=1, reply_to=99)
+
+    def test_bridge_disabled_raises_runtime_error(self):
+        svc = _make_service()
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = False
+            with self.assertRaises(RuntimeError) as ctx:
+                svc.handle_send_to_telegram({"text": "x", "chat_id": 1})
+        self.assertIn("bridge_disabled", str(ctx.exception))
+
+    def test_empty_text_raises_value_error(self):
+        svc = _make_service()
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            with self.assertRaises(ValueError):
+                svc.handle_send_to_telegram({"text": "  ", "chat_id": 1})
+
+    def test_missing_chat_id_raises_value_error(self):
+        svc = _make_service()
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            with self.assertRaises(ValueError):
+                svc.handle_send_to_telegram({"text": "hello"})
+
+    def test_circuit_breaker_open_wraps_as_runtime_error(self):
+        bridge = MagicMock()
+        bridge.send_message.side_effect = CircuitBreakerOpen("open")
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            with self.assertRaises(RuntimeError) as ctx:
+                svc.handle_send_to_telegram({"text": "x", "chat_id": 1})
+        self.assertIn("circuit_open", str(ctx.exception))
+
+    def test_generic_bridge_exception_wrapped_as_krab_unavailable(self):
+        bridge = MagicMock()
+        bridge.send_message.side_effect = ConnectionError("refused")
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            with self.assertRaises(RuntimeError) as ctx:
+                svc.handle_send_to_telegram({"text": "x", "chat_id": 1})
+        self.assertIn("krab_unavailable", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# handle_list_telegram_chats
+# ---------------------------------------------------------------------------
+
+class TestHandleListTelegramChats(unittest.TestCase):
+
+    def test_returns_chats_list(self):
+        bridge = MagicMock()
+        bridge.get_chats.return_value = [
+            {"id": 1, "title": "Dev", "type": "private"},
+        ]
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            result = svc.handle_list_telegram_chats({})
+        self.assertIn("chats", result)
+        self.assertEqual(len(result["chats"]), 1)
+
+    def test_bridge_disabled_raises(self):
+        svc = _make_service()
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = False
+            with self.assertRaises(RuntimeError) as ctx:
+                svc.handle_list_telegram_chats({})
+        self.assertIn("bridge_disabled", str(ctx.exception))
+
+    def test_circuit_open_raises(self):
+        bridge = MagicMock()
+        bridge.get_chats.side_effect = CircuitBreakerOpen("breaker")
+        svc = _make_service(bridge)
+        with patch("backend.apple_integration_service.settings") as mock_settings:
+            mock_settings.TELEGRAM_BRIDGE_ENABLED = True
+            with self.assertRaises(RuntimeError) as ctx:
+                svc.handle_list_telegram_chats({})
+        self.assertIn("circuit_open", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# handle_create_apple_note
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateAppleNote(unittest.TestCase):
+
+    def test_success_returns_ok_true(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0, "note id 1")) as mock_run:
+            result = svc.handle_create_apple_note({"title": "Test", "body": "Content"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["note_id"], "note id 1")
+        self.assertIsNone(result["error"])
+        mock_run.assert_called_once()
+
+    def test_osascript_failure_returns_ok_false(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(1, "", "Permission denied")):
+            result = svc.handle_create_apple_note({"title": "T", "body": "B"})
+        self.assertFalse(result["ok"])
+        self.assertIn("Permission", result["error"])
+
+    def test_timeout_returns_ok_false(self):
+        svc = _make_service()
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("osascript", 10)):
+            result = svc.handle_create_apple_note({"title": "T", "body": "B"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "osascript timeout")
+
+    def test_folder_included_in_script(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0, "id 2")) as mock_run:
+            svc.handle_create_apple_note({"title": "T", "body": "B", "folder": "Work"})
+        call_args = mock_run.call_args
+        script = call_args[0][0][2]  # ["osascript", "-e", script]
+        self.assertIn("Work", script)
+        self.assertIn("targetFolder", script)
+
+    def test_default_title_used_when_missing(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0, "id 3")) as mock_run:
+            svc.handle_create_apple_note({})
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("Krab Ear note", script)
+
+
+# ---------------------------------------------------------------------------
+# handle_create_apple_reminder
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateAppleReminder(unittest.TestCase):
+
+    def test_success_without_list(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)):
+            result = svc.handle_create_apple_reminder({"title": "Buy milk"})
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+
+    def test_success_with_list_name(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_apple_reminder({"title": "Task", "list_name": "Work"})
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("Work", script)
+
+    def test_due_date_included_in_script(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_apple_reminder({"title": "T", "due_date": "2026-06-01"})
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("due date", script)
+        self.assertIn("2026-06-01", script)
+
+    def test_osascript_failure_returns_ok_false(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(1, "", "Not authorized")):
+            result = svc.handle_create_apple_reminder({"title": "T"})
+        self.assertFalse(result["ok"])
+        self.assertIn("Not authorized", result["error"])
+
+    def test_timeout_handled(self):
+        svc = _make_service()
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("osascript", 10)):
+            result = svc.handle_create_apple_reminder({"title": "T"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "osascript timeout")
+
+
+# ---------------------------------------------------------------------------
+# handle_create_calendar_event
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateCalendarEvent(unittest.TestCase):
+
+    def test_missing_title_returns_error(self):
+        svc = _make_service()
+        result = svc.handle_create_calendar_event({"start_date": "2026-06-01T10:00:00"})
+        self.assertFalse(result["ok"])
+        self.assertIn("title", result["error"])
+
+    def test_missing_start_date_returns_error(self):
+        svc = _make_service()
+        result = svc.handle_create_calendar_event({"title": "Meeting"})
+        self.assertFalse(result["ok"])
+        self.assertIn("start_date", result["error"])
+
+    def test_success_without_calendar(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)):
+            result = svc.handle_create_calendar_event(
+                {"title": "Standup", "start_date": "2026-06-01T09:00:00"}
+            )
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+
+    def test_calendar_name_included_in_script(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_calendar_event(
+                {
+                    "title": "Review",
+                    "start_date": "2026-06-01T10:00:00",
+                    "calendar_name": "Work",
+                }
+            )
+        script = mock_run.call_args[0][0][2]
+        self.assertIn('"Work"', script)
+
+    def test_duration_defaults_to_30(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_create_calendar_event(
+                {"title": "T", "start_date": "2026-06-01T10:00:00"}
+            )
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("30", script)
+
+    def test_timeout_handled(self):
+        svc = _make_service()
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("osascript", 15)):
+            result = svc.handle_create_calendar_event(
+                {"title": "T", "start_date": "2026-06-01T10:00:00"}
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "osascript timeout")
+
+
+# ---------------------------------------------------------------------------
+# handle_send_imessage
+# ---------------------------------------------------------------------------
+
+class TestHandleSendImessage(unittest.TestCase):
+
+    def test_missing_recipient_returns_error(self):
+        svc = _make_service()
+        result = svc.handle_send_imessage({"body": "hi"})
+        self.assertFalse(result["ok"])
+        self.assertIn("recipient", result["error"])
+
+    def test_missing_body_returns_error(self):
+        svc = _make_service()
+        result = svc.handle_send_imessage({"recipient": "+79001234567"})
+        self.assertFalse(result["ok"])
+        self.assertIn("body", result["error"])
+
+    def test_success_imessage(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)):
+            result = svc.handle_send_imessage(
+                {"recipient": "+79001234567", "body": "Hello"}
+            )
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+
+    def test_invalid_service_defaults_to_imessage(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_send_imessage(
+                {"recipient": "+7", "body": "x", "service": "WhatsApp"}
+            )
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("iMessage", script)
+
+    def test_sms_service_in_script(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(0)) as mock_run:
+            svc.handle_send_imessage(
+                {"recipient": "+7", "body": "x", "service": "SMS"}
+            )
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("SMS", script)
+
+    def test_osascript_failure_returns_ok_false(self):
+        svc = _make_service()
+        with patch("subprocess.run", return_value=_completed(1, "", "Messages not running")):
+            result = svc.handle_send_imessage({"recipient": "+7", "body": "x"})
+        self.assertFalse(result["ok"])
+        self.assertIn("Messages", result["error"])
+
+    def test_timeout_handled(self):
+        svc = _make_service()
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("osascript", 10)):
+            result = svc.handle_send_imessage({"recipient": "+7", "body": "x"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "osascript timeout")
+
+
+if __name__ == "__main__":
+    unittest.main()
