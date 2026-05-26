@@ -545,7 +545,10 @@ class LLMRewriter:
                 "model=%s base_url=%s",
                 self._model, self._base_url,
             )
-            time.sleep(10)
+            if self._shutdown_event.wait(timeout=10.0):
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="shutdown", latency_ms=None
+                )
             start = time.monotonic()
             try:
                 with self._post_lock:
@@ -598,7 +601,10 @@ class LLMRewriter:
                 "sleeping 2s and retrying once model=%s base_url=%s",
                 self._model, self._base_url,
             )
-            time.sleep(2)
+            if self._shutdown_event.wait(timeout=2.0):
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="shutdown", latency_ms=None
+                )
             start = time.monotonic()
             try:
                 with self._post_lock:
@@ -1259,16 +1265,28 @@ class LLMRewriter:
             "last_error": self._last_error,
         }
 
+    def set_shutdown(self) -> None:
+        """Сигналит shutdown event для прерывания активных retry-ожиданий.
+
+        Вызывается при graceful shutdown backend'а. Прерывает:
+        - 10s wait после 503 (JIT cold load retry)
+        - 2s wait после Stream(gpu) Metal error retry
+        - idle keepalive loop
+
+        Идемпотентен — повторный вызов безопасен.
+        """
+        try:
+            self._shutdown_event.set()
+        except Exception:
+            pass
+
     def close(self):
         """Закрывает HTTP session и освобождает connection pool.
 
         Вызывается при завершении backend'а для корректного очищения ресурсов.
         Также сигналит keepalive-треду на остановку.
         """
-        try:
-            self._shutdown_event.set()
-        except Exception:
-            pass
+        self.set_shutdown()
         self._session.close()
 
 
