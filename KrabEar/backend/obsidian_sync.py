@@ -17,6 +17,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+def _yaml_scalar(value: str) -> str:
+    """Return a YAML-safe scalar string.
+
+    Wraps in double-quotes and escapes internal double-quotes / backslashes
+    if the value contains any character that would break unquoted YAML scalars
+    (colon, newline, leading special chars, brackets, braces, etc.).
+    Plain ASCII-safe values that don't start with a YAML indicator are left
+    unquoted for readability.
+
+    This avoids a PyYAML dependency while being correct for the subset of
+    strings that appear in transcript frontmatter.
+    """
+    _NEEDS_QUOTE = re.compile(r'[:{}\[\]#&*!|>\'"\n\r,]|^\s|\s$|^[-?]')
+    if _NEEDS_QUOTE.search(value) or not value:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        return f'"{escaped}"'
+    return value
+
+
+def _parse_ts(ts_str: str) -> datetime:
+    """Parse an ISO-8601 timestamp string to a tz-aware datetime (UTC).
+
+    Handles:
+    - ``2026-05-26T12:00:00+00:00``  — already aware, kept as-is.
+    - ``2026-05-26T12:00:00Z``       — Z suffix → +00:00.
+    - ``2026-05-26T12:00:00``        — naive → assumed UTC.
+    """
+    ts_str = ts_str.strip()
+    if ts_str.endswith("Z"):
+        ts_str = ts_str[:-1] + "+00:00"
+    dt = datetime.fromisoformat(ts_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _ts_le(a: str, b: str) -> bool:
+    """Return True if timestamp string *a* is less-than-or-equal to *b*.
+
+    Falls back to lexicographic comparison if either value cannot be parsed,
+    preserving the original behaviour while avoiding ValueError crashes.
+    """
+    try:
+        return _parse_ts(a) <= _parse_ts(b)
+    except (ValueError, TypeError):
+        return a <= b
+
 logger = logging.getLogger("KrabEar.Backend.ObsidianSync")
 
 _SYNC_STATE_FILE = "obsidian_sync.json"
@@ -149,7 +197,7 @@ class ObsidianSyncManager:
 
                 # Инкрементальная синхронизация: пропускаем старые записи
                 if not force and last_sync_ts is not None:
-                    if item_ts <= last_sync_ts:
+                    if _ts_le(item_ts, last_sync_ts):
                         result.skipped_count += 1
                         if self._event_bus is not None:
                             self._event_bus.emit("app.status", {
@@ -331,18 +379,18 @@ class ObsidianSyncManager:
             if clean:
                 yaml_tags.append(clean)
 
-        # Строим frontmatter
+        # Строим frontmatter (F1: все строковые значения экранируем через _yaml_scalar)
         lines: list[str] = ["---"]
-        lines.append(f"title: Транскрипция {date_str}")
-        lines.append(f"date: {datetime_str}")
-        lines.append(f"id: {item_id}")
+        lines.append(f"title: {_yaml_scalar('Транскрипция ' + date_str)}")
+        lines.append(f"date: {_yaml_scalar(datetime_str)}")
+        lines.append(f"id: {_yaml_scalar(str(item_id))}")
         lines.append("tags:")
         for tag in yaml_tags:
-            lines.append(f"  - {tag}")
+            lines.append(f"  - {_yaml_scalar(tag)}")
         if source_lang:
-            lines.append(f"source_lang: {source_lang}")
+            lines.append(f"source_lang: {_yaml_scalar(str(source_lang))}")
         if target_lang:
-            lines.append(f"target_lang: {target_lang}")
+            lines.append(f"target_lang: {_yaml_scalar(str(target_lang))}")
         if confidence is not None:
             lines.append(f"confidence: {confidence:.3f}")
         lines.append("source: krab-ear")
