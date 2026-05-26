@@ -20,12 +20,14 @@ Strategy:
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
 import threading
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 logger = logging.getLogger("KrabEar.LMStudioLifecycle")
 
@@ -33,12 +35,15 @@ logger = logging.getLogger("KrabEar.LMStudioLifecycle")
 _REST_TIMEOUT_SEC = 1.5
 _CLI_TIMEOUT_SEC = 2.0
 
+# Safety cap: model IDs longer than this are rejected before any network call.
+_MODEL_ID_MAX_LEN = 256
+
 
 def _try_rest_unload(base_url: str, model_id: str) -> bool:
     """LM Studio REST: POST /api/v0/models/{model}/unload. Returns True on 2xx."""
     # base_url типа "http://localhost:1234/v1" — отбрасываем "/v1"
     api_root = base_url.rstrip("/").removesuffix("/v1")
-    url = f"{api_root}/api/v0/models/{model_id}/unload"
+    url = f"{api_root}/api/v0/models/{quote(model_id, safe='')}/unload"
     try:
         req = urllib.request.Request(url, method="POST")
         with urllib.request.urlopen(req, timeout=_REST_TIMEOUT_SEC) as resp:
@@ -58,7 +63,7 @@ def _try_rest_load(base_url: str, model_id: str) -> bool:
     api_root = base_url.rstrip("/").removesuffix("/v1")
     url = f"{api_root}/api/v0/models/load"
     try:
-        body = f'{{"model":"{model_id}"}}'.encode()
+        body = json.dumps({"model": model_id}).encode()
         req = urllib.request.Request(
             url, data=body, method="POST",
             headers={"Content-Type": "application/json"},
@@ -102,6 +107,12 @@ def unload_model_async(base_url: str, model_id: str) -> None:
     """
     if not model_id:
         return
+    if len(model_id) > _MODEL_ID_MAX_LEN:
+        logger.warning(
+            "LM Studio: model_id too long (%d chars, max %d) — unload skipped",
+            len(model_id), _MODEL_ID_MAX_LEN,
+        )
+        return
 
     def _worker() -> None:
         if _try_rest_unload(base_url, model_id):
@@ -130,6 +141,12 @@ def load_model_async(base_url: str, model_id: str) -> None:
     user может открыть Voice Assistant.
     """
     if not model_id:
+        return
+    if len(model_id) > _MODEL_ID_MAX_LEN:
+        logger.warning(
+            "LM Studio: model_id too long (%d chars, max %d) — load skipped",
+            len(model_id), _MODEL_ID_MAX_LEN,
+        )
         return
 
     def _worker() -> None:
