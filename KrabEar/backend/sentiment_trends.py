@@ -99,7 +99,7 @@ class SentimentTrendAnalyzer:
             result = self._detector.detect(text, language=language)
             score = _EMOTION_SCORE.get(result.primary_emotion, 0.0)
 
-            date_str = ts.date().isoformat()
+            date_str = ts.astimezone().date().isoformat()
             daily.setdefault(date_str, []).append(score)
             daily_emotions.setdefault(date_str, []).append(result.primary_emotion)
             all_scores.append(score)
