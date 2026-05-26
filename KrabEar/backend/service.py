@@ -1036,6 +1036,9 @@ class BackendService:
             "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
             "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
             "list_normalization_profiles": self._handle_list_normalization_profiles,  # список профилей нормализации текста
+            "add_normalization_profile": self._handle_add_normalization_profile,  # добавить пользовательский профиль нормализации
+            "remove_normalization_profile": self._handle_remove_normalization_profile,  # удалить пользовательский профиль нормализации
+            "apply_normalization_profile": self._handle_apply_normalization_profile,  # применить профиль нормализации к тексту
             "get_collection_items": self._collections.handle_get_collection_items,  # получить записи истории из коллекции
             "start_chain": self._chains.handle_start_chain,  # начать цепочку связанных записей
             "add_to_chain": self._chains.handle_add_to_chain,  # добавить запись в цепочку
@@ -1445,6 +1448,34 @@ class BackendService:
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
         """Возвращает список всех профилей нормализации текста."""
         return {"profiles": self._norm_profiles.list_profiles()}
+
+    def _handle_add_normalization_profile(self, params: dict) -> dict:
+        """Добавляет пользовательский профиль нормализации текста."""
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен")
+        rules = list(params.get("rules", []))
+        description = str(params.get("description", ""))
+        overwrite = bool(params.get("overwrite", False))
+        profile = self._norm_profiles.add_profile(name, rules, description, overwrite=overwrite)
+        return {"profile": profile.to_dict()}
+
+    def _handle_remove_normalization_profile(self, params: dict) -> dict:
+        """Удаляет пользовательский профиль нормализации текста."""
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен")
+        removed = self._norm_profiles.remove_profile(name)
+        return {"removed": removed, "name": name}
+
+    def _handle_apply_normalization_profile(self, params: dict) -> dict:
+        """Применяет профиль нормализации к тексту и возвращает результат."""
+        text = str(params.get("text", ""))
+        profile_name = str(params.get("profile_name", "")).strip()
+        if not profile_name:
+            raise ValueError("Параметр 'profile_name' обязателен")
+        normalized = self._norm_profiles.apply_profile(text, profile_name)
+        return {"text": normalized, "profile_name": profile_name}
 
     def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU."""

@@ -809,6 +809,39 @@ class TestNormalizationGroup(_DispatchBase):
     def test_list_normalization_profiles(self):
         self.assert_dispatch("list_normalization_profiles", ok_required=True)
 
+    def test_add_profile_dispatched(self):
+        resp = self.assert_dispatch(
+            "add_normalization_profile",
+            {"name": "test_custom", "rules": ["cleanup_soft"], "description": "тест"},
+            ok_required=True,
+        )
+        self.assertIn("profile", resp.get("result", {}))
+        self.assertEqual(resp["result"]["profile"]["name"], "test_custom")
+
+    def test_remove_profile_dispatched(self):
+        # Сначала добавляем профиль
+        self.svc.handle_request({
+            "id": "setup",
+            "method": "add_normalization_profile",
+            "params": {"name": "to_remove", "rules": ["cleanup_soft"]},
+        })
+        resp = self.assert_dispatch(
+            "remove_normalization_profile",
+            {"name": "to_remove"},
+            ok_required=True,
+        )
+        self.assertTrue(resp["result"]["removed"])
+
+    def test_apply_profile_dispatched(self):
+        resp = self.assert_dispatch(
+            "apply_normalization_profile",
+            {"text": "  привет   мир  ", "profile_name": "clean"},
+            ok_required=True,
+        )
+        result = resp["result"]
+        self.assertIn("text", result)
+        self.assertEqual(result["profile_name"], "clean")
+
 
 # ===========================================================================
 # Группа 17: Голосовые и аудио утилиты
