@@ -1280,11 +1280,18 @@ class HistoryService:
             raise RuntimeError("older_than_days должен быть положительным числом")
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-        cutoff_iso = cutoff.isoformat()
+        cutoff_ts = cutoff.timestamp()
+
+        def _item_ts(ts_str: str) -> float:
+            """Parse item.ts to a UTC POSIX timestamp; return inf on parse failure."""
+            try:
+                return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+            except (ValueError, AttributeError):
+                return float("inf")
 
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
-            to_delete = [item for item in active if item.ts < cutoff_iso]
+            to_delete = [item for item in active if _item_ts(item.ts) < cutoff_ts]
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
