@@ -109,7 +109,7 @@ class WarnBatcher:
         summary = f"[warn batch x{count}] {latest.message_debug}"
         self._sentry.capture_message(
             summary,
-            level="warn",
+            level="warning",
             tags={"phase": "b", "code": code, "component": latest.component},
             extras={"count": count, **latest.context},
         )
@@ -197,11 +197,15 @@ class ErrorBus:
         return items[-limit:] if limit < len(items) else items
 
     def clear(self) -> int:
-        """Clear the ring buffer and dedupe state. Returns count cleared."""
+        """Clear the ring buffer, dedupe state, and WarnBatcher state. Returns count cleared."""
         with self._lock:
             count = len(self._ring)
             self._ring.clear()
             self._last_emitted.clear()
+        if self._warn_batcher is not None:
+            with self._warn_batcher._lock:
+                self._warn_batcher._buffer.clear()
+                self._warn_batcher._first_seen.clear()
         return count
 
     # ------------------------------------------------------------------
