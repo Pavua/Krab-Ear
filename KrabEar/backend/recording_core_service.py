@@ -335,7 +335,7 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if any(resolved.is_relative_to(root) for root in allowed_roots):
                 selected.append(str(resolved))
         try:
             audio_paths = self._collect_audio_paths(selected) if selected else []
@@ -535,7 +535,7 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if any(resolved.is_relative_to(root) for root in allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
@@ -1324,7 +1324,7 @@ class RecordingCoreService:
         selected: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            if any(resolved.is_relative_to(root) for root in allowed_roots):
                 selected.append(str(resolved))
             else:
                 return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
