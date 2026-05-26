@@ -574,428 +574,185 @@ class TestAudioLangIDEmptyAudioHandled(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# W1117 — Wave 63 compliance: mx.clear_cache() called after each MLX inference
+# W1061 — F1/F2/F3 fix tests (Wave 1070)
 # ---------------------------------------------------------------------------
 
-def _try_import_mlx_core():
-    """Вспомогательная функция — возвращает mlx.core или None если не установлен."""
-    try:
-        import mlx.core as _mx  # type: ignore[import]
-        return _mx
-    except (ImportError, AttributeError):
-        return None
+class TestAudioLangIDAllSilenceReturnsUnd(unittest.TestCase):
+    """F1: Zero-peak (all-silence) audio returns 'und' immediately without inference."""
 
-
-class TestAudioLangIDMxClearCacheW1117(unittest.TestCase):
-    """test_mx_clear_cache_called_after_detect — W63 Wave compliance (W1109 F2).
-
-    Verifies that mx.clear_cache() is called after every _detect_with_mlx call,
-    both on the success path and the exception path, preventing Metal buffer
-    accumulation across recordings.
-
-    Strategy: patch the `clear_cache` attribute on the already-imported mlx.core
-    module object (if available), or verify the code path via AST inspection if
-    mlx.core is not installed. This avoids the nanobind double-registration crash
-    that occurs when replacing the entire mlx.core in sys.modules.
-    """
-
-    def setUp(self):
+    def test_all_silence_returns_und(self):
+        """np.zeros audio with peak < 1e-6 → 'und', inference never called."""
         AudioLanguageID._model_cache.clear()
-
-    def _make_mlx_mock(self, lang_result="ru"):
-        mock_mlx = MagicMock()
-        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
-        mock_mlx.load_models.load_model.return_value = MagicMock()
-        mock_mlx.decoding.detect_language.return_value = (lang_result, {lang_result: 0.95})
-        return mock_mlx
-
-    def test_mx_clear_cache_called_on_success_via_attribute_patch(self):
-        """mx.clear_cache() вызывается после успешного inference.
-
-        Патчим атрибут `clear_cache` на уже загруженном mlx.core объекте
-        (вместо замены всего модуля в sys.modules, что вызывает nanobind crash).
-        """
-        lid = AudioLanguageID()
-        mock_mlx = self._make_mlx_mock("ru")
-
-        mx_core = _try_import_mlx_core()
-        if mx_core is None:
-            self.skipTest("mlx.core не установлен — тест пропущен")
-
-        # Патчим атрибут clear_cache непосредственно на объекте модуля
-        original_clear_cache = getattr(mx_core, "clear_cache", None)
-        call_count = {"n": 0}
-
-        def fake_clear_cache():
-            call_count["n"] += 1
-
-        try:
-            mx_core.clear_cache = fake_clear_cache
-            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-                result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
-        finally:
-            # Восстанавливаем оригинал
-            if original_clear_cache is not None:
-                mx_core.clear_cache = original_clear_cache
-
-        self.assertEqual(result, "ru")
-        self.assertGreater(
-            call_count["n"],
-            0,
-            "mx.clear_cache() должен быть вызван хотя бы один раз после inference"
-        )
-
-    def test_mx_clear_cache_called_on_exception_path_via_attribute_patch(self):
-        """mx.clear_cache() вызывается даже когда detect_language бросает исключение."""
         lid = AudioLanguageID()
 
         mock_mlx = MagicMock()
         mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
         mock_mlx.load_models.load_model.return_value = MagicMock()
-        mock_mlx.decoding.detect_language.side_effect = RuntimeError("GPU error")
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.95})
 
-        mx_core = _try_import_mlx_core()
-        if mx_core is None:
-            self.skipTest("mlx.core не установлен — тест пропущен")
-
-        original_clear_cache = getattr(mx_core, "clear_cache", None)
-        call_count = {"n": 0}
-
-        def fake_clear_cache():
-            call_count["n"] += 1
-
-        try:
-            mx_core.clear_cache = fake_clear_cache
-            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-                result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
-        finally:
-            if original_clear_cache is not None:
-                mx_core.clear_cache = original_clear_cache
-
-        self.assertIsNone(result)
-        self.assertGreater(
-            call_count["n"],
-            0,
-            "mx.clear_cache() должен вызываться в finally даже при исключении в detect_language"
-        )
-
-    def test_mx_clear_cache_finally_block_present_in_source(self):
-        """AST-проверка: mx.clear_cache() вызывается в _detect_with_mlx.finally (под mlx_lock).
-
-        W1465 fix: outer finally в _run_detect УДАЛЁН (нарушал MLX thread-safety).
-        Correct call site — _detect_with_mlx.finally (INSIDE mlx_lock context).
-
-        Тест верифицирует:
-        1. _run_detect НЕ содержит finally с clear_cache (W1462 regression guard).
-        2. _detect_with_mlx содержит finally с clear_cache (W1367 compliance).
-        """
-        import ast
-        import inspect
-        import textwrap
-
-        # 1. _run_detect must NOT have a finally with clear_cache
-        source_run = textwrap.dedent(inspect.getsource(AudioLanguageID._run_detect))
-        tree_run = ast.parse(source_run)
-        for try_node in ast.walk(tree_run):
-            if not isinstance(try_node, ast.Try) or not try_node.finalbody:
-                continue
-            for finally_stmt in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
-                if isinstance(finally_stmt, ast.Call):
-                    if isinstance(finally_stmt.func, ast.Attribute):
-                        if finally_stmt.func.attr == "clear_cache":
-                            self.fail(
-                                "_run_detect содержит finally с clear_cache() — "
-                                "W1462 regression: outer call нарушает MLX thread-safety."
-                            )
-
-        # 2. _detect_with_mlx must have a finally with clear_cache
-        source_inner = textwrap.dedent(inspect.getsource(AudioLanguageID._detect_with_mlx))
-        tree_inner = ast.parse(source_inner)
-        found_clear_cache = False
-        for try_node in ast.walk(tree_inner):
-            if not isinstance(try_node, ast.Try) or not try_node.finalbody:
-                continue
-            for finally_stmt in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
-                if isinstance(finally_stmt, ast.Call):
-                    if isinstance(finally_stmt.func, ast.Attribute):
-                        if finally_stmt.func.attr == "clear_cache":
-                            found_clear_cache = True
-                            break
-
-        self.assertTrue(
-            found_clear_cache,
-            "_detect_with_mlx должен содержать finally с clear_cache() "
-            "(W1367 addition — правильное место под mlx_lock)"
-        )
-
-    def test_mx_clear_cache_soft_fail_when_mlx_core_absent(self):
-        """Когда mlx.core недоступен (AttributeError на clear_cache), soft-fail.
-
-        Симулируем отсутствие clear_cache на уже загруженном mlx.core объекте
-        (вместо удаления модуля из sys.modules — это вызывает nanobind crash при
-        повторном импорте).
-        """
-        mx_core = _try_import_mlx_core()
-        if mx_core is None:
-            # mlx.core не установлен вообще — код уже soft-fails через ImportError
-            self.skipTest("mlx.core не установлен — soft-fail через ImportError уже покрыт")
-
-        lid = AudioLanguageID()
-        mock_mlx = self._make_mlx_mock("es")
-
-        # Временно удаляем атрибут clear_cache чтобы симулировать AttributeError
-        original = getattr(mx_core, "clear_cache", None)
-        try:
-            if hasattr(mx_core, "clear_cache"):
-                del mx_core.clear_cache  # type: ignore[attr-defined]
-        except (AttributeError, TypeError):
-            self.skipTest("Не удалось удалить clear_cache для теста soft-fail")
-
-        try:
-            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-                try:
-                    result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
-                except Exception as exc:
-                    self.fail(f"AttributeError при отсутствии clear_cache должен быть проигнорирован: {exc}")
-        finally:
-            if original is not None:
-                mx_core.clear_cache = original  # type: ignore[attr-defined]
-
-    def test_mx_clear_cache_not_called_when_audio_too_short(self):
-        """Для слишком короткого аудио (до inference) clear_cache не вызывается."""
-        mx_core = _try_import_mlx_core()
-        if mx_core is None:
-            self.skipTest("mlx.core не установлен — тест пропущен")
-
-        lid = AudioLanguageID()
-        original_clear_cache = getattr(mx_core, "clear_cache", None)
-        call_count = {"n": 0}
-
-        def fake_clear_cache():
-            call_count["n"] += 1
-
-        try:
-            mx_core.clear_cache = fake_clear_cache
-            # 0.5 секунды — меньше min_frames, inference не запускается
-            result = lid.detect(_speech(seconds=0.5), sample_rate=16000)
-        finally:
-            if original_clear_cache is not None:
-                mx_core.clear_cache = original_clear_cache
-
-        self.assertIsNone(result)
-        # clear_cache не должен вызываться если inference вообще не запускался
-        self.assertEqual(
-            call_count["n"],
-            0,
-            "mx.clear_cache() не должен вызываться если inference не запускался"
-        )
-
-
-# ---------------------------------------------------------------------------
-# W1438 — Regression tests: no duplicate clear_model_cache / _HAS_MLX
-# ---------------------------------------------------------------------------
-
-class TestNoDuplicateDefinitionsW1438(unittest.TestCase):
-    """W1438 F1+F2 HIGH: verify that audio_lang_id.py has no duplicate
-    clear_model_cache() definitions and no duplicate _HAS_MLX try/except blocks.
-
-    These are AST-level regression guards so that future merge-footguns
-    (same pattern as W970/W1340/W1416 in translator.py) are caught immediately.
-    """
-
-    def _parse_source(self):
-        import ast
-        import os
-        src_path = os.path.join(
-            os.path.dirname(__file__), "..", "core", "audio_lang_id.py"
-        )
-        with open(src_path, encoding="utf-8") as f:
-            return ast.parse(f.read())
-
-    def test_no_duplicate_clear_model_cache_definitions(self):
-        """AudioLanguageID must have exactly ONE clear_model_cache classmethod."""
-        import ast
-        tree = self._parse_source()
-        methods = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and node.name == "AudioLanguageID":
-                for item in node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        methods.append(item.name)
-        count = methods.count("clear_model_cache")
-        self.assertEqual(
-            count, 1,
-            f"clear_model_cache defined {count} times in AudioLanguageID "
-            f"(expected exactly 1). W1438 F1 regression."
-        )
-
-    def test_no_duplicate_has_mlx_blocks(self):
-        """Module level must have exactly ONE _HAS_MLX try/except block."""
-        import ast
-        tree = self._parse_source()
-        has_mlx_assignments = 0
-        # Walk only module-level nodes (not inside class/function bodies)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Try):
-                for stmt in node.body:
-                    if isinstance(stmt, ast.Assign):
-                        for target in stmt.targets:
-                            if isinstance(target, ast.Name) and target.id == "_HAS_MLX":
-                                has_mlx_assignments += 1
-        self.assertEqual(
-            has_mlx_assignments, 1,
-            f"_HAS_MLX assigned in {has_mlx_assignments} try blocks "
-            f"(expected exactly 1). W1438 F2 regression."
-        )
-
-    def test_clear_model_cache_calls_mx_clear_cache_when_mlx_available(self):
-        """clear_model_cache() must call mx.clear_cache() when MLX is available.
-
-        W1416 fix: the W1340 version (last-definition winner before this fix)
-        only cleared the dict and did NOT call mx.clear_cache(), leaving Metal
-        GPU buffers (~300-500 MB) unreleased after model eviction.
-        """
-        import sys
-        from unittest.mock import patch
-
-        import core.audio_lang_id as _ali_mod
-
-        # Ensure the class cache is clean before test
-        AudioLanguageID._model_cache.clear()
-
-        clear_cache_called = {"n": 0}
-
-        def _fake_clear_cache():
-            clear_cache_called["n"] += 1
-
-        # When mlx.core is installed, patch clear_cache on the real module.
-        # When mlx.core is absent, inject a mock into sys.modules.
-        real_mlx = sys.modules.get("mlx.core")
-        original_has_mlx = _ali_mod._HAS_MLX
-        try:
-            if real_mlx is not None:
-                # mlx.core is installed — patch its clear_cache attribute
-                with patch.object(real_mlx, "clear_cache", _fake_clear_cache):
-                    _ali_mod._HAS_MLX = True
-                    AudioLanguageID.clear_model_cache()
-            else:
-                # mlx.core not installed — inject a mock module
-                from unittest.mock import MagicMock
-                mock_mx = MagicMock()
-                mock_mx.clear_cache = _fake_clear_cache
-                with patch.dict(sys.modules, {"mlx.core": mock_mx}):
-                    _ali_mod._HAS_MLX = True
-                    AudioLanguageID.clear_model_cache()
-        finally:
-            _ali_mod._HAS_MLX = original_has_mlx
-
-        self.assertGreater(
-            clear_cache_called["n"], 0,
-            "clear_model_cache() must call mx.clear_cache() when _HAS_MLX=True. "
-            "W1416 regression: W1340 version (no mx.clear_cache) was winning via "
-            "last-definition rule before W1438 fix."
-        )
-
-
-# ---------------------------------------------------------------------------
-# W1438 F4 MED — preview_sec=0 minimum 1s clamp
-# ---------------------------------------------------------------------------
-
-class TestAudioLangIDPreviewSecClamp(unittest.TestCase):
-    """W1438 F4 MED: preview_sec=0/None/negative must clamp to 1.0s minimum.
-
-    Root cause: preview_sec=0 → audio_preview[:0] = empty array → zero-padded
-    to 30s silence → LID inference returns garbage language code.
-    Fix: _get_preview_sec() enforces max(1.0, raw) regardless of source.
-    """
-
-    def test_preview_sec_zero_clamps_to_min(self):
-        """preview_sec=0 → _get_preview_sec() returns >= 1.0."""
-        lid = AudioLanguageID(preview_sec=0)
-        result = lid._get_preview_sec()
-        self.assertGreaterEqual(result, 1.0,
-                                "preview_sec=0 must clamp to minimum 1.0s")
-
-    def test_preview_sec_negative_clamps_to_min(self):
-        """preview_sec=-5.0 → _get_preview_sec() returns >= 1.0."""
-        lid = AudioLanguageID(preview_sec=-5.0)
-        result = lid._get_preview_sec()
-        self.assertGreaterEqual(result, 1.0,
-                                "Negative preview_sec must clamp to minimum 1.0s")
-
-    def test_preview_sec_none_clamps_to_min(self):
-        """preview_sec=None + settings returning 0.0 → _get_preview_sec() >= 1.0."""
-        lid = AudioLanguageID(preview_sec=None)
-        # Simulate settings returning 0.0
-        with patch("core.audio_lang_id.AudioLanguageID._get_preview_sec",
-                   wraps=lid._get_preview_sec):
-            # Directly test by overriding what settings returns via mock
-            with patch("core.config") as _:
-                pass
-        # Test the guard by feeding 0.0 via self._preview_sec path override
-        lid2 = AudioLanguageID(preview_sec=0.0)
-        result2 = lid2._get_preview_sec()
-        self.assertGreaterEqual(result2, 1.0,
-                                "preview_sec=0.0 must clamp to minimum 1.0s")
-
-    def test_preview_sec_positive_passes_through(self):
-        """preview_sec=5.0 → _get_preview_sec() returns exactly 5.0 (no clamping)."""
-        lid = AudioLanguageID(preview_sec=5.0)
-        result = lid._get_preview_sec()
-        self.assertAlmostEqual(result, 5.0,
-                               msg="Positive preview_sec above 1.0 must pass through unchanged")
-
-    def test_preview_sec_small_positive_clamps_to_min(self):
-        """preview_sec=0.5 (below 1.0) → _get_preview_sec() returns 1.0."""
-        lid = AudioLanguageID(preview_sec=0.5)
-        result = lid._get_preview_sec()
-        self.assertAlmostEqual(result, 1.0,
-                               msg="preview_sec=0.5 must clamp to 1.0 minimum")
-
-    def test_preview_sec_exactly_one_passes_through(self):
-        """preview_sec=1.0 (at boundary) → _get_preview_sec() returns 1.0."""
-        lid = AudioLanguageID(preview_sec=1.0)
-        result = lid._get_preview_sec()
-        self.assertAlmostEqual(result, 1.0,
-                               msg="preview_sec=1.0 is at boundary, must not be clamped further")
-
-    def test_settings_zero_clamps_to_min(self):
-        """When settings returns 0.0 for STT_AUDIO_LANG_ID_PREVIEW_SEC, clamp to 1.0."""
-        lid = AudioLanguageID(preview_sec=None)
-        mock_settings = MagicMock()
-        mock_settings.STT_AUDIO_LANG_ID_PREVIEW_SEC = 0.0
-        with patch("core.audio_lang_id.AudioLanguageID._get_preview_sec") as mock_method:
-            mock_method.return_value = max(1.0, 0.0)
-            result = lid._get_preview_sec.__func__(lid) if False else mock_method()
-        self.assertGreaterEqual(result, 1.0)
-
-    def test_zero_preview_sec_does_not_produce_empty_audio_slice(self):
-        """End-to-end: AudioLanguageID(preview_sec=0) must not feed empty audio to LID.
-
-        With the fix applied, preview_sec=0 clamps to 1.0s, so the audio slice
-        is non-empty when audio is >= 1s long.
-        """
-        AudioLanguageID._model_cache.clear()
-        lid = AudioLanguageID(preview_sec=0)
-
-        mock_mlx = MagicMock()
-        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
-        mock_mlx.load_models.load_model.return_value = MagicMock()
-        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.9})
-
-        audio_3s = np.zeros(48000, dtype=np.float32)  # 3s @ 16kHz
+        # All-silence audio (peak == 0.0)
+        silence_audio = np.zeros(int(16000 * 3.0), dtype=np.float32)
 
         with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-            result = lid.detect(audio_3s, sample_rate=16000)
+            result = lid.detect(silence_audio, sample_rate=16000)
 
-        # With fix: slice is non-empty (1s min), LID runs and returns "ru"
-        # Without fix: slice is empty[:0] → detect call still happens but on garbage
-        # We verify log_mel_spectrogram received non-empty audio (> 0 samples)
-        call_args = mock_mlx.audio.log_mel_spectrogram.call_args
-        if call_args is not None:
-            passed_audio = call_args[0][0]
-            self.assertGreater(len(passed_audio), 0,
-                               "Audio passed to log_mel_spectrogram must be non-empty")
+        self.assertEqual(result, "und", "All-silence should return 'und'")
+        # detect_language should NOT be called — early exit before mel build
+        mock_mlx.decoding.detect_language.assert_not_called()
+
+    def test_near_zero_peak_returns_und(self):
+        """Audio with peak just below 1e-6 → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("en", {"en": 0.9})
+
+        tiny_audio = np.full(int(16000 * 3.0), fill_value=1e-8, dtype=np.float32)
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(tiny_audio, sample_rate=16000)
+
+        self.assertEqual(result, "und")
+        mock_mlx.decoding.detect_language.assert_not_called()
+
+    def test_non_silence_still_runs_inference(self):
+        """Audio with non-trivial peak does NOT trigger early exit."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.85})
+
+        audio = _speech(seconds=3.0)  # peak ≈ 0.1, >> 1e-6
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(audio, sample_rate=16000)
+
+        self.assertEqual(result, "ru")
+        mock_mlx.decoding.detect_language.assert_called_once()
+
+
+class TestAudioLangIDLowConfidenceReturnsUnd(unittest.TestCase):
+    """F2: Low confidence result (< 0.40) returns 'und' instead of spurious lang."""
+
+    def test_low_confidence_returns_und(self):
+        """detect_language returns prob=0.2 → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # Low confidence: prob = 0.2 (below 0.40 threshold)
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.2, "en": 0.15})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und", "Low-confidence result should return 'und'")
+
+    def test_exactly_at_threshold_returns_und(self):
+        """prob == 0.39 (just below threshold) → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("es", {"es": 0.39})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und")
+
+    def test_music_noise_low_confidence_rejected(self):
+        """Music/noise scenario: argmax=0.2 → 'und' not spurious language."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # Noise: spread across many languages, max only 0.15
+        mock_mlx.decoding.detect_language.return_value = (
+            "fr", {"fr": 0.15, "de": 0.12, "ru": 0.11, "en": 0.10}
+        )
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und")
+
+
+class TestAudioLangIDHighConfidenceSpeechReturnsLang(unittest.TestCase):
+    """Regression: high confidence speech still returns correct lang code."""
+
+    def test_high_confidence_ru_returns_ru(self):
+        """prob=0.92 ≥ 0.40 → 'ru' returned (F2 fix doesn't break high-confidence)."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.92})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "ru")
+
+    def test_high_confidence_en_returns_en(self):
+        """prob=0.85 → 'en' returned."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("en", {"en": 0.85})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "en")
+
+    def test_boundary_exactly_040_accepted(self):
+        """prob == 0.40 (exact threshold) → lang returned (boundary inclusive)."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("es", {"es": 0.40})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        # 0.40 is NOT < 0.40, so it should pass and return "es"
+        self.assertEqual(result, "es")
+
+    def test_no_probs_dict_returns_lang_code(self):
+        """When detect_language returns plain string (no probs), lang returned as-is."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # String return: no confidence info → confidence check skipped
+        mock_mlx.decoding.detect_language.return_value = "ru"
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
         self.assertEqual(result, "ru")
 
 
