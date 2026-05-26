@@ -1796,18 +1796,50 @@ class BackendService:
             store=getattr(self, "store", None),
         )
 
+    # ── Swift→backend telemetry helpers ─────────────────────────────────────
+
+    _UNSET = object()  # sentinel for _push_registry_error optional overrides
+
+    def _push_registry_error(
+        self,
+        code: str,
+        debug_msg: str,
+        context: dict | None = None,
+        *,
+        actionable: bool | None = None,
+        action_id: object = _UNSET,
+    ) -> None:
+        """Build a KrabError from ERROR_REGISTRY and push it to the error bus.
+
+        actionable / action_id default to the registry values; pass explicit
+        values to override (e.g. actionable=False, action_id=None for info-only
+        codes that are never actionable at a specific call site).
+        """
+        from backend.error_bus import KrabError
+        from backend.error_codes import ERROR_REGISTRY
+        from datetime import datetime, timezone
+        entry = ERROR_REGISTRY[code]
+        component = code.split(".")[0] if "." in code else "system"
+        err = KrabError(
+            severity=entry["severity"],
+            component=component,
+            code=code,
+            message_user=entry["user_msg_ru"],
+            message_debug=debug_msg,
+            timestamp=datetime.now(timezone.utc),
+            context=context or {},
+            actionable=entry["actionable"] if actionable is None else actionable,
+            action_id=entry["action_id"] if action_id is BackendService._UNSET else action_id,
+        )
+        self._error_bus.push(err)
+
     def _handle_report_paste_failure(self, params: dict) -> dict:
         """Swift→backend report когда paste fails (AX denied / app unsupported).
-
-        Backend transforms into KrabError and pushes to error_bus.
 
         Params:
             reason (str): "ax_denied" | "app_unsupported"
             app_bundle (str): bundle identifier of the target app
         """
-        from backend.error_bus import KrabError
-        from backend.error_codes import ERROR_REGISTRY
-        from datetime import datetime, timezone
         reason = params.get("reason", "")
         app_bundle = params.get("app_bundle", "")
         code_map = {
@@ -1817,46 +1849,25 @@ class BackendService:
         code = code_map.get(reason)
         if code is None:
             return {"ok": False, "reason": "unknown_paste_reason"}
-        entry = ERROR_REGISTRY[code]
-        err = KrabError(
-            severity=entry["severity"],
-            component="paste",
-            code=code,
-            message_user=entry["user_msg_ru"],
-            message_debug=f"paste failed reason={reason} app={app_bundle}",
-            timestamp=datetime.now(timezone.utc),
+        self._push_registry_error(
+            code,
+            debug_msg=f"paste failed reason={reason} app={app_bundle}",
             context={"app_bundle": app_bundle, "reason": reason},
-            actionable=entry["actionable"],
-            action_id=entry["action_id"],
         )
-        self._error_bus.push(err)
         return {"ok": True, "code": code}
 
     def _handle_report_hotkey_conflict(self, params: dict) -> dict:
         """Swift→backend report когда RegisterEventHotKey returns eventHotKeyExistsErr.
 
-        Backend transforms into KrabError and pushes to error_bus.
-
         Params:
             chord (str): chord identifier e.g. "right_option"
         """
-        from backend.error_bus import KrabError
-        from backend.error_codes import ERROR_REGISTRY
-        from datetime import datetime, timezone
         chord = params.get("chord", "")
-        entry = ERROR_REGISTRY["hotkey.conflict"]
-        err = KrabError(
-            severity=entry["severity"],
-            component="hotkey",
-            code="hotkey.conflict",
-            message_user=entry["user_msg_ru"],
-            message_debug=f"hotkey conflict chord={chord}",
-            timestamp=datetime.now(timezone.utc),
+        self._push_registry_error(
+            "hotkey.conflict",
+            debug_msg=f"hotkey conflict chord={chord}",
             context={"chord": chord},
-            actionable=entry["actionable"],
-            action_id=entry["action_id"],
         )
-        self._error_bus.push(err)
         return {"ok": True}
 
     def _handle_handshake(self, params: dict) -> dict:
@@ -1898,24 +1909,15 @@ class BackendService:
             attempts (int): number of retry attempts before success (1-5)
             duration_ms (int): total elapsed reconnect time in milliseconds
         """
-        from backend.error_bus import KrabError
-        from backend.error_codes import ERROR_REGISTRY
-        from datetime import datetime, timezone
         attempts = int(params.get("attempts", 0))
         duration_ms = int(params.get("duration_ms", 0))
-        entry = ERROR_REGISTRY["ipc.reconnect"]
-        err = KrabError(
-            severity=entry["severity"],
-            component="ipc",
-            code="ipc.reconnect",
-            message_user=entry["user_msg_ru"],
-            message_debug=f"reconnected after {attempts} attempts in {duration_ms}ms",
-            timestamp=datetime.now(timezone.utc),
+        self._push_registry_error(
+            "ipc.reconnect",
+            debug_msg=f"reconnected after {attempts} attempts in {duration_ms}ms",
             context={"attempts": attempts, "duration_ms": duration_ms},
             actionable=False,
             action_id=None,
         )
-        self._error_bus.push(err)
         return {"ok": True}
 
     # ── Binary drift helpers ─────────────────────────────────────────────────
