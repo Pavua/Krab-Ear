@@ -42,6 +42,12 @@ class AudioLanguageID:
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
 
+    # F1: пропускаем inference для практически беззвучного аудио (< 1e-4 пик)
+    _ZERO_PEAK_THRESHOLD: float = 1e-4
+
+    # F2: минимальный порог confidence для возврата языкового кода
+    MIN_CONFIDENCE: float = 0.35
+
     def __init__(
         self,
         model_path: Optional[str] = None,
@@ -94,6 +100,14 @@ class AudioLanguageID:
                 "AudioLanguageID: audio too short (%d frames, need %d) → skip",
                 len(audio_mono) if audio_mono is not None else 0,
                 min_frames,
+            )
+            return None
+
+        # 3b. F1: пропускаем inference для беззвучного / нулевого аудио
+        if float(np.max(np.abs(audio_mono))) < self._ZERO_PEAK_THRESHOLD:
+            logger.debug(
+                "AudioLanguageID: zero-peak audio (peak < %.0e) → skip encoder",
+                self._ZERO_PEAK_THRESHOLD,
             )
             return None
 
@@ -261,14 +275,23 @@ class AudioLanguageID:
             # или может возвращать (str, dict) в разных версиях — обрабатываем оба
             result = mlx_whisper.decoding.detect_language(model, mel)
 
+            confidence: float = 0.0
+
             if isinstance(result, tuple):
-                # (language_str, probs_dict)
+                # (language_str, probs_dict) — извлекаем confidence из dict если есть
                 lang_code = result[0]
+                if len(result) >= 2 and isinstance(result[1], dict):
+                    probs = result[1]
+                    lang_str = str(lang_code).strip().lower()
+                    confidence = float(probs.get(lang_str, max(probs.values()) if probs else 0.0))
             elif isinstance(result, dict):
                 # {lang: prob, ...} — берём argmax
                 lang_code = max(result, key=lambda k: result[k])
+                confidence = float(result[lang_code])
             elif isinstance(result, str):
                 lang_code = result
+                # confidence неизвестна — считаем достаточной для str-ответа
+                confidence = 1.0
             else:
                 logger.warning(
                     "AudioLanguageID: неожиданный тип результата detect_language: %s",
@@ -277,7 +300,22 @@ class AudioLanguageID:
                 return None
 
             lang_code = str(lang_code).strip().lower()
-            logger.info("AudioLanguageID: detected language = %s", lang_code)
+
+            # F2: отсекаем ненадёжные результаты по порогу confidence
+            if confidence < self.MIN_CONFIDENCE:
+                logger.debug(
+                    "AudioLanguageID: confidence %.3f < %.2f → dropping %s",
+                    confidence,
+                    self.MIN_CONFIDENCE,
+                    lang_code,
+                )
+                return None
+
+            logger.info(
+                "AudioLanguageID: detected language = %s (confidence=%.3f)",
+                lang_code,
+                confidence,
+            )
             return lang_code if lang_code else None
 
         except Exception as exc:
