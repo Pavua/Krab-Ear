@@ -94,7 +94,7 @@ class TranslationService:
         network_mode = original_network_mode
         # Privacy mode: force offline translation — no external network requests.
         if settings.get("privacy_mode_enabled"):
-            if original_network_mode != "offline_only":
+            if original_network_mode != "offline_strict":
                 try:
                     from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
                     get_privacy_audit_logger().log_event(
@@ -107,7 +107,7 @@ class TranslationService:
                     )
                 except Exception:  # noqa: BLE001
                     pass
-            network_mode = "offline_only"
+            network_mode = "offline_strict"
         glossary = settings.get("translation_glossary", {})
         result = self.translator.translate(
             text=text,
@@ -199,7 +199,7 @@ class TranslationService:
         network_mode = original_network_mode
         # Privacy mode: force offline translation — no external network requests.
         if settings.get("privacy_mode_enabled"):
-            if original_network_mode != "offline_only":
+            if original_network_mode != "offline_strict":
                 try:
                     from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
                     get_privacy_audit_logger().log_event(
@@ -212,7 +212,7 @@ class TranslationService:
                     )
                 except Exception:  # noqa: BLE001
                     pass
-            network_mode = "offline_only"
+            network_mode = "offline_strict"
         translation_style = str(settings.get("translation_style", "neutral"))
         glossary = settings.get("translation_glossary", {})
 
