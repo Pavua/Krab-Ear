@@ -353,10 +353,60 @@ class TestDetectEmotion(unittest.TestCase):
 
 
 # ===========================================================================
-# expand_abbreviations / remove_abbreviation / list_abbreviations
+# add_abbreviation / expand_abbreviations / remove_abbreviation / list_abbreviations
 # ===========================================================================
 
 class TestAbbreviationHandlers(unittest.TestCase):
+    def test_add_abbreviation_dispatched(self) -> None:
+        """handle_add_abbreviation вызывает add_abbreviation у expander и возвращает added=True."""
+        svc, mocks = _make_service()
+        result = svc.handle_add_abbreviation(
+            {"abbreviation": "т.н.", "expansion": "так называемый", "language": "ru"}
+        )
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "т.н.", "так называемый", language="ru", flags=""
+        )
+        self.assertTrue(result["added"])
+        self.assertEqual(result["abbreviation"], "т.н.")
+        self.assertEqual(result["expansion"], "так называемый")
+        self.assertEqual(result["language"], "ru")
+
+    def test_add_abbreviation_persists(self) -> None:
+        """handle_add_abbreviation с флагом no_after_digit прокидывает его в expander."""
+        svc, mocks = _make_service()
+        result = svc.handle_add_abbreviation(
+            {
+                "abbreviation": "кв.",
+                "expansion": "квадратный",
+                "language": "ru",
+                "flags": "no_after_digit",
+            }
+        )
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "кв.", "квадратный", language="ru", flags="no_after_digit"
+        )
+        self.assertTrue(result["added"])
+
+    def test_add_abbreviation_default_language(self) -> None:
+        """handle_add_abbreviation использует 'ru' как язык по умолчанию."""
+        svc, mocks = _make_service()
+        svc.handle_add_abbreviation({"abbreviation": "т.е.", "expansion": "то есть"})
+        mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(
+            "т.е.", "то есть", language="ru", flags=""
+        )
+
+    def test_add_abbreviation_empty_abbr_raises(self) -> None:
+        """handle_add_abbreviation с пустым abbreviation выбрасывает ValueError."""
+        svc, _ = _make_service()
+        with self.assertRaises(ValueError):
+            svc.handle_add_abbreviation({"abbreviation": "", "expansion": "что-то"})
+
+    def test_add_abbreviation_empty_expansion_raises(self) -> None:
+        """handle_add_abbreviation с пустым expansion выбрасывает ValueError."""
+        svc, _ = _make_service()
+        with self.assertRaises(ValueError):
+            svc.handle_add_abbreviation({"abbreviation": "т.н.", "expansion": ""})
+
     def test_expand_changed(self) -> None:
         svc, mocks = _make_service()
         mocks["abbreviation_expander"].expand.return_value = "доктор медицинских наук"

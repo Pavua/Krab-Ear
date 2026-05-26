@@ -294,6 +294,34 @@ class TextProcessingService:
         expanded = self._abbreviation_expander.expand(text, language=language)
         return {"expanded": expanded, "changed": expanded != text}
 
+    def handle_add_abbreviation(self, params: dict) -> dict:
+        """IPC: add_abbreviation — добавить пользовательскую аббревиатуру.
+
+        Params:
+            abbreviation (str): Аббревиатура (например, "т.н.").
+            expansion    (str): Полная форма (например, "так называемый").
+            language     (str, optional): Код языка (по умолчанию "ru").
+            flags        (str, optional): Дополнительные флаги, например "no_after_digit".
+
+        Returns:
+            {"added": True, "abbreviation": str, "expansion": str, "language": str}
+
+        Raises:
+            ValueError: если ``abbreviation`` или ``expansion`` пустые.
+        """
+        abbr = str(params.get("abbreviation", "")).strip()
+        expansion = str(params.get("expansion", "")).strip()
+        language = str(params.get("language", "ru"))
+        flags = str(params.get("flags", ""))
+        if not abbr:
+            raise ValueError("Параметр 'abbreviation' не может быть пустым")
+        if not expansion:
+            raise ValueError("Параметр 'expansion' не может быть пустым")
+        self._abbreviation_expander.add_abbreviation(
+            abbr, expansion, language=language, flags=flags
+        )
+        return {"added": True, "abbreviation": abbr, "expansion": expansion, "language": language}
+
     def handle_remove_abbreviation(self, params: dict) -> dict:
         """IPC: remove_abbreviation — удалить аббревиатуру.
 

@@ -961,6 +961,13 @@ class TestAbbreviationsGroup(_DispatchBase):
             "language": "ru",
         }, ok_required=True)
 
+    def test_add_abbreviation_dispatched(self):
+        self.assert_dispatch("add_abbreviation", {
+            "abbreviation": "т.н.",
+            "expansion": "так называемый",
+            "language": "ru",
+        }, ok_required=True)
+
     def test_remove_abbreviation(self):
         # Может не существовать — ok=True/False оба допустимы
         self.assert_dispatch("remove_abbreviation", {
@@ -1297,7 +1304,7 @@ class TestMethodCountSummary(_DispatchBase):
         "detect_emotion",
         "estimate_recording_cost", "get_daily_cost_summary",
         "check_migration", "run_migration",
-        "expand_abbreviations", "remove_abbreviation", "list_abbreviations",
+        "add_abbreviation", "expand_abbreviations", "remove_abbreviation", "list_abbreviations",
         "profile_noise",
         "configure_obsidian_sync", "run_obsidian_sync", "get_obsidian_sync_status",
         "record_playback", "get_playback_stats", "get_most_replayed",
