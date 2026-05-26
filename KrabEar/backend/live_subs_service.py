@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 import numpy as np
 
@@ -35,9 +36,12 @@ class LiveSubsService:
         self,
         transcriber: "Transcriber",
         translator: "Translator",
+        settings_get: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._lock = threading.RLock()
         self._buffer: list[np.ndarray] = []
         self._buffer_samples: int = 0
         self._session_start: float = time.monotonic()
@@ -57,29 +61,33 @@ class LiveSubsService:
             None если flush не произошёл, иначе dict с результатами.
         """
         audio_array = self._decode_audio(audio_bytes, sample_rate)
-        self._buffer.append(audio_array)
-        self._buffer_samples += len(audio_array)
-
-        buffer_sec = self._buffer_samples / max(sample_rate, 1)
-
-        if is_final or buffer_sec >= _FLUSH_THRESHOLD_SEC:
-            return self._flush(sample_rate=sample_rate, target_lang=target_lang)
+        with self._lock:
+            self._buffer.append(audio_array)
+            self._buffer_samples += len(audio_array)
+            buffer_sec = self._buffer_samples / max(sample_rate, 1)
+            if is_final or buffer_sec >= _FLUSH_THRESHOLD_SEC:
+                return self._flush(sample_rate=sample_rate, target_lang=target_lang)
         return None
 
     def stop(self) -> dict[str, Any]:
         """Flush оставшегося буфера и сброс состояния."""
-        result = self._flush(sample_rate=16000, target_lang="off") if self._buffer else None
-        self._reset()
+        with self._lock:
+            result = self._flush(sample_rate=16000, target_lang="off") if self._buffer else None
+            self._reset()
         return {"status": "stopped", "flushed": result is not None}
 
     def buffer_duration_sec(self, sample_rate: int = 16000) -> float:
         """Текущая длительность буфера в секундах."""
-        return self._buffer_samples / max(sample_rate, 1)
+        with self._lock:
+            return self._buffer_samples / max(sample_rate, 1)
 
     # ── IPC handlers ──────────────────────────────────────────────────────────
 
     def handle_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_ingest."""
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
+
         audio_b64 = params.get("audio_chunk", "")
         target_lang = str(params.get("target_lang", "off"))
         sample_rate = int(params.get("sample_rate", 16000))
