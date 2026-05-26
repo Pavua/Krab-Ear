@@ -63,7 +63,7 @@ def _parse_osascript_output(raw: str) -> list[dict[str, Any]]:
         line = line.strip().rstrip(",")
         if "|||" not in line:
             continue
-        parts = line.split("|||")
+        parts = line.split("|||", maxsplit=4)
         if len(parts) < 5:
             continue
         title = parts[0].strip()
