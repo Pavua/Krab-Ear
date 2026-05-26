@@ -13,6 +13,8 @@ from typing import Optional
 
 import numpy as np
 
+from core.silence_detector import SILENCE_THRESHOLD_AMP
+
 logger = logging.getLogger("KrabEar.AudioQuality")
 
 # ---------------------------------------------------------------------------
@@ -21,7 +23,9 @@ logger = logging.getLogger("KrabEar.AudioQuality")
 
 _CLIPPING_THRESHOLD = 0.99      # амплитуда ≥ порога считается клиппингом
 _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме при анализе тишины
-_SILENCE_RMS_THRESHOLD = 0.001  # RMS фрейма ниже этого → тишина
+# Порог тишины импортирован из core.silence_detector (SILENCE_THRESHOLD_AMP = 0.01,
+# соответствует -40 дБ). Ранее было захардкожено 0.001 (~-60 дБ) — исправлено в W885/F8.
+_SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 

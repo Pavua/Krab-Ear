@@ -18,10 +18,21 @@ logger = logging.getLogger("KrabEar.SilenceDetector")
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
+# Единый порог тишины для всех аудио-анализаторов проекта.
+# -40 дБ = амплитуда 0.01 — соответствует реальному фоновому шуму в офисе/дома.
+# Использовать через _db_to_amplitude() или импортировать SILENCE_THRESHOLD_DB напрямую.
+SILENCE_THRESHOLD_DB: float = -40.0
+
 
 def _db_to_amplitude(db: float) -> float:
     """Конвертирует порог в дБ в амплитуду (RMS)."""
     return 10.0 ** (db / 20.0)
+
+
+# Амплитудный эквивалент SILENCE_THRESHOLD_DB (0.01 при -40 дБ).
+# Экспортируется для прямого использования в AudioQualityAnalyzer и других модулях,
+# которые не хотят пересчитывать через _db_to_amplitude при каждом вызове.
+SILENCE_THRESHOLD_AMP: float = _db_to_amplitude(SILENCE_THRESHOLD_DB)
 
 
 @dataclass
