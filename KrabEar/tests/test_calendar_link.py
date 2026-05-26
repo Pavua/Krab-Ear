@@ -29,7 +29,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.calendar_link import CalendarLinker, _parse_osascript_output, _epoch_to_iso
+from backend.calendar_link import (
+    CalendarLinker,
+    _parse_osascript_output,
+    _epoch_to_iso,
+    _is_tcc_denial,
+)
 from backend.state_store import StateStore
 
 SAMPLE_EPOCH_START = 1714000000
@@ -403,6 +408,81 @@ class TestLinkReturnsEventId(_DarwinPatchedTestCase):
             self.assertIn(key, result)
         # Internal _start_epoch must be stripped from result
         self.assertNotIn("_start_epoch", result)
+
+
+class TestIsTccDenial(unittest.TestCase):
+    """Tests for the _is_tcc_denial helper (W1028 F3 HIGH)."""
+
+    def test_tcc_detects_not_authorized(self):
+        """Legacy 'Not authorized' substring still triggers TCC denial."""
+        self.assertTrue(_is_tcc_denial("Not authorized to send Apple events to Calendar."))
+
+    def test_tcc_detects_not_allowed(self):
+        """Legacy 'not allowed' substring still triggers TCC denial."""
+        self.assertTrue(_is_tcc_denial("This application is not allowed to access Calendar."))
+
+    def test_tcc_detects_minus_1743(self):
+        """Apple Event error (-1743) is detected as TCC denial."""
+        self.assertTrue(_is_tcc_denial("(-1743)"))
+
+    def test_tcc_detects_minus_1743_in_real_error(self):
+        """(-1743) embedded in a real-world osascript error string."""
+        self.assertTrue(_is_tcc_denial(
+            "osascript: OpenScripting.framework - scripting addition gave an error: "
+            "Calendar got an error: AppleEvent handler failed. (-1743)"
+        ))
+
+    def test_tcc_detects_errAEEventNotPermitted(self):
+        """errAEEventNotPermitted constant is detected as TCC denial."""
+        self.assertTrue(_is_tcc_denial("errAEEventNotPermitted"))
+
+    def test_tcc_detects_isnt_running(self):
+        """\"isn't running\" indicates app not yet TCC-prompted / automation blocked."""
+        self.assertTrue(_is_tcc_denial("Calendar isn't running."))
+
+    def test_tcc_detects_isnt_running_mixed_case(self):
+        """Case-insensitive match for \"isn't running\"."""
+        self.assertTrue(_is_tcc_denial("CALENDAR ISN'T RUNNING."))
+
+    def test_tcc_detects_doesnt_have_permission(self):
+        """\"doesn't have permission\" phrase is detected as TCC denial."""
+        self.assertTrue(_is_tcc_denial("Calendar doesn't have permission to access the system."))
+
+    def test_normal_stderr_not_classified_as_tcc(self):
+        """Normal non-TCC stderr is NOT misclassified as a TCC denial."""
+        self.assertFalse(_is_tcc_denial("syntax error: Expected end of line but found identifier."))
+
+    def test_empty_stderr_not_classified_as_tcc(self):
+        """Empty stderr is not a TCC denial."""
+        self.assertFalse(_is_tcc_denial(""))
+
+    def test_unrelated_error_not_classified_as_tcc(self):
+        """Unrelated error numbers are not TCC denials."""
+        self.assertFalse(_is_tcc_denial("error -9999: unknown error occurred"))
+
+    def test_tcc_denial_via_find_active_event_minus_1743(self):
+        """find_active_event returns None when stderr contains (-1743)."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "Calendar got an error: AppleEvent handler failed. (-1743)"
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
+                linker = CalendarLinker(cache_minutes=1)
+                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
+
+    def test_tcc_denial_via_find_active_event_isnt_running(self):
+        """find_active_event returns None when stderr contains \"isn't running\"."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_proc.stderr = "Calendar isn't running."
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
+                linker = CalendarLinker(cache_minutes=1)
+                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
