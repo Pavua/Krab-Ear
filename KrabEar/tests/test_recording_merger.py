@@ -634,5 +634,85 @@ class TestMergerRequiredNames(unittest.TestCase):
             self.assertIn("merged_from", r)
 
 
+class TestMergerSemanticSearchIntegration(unittest.TestCase):
+    """Тесты интеграции RecordingMerger с SemanticSearcher (W1266 F3 MED)."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    # --- Вспомогательный фейк SemanticSearcher ---
+
+    def _make_fake_searcher(self) -> Any:
+        class FakeSemanticSearcher:
+            def __init__(self) -> None:
+                self.indexed: list[tuple[str, str]] = []
+                self.removed: list[str] = []
+
+            def index_item(self, item_id: str, text: str) -> None:
+                self.indexed.append((item_id, text))
+
+            def remove_item(self, item_id: str) -> None:
+                self.removed.append(item_id)
+
+        return FakeSemanticSearcher()
+
+    # test_merge_indexes_new_item_in_semantic_search
+    def test_merge_indexes_new_item_in_semantic_search(self) -> None:
+        """Новый объединённый элемент индексируется в SemanticSearcher."""
+        fake_searcher = self._make_fake_searcher()
+        merger = RecordingMerger(semantic_searcher=fake_searcher)
+        self._add("idx1", "Первая запись", ts="2026-04-12T10:00:00")
+        self._add("idx2", "Вторая запись", ts="2026-04-12T10:01:00")
+        result = merger.merge_items(["idx1", "idx2"], self.store)
+        self.assertEqual(len(fake_searcher.indexed), 1)
+        indexed_id, indexed_text = fake_searcher.indexed[0]
+        self.assertEqual(indexed_id, result["id"])
+        self.assertIn("Первая запись", indexed_text)
+
+    # test_merge_removes_originals_from_semantic_search
+    def test_merge_removes_originals_from_semantic_search(self) -> None:
+        """При delete_originals=True оба оригинала удаляются из индекса."""
+        fake_searcher = self._make_fake_searcher()
+        merger = RecordingMerger(semantic_searcher=fake_searcher)
+        self._add("rem1", "Alpha", ts="2026-04-12T10:00:00")
+        self._add("rem2", "Beta", ts="2026-04-12T10:01:00")
+        merger.merge_items(["rem1", "rem2"], self.store, delete_originals=True)
+        self.assertIn("rem1", fake_searcher.removed)
+        self.assertIn("rem2", fake_searcher.removed)
+
+    # test_merge_without_semantic_searcher_no_op
+    def test_merge_without_semantic_searcher_no_op(self) -> None:
+        """Без semantic_searcher merge работает без ошибок и ничего не вызывает."""
+        merger = RecordingMerger()  # semantic_searcher=None по умолчанию
+        self._add("nop1", "No searcher A", ts="2026-04-12T10:00:00")
+        self._add("nop2", "No searcher B", ts="2026-04-12T10:01:00")
+        result = merger.merge_items(["nop1", "nop2"], self.store, delete_originals=True)
+        self.assertIn("text", result)
+        self.assertIn("nop1", self.store._deleted)
+        self.assertIn("nop2", self.store._deleted)
+
+    # test_semantic_failure_does_not_break_merge
+    def test_semantic_failure_does_not_break_merge(self) -> None:
+        """Исключение в semantic_searcher не нарушает основной процесс merge."""
+        class BrokenSearcher:
+            def index_item(self, item_id: str, text: str) -> None:
+                raise RuntimeError("index_item intentionally broken")
+
+            def remove_item(self, item_id: str) -> None:
+                raise RuntimeError("remove_item intentionally broken")
+
+        merger = RecordingMerger(semantic_searcher=BrokenSearcher())
+        self._add("brk1", "Breaking A", ts="2026-04-12T10:00:00")
+        self._add("brk2", "Breaking B", ts="2026-04-12T10:01:00")
+        # Не должно бросить исключение; merge завершается успешно
+        result = merger.merge_items(["brk1", "brk2"], self.store, delete_originals=True)
+        self.assertIn("text", result)
+        self.assertIn("brk1", self.store._deleted)
+        self.assertIn("brk2", self.store._deleted)
+
+
 if __name__ == "__main__":
     unittest.main()
