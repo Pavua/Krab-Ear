@@ -19,6 +19,15 @@
 - [ ] Accessibility-права выданы для `native/runtime/KrabEarAgent`
 - [ ] Нет незакоммиченных изменений: `git status`
 
+## 1а. Pre-deploy (только для production-тега)
+
+Перед тегом для production-деплоя обратитесь к `docs/DEPLOY_V2.0.5.md` —
+там описаны: проверка migration, бинарный drift-check (bundle vs runtime),
+launchd plist reload, дешифровка `.env` секретов и rollback-план.
+
+> Чеклист ниже (разделы 2–6) обязателен для **всех** релизов.
+> `docs/DEPLOY_V2.0.5.md` — дополнительный слой для production-деплоя v2.0.5+.
+
 ## 2. Сборка
 
 - [ ] Swift agent собирается в release:
@@ -29,6 +38,12 @@
   ```bash
   find . -maxdepth 2 -name "*.command" -print0 | xargs -0 -n1 zsh -n
   ```
+- [ ] IPC_API_REFERENCE.md актуален — проверить drift от `origin/codex/krab-ear-v2`:
+  ```bash
+  git diff origin/codex/krab-ear-v2 docs/IPC_API_REFERENCE.md
+  ```
+  Если есть значимые изменения в хендлерах — перегенерировать документ (W745 regen,
+  см. PR #678 для контекста). Незначительный drift (форматирование) допустим.
 
 ## 3. Тесты
 
@@ -36,6 +51,17 @@
   ```bash
   PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/ -v
   ```
+- [ ] Orphan-imports audit — нет сиротских импортов в service.py (W750):
+  ```bash
+  python3 scripts/audit_orphan_imports.py
+  ```
+  Скрипт завершится с ненулевым кодом и перечислит нарушения, если импорт
+  модуля присутствует, но ни один его символ не используется в `service.py`.
+- [ ] Wiring-tests guard — все extracted services покрыты dispatch-тестами (W762):
+  ```bash
+  PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/ -k "dispatch" -v
+  ```
+  Убедиться, что ни один extracted service не пропущен в `test_dispatch_invariants_*.py`.
 - [ ] Smoke-тест релиза:
   ```bash
   scripts/run_smoke_release.command
@@ -95,3 +121,10 @@
 - [ ] `Run Daily Driver Validation.command` — пройден
 - [ ] `Run Regression Radar.command` — без регрессий
 - [ ] Отчёты сохранены в `docs/reports/`
+- [ ] Sentry release-tag верифицирован (W704): в Sentry Issues следующее событие
+  после деплоя должно иметь тег `release=krab-ear@<new_version>`. Проверить:
+  1. Открыть Sentry → Issues → любой новый event после деплоя.
+  2. В поле Tags убедиться, что `release` = `krab-ear@v2.0.X` (не старый тег).
+  3. Если тег не обновился — перезапустить backend (он читает версию из
+     `CFBundleVersion` / `__version__` при старте, а не из env-переменной).
+  Источник правды: `KrabEar/backend/observability.py` + `SentryConfig.swift` (PR #241).

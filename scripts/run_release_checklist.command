@@ -147,6 +147,13 @@ else
   fi
 fi
 
+# Orphan imports audit (W750)
+if "$VENV_PY" "$ROOT_DIR/scripts/audit_orphan_imports.py" 2>&1; then
+  pass "orphan imports audit OK (no orphan imports in service.py)"
+else
+  fail "orphan_imports" "Orphan imports detected in service.py; run: python3 scripts/audit_orphan_imports.py"
+fi
+
 # Smoke test
 if "$ROOT_DIR/scripts/run_smoke_release.command" 2>&1 > /dev/null; then
   SMOKE_REPORT="$(ls -1t "$REPORT_DIR"/smoke_release_*.md 2>/dev/null | head -n 1 || true)"
@@ -183,6 +190,7 @@ print_section "FINAL REPORT"
   else
     echo "| unit tests | ✓ |"
   fi
+  echo "| orphan imports (W750) | ✓ |"
   echo "| smoke test | ✓ |"
   echo ""
   echo "## Generated Reports"
