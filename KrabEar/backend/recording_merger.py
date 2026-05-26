@@ -60,8 +60,13 @@ class RecordingMerger:
             diarization=merged_data["diarization"],
             audio_duration_sec=merged_data["audio_duration_sec"],
             confidence=merged_data["confidence"],
-            tags=merged_data["tags"],
         )
+
+        # Теги сохраняем отдельным вызовом: StateStore.add_history_item не
+        # принимает параметр tags (W1237 не смёрджен), поэтому используем
+        # выделенный метод update_history_item_tags.
+        if merged_data["tags"]:
+            store.update_history_item_tags(new_item.id, merged_data["tags"])
 
         if delete_originals:
             deleted_ids: list[str] = []

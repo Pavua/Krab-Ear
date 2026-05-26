@@ -84,7 +84,7 @@ class FakeStore:
         diarization: dict | None = None,
         audio_duration_sec: float | None = None,
         confidence: float | None = None,
-        tags: list | None = None,
+        # NOTE: намеренно НЕТ параметра tags — как в реальном StateStore
         **kwargs: Any,
     ) -> FakeHistoryItem:
         import uuid
@@ -102,11 +102,16 @@ class FakeStore:
             diarization=diarization,
             audio_duration_sec=audio_duration_sec,
             confidence=confidence,
-            tags=list(tags) if tags else [],
         )
         self._items[item.id] = item
         self._added.append(item)
         return item
+
+    def update_history_item_tags(self, item_id: str, tags: list) -> bool:
+        if item_id not in self._items:
+            return False
+        self._items[item_id].tags = list(tags)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +637,174 @@ class TestMergerRequiredNames(unittest.TestCase):
         for r in results:
             self.assertIn("text", r)
             self.assertIn("merged_from", r)
+
+
+class StrictFakeStore:
+    """Строгий фейк StateStore, который НЕ принимает tags в add_history_item.
+
+    Имитирует реальный StateStore до применения W1237 — любая попытка
+    передать tags= вызовет TypeError, как в production.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[str, FakeHistoryItem] = {}
+        self._added: list[FakeHistoryItem] = []
+        self._tags_updates: list[tuple[str, list[str]]] = []
+
+    def add_fake_item(
+        self,
+        item_id: str,
+        text: str,
+        ts: str = "2026-04-12T10:00:00",
+        **kwargs: Any,
+    ) -> FakeHistoryItem:
+        item = FakeHistoryItem(id=item_id, ts=ts, text=text, **kwargs)
+        self._items[item_id] = item
+        return item
+
+    def get_history_item_by_id(self, item_id: str) -> FakeHistoryItem | None:
+        return self._items.get(item_id)
+
+    def delete_history_item(self, item_id: str) -> bool:
+        if item_id in self._items:
+            del self._items[item_id]
+            return True
+        return False
+
+    def add_history_item(
+        self,
+        text: str,
+        paste_status: str = "merged",
+        source_text: str = "",
+        translated_text: str = "",
+        translation_mode: str = "off",
+        source_lang: str = "",
+        target_lang: str = "",
+        translation_status: str = "not_requested",
+        diarization: "dict | None" = None,
+        audio_duration_sec: "float | None" = None,
+        confidence: "float | None" = None,
+        # NOTE: намеренно НЕТ параметра tags — как в реальном StateStore
+    ) -> FakeHistoryItem:
+        import uuid
+        item = FakeHistoryItem(
+            id=str(uuid.uuid4()),
+            ts="2026-04-12T12:00:00",
+            text=text,
+            paste_status=paste_status,
+            source_text=source_text,
+            translated_text=translated_text,
+            translation_mode=translation_mode,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            translation_status=translation_status,
+            diarization=diarization,
+            audio_duration_sec=audio_duration_sec,
+            confidence=confidence,
+        )
+        self._items[item.id] = item
+        self._added.append(item)
+        return item
+
+    def update_history_item_tags(self, item_id: str, tags: list) -> bool:
+        if item_id not in self._items:
+            return False
+        self._items[item_id].tags = list(tags)
+        self._tags_updates.append((item_id, list(tags)))
+        return True
+
+
+class TestMergeTagsSeparateUpdate(unittest.TestCase):
+    """W1268 — тесты для fix(W1266 F1 CRITICAL): tags передаются через
+    отдельный вызов update_history_item_tags, а не через add_history_item.
+    """
+
+    def setUp(self) -> None:
+        self.store = StrictFakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    def test_merge_recordings_does_not_pass_tags_to_add_history_item(self) -> None:
+        """add_history_item не должен получать kwarg tags — иначе TypeError в production.
+
+        Используем StrictFakeStore без tags= в add_history_item. Если фикс
+        применён корректно — TypeError не возникнет.
+        """
+        self._add("wt1", "Alpha", ts="2026-04-12T09:00:00", tags=["a", "b"])
+        self._add("wt2", "Beta", ts="2026-04-12T09:01:00", tags=["c"])
+        # До фикса: TypeError: add_history_item() got an unexpected keyword argument 'tags'
+        # После фикса: должно выполниться без ошибок
+        result = self.merger.merge_items(["wt1", "wt2"], self.store)
+        self.assertIn("text", result)
+        self.assertEqual(len(self.store._added), 1)
+
+    def test_merge_recordings_updates_tags_via_separate_method(self) -> None:
+        """После add_history_item должен быть вызван update_history_item_tags.
+
+        Проверяем, что теги попали в _tags_updates StrictFakeStore.
+        """
+        self._add("tt1", "One", ts="2026-04-12T09:00:00", tags=["work", "urgent"])
+        self._add("tt2", "Two", ts="2026-04-12T09:01:00", tags=["personal"])
+        self.merger.merge_items(["tt1", "tt2"], self.store)
+
+        # update_history_item_tags должен был быть вызван
+        self.assertEqual(len(self.store._tags_updates), 1,
+                         "update_history_item_tags должен быть вызван ровно один раз")
+        _, tags_saved = self.store._tags_updates[0]
+        self.assertIn("work", tags_saved)
+        self.assertIn("urgent", tags_saved)
+        self.assertIn("personal", tags_saved)
+
+    def test_merge_recordings_works_with_real_state_store_not_fake(self) -> None:
+        """Интеграционный тест с реальным StateStore (не FakeStore).
+
+        Проверяет, что merge_items не вызывает TypeError с реальным StateStore,
+        и что теги корректно сохраняются через update_history_item_tags.
+        """
+        import tempfile
+        from backend.state_store import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_store = StateStore(Path(tmpdir))
+
+            # Создаём два реальных элемента истории
+            item1 = real_store.add_history_item(
+                text="Первая запись",
+                paste_status="success",
+                audio_duration_sec=10.0,
+                confidence=0.85,
+            )
+            real_store.update_history_item_tags(item1.id, ["work", "meeting"])
+
+            item2 = real_store.add_history_item(
+                text="Вторая запись",
+                paste_status="success",
+                audio_duration_sec=5.0,
+                confidence=0.90,
+            )
+            real_store.update_history_item_tags(item2.id, ["meeting", "important"])
+
+            merger = RecordingMerger()
+
+            # Должно выполниться без TypeError
+            result = merger.merge_items([item1.id, item2.id], real_store)
+
+            self.assertIn("Первая запись", result["text"])
+            self.assertIn("Вторая запись", result["text"])
+
+            # Объединённая запись должна существовать в store
+            merged_id = result["id"]
+            merged_item = real_store.get_history_item_by_id(merged_id)
+            self.assertIsNotNone(merged_item)
+
+            # Теги должны быть сохранены через update_history_item_tags
+            self.assertIn("work", merged_item.tags)
+            self.assertIn("meeting", merged_item.tags)
+            self.assertIn("important", merged_item.tags)
+            # Без дублей
+            self.assertEqual(merged_item.tags.count("meeting"), 1)
 
 
 if __name__ == "__main__":
