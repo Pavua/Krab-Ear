@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import ssl
 
 import websockets
 
@@ -19,11 +21,25 @@ logger = logging.getLogger("KrabEar.VGClient")
 _RECONNECT_BASE_SEC = 1.0
 _RECONNECT_MAX_SEC = 10.0
 
+# W1204 F1: explicit handshake timeout constant
+_VG_WS_DEFAULT_TIMEOUT_SEC = 30
+
+# W1204 F2: allowed characters in session_id (alphanumeric, underscore, dash; 1-128 chars)
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# W1204 F4: cap incoming WS message size to prevent rogue-gateway DoS
+_VG_WS_MAX_SIZE = 2 * 1024 * 1024  # 2 MiB
+
 
 class VGWebSocketClient:
     """Клиент к Voice Gateway WebSocket stream."""
 
     def __init__(self, gateway_url: str, session_id: str, api_key: str = ""):
+        # W1204 F2: validate session_id before embedding in URL path
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(
+                f"Invalid session_id {session_id!r}: must match ^[A-Za-z0-9_-]{{1,128}}$"
+            )
         ws_base = gateway_url.replace("http://", "ws://").replace("https://", "wss://")
         self.ws_url = f"{ws_base.rstrip('/')}/v1/sessions/{session_id}/stream"
         self.api_key = api_key
@@ -33,12 +49,24 @@ class VGWebSocketClient:
     async def run(self) -> None:
         """Основной цикл: подключение + проброс событий в EventBus."""
         backoff = _RECONNECT_BASE_SEC
+        # W1204 F1: build explicit SSL context — certificate verification required
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = True
+        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+        # Use ssl=None for plain ws:// URLs so we don't force TLS on non-wss
+        _ssl_arg = ssl_ctx if self.ws_url.startswith("wss://") else None
         while not self._stop.is_set():
             try:
                 headers = {}
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"
-                async with websockets.connect(self.ws_url, extra_headers=headers) as ws:
+                async with websockets.connect(
+                    self.ws_url,
+                    extra_headers=headers,
+                    ssl=_ssl_arg,
+                    open_timeout=_VG_WS_DEFAULT_TIMEOUT_SEC,
+                    max_size=_VG_WS_MAX_SIZE,
+                ) as ws:
                     logger.info("VG WS connected: %s", self.ws_url)
                     backoff = _RECONNECT_BASE_SEC
                     async for raw in ws:
