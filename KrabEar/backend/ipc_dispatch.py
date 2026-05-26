@@ -173,6 +173,7 @@ def build_dispatch_table(
         "list_collections": svc._collections.handle_list_collections,  # список всех коллекций
         "add_to_collection": svc._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
         "remove_from_collection": svc._collections.handle_remove_from_collection,  # удалить запись из коллекции
+        "rename_collection": svc._collections.handle_rename_collection,  # переименовать коллекцию
         "list_normalization_profiles": svc._handle_list_normalization_profiles,  # список профилей нормализации текста
         "get_collection_items": svc._collections.handle_get_collection_items,  # получить записи истории из коллекции
         "start_chain": svc._chains.handle_start_chain,  # начать цепочку связанных записей
