@@ -39,11 +39,13 @@ class BookmarkManager:
             with self._path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def _load_active(self) -> list[dict[str, Any]]:
-        """Читает все активные закладки (без tombstone'ов)."""
-        with self._lock:
-            raw = self._path.read_text(encoding="utf-8")
+    def _append_unlocked(self, record: dict[str, Any]) -> None:
+        """Дописывает одну JSON-запись в журнал — вызывать только внутри self._lock."""
+        with self._path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def _parse_active(self, raw: str) -> list[dict[str, Any]]:
+        """Разбирает NDJSON-текст и возвращает активные закладки (без tombstone'ов)."""
         records: dict[str, dict[str, Any]] = {}
         for line in raw.splitlines():
             line = line.strip()
@@ -60,8 +62,18 @@ class BookmarkManager:
                 records.pop(bid, None)
             else:
                 records[bid] = obj
-
         return list(records.values())
+
+    def _load_active(self) -> list[dict[str, Any]]:
+        """Читает все активные закладки (без tombstone'ов)."""
+        with self._lock:
+            raw = self._path.read_text(encoding="utf-8")
+        return self._parse_active(raw)
+
+    def _load_active_unlocked(self) -> list[dict[str, Any]]:
+        """Читает активные закладки — вызывать только внутри self._lock."""
+        raw = self._path.read_text(encoding="utf-8")
+        return self._parse_active(raw)
 
     # ------------------------------------------------------------------
     # Public API
@@ -115,6 +127,9 @@ class BookmarkManager:
     def delete(self, bookmark_id: str) -> bool:
         """Помечает закладку удалённой (tombstone).
 
+        Проверка существования и запись tombstone выполняются под одним lock-ом,
+        исключая TOCTOU-гонку (BUG-1, W877).
+
         Returns:
             True если закладка существовала и была удалена.
         """
@@ -122,14 +137,14 @@ class BookmarkManager:
         if not clean_id:
             return False
 
-        # Проверяем существование перед tombstone
-        active = self._load_active()
-        exists = any(b["id"] == clean_id for b in active)
-        if not exists:
-            logger.warning("Попытка удалить несуществующую закладку: %s", clean_id)
-            return False
+        with self._lock:
+            active = self._load_active_unlocked()
+            exists = any(b["id"] == clean_id for b in active)
+            if not exists:
+                logger.warning("Попытка удалить несуществующую закладку: %s", clean_id)
+                return False
+            self._append_unlocked({"id": clean_id, "deleted": True})
 
-        self._append({"id": clean_id, "deleted": True})
         logger.info("Закладка удалена: id=%s", clean_id)
         return True
 
@@ -147,6 +162,9 @@ class BookmarkManager:
         Вызывается из BackendService после финализации item в StateStore,
         чтобы привязать live-закладки к реальному item_id.
 
+        Весь цикл (load → tombstone → re-add) выполняется под одним lock-ом,
+        исключая TOCTOU-гонку с concurrent add() (BUG-2, W877).
+
         Returns:
             Количество обновлённых закладок.
         """
@@ -155,17 +173,21 @@ class BookmarkManager:
         if not old or not new:
             return 0
 
-        to_update = [b for b in self._load_active() if b.get("session_id") == old]
-        if not to_update:
-            return 0
+        with self._lock:
+            to_update = [
+                b for b in self._load_active_unlocked()
+                if b.get("session_id") == old
+            ]
+            if not to_update:
+                return 0
 
-        for bm in to_update:
-            # tombstone старой записи + новая с updated session_id
-            self._append({"id": bm["id"], "deleted": True})
-            updated = dict(bm)
-            updated["session_id"] = new
-            updated["deleted"] = False
-            self._append(updated)
+            for bm in to_update:
+                # tombstone старой записи + новая с updated session_id
+                self._append_unlocked({"id": bm["id"], "deleted": True})
+                updated = dict(bm)
+                updated["session_id"] = new
+                updated["deleted"] = False
+                self._append_unlocked(updated)
 
         logger.info(
             "Обновлены session_id закладок: %s → %s (%d шт.)",
