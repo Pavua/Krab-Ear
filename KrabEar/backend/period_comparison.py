@@ -249,10 +249,11 @@ class PeriodComparisonService:
 
         Параметры:
             period1_start, period1_end, period2_start, period2_end — ISO даты YYYY-MM-DD.
-            mode — "custom" | "weeks" | "months" (default "custom").
+            mode — "explicit" | "custom" | "weeks" | "months" (default "explicit").
+                "explicit" и "custom" эквивалентны — задают явные даты (backward compat).
             weeks_back — int, только для mode=weeks (default 2).
         """
-        mode = str(params.get("mode", "custom")).strip()
+        mode = str(params.get("mode", "explicit")).strip()
 
         if mode == "weeks":
             weeks_back = int(params.get("weeks_back", 2))
@@ -260,6 +261,7 @@ class PeriodComparisonService:
         elif mode == "months":
             report = compare_months(self.store)
         else:
+            # "explicit", "custom", or any unrecognised value → explicit-date mode
             p1_start = params.get("period1_start")
             p1_end = params.get("period1_end")
             p2_start = params.get("period2_start")
