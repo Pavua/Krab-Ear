@@ -70,3 +70,8 @@ native/_tmp_bundle_test/
 docs/llm-bench-results-*.md
 docs/llm-bench-results-*.json
 /tmp/r*_bench.log
+
+# Wave 47 CRIT-1 / W821 (security-audit-2026-05-12.md line 28):
+# Bench driver scripts previously contained hardcoded LM Studio tokens
+# (fixed to env-read, but files may regress). Keep local only — not in repo.
+scripts/r*_bench.py
