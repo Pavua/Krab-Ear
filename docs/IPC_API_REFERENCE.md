@@ -8,28 +8,103 @@ Unix socket JSON-RPC protocol. Default socket paths:
 **Success response:** `{"id": "req-1", "ok": true, "result": {...}}`  
 **Error response:** `{"id": "req-1", "ok": false, "error": {"code": "...", "message": "..."}}`
 
+Live handler count: **285** (from `awk 'NR>=905&&NR<=1250' KrabEar/backend/service.py | grep -cE '"[a-z_]+":\s*(self\._|lambda)'`).  
+Source of truth: `service.py` lookup table (lines 905–1233) + delegated service modules.  
+Regen: Wave 745 (2026-05-26) — replaces 840-line stub doc with ~58% drift. Documented: **289 handlers** across 44 categories.
+
+---
+
+## Категории / Categories
+
+1. [Recording](#recording)
+2. [History — CRUD](#history--crud)
+3. [History — Search & Filter](#history--search--filter)
+4. [History — Tags & Favorites](#history--tags--favorites)
+5. [History — Export](#history--export)
+6. [History — Annotations & Enrichment](#history--annotations--enrichment)
+7. [History — Backup & Restore](#history--backup--restore)
+8. [History — Deduplication & Integrity](#history--deduplication--integrity)
+9. [Settings & Profile Presets](#settings--profile-presets)
+10. [Translation](#translation)
+11. [Glossary & Vocabulary](#glossary--vocabulary)
+12. [STT Management](#stt-management)
+13. [Audio — Devices & Analysis](#audio--devices--analysis)
+14. [Audio Import & Transcription Queue](#audio-import--transcription-queue)
+15. [LLM / Rewriter](#llm--rewriter)
+16. [Call Assist](#call-assist)
+17. [Call Automation (Phase 3)](#call-automation-phase-3)
+18. [Live Subtitles (Phase 2)](#live-subtitles-phase-2)
+19. [Apple Integration](#apple-integration)
+20. [Sentry / Observability / Error Bus](#sentry--observability--error-bus)
+21. [Health, Diagnostics & Metrics](#health-diagnostics--metrics)
+22. [Analytics & Trends](#analytics--trends)
+23. [Collections & Chains](#collections--chains)
+24. [Bookmarks](#bookmarks)
+25. [Sharing & Webhooks](#sharing--webhooks)
+26. [Transcript Versioning](#transcript-versioning)
+27. [Paste Formatter & App Memory](#paste-formatter--app-memory)
+28. [Templates & Quick Phrases](#templates--quick-phrases)
+29. [Plugins & Feature Flags](#plugins--feature-flags)
+30. [Speaker Manager](#speaker-manager)
+31. [Semantic Search](#semantic-search)
+32. [Scheduled Recordings](#scheduled-recordings)
+33. [Obsidian Sync](#obsidian-sync)
+34. [Playback Tracker](#playback-tracker)
+35. [Search History](#search-history)
+36. [Archive Manager](#archive-manager)
+37. [Text Processing](#text-processing)
+38. [Event Replay](#event-replay)
+39. [Config Presets Library](#config-presets-library)
+40. [Data Migrator](#data-migrator)
+41. [Model Cache Manager](#model-cache-manager)
+42. [Wake Word](#wake-word)
+43. [TTS](#tts)
+44. [Misc](#misc)
+
 ---
 
 ## Recording
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `ping` | Liveness check, returns uptime and recording state |
-| `start_recording` | Begin microphone capture |
-| `stop_recording` | Stop capture, run STT, optionally translate, save to history |
-| `get_recording_state` | Get current recording state and real-time preview text |
-| `set_paste_status` | Update paste result for a history item |
+| `ping` | Liveness check, возвращает uptime и состояние записи |
+| `start_recording` | Начать захват микрофона |
+| `stop_recording` | Остановить захват, запустить STT, сохранить в историю |
+| `get_recording_state` | Текущее состояние записи и preview текст |
+| `set_paste_status` | Обновить статус вставки для элемента истории |
+| `handshake` | Инициализация соединения Swift→backend |
+| `report_reconnect` | Телеметрия переподключения |
+| `report_paste_failure` | Репорт ошибки вставки из Swift |
+| `report_hotkey_conflict` | Репорт конфликта хоткея из Swift |
 
 ### `ping`
-No params.  
+*(service.py → health_check_service.py)*  
+Liveness check. Используется `HealthMonitor.swift` (3-секундный тик).  
+Нет параметров.  
 Returns: `{status, service, version, uptime_sec, is_recording, history_count}`
 
+**Пример:**
+```json
+Request:  {"id":"1","method":"ping","params":{}}
+Response: {"id":"1","ok":true,"result":{"status":"ok","service":"krab-ear-backend","version":"2.0.4","uptime_sec":3721,"is_recording":false,"history_count":142}}
+```
+
 ### `start_recording`
-No params.  
+*(service.py → recording_core_service.py)*  
+Начать захват микрофона.  
+Нет параметров.  
 Returns: `{status: "recording" | "already_recording", is_recording, duration_sec, preview_text}`
 
+**Пример:**
+```json
+Request:  {"id":"2","method":"start_recording","params":{}}
+Response: {"id":"2","ok":true,"result":{"status":"recording","is_recording":true,"duration_sec":0.0,"preview_text":""}}
+```
+
 ### `stop_recording`
-Params (all optional, fall back to current settings):
+*(service.py → recording_core_service.py)*  
+Остановить запись, запустить STT pipeline (Whisper → cleanup → diarization → translate → LLM rewrite → paste → save).  
+Params (все опциональные, fallback на runtime settings):
 
 | Param | Type | Default | Description |
 |---|---|---|---|
@@ -37,804 +112,2311 @@ Params (all optional, fall back to current settings):
 | `cleanup_profile` | string | `"soft"` | `"soft"`, `"strict"` |
 | `lang_hint` | string | null | ISO 639-1 language hint |
 | `translation_mode` | string | from settings | `"off"`, `"ru_to_es"`, `"es_to_ru"`, `"en_to_ru"`, `"auto"`, `"bilingual_ru_es"` |
-| `translate_and_paste` | bool | from settings | Paste translated text instead of original |
-| `stop_tail_trim_ms` | int | `180` | Trim N ms from end of audio (0–1200) |
+| `translate_and_paste` | bool | from settings | Вставить переведённый текст |
+| `stop_tail_trim_ms` | int | `180` | Обрезать N мс с конца аудио (0–1200) |
 
 Returns: `{status, text, original_text, translated_text, translation_status, translation_mode, source_lang, target_lang, history_id, ts, duration_sec, silence_detected, background_guard_rejected, ...}`  
-Status values: `"ok"`, `"empty_audio"`, `"empty_text"`, `"already_stopped"`
+Статусы: `"ok"`, `"empty_audio"`, `"empty_text"`, `"already_stopped"`
 
 ### `get_recording_state`
-No params.  
+*(service.py → recording_core_service.py)*  
+Текущее состояние записи и preview текст.  
+Нет параметров.  
 Returns: `{is_recording, duration_sec, preview_text}`
 
 ### `set_paste_status`
-Params: `id` (str, required), `paste_status` (str: `"ok"` | `"failed"`)  
+*(service.py)*  
+Обновить результат вставки для элемента истории (сообщает backend успех/ошибку paste).  
+Params: `{id}` (str, required), `{paste_status}` (str: `"ok"` | `"failed"`)  
 Returns: `{updated, id, paste_status}`
 
+### `handshake`
+*(service.py)*  
+Swift→backend инициализация при подключении. Обмен версиями и capabilities.  
+Params: `{agent_version?, capabilities?}`  
+Returns: `{backend_version, protocol_version, capabilities}`
+
+### `report_reconnect`
+*(service.py)*  
+Swift→backend телеметрия переподключения. Публикует `ipc.reconnect` info event.  
+Params: `{reason?}`  
+Returns: `{ok: true}`
+
+### `report_paste_failure`
+*(service.py)*  
+Репорт из Swift когда paste не удался (AX denied / app unsupported).  
+Params: `{reason, app_bundle_id?, error_code?}`  
+Returns: `{ok: true}`
+
+### `report_hotkey_conflict`
+*(service.py)*  
+Репорт из Swift когда `RegisterEventHotKey` возвращает `eventHotKeyExistsErr`.  
+Params: `{hotkey_description?}`  
+Returns: `{ok: true}`
+
 ---
 
-## History
+## History — CRUD
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `get_history_page` | Paginated history with filters |
-| `search_history` | Full-text search with filters |
-| `search_by_speaker` | Filter by diarization speaker ID |
-| `get_history_item` | Full details for single item by ID |
-| `add_history_item` | Manually add item |
-| `delete_history_item` | Soft-delete by ID (tombstone) |
-| `compact_history` | Compact NDJSON, removing tombstones |
-| `import_history_ndjson` | Import from external NDJSON file |
-| `get_history_stats` | Journal file sizes and counts |
-| `get_history_overview` | Dashboard overview snapshot |
-| `get_history_statistics` | Aggregated stats (duration, words, dates) |
-| `word_frequency_analysis` | Top N words by frequency |
-| `cleanup_old_history` | Delete items older than N days |
-| `get_clipboard_history` | Last 20 pasted items |
-| `repaste_item` | Re-trigger paste for clipboard item |
-| `get_storage_info` | Data file sizes |
-| `get_transcripts_path` | Path to transcripts folder |
-| `backup_history` | Create timestamped backup |
-| `restore_history` | Restore from backup |
-| `list_backups` | List available backups |
-| `filter_by_confidence` | Filter history by STT confidence |
-| `auto_summarize_batch` | LLM batch summarize recent items |
+| `get_history_page` | Страница истории с фильтрами |
+| `get_history_item` | Полные детали записи по ID |
+| `add_history_item` | Добавить запись вручную |
+| `delete_history_item` | Мягкое удаление по ID (tombstone) |
+| `cleanup_old_history` | Удалить записи старше N дней |
+| `compact_history` | Уплотнить NDJSON, удалить tombstone |
+| `import_history_ndjson` | Импорт из внешнего NDJSON файла |
 
 ### `get_history_page`
-Params (all optional):
+*(history_service.py)*  
+Paginated history с фильтрами по языку, дате, confidence.  
+Params: `{page?, page_size?, lang?, date_from?, date_to?, min_confidence?}`  
+Returns: `{items: [...], total, page, page_size, has_more}`
 
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `cursor` | string | null | Pagination cursor from previous response |
-| `limit` | int | `50` | Page size |
-| `paste_status` | string | null | Filter: `"ok"` / `"failed"` |
-| `translation_mode` | string | null | Filter by mode |
-| `translation_status` | string | null | Filter by status |
-| `from_ts` | string | null | ISO 8601 start datetime |
-| `to_ts` | string | null | ISO 8601 end datetime |
-
-Returns: `{items: [...HistoryItem], next_cursor}`
-
-### `search_history`
-Same params as `get_history_page` plus `query` (string, required).  
-Returns: `{items, next_cursor}`
-
-### `delete_history_item`
-Params: `id` (str, required)  
-Returns: `{deleted: true}`
+### `get_history_item`
+*(history_service.py)*  
+Возвращает полные детали одной записи истории по ID.  
+Params: `{id}` (str, required)  
+Returns: HistoryItem object (все поля включая speaker_turns, action_items, tags)
 
 ### `add_history_item`
-Params: `text` (str, required), optional `paste_status`, `source_text`, `translated_text`, `translation_mode`, `source_lang`, `target_lang`, `translation_status`, `translation_engine`  
-Returns: full HistoryItem dict
+*(history_service.py)*  
+Вручную добавить запись в историю.  
+Params: `{text, ts?, lang?, duration_sec?, ...}`  
+Returns: `{id, ts}`
+
+### `delete_history_item`
+*(history_service.py)*  
+Мягкое удаление записи (tombstone в NDJSON; реальная запись остаётся до compact).  
+Params: `{id}` (str, required)  
+Returns: `{deleted, id}`
+
+### `cleanup_old_history`
+*(history_service.py)*  
+Удаляет записи истории старше указанного числа дней (tombstone).  
+Params: `{days}` (int, required) — записи с ts старше days удаляются  
+Returns: `{deleted}`
+
+### `compact_history`
+*(history_service.py)*  
+Уплотнить NDJSON файл — удалить tombstones, переписать активные записи.  
+Нет params.  
+Returns: `{ok, before_count, after_count}`
+
+### `import_history_ndjson`
+*(history_service.py)*  
+Импортирует историю из внешнего NDJSON файла с merge (дубли по ID пропускаются).  
+Params: `{path}` (str, absolute path)  
+Returns: `{imported, skipped, errors}`
 
 ---
 
-## Tags
+## History — Search & Filter
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `add_tag` | Add tag to item |
-| `remove_tag` | Remove tag from item |
-| `get_tags` | Get all tags for item |
-| `search_by_tag` | Filter items by tag |
-| `list_all_tags` | All tags with usage counts |
+| `search_history` | Полнотекстовый поиск |
+| `fuzzy_search` | Нечёткий поиск |
+| `search_with_highlights` | Поиск с подсветкой совпадений |
+| `search_by_speaker` | Фильтр по спикеру диаризации |
+| `filter_by_confidence` | Фильтр по STT confidence |
+| `get_history_overview` | Обзорный срез истории |
+| `get_history_stats` | Размер файлов и счётчики |
+| `get_history_statistics` | Агрегированная статистика |
+| `word_frequency_analysis` | Частотный анализ слов |
+| `find_duplicates` | Поиск дублей по текстовому сходству |
+| `get_clipboard_history` | Последние N вставленных транскрипций |
+| `repaste_item` | Повторная вставка элемента clipboard |
+| `get_storage_info` | Размер файлов данных |
+| `get_transcripts_path` | Путь к папке транскриптов |
 
-All tag methods require `id` (str). `add_tag` / `remove_tag` / `search_by_tag` also require `tag` (str).  
-`search_by_tag` accepts optional `limit` (int, default 100, max 500).  
-Returns: `{id, tags: [...]}` for item-level methods; `{tags: [{tag, count}, ...]}` for `list_all_tags`.
+### `search_history`
+*(history_service.py)*  
+Полнотекстовый поиск по транскрипциям.  
+Params: `{query, limit?, date_from?, date_to?, lang?}`  
+Returns: `{items: [...], total}`
+
+### `fuzzy_search`
+*(history_service.py)*  
+Нечёткий поиск по истории транскрипций (approximate string matching).  
+Params: `{query, limit?, threshold?}` (threshold: float 0–1, default 0.7)  
+Returns: `{items: [...], scores: [...]}`
+
+### `search_with_highlights`
+*(history_service.py)*  
+Поиск по истории с подсветкой совпадений в результатах.  
+Params: `{query, limit?}`  
+Returns: `{items: [{...item, highlights: [...]}], total}`
+
+### `search_by_speaker`
+*(history_service.py)*  
+Возвращает записи истории, в которых участвует указанный спикер.  
+Params: `{speaker_id}` (str)  
+Returns: `{items: [...]}`
+
+### `filter_by_confidence`
+*(history_service.py)*  
+Возвращает записи истории, отфильтрованные по STT confidence score.  
+Params: `{min_confidence?, max_confidence?, limit?}` (float 0–1)  
+Returns: `{items: [...]}`
+
+### `get_history_overview`
+*(history_service.py)*  
+Возвращает обзорный срез истории для панели управления.  
+Params: `{limit?}` (опционально)  
+Returns: `{total, recent: [...], oldest_ts, newest_ts, avg_duration_sec}`
+
+### `get_history_stats`
+*(history_service.py)*  
+Возвращает состояние журналов истории и оценку размера.  
+Нет params.  
+Returns: `{active_count, deleted_count, file_size_bytes, ...}`
+
+### `get_history_statistics`
+*(history_service.py)*  
+Агрегирует статистику по всем активным записям истории за один проход.  
+Params: `{date_from?, date_to?}`  
+Returns: `{total_recordings, total_duration_sec, total_words, avg_confidence, languages: {...}, ...}`
+
+### `word_frequency_analysis`
+*(history_service.py)*  
+Анализирует частоту слов по истории транскрипций.  
+Params: `{limit?, lang?, date_from?, date_to?}`  
+Returns: `{words: [{word, count}, ...], total_unique}`
+
+### `find_duplicates`
+*(history_service.py)*  
+Находит дублирующиеся транскрипции в истории по текстовому сходству.  
+Params: `{threshold?, limit?}` (threshold: float 0–1)  
+Returns: `{groups: [[id1, id2, ...], ...], total_groups}`
+
+### `get_clipboard_history`
+*(history_service.py)*  
+Возвращает последние N вставленных транскрипций из in-memory clipboard_history (≤20).  
+Нет params.  
+Returns: `{items: [{id, text, ts}, ...]}`
+
+### `repaste_item`
+*(history_service.py)*  
+Находит текст по history_id в clipboard_history и возвращает для повторной вставки.  
+Params: `{id}` (str)  
+Returns: `{text, id}`
+
+### `get_storage_info`
+*(history_service.py)*  
+Возвращает информацию о размере файлов данных Krab Ear.  
+Нет params.  
+Returns: `{history_bytes, settings_bytes, transcripts_dir_bytes, total_bytes}`
+
+### `get_transcripts_path`
+*(history_service.py)*  
+Возвращает путь к папке транскриптов и создаёт её при необходимости.  
+Нет params.  
+Returns: `{path}` (str, абсолютный путь)
 
 ---
 
-## Export
+## History — Tags & Favorites
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `export_history` | Markdown with metadata and diarization |
-| `export_history_srt` | SubRip subtitle format |
-| `export_history_csv` | CSV table |
-| `export_history_markdown` | Plain Markdown |
-| `export_obsidian` | Obsidian-compatible `.md` |
+| `add_tag` | Добавить тег к записи |
+| `remove_tag` | Удалить тег из записи |
+| `get_tags` | Теги конкретной записи |
+| `search_by_tag` | Записи с указанным тегом |
+| `list_all_tags` | Все уникальные теги с count |
+| `toggle_favorite` | Переключить флаг избранного |
+| `get_favorites` | Все избранные записи |
+| `is_favorite` | Проверить, находится ли запись в избранном |
 
-All export methods accept optional `limit` (int, default 500, max 5000) and `save_to_file` (bool).  
-Returns: `{content: str, total_items: int, path: str|null}`
+### `add_tag`
+*(history_service.py)*  
+Добавляет тег к записи истории.  
+Params: `{id, tag}` (str, str)  
+Returns: `{ok, id, tags: [...]}`
+
+### `remove_tag`
+*(history_service.py)*  
+Удаляет тег из записи истории.  
+Params: `{id, tag}` (str, str)  
+Returns: `{ok, id, tags: [...]}`
+
+### `get_tags`
+*(history_service.py)*  
+Возвращает все теги для конкретной записи.  
+Params: `{id}` (str)  
+Returns: `{id, tags: [...]}`
+
+### `search_by_tag`
+*(history_service.py)*  
+Возвращает записи истории с указанным тегом.  
+Params: `{tag}` (str)  
+Returns: `{items: [...], total}`
+
+### `list_all_tags`
+*(history_service.py)*  
+Возвращает все уникальные теги с количеством использований.  
+Нет params.  
+Returns: `{tags: [{tag, count}, ...]}`
+
+### `toggle_favorite`
+*(history_service.py)*  
+Переключает флаг избранного для записи истории.  
+Params: `{id}` (str)  
+Returns: `{id, is_favorite}`
+
+### `get_favorites`
+*(history_service.py)*  
+Возвращает все избранные записи, отсортированные по времени (новые первыми).  
+Нет params.  
+Returns: `{items: [...]}`
+
+### `is_favorite`
+*(history_service.py)*  
+Проверяет, находится ли запись в избранном.  
+Params: `{id}` (str)  
+Returns: `{id, is_favorite}`
+
+---
+
+## History — Export
+
+| Метод | Описание |
+|---|---|
+| `export_history` | Экспорт в Markdown |
+| `export_history_srt` | Экспорт в формат SRT субтитров |
+| `export_history_csv` | Экспорт в CSV |
+| `export_history_json` | Экспорт в JSON |
+| `export_history_markdown` | Экспорт в Markdown (явный) |
+| `export_obsidian` | Экспорт в Obsidian-совместимый Markdown |
+| `export_html_report` | Экспорт в автономный HTML отчёт |
+| `generate_html_report` | Алиас для Swift UI Analytics Dashboard |
+| `batch_export` | Пакетный экспорт в нескольких форматах |
+
+### `export_history`
+*(history_service.py)*  
+Экспортирует всю историю в формате Markdown с метаданными и диаризацией.  
+Params: `{date_from?, date_to?, limit?}`  
+Returns: `{content}` (str, Markdown)
+
+### `export_history_srt`
+*(history_service.py)*  
+Экспортирует запись истории в формате SRT-субтитров (по speaker_turns).  
+Params: `{id}` (str)  
+Returns: `{content}` (str, SRT)
+
+### `export_history_csv`
+*(history_service.py)*  
+Экспорт истории в CSV формат.  
+Params: `{date_from?, date_to?}`  
+Returns: `{content}` (str, CSV)
+
+### `export_history_json`
+*(history_service.py)*  
+Экспортирует историю транскрипций в структурированный JSON.  
+Params: `{date_from?, date_to?, limit?}`  
+Returns: `{content}` (str, JSON)
+
+### `export_history_markdown`
+*(history_service.py)*  
+Экспортирует историю транскрипций в формате Markdown.  
+Params: `{date_from?, date_to?}`  
+Returns: `{content}` (str, Markdown)
+
+### `export_obsidian`
+*(history_service.py)*  
+Экспортирует транскрипции в формат Obsidian-совместимого Markdown с YAML frontmatter.  
+Params: `{date_from?, date_to?}`  
+Returns: `{content}` (str)
+
+### `export_html_report`
+*(history_service.py)*  
+Экспортирует историю транскрипций в автономный HTML-отчёт с аналитикой.  
+Params: `{date_from?, date_to?}` (опциональные)  
+Returns: `{content}` (str, HTML)
+
+### `generate_html_report`
+*(history_service.py)*  
+Алиас для `export_html_report` — используется из Analytics Dashboard в Swift UI.  
+_(documented in history_service.py)_
+
+### `batch_export`
+*(history_service.py)*  
+Экспортирует историю в нескольких форматах одновременно.  
+Params: `{formats: ["json","csv","srt",...], date_from?, date_to?}`  
+Returns: `{exports: {format: content, ...}}`
+
+---
+
+## History — Annotations & Enrichment
+
+| Метод | Описание |
+|---|---|
+| `set_annotation` | Сохранить заметку к записи |
+| `get_annotation` | Получить заметку |
+| `search_annotations` | Полнотекстовый поиск по заметкам |
+| `enrich_recording` | Авто-заполнение метаданных записи |
+| `auto_summarize_batch` | LLM резюме для пакета транскрипций |
+| `list_summary_profiles` | Список профилей резюмирования |
+| `add_summary_profile` | Добавить профиль резюмирования |
+| `generate_auto_title` | Автоматический заголовок |
+
+### `set_annotation`
+*(history_service.py)*  
+Сохраняет текстовую заметку к записи истории.  
+Params: `{id, note}` (str, str)  
+Returns: `{ok, id}`
+
+### `get_annotation`
+*(history_service.py)*  
+Возвращает заметку для записи истории.  
+Params: `{id}` (str)  
+Returns: `{id, note}` (note может быть null)
+
+### `search_annotations`
+*(history_service.py)*  
+Полнотекстовый поиск по пользовательским заметкам.  
+Params: `{query, limit?}`  
+Returns: `{items: [...]}`
+
+### `enrich_recording`
+*(metadata_enricher.py)*  
+Авто-заполняет поля метаданных: language, sentence_count, word_count, keywords.  
+Params: `{id}` (str)  
+Returns: `{ok, id, enriched_fields: {...}}`
+
+### `auto_summarize_batch`
+*(history_service.py)*  
+Генерирует сводное LLM-резюме для нескольких транскрипций.  
+Params: `{ids?: [...], limit?, profile?}`  
+Returns: `{summaries: [{id, summary}, ...], failed: [...]}`
+
+### `list_summary_profiles`
+*(history_service.py)*  
+Возвращает список всех профилей резюмирования (встроенных + кастомных).  
+Нет params.  
+Returns: `{profiles: [{name, description, prompt_template}, ...]}`
+
+### `add_summary_profile`
+*(history_service.py)*  
+Добавляет или заменяет кастомный профиль резюмирования.  
+Params: `{name, description, prompt_template}`  
+Returns: `{ok, name}`
+
+### `generate_auto_title`
+*(service.py)*  
+Генерирует автоматический заголовок для транскрибации эвристически.  
+Params: `{id?, text?}` — одно из двух required  
+Returns: `{title}` (str)
+
+---
+
+## History — Backup & Restore
+
+| Метод | Описание |
+|---|---|
+| `backup_history` | Создать timestamped резервную копию |
+| `restore_history` | Восстановить из резервной копии |
+| `list_backups` | Список резервных копий |
+| `configure_auto_export` | Настроить расписание авто-экспорта |
+| `list_auto_exports` | Список файлов авто-экспорта |
+
+### `backup_history`
+*(history_service.py)*  
+Создаёт timestamped-резервную копию `history.ndjson` и `settings.json`.  
+Нет params.  
+Returns: `{path, size_bytes, ts}`
+
+### `restore_history`
+*(history_service.py)*  
+Восстанавливает историю из резервной копии (текущий файл заменяется).  
+Params: `{backup_name}` (str)  
+Returns: `{ok, restored_count}`
+
+### `list_backups`
+*(history_service.py)*  
+Возвращает список доступных резервных копий с метаданными.  
+Нет params.  
+Returns: `{backups: [{name, ts, size_bytes}, ...]}`
+
+### `configure_auto_export`
+*(service.py)*  
+Настраивает расписание авто-экспорта транскрипций.  
+Params: `{enabled, interval_sec?, format?, output_dir?}`  
+Returns: `{ok, config}`
+
+### `list_auto_exports`
+*(service.py)*  
+Список файлов авто-экспорта.  
+Нет params.  
+Returns: `{exports: [...]}`
+
+---
+
+## History — Deduplication & Integrity
+
+| Метод | Описание |
+|---|---|
+| `check_duplicate` | Проверить одну транскрипцию на дублирование |
+| `run_deduplication` | Полное сканирование истории на дубли |
+| `get_dedup_stats` | Статистика дедупликатора |
+| `check_integrity` | Проверка целостности данных |
+| `repair_integrity` | Исправление проблем целостности |
+
+### `check_duplicate`
+*(service.py)*  
+Проверяет, является ли текст дубликатом существующей записи в истории.  
+Params: `{text, threshold?}` (float 0–1, default 0.9)  
+Returns: `{is_duplicate, matched_id?, similarity?}`
+
+### `run_deduplication`
+*(service.py)*  
+Сканирует всю историю и возвращает отчёт о дублирующихся транскрипциях.  
+Params: `{threshold?, auto_delete?}`  
+Returns: `{groups: [...], total_groups, deleted?}`
+
+### `get_dedup_stats`
+*(service.py)*  
+Возвращает статистику дедупликатора за текущую сессию.  
+Нет params.  
+Returns: `{checked, duplicates_found, chars_saved}`
+
+### `check_integrity`
+*(health_check_service.py)*  
+Проверяет целостность файлов данных Krab Ear (history.ndjson, settings.json).  
+Нет params.  
+Returns: `{ok, issues: [...], checked_files}`
+
+### `repair_integrity`
+*(service.py)*  
+Исправляет автоматически устраняемые проблемы целостности данных.  
+Нет params.  
+Returns: `{ok, repaired, issues_remaining}`
+
+---
+
+## Settings & Profile Presets
+
+| Метод | Описание |
+|---|---|
+| `get_settings` | Все текущие настройки |
+| `set_settings` | Обновить настройки (partial) |
+| `apply_profile_preset` | Применить пресет профиля |
+| `list_profile_presets` | Список пресетов профилей |
+| `get_notification_preferences` | Настройки уведомлений |
+| `set_notification_preferences` | Обновить уведомления |
+| `export_settings` | Экспорт в JSON файл |
+| `import_settings` | Импорт из JSON файла |
+| `list_settings_backups` | Список rolling бэкапов |
+| `restore_settings_backup` | Восстановить из бэкапа |
+| `create_manual_settings_backup` | Ручной бэкап настроек |
+
+### `get_settings`
+*(settings_service.py)*  
+Возвращает все текущие настройки (из кэша с TTL 5 с).  
+Нет params.  
+Returns: `{settings: {...}}` — полный словарь настроек
+
+### `set_settings`
+*(settings_service.py)*  
+Обновляет одно или несколько полей настроек. Принимает любое подмножество.  
+Params: `{key: value, ...}`  
+Returns: `{ok, updated_keys: [...]}`
+
+### `apply_profile_preset`
+*(settings_service.py)*  
+Применяет пресет настроек профиля, сохраняет и сбрасывает кэш.  
+Params: `{preset_name}` — `"default"`, `"meeting"`, `"translation"`, `"call_recording"`  
+Returns: `{ok, preset_name, applied_settings: {...}}`
+
+### `list_profile_presets`
+*(settings_service.py)*  
+Возвращает список доступных пресетов профилей с описаниями и значениями.  
+Нет params.  
+Returns: `{presets: [{name, description, settings}, ...]}`
+
+### `get_notification_preferences`
+*(settings_service.py)*  
+Возвращает текущие настройки уведомлений из хранилища настроек.  
+Нет params.  
+Returns: `{notify_confidence_warn, notify_errors, notify_restart, ...}`
+
+### `set_notification_preferences`
+*(settings_service.py)*  
+Обновляет настройки уведомлений. Принимает любое подмножество полей.  
+Params: `{notify_confidence_warn?, notify_errors?, ...}`  
+Returns: `{ok}`
+
+### `export_settings`
+*(settings_service.py)*  
+Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля (API ключи).  
+Params: `{path}` (str, absolute path)  
+Returns: `{ok, path, excluded_fields: [...]}`
+
+### `import_settings`
+*(settings_service.py)*  
+Импортирует настройки из JSON-файла.  
+Params: `{path}` (str)  
+Returns: `{ok, imported_keys: [...]}`
+
+### `list_settings_backups`
+*(settings_service.py)*  
+Возвращает список бэкапов настроек, от новых к старым.  
+Нет params.  
+Returns: `{backups: [{name, ts, reason}, ...]}`
+
+### `restore_settings_backup`
+*(settings_service.py)*  
+Восстанавливает настройки из указанного бэкапа и сохраняет их.  
+Params: `{backup_name}` (str)  
+Returns: `{ok, backup_name}`
+
+### `create_manual_settings_backup`
+*(settings_service.py)*  
+Создаёт ручной бэкап текущих настроек с произвольной причиной.  
+Params: `{reason?}` (str)  
+Returns: `{ok, backup_name}`
 
 ---
 
 ## Translation
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `translate_text` | Translate arbitrary text |
-| `set_translation_glossary_item` | Add/update glossary pair |
-| `remove_translation_glossary_item` | Remove glossary entry |
-| `get_glossary_suggestions` | Auto-suggest glossary pairs from history |
-| `get_vocabulary_suggestions` | Propose STT vocabulary entries from history |
+| `translate_text` | Перевод текста |
+| `translate_selection` | Перевод выделенного текста из любого приложения |
 
 ### `translate_text`
-Params: `text` (str), `translation_mode` (str), optional `translation_style` (`"neutral"`, `"chat"`, `"formal"`), `network_mode`  
-Returns: `{text, status, source_lang, target_lang, translation_mode, translation_style, engine}`
+*(translation_service.py)*  
+Отдельная IPC-команда перевода текста для UI и будущих workflow.  
+Params: `{text, mode?}` — mode: `"ru_to_es"`, `"es_to_ru"`, `"en_to_ru"`, `"auto"`, `"bilingual_ru_es"`  
+Returns: `{translated, source_lang, target_lang, mode}`
+
+### `translate_selection`
+*(translation_service.py)*  
+Переводит выделенный текст из любого приложения (Phase 2A workflow — Cmd+Shift+T).  
+Params: `{text, mode?}`  
+Returns: `{translated, source_lang, target_lang}`
+
+---
+
+## Glossary & Vocabulary
+
+| Метод | Описание |
+|---|---|
+| `set_translation_glossary_item` | Добавить/обновить пару глоссария |
+| `remove_translation_glossary_item` | Удалить пару из глоссария |
+| `get_glossary_suggestions` | Предложения для глоссария из истории |
+| `suggest_medical_glossary_terms` | Мед. термины auto-learn |
+| `apply_glossary_suggestions` | Применить выбранные предложения |
+| `export_glossary_csv` | Экспорт глоссария в CSV |
+| `import_glossary_csv` | Импорт CSV в глоссарий |
+| `get_vocabulary_suggestions` | Предложения для STT vocabulary |
+| `get_smart_vocabulary_suggestions` | Умные предложения vocabulary из паттернов |
+| `add_stt_hotword` | Добавить STT hotword |
+| `remove_stt_hotword` | Удалить STT hotword |
+| `list_stt_hotwords` | Список STT hotwords |
+| `add_hotword` | Добавить триггерное слово |
+| `remove_hotword` | Удалить триггерное слово |
+| `get_hotwords` | Список триггерных слов |
+| `check_hotwords` | Проверить текст на триггерные слова |
 
 ### `set_translation_glossary_item`
-Params: `source` (str), `target` (str)  
-Returns: `{glossary: {...}}`
+*(translation_service.py)*  
+Добавляет/обновляет одну пару глоссария перевода (`source→target`).  
+Params: `{source, target, lang_pair?}`  
+Returns: `{ok, glossary_size}`
 
 ### `remove_translation_glossary_item`
-Params: `source` (str)  
-Returns: `{glossary: {...}}`
+*(translation_service.py)*  
+Удаляет одну пару из глоссария перевода.  
+Params: `{source}` (str)  
+Returns: `{ok, removed}`
+
+### `get_glossary_suggestions`
+*(translation_service.py)*  
+Анализирует историю переводов и предлагает пары `source→target` для глоссария.  
+Params: `{limit?}`  
+Returns: `{suggestions: [{source, target, confidence}, ...]}`
+
+### `suggest_medical_glossary_terms`
+*(glossary_auto_learn.py)*  
+Мед. домен auto-learn: предлагает пары ES↔RU из истории переводов.  
+Params: `{limit?}`  
+Returns: `{suggestions: [{source, target, domain}, ...]}`
+
+### `apply_glossary_suggestions`
+*(glossary_auto_learn.py)*  
+Применяет выбранные мед. термины в `translation_glossary`.  
+Params: `{suggestions: [{source, target}]}`  
+Returns: `{ok, applied}`
+
+### `export_glossary_csv`
+*(service.py)*  
+Экспортирует `translation_glossary` в CSV-строку.  
+Нет params.  
+Returns: `{csv}` (str)
+
+### `import_glossary_csv`
+*(service.py)*  
+Импортирует CSV в `translation_glossary` (merge или replace).  
+Params: `{csv, mode?}` — mode: `"merge"` | `"replace"`, default `"merge"`  
+Returns: `{ok, imported, skipped}`
+
+### `get_vocabulary_suggestions`
+*(translation_service.py)*  
+Анализирует историю транскрибаций и предлагает слова для STT vocabulary.  
+Params: `{limit?}`  
+Returns: `{suggestions: [{word, frequency}, ...]}`
+
+### `get_smart_vocabulary_suggestions`
+*(service.py)*  
+Предложения для словаря STT на основе паттернов использования.  
+Params: `{limit?}`  
+Returns: `{suggestions: [{word, score, reason}, ...]}`
+
+### `add_stt_hotword`
+*(stt_management_service.py)*  
+Добавляет термин в список STT hotwords (используются в initial_prompt Whisper).  
+Params: `{word}` (str)  
+Returns: `{ok, word, total}`
+
+### `remove_stt_hotword`
+*(stt_management_service.py)*  
+Удаляет термин из списка STT hotwords.  
+Params: `{word}` (str)  
+Returns: `{ok, removed}`
+
+### `list_stt_hotwords`
+*(stt_management_service.py)*  
+Возвращает текущий список STT hotwords.  
+Нет params.  
+Returns: `{hotwords: [...], total}`
+
+### `add_hotword`
+*(hotword_detector.py)*  
+Добавляет горячее слово для отслеживания в транскрипциях.  
+Params: `{word}` (str)  
+Returns: `{ok}`
+
+### `remove_hotword`
+*(hotword_detector.py)*  
+Удаляет горячее слово.  
+Params: `{word}` (str)  
+Returns: `{ok}`
+
+### `get_hotwords`
+*(hotword_detector.py)*  
+Список горячих слов для детектора.  
+Нет params.  
+Returns: `{hotwords: [...]}`
+
+### `check_hotwords`
+*(hotword_detector.py)*  
+Проверяет текст на наличие горячих слов.  
+Params: `{text}` (str)  
+Returns: `{found: [...], count}`
 
 ---
 
-## Settings
+## STT Management
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `get_settings` | Read current settings (TTL-cached 5s) |
-| `set_settings` | Merge-update settings |
-| `apply_profile_preset` | Apply named preset |
-| `list_profile_presets` | List available presets |
-| `get_notification_preferences` | Read notification settings |
-| `set_notification_preferences` | Update notification settings |
+| `warmup_stt` | Ручной STT warmup |
+| `warmup_rewriter` | Ручной LLM warmup probe |
+| `select_model` | Умный выбор STT модели |
+| `get_stt_routing_decision` | Debug: результат scored adapter selection |
+| `list_normalization_profiles` | Список профилей нормализации текста |
 
-### `get_settings` / `set_settings`
-`get_settings`: no params. Returns the full settings dict.  
-`set_settings`: pass any subset of settings keys to merge. Key settings:
+### `warmup_stt`
+*(stt_management_service.py)*  
+Ручной запуск STT warmup — полезен после смены профиля или модели.  
+Нет params.  
+Returns: `{ok, model, duration_ms}`
 
-| Key | Type | Values |
-|---|---|---|
-| `quality_profile` | string | `"balanced"`, `"max"` |
-| `cleanup_profile` | string | `"soft"`, `"strict"` |
-| `translation_mode` | string | `"off"`, `"ru_to_es"`, `"es_to_ru"`, `"en_to_ru"`, `"auto"`, `"auto_to_ru"`, `"bilingual_ru_es"` |
-| `translation_style` | string | `"neutral"`, `"chat"`, `"formal"` |
-| `auto_paste` | bool | |
-| `translate_and_paste` | bool | |
-| `realtime_preview_enabled` | bool | |
-| `network_mode` | string | `"offline_default"`, `"offline_strict"`, `"online_opt_in"` |
-| `diarization_enabled` | bool | |
-| `llm_rewrite_enabled` | bool | |
+### `warmup_rewriter`
+*(service.py)*  
+Ручной запуск LLM rewriter warmup probe (для кнопки "Load Model" в GUI).  
+Нет params.  
+Returns: `{ok, status, latency_ms}`
 
-### `apply_profile_preset`
-Params: `preset` (str: `"default"`, `"meeting"`, `"translation"`, `"call_recording"`)  
-Returns: updated settings dict
+### `select_model`
+*(stt_management_service.py)*  
+Умный выбор STT-модели на основе условий записи (длительность, нагрузка, язык).  
+Params: `{duration_hint_sec?, lang_hint?}`  
+Returns: `{model, reason}`
+
+### `get_stt_routing_decision`
+*(stt_management_service.py)*  
+Возвращает результат scored STT adapter selection для отладки.  
+Params: `{lang?, duration_sec?}`  
+Returns: `{adapters: [{name, score, reason}, ...], selected}`
+
+### `list_normalization_profiles`
+*(service.py)*  
+Возвращает список всех профилей нормализации текста.  
+Нет params.  
+Returns: `{profiles: [{name, description}, ...]}`
 
 ---
 
-## Diagnostics
+## Audio — Devices & Analysis
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `get_diagnostics` | System, STT, LLM, history, settings cache info |
-| `health_check` | Aggregated subsystem health |
-| `analyze_audio_quality` | Pre-flight audio file quality metrics |
-| `analyze_silence` | Silence/speech ratio in audio file |
-| `detect_language` | Heuristic language detection |
-| `get_last_llm_diff` | Last word-level LLM rewriter diff |
-| `summarize_text` | Local lightweight text summarizer |
-| `summarize_item` | LLM summary for history item by ID |
+| `list_audio_inputs` | Список аудиовходов для GUI пикера |
+| `get_audio_devices` | Список аудиоустройств с деталями |
+| `test_microphone` | Тест микрофона: RMS/peak |
+| `analyze_audio_quality` | Pre-flight анализ качества аудиофайла |
+| `analyze_silence` | Обнаружение тишины в аудиофайле |
+| `get_audio_info` | Метаданные аудиофайла |
+| `get_waveform` | Waveform данные для GUI |
+| `check_audio_duplicate` | Аудио-фингерпринтинг для обнаружения дублей |
+| `profile_noise` | Профилирование фонового шума |
+| `analyze_word_timing` | Анализ ритма речи по таймстемпам |
 
-### `get_diagnostics`
-No params.  
-Returns: `{system: {python_version, platform, uptime_sec}, stt: {model_balanced, quality_profile, current_model, diarization_enabled, diarization_device}, llm: {...}, history: {total_items, data_dir}, settings_cache: {ttl_sec, cached}}`
+### `list_audio_inputs`
+*(service.py → recording_core_service.py)*  
+Список доступных аудиовходов для GUI пикера.  
+Нет params.  
+Returns: `{inputs: [{index, name, channels, sample_rate}, ...]}`
 
-### `analyze_audio_quality`
-Params: `file_path` (str, required)  
-Returns: `{rms_level, peak_level, snr_estimate_db, clipping_ratio, silence_ratio, duration_sec, quality_score, warnings}`
-
-### `analyze_silence`
-Params: `file_path` (str, required), `threshold_db` (float, default `-40.0`)  
-Returns: `{silence_regions, speech_ratio, total_silence_sec, duration_sec}`
-
-### `detect_language`
-Params: `text` (str) **or** `texts` (list of str) for batch mode  
-Returns: `{language, confidence, script}` or `{results: [{language, confidence, script}, ...]}`
-
-### `summarize_text`
-Params: `text` (str, required), `mode` (`"summary_short"` | `"summary_detailed"`, default `"summary_short"`), `max_points` (int 1–12, default 3)  
-Returns: `{mode, summary, bullets, source_chars}`
-
-### `summarize_item`
-Params: `id` (str, required)  
-Returns: `{id, summary, text_length, source_chars}`
-
----
-
-## Analytics
-
-| Method | Description |
-|---|---|
-| `get_recording_stats` | Cumulative recording statistics |
-| `get_metrics_dashboard` | Real-time session/LLM/call_assist snapshot |
-| `get_usage_stats` | Daily usage: recordings, duration, words |
-| `get_error_report` | Recent errors from ring buffer |
-| `get_error_stats` | Error counts by component/type/window |
-
-### `get_recording_stats`
-No params.  
-Returns: `{total_count, total_duration_sec, today_count, today_duration_sec, week_count, week_duration_sec, avg_duration_sec, most_used_lang, lang_distribution, llm_applied_count, llm_correction_rate, diarization_used_count, diarization_usage_rate}`
-
-### `get_metrics_dashboard`
-No params.  
-Returns: `{session: {recording_active, preview_active, preview_text_length, preview_duration_sec}, llm: {enabled, model, status}, call_assist: {...}, config_snapshot: {quality, cleanup, translation_mode, diarization, network_mode}}`
-
----
-
-## System / Audio
-
-| Method | Description |
-|---|---|
-| `list_audio_inputs` | Enumerate available audio input devices |
-| `get_audio_devices` | Audio device list for GUI picker |
-| `test_microphone` | Record short clip, return RMS/peak levels |
-
-### `list_audio_inputs` / `get_audio_devices`
-No params. Returns list of available input devices.
+### `get_audio_devices`
+*(service.py → recording_core_service.py)*  
+Список аудиоустройств с деталями (все входы sounddevice).  
+Нет params.  
+Returns: `{devices: [{index, name, channels, sample_rate, default}, ...]}`
 
 ### `test_microphone`
-No params. Returns: `{rms, peak, duration_sec, status}`
+*(service.py)*  
+Записывает короткий фрагмент аудио и возвращает RMS/peak уровни.  
+Params: `{duration_sec?}` (default 2.0)  
+Returns: `{rms, peak, ok}`
+
+### `analyze_audio_quality`
+*(audio_analytics_service.py)*  
+Pre-flight анализ качества аудиофайла перед транскрипцией (RMS, SNR, clipping, silence ratio).  
+Params: `{path}` (str, absolute path)  
+Returns: `{rms, peak, snr_db, clipping_ratio, silence_ratio, recommendation}`
+
+### `analyze_silence`
+*(audio_analytics_service.py)*  
+Обнаруживает участки тишины в аудиофайле.  
+Params: `{path, threshold?}`  
+Returns: `{silence_regions: [{start_sec, end_sec}], speech_ratio}`
+
+### `get_audio_info`
+*(audio_analytics_service.py)*  
+Возвращает метаданные аудиофайла (длительность, sample_rate, channels, codec).  
+Params: `{path}` (str)  
+Returns: `{duration_sec, sample_rate, channels, codec, size_bytes}`
+
+### `get_waveform`
+*(audio_analytics_service.py)*  
+Генерирует waveform-данные из аудиофайла для GUI-визуализации.  
+Params: `{path, points?}` (int, default 200)  
+Returns: `{waveform: [...], duration_sec}`
+
+### `check_audio_duplicate`
+*(audio_analytics_service.py)*  
+Проверяет, являются ли два аудио-сигнала дубликатами по фингерпринту.  
+Params: `{path1, path2, threshold?}`  
+Returns: `{is_duplicate, similarity}`
+
+### `profile_noise`
+*(audio_analytics_service.py)*  
+Профилирует фоновый шум в аудиофайле: тип, уровень, SNR, рекомендации.  
+Params: `{path}` (str)  
+Returns: `{noise_type, level_db, snr_db, recommendations: [...]}`
+
+### `analyze_word_timing`
+*(audio_analytics_service.py)*  
+Анализирует ритм речи по пословным таймстемпам Whisper.  
+Params: `{id}` (str, history_id) или `{segments: [...]}`  
+Returns: `{wpm, hesitations: [...], pace_category}`
+
+---
+
+## Audio Import & Transcription Queue
+
+| Метод | Описание |
+|---|---|
+| `transcribe_paths` | Синхронная транскрипция файлов |
+| `transcribe_paths_async` | Асинхронная транскрипция (job) |
+| `get_transcribe_progress` | Прогресс job'а |
+| `cancel_transcribe_job` | Отмена job'а |
+| `preview_transcribe_paths` | Preview без сохранения |
+| `enqueue_transcription` | Добавить в очередь транскрипции |
+| `cancel_transcription` | Отменить задание по job_id |
+| `get_queue_status` | Статус задания по job_id |
+| `list_transcription_queue` | Список всех заданий очереди |
+
+### `transcribe_paths`
+*(service.py → recording_core_service.py)*  
+Синхронная транскрипция одного или нескольких аудиофайлов.  
+Params: `{paths: [...], quality_profile?, lang_hint?, translation_mode?}`  
+Returns: `{results: [{path, text, history_id, ...}]}`
+
+### `transcribe_paths_async`
+*(service.py → recording_core_service.py)*  
+Асинхронная транскрипция файлов в фоновом job с прогрессом.  
+Params: `{paths: [...], quality_profile?, lang_hint?}`  
+Returns: `{job_id}` — используйте `get_transcribe_progress` для опроса
+
+### `get_transcribe_progress`
+*(service.py → recording_core_service.py)*  
+Опрос прогресса асинхронного job'а транскрипции.  
+Params: `{job_id}` (str)  
+Returns: `{job_id, status, progress_pct, results?, error?}`
+
+### `cancel_transcribe_job`
+*(service.py → recording_core_service.py)*  
+Запрос отмены асинхронного job'а.  
+Params: `{job_id}` (str)  
+Returns: `{ok, job_id, status}`
+
+### `preview_transcribe_paths`
+*(service.py → recording_core_service.py)*  
+Preview транскрипции файлов без сохранения в историю.  
+Params: `{paths: [...], quality_profile?}`  
+Returns: `{results: [{path, text, duration_sec}]}`
+
+### `enqueue_transcription`
+*(transcription_queue.py)*  
+Добавляет аудиофайл в очередь транскрипции с приоритетом.  
+Params: `{path, priority?}` (int 0–10, default 5)  
+Returns: `{job_id, position}`
+
+### `cancel_transcription`
+*(transcription_queue.py)*  
+Отменяет задание транскрипции по job_id.  
+Params: `{job_id}` (str)  
+Returns: `{ok, job_id}`
+
+### `get_queue_status`
+*(transcription_queue.py)*  
+Статус задания транскрипции по job_id.  
+Params: `{job_id}` (str)  
+Returns: `{job_id, status, progress_pct, result?, error?}`
+
+### `list_transcription_queue`
+*(transcription_queue.py)*  
+Список всех заданий очереди транскрипции.  
+Нет params.  
+Returns: `{jobs: [{job_id, path, status, priority, created_at}, ...]}`
+
+---
+
+## LLM / Rewriter
+
+| Метод | Описание |
+|---|---|
+| `list_llm_models` | Список моделей из LM Studio |
+| `probe_llm_http` | Ping LM Studio HTTP endpoint |
+| `get_last_llm_diff` | Последний word-level diff от rewriter'а |
+| `extract_action_items` | Извлечение задач из транскрипта |
+| `batch_extract_action_items` | Пакетное извлечение |
+| `get_pending_action_items` | Items без action_items |
+| `summarize_text` | Lightweight summary текста |
+| `summarize_item` | LLM summary элемента истории |
+
+### `list_llm_models`
+*(service.py)*  
+Возвращает список моделей доступных в LM Studio через `/api/v1/models`.  
+Нет params.  
+Returns: `{models: [{id, name, ...}]}`
+
+### `probe_llm_http`
+*(service.py → health_check_service.py)*  
+Однократный ping LM Studio HTTP endpoint. Возвращает `reachable`, `latency_ms`, `model`.  
+Нет params.  
+Returns: `{reachable, latency_ms, model?, error?}`
+
+### `get_last_llm_diff`
+*(service.py)*  
+Возвращает последний word-level diff от LLM rewriter'а (для debug панели).  
+Нет params.  
+Returns: `{diff: [{op, text}, ...], before, after}`
+
+### `extract_action_items`
+*(service.py)*  
+Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM.  
+Params: `{id}` (str)  
+Returns: `{tasks: [...], decisions: [...], questions: [...], priority_tags: [...]}`
+
+### `batch_extract_action_items`
+*(service.py)*  
+Пакетное извлечение задач/решений/вопросов для нескольких item_id.  
+Params: `{ids: [...]}`  
+Returns: `{results: [{id, tasks, decisions, questions}], failed: [...]}`
+
+### `get_pending_action_items`
+*(service.py)*  
+Возвращает все items у которых `action_items=None` (ещё не анализировались).  
+Нет params.  
+Returns: `{items: [...]}`
+
+### `summarize_text`
+*(text_processing_service.py)*  
+Локальный lightweight-summary для длинных транскриптов.  
+Params: `{text, max_sentences?}`  
+Returns: `{summary}`
+
+### `summarize_item`
+*(text_processing_service.py)*  
+LLM-summary для элемента истории по ID.  
+Params: `{id}` (str)  
+Returns: `{summary, id}`
 
 ---
 
 ## Call Assist
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `start_call_assist` | Start real-time call translation session |
-| `stop_call_assist` | Stop session and save results |
-| `get_call_assist_state` | Current session state |
-| `call_assist_diagnostics` | Session diagnostics |
-| `call_assist_summary` | Session summary |
-| `call_assist_quick_phrase` | Translate and emit a quick phrase |
-| `list_call_assist_quick_phrases` | List available quick phrases |
-| `call_assist_cost_estimate` | Estimated API cost for session |
-| `call_assist_timeline` | Full timeline entries |
-| `call_assist_timeline_stats` | Timeline statistics |
-| `call_assist_timeline_summary` | LLM summary of timeline |
-| `call_assist_timeline_export` | Export timeline to file |
-| `call_assist_timeline_clear` | Clear timeline entries |
-| `call_assist_timeline_to_history` | Save timeline to main history |
+| `start_call_assist` | Запустить сессию ассистента звонка |
+| `stop_call_assist` | Остановить сессию |
+| `get_call_assist_state` | Текущее состояние |
+| `call_assist_diagnostics` | Диагностика и explain-пакет |
+| `call_assist_summary` | Summary текущей сессии |
+| `call_assist_quick_phrase` | Отправить быструю фразу |
+| `list_call_assist_quick_phrases` | Библиотека быстрых фраз |
+| `call_assist_cost_estimate` | Оценка telephony+AI стоимости |
+| `call_assist_timeline` | Timeline текущей сессии |
+| `call_assist_timeline_stats` | Статистика timeline |
+| `call_assist_timeline_summary` | Summary timeline |
+| `call_assist_timeline_export` | Экспорт timeline |
+| `call_assist_timeline_clear` | Очистить timeline |
+| `call_assist_timeline_to_history` | Сохранить timeline в историю |
+| `call_assist_list_templates` | Список шаблонов быстрых реплик |
+| `call_assist_add_template` | Добавить шаблон |
+| `call_assist_remove_template` | Удалить шаблон |
+| `call_assist_template` | Отправить шаблонную реплику |
+| `call_assist_cost_report` | Detailed cost report |
 
 ### `start_call_assist`
-Params (all optional): `language_pair` (str), `voice_gateway_url` (str), `quality_profile` (str)  
-Returns: `{status, session_id}`
+*(call_assist_service.py)*  
+Запускает сессию ассистента звонка с интеграцией Voice Gateway.  
+Params: `{session_id?, lang?}`  
+Returns: `{ok, session_id, state}`
 
 ### `stop_call_assist`
-No params.  
-Returns: `{status, duration_sec, timeline_count}`
+*(call_assist_service.py)*  
+Останавливает текущую сессию ассистента звонка.  
+Нет params.  
+Returns: `{ok, session_id, duration_sec}`
+
+### `get_call_assist_state`
+*(call_assist_service.py)*  
+Возвращает текущее состояние сессии call assist.  
+Нет params.  
+Returns: `{active, session_id?, state?}`
+
+### `call_assist_diagnostics`
+*(call_assist_service.py)*  
+Возвращает diagnostics и explain-пакет почему перевод не появился.  
+Нет params.  
+Returns: `{state, gateway_connected, last_error?, explain}`
+
+### `call_assist_summary`
+*(call_assist_service.py)*  
+Запрашивает summary текущей звонковой сессии.  
+Нет params.  
+Returns: `{summary, duration_sec, phrase_count}`
 
 ### `call_assist_quick_phrase`
-Params: `phrase` (str, required), `target_lang` (str, optional)  
-Returns: `{translated, original, target_lang, engine}`
+*(call_assist_service.py)*  
+Отправляет быструю фразу на перевод/озвучку в Voice Gateway.  
+Params: `{phrase, lang?}`  
+Returns: `{ok, translated?}`
+
+### `list_call_assist_quick_phrases`
+*(call_assist_service.py)*  
+Возвращает библиотеку быстрых фраз из Voice Gateway.  
+Нет params.  
+Returns: `{phrases: [{id, text, category}, ...]}`
+
+### `call_assist_cost_estimate`
+*(call_assist_service.py)*  
+Считает оценку telephony+AI стоимости через Voice Gateway.  
+Params: `{country?, duration_min?}`  
+Returns: `{estimated_cost_usd, breakdown}`
+
+### `call_assist_timeline`
+*(call_assist_service.py)*  
+Возвращает timeline текущей звонковой сессии.  
+Нет params.  
+Returns: `{timeline: [{ts, speaker, text, translated?}, ...]}`
+
+### `call_assist_timeline_stats`
+*(call_assist_service.py)*  
+Статистика timeline (счётчики реплик, спикеры).  
+_(documented in call_assist_service.py)_
+
+### `call_assist_timeline_summary`
+*(call_assist_service.py)*  
+Summary timeline текущей сессии.  
+_(documented in call_assist_service.py)_
+
+### `call_assist_timeline_export`
+*(call_assist_service.py)*  
+Экспорт timeline в текстовый формат.  
+_(documented in call_assist_service.py)_
+
+### `call_assist_timeline_clear`
+*(call_assist_service.py)*  
+Очищает timeline текущей сессии.  
+_(documented in call_assist_service.py)_
+
+### `call_assist_timeline_to_history`
+*(call_assist_service.py)*  
+Сохраняет экспорт timeline в историю Krab Ear.  
+Нет params.  
+Returns: `{ok, history_id}`
+
+### `call_assist_list_templates`
+*(call_assist_service.py)*  
+Возвращает локальные шаблоны быстрых реплик.  
+Нет params.  
+Returns: `{templates: [{name, text}, ...]}`
+
+### `call_assist_add_template`
+*(call_assist_service.py)*  
+Сохраняет пользовательский шаблон фразы.  
+Params: `{name, text}`  
+Returns: `{ok, name}`
+
+### `call_assist_remove_template`
+*(call_assist_service.py)*  
+Удаляет шаблон по имени.  
+Params: `{name}` (str)  
+Returns: `{ok, removed}`
+
+### `call_assist_template`
+*(call_assist_service.py)*  
+Отправляет быстрый шаблон в сессию через Gateway.  
+Params: `{name}` (str)  
+Returns: `{ok, text, translated?}`
+
+### `call_assist_cost_report`
+*(call_assist_service.py)*  
+Считает usage-показатели и вызывает Gateway cost estimate для текущей сессии.  
+Нет params.  
+Returns: `{cost_usd, duration_sec, phrases, breakdown}`
 
 ---
 
-## Favorites
+## Call Automation (Phase 3)
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `toggle_favorite` | Toggle favorite flag on a history item |
-| `get_favorites` | List all favorited items |
-| `is_favorite` | Check if item is favorited |
+| `call_session_create` | Создать звонковую сессию |
+| `call_session_get` | Получить сессию по id |
+| `call_session_list` | Список сессий |
+| `call_session_update_status` | Переход статуса сессии |
+| `call_session_add_transcript` | Добавить реплику в транскрипт |
+| `call_session_end` | Завершить сессию |
+| `call_estimate_cost` | Оценить стоимость звонка |
+| `call_check_auto_end` | Проверить правила авто-завершения |
 
-All require `id` (str). `toggle_favorite` / `is_favorite` return `{id, is_favorite}`. `get_favorites` returns `{items: [...]}`.
+### `call_session_create`
+*(call_session_service.py)*  
+Создаёт новую звонковую сессию.  
+Params: `{provider?, phone_number?, lang?, direction?}`  
+Returns: `{session_id, status, created_at}`
+
+### `call_session_get`
+*(call_session_service.py)*  
+Возвращает полную запись сессии по id.  
+Params: `{session_id}` (str)  
+Returns: CallSession object
+
+### `call_session_list`
+*(call_session_service.py)*  
+Возвращает список звонковых сессий.  
+Params: `{status?, limit?}`  
+Returns: `{sessions: [...]}`
+
+### `call_session_update_status`
+*(call_session_service.py)*  
+Применяет переход статуса звонковой сессии.  
+State machine: `idle→dialing→connected→talking→ending→completed/failed`  
+Params: `{session_id, status}`  
+Returns: `{ok, session_id, old_status, new_status}`
+
+### `call_session_add_transcript`
+*(call_session_service.py)*  
+Добавляет реплику в транскрипт сессии.  
+Params: `{session_id, speaker, text, ts?}`  
+Returns: `{ok, entry_index}`
+
+### `call_session_end`
+*(call_session_service.py)*  
+Завершает звонковую сессию: переводит в COMPLETED, вычисляет duration/cost.  
+Params: `{session_id}` (str)  
+Returns: `{ok, session_id, duration_sec, total_cost_usd}`
+
+### `call_estimate_cost`
+*(call_cost_estimator.py)*  
+Оценить стоимость звонка по провайдеру и стране до набора.  
+Params: `{provider?, country_code?, duration_min?}`  
+Returns: `{estimated_cost_usd, per_minute_rate, currency}`
+
+### `call_check_auto_end`
+*(call_auto_end.py)*  
+Проверить правила автоматического завершения для текущей сессии.  
+Params: `{session_id}`  
+Returns: `{should_end, reason?, elapsed_sec}`
 
 ---
 
-## Annotations
+## Live Subtitles (Phase 2)
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `set_annotation` | Save a user note to a history item |
-| `get_annotation` | Retrieve the note for a history item |
-| `search_annotations` | Full-text search across notes |
+| `live_subs_ingest` | Потоковая STT+translate (частый вызов) |
+| `live_subs_stop` | Flush и сброс буфера |
 
-`set_annotation` params: `id` (str), `text` (str). Returns `{id, annotation}`.  
-`get_annotation` params: `id` (str). Returns `{id, annotation}`.  
-`search_annotations` params: `query` (str), optional `limit` (int). Returns `{items: [...]}`.
+### `live_subs_ingest`
+*(live_subs_service.py)*  
+Принимает base64 PCM 16 kHz chunk от ScreenCaptureKit. Аккумулирует ≥3 с, затем Whisper STT → translate → emits `live_subs.result` via EventBus.  
+Params: `{audio_b64, is_final?}` — audio_b64: base64 PCM 16 kHz mono  
+Returns: `{ok, buffered_ms}`
+
+### `live_subs_stop`
+*(live_subs_service.py)*  
+Flush накопленного буфера и сброс состояния live subtitles.  
+Нет params.  
+Returns: `{ok, flushed_ms}`
 
 ---
 
-## Collections
+## Apple Integration
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `create_collection` | Create a named collection |
-| `delete_collection` | Delete a collection |
-| `list_collections` | List all collections |
-| `add_to_collection` | Add a history item to a collection |
-| `remove_from_collection` | Remove a history item from a collection |
-| `get_collection_items` | Get items in a collection |
+| `send_to_telegram` | Отправить в Telegram через Krab userbot |
+| `list_telegram_chats` | Список доступных чатов Telegram |
+| `create_apple_note` | Создать заметку в Apple Notes |
+| `create_apple_reminder` | Создать напоминание в Reminders |
+| `create_calendar_event` | Создать событие в Calendar |
+| `send_imessage` | Отправить iMessage/SMS |
 
-`create_collection` params: `name` (str), optional `description` (str). Returns collection dict.  
-`add_to_collection` / `remove_from_collection` params: `collection_id` (str), `item_id` (str).  
-`get_collection_items` params: `collection_id` (str), optional `limit` (int). Returns `{items: [...]}`.
+### `send_to_telegram`
+*(apple_integration_service.py)*  
+Отправляет текст в Telegram через main Krab userbot (`POST /api/notify`).  
+Params: `{text, chat_id?, history_id?}`  
+Returns: `{ok, message_id?}`
+
+### `list_telegram_chats`
+*(apple_integration_service.py)*  
+Возвращает список доступных чатов через main Krab userbot.  
+Нет params.  
+Returns: `{chats: [{id, name, type}, ...]}`
+
+### `create_apple_note`
+*(apple_integration_service.py)*  
+Создаёт заметку в Apple Notes через osascript.  
+Params: `{title, text, folder?}`  
+Returns: `{ok, note_id?}`
+
+### `create_apple_reminder`
+*(apple_integration_service.py)*  
+Создаёт напоминание в Apple Reminders через osascript.  
+Params: `{text, due_date?, list?}`  
+Returns: `{ok}`
+
+### `create_calendar_event`
+*(apple_integration_service.py)*  
+Создаёт событие в Apple Calendar через osascript.  
+Params: `{title, start_date, end_date?, notes?, calendar?}`  
+Returns: `{ok}`
+
+### `send_imessage`
+*(apple_integration_service.py)*  
+Отправляет сообщение через iMessage/SMS через Messages.app (osascript).  
+Params: `{recipient, text}` — recipient: phone number или email  
+Returns: `{ok}`
 
 ---
 
-## Recording Chains
+## Sentry / Observability / Error Bus
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `start_chain` | Begin a chain of related recordings |
-| `add_to_chain` | Add a history item to the active chain |
-| `end_chain` | Finalize the chain |
-| `get_chain` | Retrieve chain with all items |
-| `list_chains` | List all chains |
-| `merge_chain_text` | Get merged text of all items in a chain |
+| `list_recent_errors` | Ring-буфер KrabError: последние N |
+| `clear_recent_errors` | Очистить ring-буфер |
+| `handle_error_action` | Выполнить actionable действие |
+| `send_diagnostics_to_sentry` | Отправить ошибки в Sentry |
+| `get_error_report` | Последние ошибки из ErrorReporter |
+| `get_error_stats` | Счётчики ошибок по компоненту/типу |
+| `get_privacy_audit_log` | Privacy audit log |
+| `clear_privacy_audit_log` | Удалить файл privacy audit log |
 
-`start_chain` returns `{chain_id}`. `add_to_chain` params: `chain_id` (str), `item_id` (str).  
-`get_chain` params: `chain_id` (str). Returns `{chain_id, items: [...], created_at, ended_at}`.  
-`merge_chain_text` params: `chain_id` (str). Returns `{text, item_count}`.
+### `list_recent_errors`
+*(service.py)*  
+Возвращает до `limit` последних KrabError из ring-буфера ErrorBus.  
+Params: `{limit?}` (default 50)  
+Returns: `{errors: [{code, message, component, ts, severity}, ...]}`
+
+### `clear_recent_errors`
+*(service.py)*  
+Очищает ring-буфер и dedupe-состояние ErrorBus.  
+Нет params.  
+Returns: `{cleared}` (int — количество удалённых)
+
+### `handle_error_action`
+*(service.py)*  
+Выполняет actionable-действие по `action_id` из toast/diagnostics кнопки.  
+Params: `{action_id}` — например `"open_privacy_settings"`, `"disable_rewriter"`  
+Returns: `{ok, action_id, result?}`
+
+### `send_diagnostics_to_sentry`
+*(service.py)*  
+Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.  
+Params: `{limit?}` (default 50)  
+Returns: `{ok, sent}`
+
+### `get_error_report`
+*(error_reporter.py)*  
+Последние N ошибок из ring-буфера ErrorReporter.  
+Params: `{limit?}`  
+Returns: `{errors: [...]}`
+
+### `get_error_stats`
+*(error_reporter.py)*  
+Счётчики ошибок по компоненту, типу и временным окнам.  
+Нет params.  
+Returns: `{by_component: {...}, by_type: {...}, last_1min, last_5min, last_1h}`
+
+### `get_privacy_audit_log`
+*(service.py)*  
+Возвращает последние записи privacy audit log (NDJSON, без контента транскрипций).  
+Params: `{limit?}`  
+Returns: `{entries: [{event, ts, mode}, ...]}`
+
+### `clear_privacy_audit_log`
+*(service.py)*  
+Удаляет файл privacy audit log. Идемпотентен.  
+Нет params.  
+Returns: `{ok, deleted}`
 
 ---
 
-## Recording Scheduler
+## Health, Diagnostics & Metrics
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `schedule_recording` | Schedule a recording for a future time |
-| `cancel_scheduled_recording` | Cancel a scheduled recording |
-| `list_scheduled_recordings` | List all scheduled recordings |
+| `health_check` | Агрегированный health check |
+| `get_diagnostics` | Комплексная диагностика |
+| `get_startup_diagnostics` | Результаты startup проверок |
+| `get_metrics_dashboard` | Снимок метрик реального времени |
+| `get_memory_stats` | RSS/VSZ по процессам |
+| `get_system_info` | CPU, RAM, диск, GPU |
+| `get_usage_stats` | Ежедневная статистика использования |
+| `get_recording_stats` | Кумулятивная статистика записей |
+| `get_shutdown_status` | Статус последнего graceful shutdown |
+| `get_throttle_stats` | Статистика IPC throttle |
+| `estimate_recording_cost` | Оценка вычислительной стоимости записи |
+| `get_daily_cost_summary` | Сводка вычислительных расходов |
 
-`schedule_recording` params: `start_at` (ISO 8601 datetime), optional `duration_sec` (int), `quality_profile` (str).  
-Returns `{job_id, start_at, status}`.
+### `health_check`
+*(health_check_service.py)*  
+Агрегированный health check всех ключевых подсистем бэкенда.  
+Нет params.  
+Returns: `{ok, components: {disk, ipc, stt_model, history}, overall}`
+
+### `get_diagnostics`
+*(health_check_service.py)*  
+Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек.  
+Нет params.  
+Returns: `{system: {...}, stt: {...}, llm: {...}, history: {...}, settings_cache: {...}}`
+
+### `get_startup_diagnostics`
+*(health_check_service.py)*  
+Возвращает результаты диагностики при старте бэкенда (все readiness checks).  
+Нет params.  
+Returns: `{checks: [{name, ok, message?, duration_ms}], overall_ok}`
+
+### `get_metrics_dashboard`
+*(service.py)*  
+Снимок метрик реального времени: сессия, LLM, call_assist, конфиг.  
+Нет params.  
+Returns: `{session: {...}, llm: {...}, call_assist: {...}, config: {...}, uptime_sec}`
+
+### `get_memory_stats`
+*(service.py)*  
+Возвращает RSS/VSZ для backend, agent и worker процессов через psutil.  
+Нет params.  
+Returns: `{backend: {rss_mb, vsz_mb, pid}, agent: {...}?, workers: [...]}`
+
+### `get_system_info`
+*(service.py)*  
+Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU.  
+Нет params.  
+Returns: `{cpu_pct, ram_mb, ram_total_mb, disk_free_gb, gpu_available}`
+
+### `get_usage_stats`
+*(service.py)*  
+Возвращает ежедневную статистику использования: записи, длительность, слова.  
+Params: `{days?}` (default 7)  
+Returns: `{days: [{date, recordings, duration_sec, words}], totals}`
+
+### `get_recording_stats`
+*(service.py)*  
+Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.  
+Нет params.  
+Returns: `{total_recordings, total_duration_sec, languages: {...}, llm_used_pct, diarization_used_pct}`
+
+### `get_shutdown_status`
+*(service.py)*  
+Возвращает статус последнего graceful shutdown.  
+Нет params.  
+Returns: `{clean, last_shutdown_time?, reason?}`
+
+### `get_throttle_stats`
+*(service.py)*  
+Возвращает статистику IPC throttle: вызовы, отклонения по методу.  
+Нет params.  
+Returns: `{methods: {method: {calls, rejected, rate}}, total_rejected}`
+
+### `estimate_recording_cost`
+*(service.py)*  
+Оценка вычислительной стоимости обработки записи (CPU time, memory, disk).  
+Params: `{duration_sec, quality_profile?, with_llm?}`  
+Returns: `{cpu_sec, memory_mb_peak, disk_mb, breakdown}`
+
+### `get_daily_cost_summary`
+*(service.py)*  
+Сводка вычислительных расходов за сегодня.  
+Нет params.  
+Returns: `{date, total_recordings, total_cpu_sec, total_disk_mb}`
 
 ---
 
-## Transcription Queue
+## Analytics & Trends
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `enqueue_transcription` | Add an audio file to the transcription queue |
-| `cancel_transcription` | Cancel a queued transcription job |
-| `get_queue_status` | Get status of a transcription job |
-| `list_transcription_queue` | List all queued transcription jobs |
+| `get_analytics_dashboard` | Комплексный дашборд аналитики |
+| `get_sentiment_trends` | Тренды тональности за N дней |
+| `analyze_quality_trends` | Тренды качества распознавания |
+| `get_topic_timeline` | Таймлайн смен тем разговора |
+| `get_activity_calendar` | GitHub-style activity calendar |
+| `get_recording_insights` | Эвристические инсайты по записям |
+| `compare_periods` | Сравнение двух периодов |
+| `get_keyword_cloud` | Данные облака ключевых слов |
+| `generate_daily_digest` | Ежедневный дайджест транскрипций |
+| `generate_stats_report` | Полный Markdown отчёт статистики |
+| `generate_mini_stats_report` | Краткий 5-строчный отчёт |
+| `get_timeline_view` | Группировка истории по временным блокам |
+| `get_learning_stats` | Статистика изучения языков |
 
-`enqueue_transcription` params: `path` (str, required), optional `priority` (int 0–9), `quality_profile` (str).  
-Returns `{job_id, status}`.  
-`get_queue_status` / `cancel_transcription` params: `job_id` (str).
+### `get_analytics_dashboard`
+*(analytics_service.py)*  
+Комплексный дашборд всех метрик аналитики за один вызов.  
+Params: `{days?}` (default 30)  
+Returns: `{sentiment, quality, keywords, activity, usage, recording_stats}`
+
+### `get_sentiment_trends`
+*(analytics_service.py)*  
+Анализирует тренды тональности транскрипций за последние N дней.  
+Params: `{days?}` (default 30)  
+Returns: `{trend: "improving"|"stable"|"declining", daily: [...], avg_sentiment}`
+
+### `analyze_quality_trends`
+*(audio_analytics_service.py)*  
+Анализирует тренды качества распознавания за последние N дней.  
+Params: `{days?}` (default 30)  
+Returns: `{trend, daily: [{date, avg_confidence, count}]}`
+
+### `get_topic_timeline`
+*(service.py)*  
+Таймлайн смен тем разговора из истории транскрибаций.  
+Params: `{limit?}`  
+Returns: `{timeline: [{topic, ts, keywords: [...]}]}`
+
+### `get_activity_calendar`
+*(analytics_service.py)*  
+GitHub-style activity calendar данные за последние N месяцев.  
+Params: `{months?}` (default 3)  
+Returns: `{days: [{date, count, duration_sec}], max_count}`
+
+### `get_recording_insights`
+*(service.py)*  
+Генерирует эвристические инсайты по записям за последние N дней.  
+Params: `{days?}` (default 7)  
+Returns: `{insights: [{title, description, type}]}`
+
+### `compare_periods`
+*(analytics_service.py)*  
+Сравнивает статистику двух временных периодов.  
+Params: `{period_a: {from, to}, period_b: {from, to}}`  
+Returns: `{period_a: {...}, period_b: {...}, delta: {...}}`
+
+### `get_keyword_cloud`
+*(analytics_service.py)*  
+Генерирует данные облака ключевых слов из истории транскрипций.  
+Params: `{limit?, days?}`  
+Returns: `{words: [{word, count, weight, font_size}]}`
+
+### `generate_daily_digest`
+*(service.py)*  
+Генерирует ежедневный дайджест транскрипций за указанную дату.  
+Params: `{date?}` (ISO 8601, default today)  
+Returns: `{digest}` (str, Markdown)
+
+### `generate_stats_report`
+*(service.py)*  
+Генерирует полный Markdown-отчёт статистики использования за период.  
+Params: `{days?}` (default 30)  
+Returns: `{report}` (str, Markdown)
+
+### `generate_mini_stats_report`
+*(service.py)*  
+Генерирует краткий 5-строчный Markdown-отчёт состояния.  
+Нет params.  
+Returns: `{report}` (str)
+
+### `get_timeline_view`
+*(analytics_service.py)*  
+Группирует историю транскрипций по временным блокам (timeline).  
+Params: `{granularity?}` — `"hour"` | `"day"` | `"week"`, default `"day"`  
+Returns: `{timeline: [{period, items: [...], count}]}`
+
+### `get_learning_stats`
+*(service.py)*  
+Статистика прогресса изучения языков (двуязычные пары, flashcard stats).  
+Нет params.  
+Returns: `{languages: {...}, flashcards: {...}, vocab_size}`
 
 ---
 
-## Audio Tools
+## Collections & Chains
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `convert_audio` | Convert an audio file to WAV (default 16kHz mono) |
-| `get_audio_info` | Get audio file metadata |
-| `get_waveform` | Generate waveform data for GUI visualization |
-| `check_audio_duplicate` | Audio fingerprinting to detect duplicate recordings |
-| `detect_voice_activity` | VAD: detect speech/silence regions in audio file |
-| `profile_noise` | Profile background noise: type, level, SNR, recommendations |
+| `create_collection` | Создать коллекцию/папку |
+| `delete_collection` | Удалить коллекцию |
+| `list_collections` | Список всех коллекций |
+| `add_to_collection` | Добавить запись в коллекцию |
+| `remove_from_collection` | Удалить запись из коллекции |
+| `get_collection_items` | Записи из коллекции |
+| `start_chain` | Начать цепочку связанных записей |
+| `add_to_chain` | Добавить запись в цепочку |
+| `end_chain` | Завершить цепочку |
+| `get_chain` | Получить цепочку с деталями |
+| `list_chains` | Список цепочек |
+| `merge_chain_text` | Объединённый текст цепочки |
+| `unlink_recording_from_chain` | Убрать запись из цепочки |
 
-### `convert_audio`
-Params: `input_path` (str, required), optional `output_format` (str, default `"wav"`), `sample_rate` (int, default 16000), `output_path` (str)  
-Returns: `{output_path, format, sample_rate}`
+### `create_collection`
+*(collection_manager.py)*  
+Создать коллекцию/папку для организации истории.  
+Params: `{name, description?}`  
+Returns: `{collection_id, name}`
 
-### `get_audio_info`
-Params: `path` (str, required)  
-Returns: `{duration, sample_rate, channels, format, size_mb}`
+### `delete_collection`
+*(collection_manager.py)*  
+Удалить коллекцию (записи истории не удаляются).  
+Params: `{collection_id}` (str)  
+Returns: `{ok, collection_id}`
 
-### `get_waveform`
-Params: `file_path` (str, required), optional `num_samples` (int)  
-Returns: `{samples: [...float], duration_sec, sample_rate}`
+### `list_collections`
+*(collection_manager.py)*  
+Список всех коллекций.  
+Нет params.  
+Returns: `{collections: [{collection_id, name, count}, ...]}`
 
-### `check_audio_duplicate`
-Params: `audio1` (list[float], PCM), `audio2` (list[float], PCM), optional `sample_rate` (int, default 16000), `threshold` (float, default 0.95)  
-Returns: `{fingerprint1, fingerprint2, similarity, is_duplicate}`
+### `add_to_collection`
+*(collection_manager.py)*  
+Добавить запись истории в коллекцию.  
+Params: `{collection_id, item_id}`  
+Returns: `{ok}`
 
-### `detect_voice_activity`
-Params: `file_path` (str, required), optional `threshold_db` (float)  
-Returns: `{speech_regions, silence_regions, speech_ratio, duration_sec}`
+### `remove_from_collection`
+*(collection_manager.py)*  
+Удалить запись из коллекции.  
+Params: `{collection_id, item_id}`  
+Returns: `{ok}`
 
-### `profile_noise`
-Params: `file_path` (str, required)  
-Returns: `{noise_type, noise_level_db, snr_db, recommendations}`
+### `get_collection_items`
+*(collection_manager.py)*  
+Получить записи истории из коллекции.  
+Params: `{collection_id, page?, page_size?}`  
+Returns: `{items: [...], total}`
+
+### `start_chain`
+*(recording_chain.py)*  
+Начать цепочку связанных записей (напр. длинное совещание по частям).  
+Params: `{name?, description?}`  
+Returns: `{chain_id}`
+
+### `add_to_chain`
+*(recording_chain.py)*  
+Добавить запись истории в цепочку.  
+Params: `{chain_id, item_id}`  
+Returns: `{ok}`
+
+### `end_chain`
+*(recording_chain.py)*  
+Завершить цепочку.  
+Params: `{chain_id}` (str)  
+Returns: `{ok, chain_id, item_count}`
+
+### `get_chain`
+*(recording_chain.py)*  
+Получить цепочку с деталями.  
+Params: `{chain_id}` (str)  
+Returns: `{chain_id, name, items: [...], created_at, ended_at?}`
+
+### `list_chains`
+*(recording_chain.py)*  
+Список цепочек.  
+Нет params.  
+Returns: `{chains: [{chain_id, name, item_count, status}]}`
+
+### `merge_chain_text`
+*(recording_chain.py)*  
+Объединённый текст всех записей цепочки.  
+Params: `{chain_id}` (str)  
+Returns: `{text, item_count, total_duration_sec}`
+
+### `unlink_recording_from_chain`
+*(recording_chain.py)*  
+Убирает запись из цепочки без удаления записи.  
+Params: `{chain_id, item_id}`  
+Returns: `{ok}`
 
 ---
 
-## Export (extended)
+## Bookmarks
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `export_history_json` | Export history as JSON |
-| `export_html_report` | Standalone HTML analytics report |
-| `batch_export` | Batch export in multiple formats simultaneously |
-| `export_settings` | Export settings to a JSON file |
-| `import_settings` | Import settings from a JSON file |
+| `add_bookmark` | Создать закладку |
+| `list_bookmarks` | Закладки для item_id |
+| `list_all_bookmarks` | Все активные закладки |
+| `delete_bookmark` | Удалить закладку |
+| `jump_to_bookmark` | Перейти к закладке |
 
-`batch_export` params: `formats` (list[str]), optional `limit` (int), `save_to_file` (bool).  
-Returns: `{results: [{format, content, path}, ...]}`.
+### `add_bookmark`
+*(bookmarks.py)*  
+Создать закладку для текущей записи.  
+Params: `{item_id, position_sec, label?}`  
+Returns: `{bookmark_id, item_id, position_sec}`
 
-`export_settings` / `import_settings`: no required params (`import_settings` accepts `file_path` str).
+### `list_bookmarks`
+*(bookmarks.py)*  
+Список закладок для конкретного item_id.  
+Params: `{item_id}` (str)  
+Returns: `{bookmarks: [{bookmark_id, position_sec, label, ts}]}`
+
+### `list_all_bookmarks`
+*(bookmarks.py)*  
+Все активные закладки.  
+Нет params.  
+Returns: `{bookmarks: [...]}`
+
+### `delete_bookmark`
+*(bookmarks.py)*  
+Удалить закладку (tombstone).  
+Params: `{bookmark_id}` (str)  
+Returns: `{ok}`
+
+### `jump_to_bookmark`
+*(bookmarks.py)*  
+Перейти к закладке — получить данные для навигации плеера. Эмитит `playback.seek`.  
+Params: `{bookmark_id}` (str)  
+Returns: `{item_id, position_sec, label?}`
 
 ---
 
-## Obsidian Sync
+## Sharing & Webhooks
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `configure_obsidian_sync` | Configure Obsidian vault path for sync |
-| `run_obsidian_sync` | Sync history items to Obsidian vault |
-| `get_obsidian_sync_status` | Get current sync status |
+| `prepare_share` | Подготовить пакет для шаринга |
+| `list_shared` | Список пакетов шаринга |
+| `get_shared` | Получить пакет по share_id |
+| `revoke_share_link` | Отозвать пакет шаринга |
+| `register_webhook` | Зарегистрировать webhook |
+| `unregister_webhook` | Отменить webhook |
+| `list_webhooks` | Список webhook-ов |
 
-### `configure_obsidian_sync`
-Params: `vault_path` (str, required), optional `folder` (str), `forced` (bool)  
-Returns: `{vault_path, folder, enabled}`
+### `prepare_share`
+*(sharing_manager.py)*  
+Подготовить пакет для шаринга транскрипций (создаёт share_id + token).  
+Params: `{ids: [...], include_metadata?}`  
+Returns: `{share_id, token, expires_at?}`
 
-### `run_obsidian_sync`
-Params: optional `forced` (bool, default false), `limit` (int)  
-Returns: `{synced, skipped, errors}`
+### `list_shared`
+*(sharing_manager.py)*  
+Список сохранённых пакетов шаринга.  
+Нет params.  
+Returns: `{shares: [{share_id, created_at, item_count}]}`
 
-### `get_obsidian_sync_status`
-No params. Returns: `{vault_path, last_sync_at, total_synced, enabled}`
+### `get_shared`
+*(sharing_manager.py)*  
+Получить пакет шаринга по share_id.  
+Params: `{share_id}` (str)  
+Returns: `{share_id, items: [...], created_at}`
 
----
+### `revoke_share_link`
+*(sharing_manager.py)*  
+Отозвать пакет шаринга по токену (share_id). Пакет становится недоступным.  
+Params: `{share_id}` (str)  
+Returns: `{ok, share_id}`
 
-## Sharing
+### `register_webhook`
+*(webhook_manager.py)*  
+Зарегистрировать webhook URL для событий IPC.  
+Params: `{url, events: [...], secret?}`  
+Returns: `{webhook_id, url, events}`
 
-| Method | Description |
-|---|---|
-| `prepare_share` | Prepare a shareable package from history items |
-| `list_shared` | List saved share packages |
-| `get_shared` | Retrieve a share package by ID |
+### `unregister_webhook`
+*(webhook_manager.py)*  
+Отменить регистрацию webhook.  
+Params: `{webhook_id}` (str)  
+Returns: `{ok, webhook_id}`
 
-`prepare_share` params: `item_ids` (list[str]), optional `format` (str).  
-Returns: `{share_id, content, created_at}`.  
-`get_shared` params: `share_id` (str).
+### `list_webhooks`
+*(webhook_manager.py)*  
+Список зарегистрированных webhook-ов.  
+Нет params.  
+Returns: `{webhooks: [{webhook_id, url, events, active}]}`
 
 ---
 
 ## Transcript Versioning
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `save_transcript_version` | Save a new version of a transcript text |
-| `get_transcript_versions` | Get all versions of a transcript |
-| `revert_transcript_version` | Revert to a specific version |
+| `save_transcript_version` | Сохранить новую версию текста |
+| `get_transcript_versions` | Все версии транскрипции |
+| `revert_transcript_version` | Откат к указанной версии |
 
-All require `item_id` (str). `save_transcript_version` also requires `text` (str).  
-`revert_transcript_version` requires `version_id` (str).
+### `save_transcript_version`
+*(transcript_versioning.py)*  
+Сохранить новую версию текста транскрипции (append-only).  
+Params: `{item_id, text, reason?}`  
+Returns: `{version_id, item_id, version_number}`
+
+### `get_transcript_versions`
+*(transcript_versioning.py)*  
+Получить все версии транскрипции по item_id.  
+Params: `{item_id}` (str)  
+Returns: `{versions: [{version_id, version_number, ts, reason?, preview}]}`
+
+### `revert_transcript_version`
+*(transcript_versioning.py)*  
+Откат транскрипции к указанной версии.  
+Params: `{item_id, version_id}`  
+Returns: `{ok, item_id, reverted_to_version}`
+
+---
+
+## Paste Formatter & App Memory
+
+| Метод | Описание |
+|---|---|
+| `format_for_paste` | Форматировать текст под целевое приложение |
+| `list_paste_formatters` | Список доступных форматтеров |
+| `get_paste_profile_for_app` | Профиль вставки для bundle_id |
+| `record_paste_app_profile` | Сохранить профиль для приложения |
+| `list_app_profiles` | Список сохранённых профилей |
+| `delete_app_profile` | Удалить профиль приложения |
+| `cleanup_stale_app_profiles` | Удалить устаревшие профили |
+
+### `format_for_paste`
+*(core/paste_formatter.py)*  
+Форматирует текст под целевое приложение.  
+Params: `{text, app_name?, bundle_id?, formatter?}`  
+Returns: `{formatted_text, formatter_used}`
+
+### `list_paste_formatters`
+*(core/paste_formatter.py)*  
+Список всех доступных форматтеров вставки.  
+Нет params.  
+Returns: `{formatters: [{name, description, apps: [...]}, ...], total}`
+
+### `get_paste_profile_for_app`
+*(paste_app_memory.py)*  
+Возвращает сохранённый профиль вставки для bundle_id.  
+Params: `{bundle_id}` (str)  
+Returns: `{profile?, bundle_id}`
+
+### `record_paste_app_profile`
+*(paste_app_memory.py)*  
+Сохраняет ассоциацию bundle_id → paste profile.  
+Params: `{bundle_id, profile}` (str, str)  
+Returns: `{ok, bundle_id, profile}`
+
+### `list_app_profiles`
+*(paste_app_memory.py)*  
+Список всех сохранённых ассоциаций приложение → профиль.  
+Нет params.  
+Returns: `{profiles: [{bundle_id, profile, last_used}]}`
+
+### `delete_app_profile`
+*(paste_app_memory.py)*  
+Удалить профиль приложения.  
+Params: `{bundle_id}` (str)  
+Returns: `{ok, deleted}`
+
+### `cleanup_stale_app_profiles`
+*(paste_app_memory.py)*  
+Удаляет устаревшие записи профилей приложений.  
+Нет params.  
+Returns: `{ok, deleted_count}`
+
+---
+
+## Templates & Quick Phrases
+
+| Метод | Описание |
+|---|---|
+| `get_templates` | Список шаблонов быстрой вставки |
+| `add_template` | Добавить шаблон |
+| `remove_template` | Удалить шаблон |
+| `apply_template` | Применить шаблон с переменными |
+
+### `get_templates`
+*(template_manager.py)*  
+Список всех шаблонов быстрой вставки текста.  
+Нет params.  
+Returns: `{templates: [{name, text, variables: [...]}]}`
+
+### `add_template`
+*(template_manager.py)*  
+Добавляет или обновляет шаблон текста.  
+Params: `{name, text}` — text может содержать `{{variable}}` плейсхолдеры  
+Returns: `{ok, name}`
+
+### `remove_template`
+*(template_manager.py)*  
+Удаляет шаблон по имени.  
+Params: `{name}` (str)  
+Returns: `{ok, removed}`
+
+### `apply_template`
+*(template_manager.py)*  
+Применяет шаблон с подстановкой переменных.  
+Params: `{name, variables?: {var: value}}`  
+Returns: `{text}` — текст с подставленными переменными
+
+---
+
+## Plugins & Feature Flags
+
+| Метод | Описание |
+|---|---|
+| `list_plugins` | Список обнаруженных плагинов |
+| `get_plugin_info` | Информация о плагине |
+| `unload_plugin` | Полная выгрузка плагина |
+| `get_feature_flags` | Все feature-флаги |
+| `set_feature_flag` | Установить значение флага |
+
+### `list_plugins`
+*(plugin_system.py)*  
+Список обнаруженных плагинов с метаданными.  
+Нет params.  
+Returns: `{plugins: [{name, version, loaded, path}, ...]}`
+
+### `get_plugin_info`
+*(plugin_system.py)*  
+Информация о конкретном плагине.  
+Params: `{name}` (str)  
+Returns: `{name, version, description, loaded, capabilities}`
+
+### `unload_plugin`
+*(plugin_system.py)*  
+Полная выгрузка плагина из памяти.  
+Params: `{name}` (str)  
+Returns: `{ok, name}`
+
+### `get_feature_flags`
+*(feature_flags.py)*  
+Получить все feature-флаги с описаниями.  
+Нет params.  
+Returns: `{flags: [{name, enabled, description}, ...]}`
+
+### `set_feature_flag`
+*(feature_flags.py)*  
+Установить значение feature-флага.  
+Params: `{flag_name, enabled}` (str, bool)  
+Returns: `{ok, flag_name, enabled}`
+
+---
+
+## Speaker Manager
+
+| Метод | Описание |
+|---|---|
+| `set_speaker_alias` | Назначить псевдоним спикеру |
+| `get_speaker_aliases` | Список псевдонимов |
+| `remove_speaker_alias` | Удалить псевдоним |
+
+### `set_speaker_alias`
+*(speaker_manager.py)*  
+Назначить псевдоним для спикера диаризации.  
+Params: `{speaker_id, alias}` (str, str)  
+Returns: `{ok, speaker_id, alias}`
+
+### `get_speaker_aliases`
+*(speaker_manager.py)*  
+Список псевдонимов спикеров.  
+Нет params.  
+Returns: `{aliases: [{speaker_id, alias}, ...]}`
+
+### `remove_speaker_alias`
+*(speaker_manager.py)*  
+Удалить псевдоним спикера.  
+Params: `{speaker_id}` (str)  
+Returns: `{ok, speaker_id}`
+
+---
+
+## Semantic Search
+
+| Метод | Описание |
+|---|---|
+| `semantic_search` | Семантический поиск через embeddings |
+| `semantic_search_status` | Статус семантического поиска |
+| `semantic_search_reindex` | Переиндексировать всю историю |
+
+### `semantic_search`
+*(service.py)*  
+Семантический поиск по истории транскрипций через embeddings (`multilingual-e5-base`).  
+Params: `{query, limit?}` (str, int default 10)  
+Returns: `{results: [{id, score, text_preview}, ...]}`
+
+### `semantic_search_status`
+*(service.py)*  
+Возвращает статус семантического поиска: модель, индекс.  
+Нет params.  
+Returns: `{model, indexed_count, index_size_mb, status}`
+
+### `semantic_search_reindex`
+*(service.py)*  
+Переиндексирует всю историю транскрипций.  
+Нет params.  
+Returns: `{ok, indexed}`
+
+---
+
+## Scheduled Recordings
+
+| Метод | Описание |
+|---|---|
+| `schedule_recording` | Запланировать запись |
+| `cancel_scheduled_recording` | Отменить запланированную запись |
+| `list_scheduled_recordings` | Список запланированных записей |
+
+### `schedule_recording`
+*(recording_scheduler.py)*  
+Запланировать запись на определённое время.  
+Params: `{start_at, duration_sec?, quality_profile?, note?}` — start_at: ISO 8601  
+Returns: `{schedule_id, start_at, duration_sec}`
+
+### `cancel_scheduled_recording`
+*(recording_scheduler.py)*  
+Отменить запланированную запись.  
+Params: `{schedule_id}` (str)  
+Returns: `{ok, schedule_id}`
+
+### `list_scheduled_recordings`
+*(recording_scheduler.py)*  
+Список запланированных записей.  
+Нет params.  
+Returns: `{schedules: [{schedule_id, start_at, duration_sec, status}]}`
+
+---
+
+## Obsidian Sync
+
+| Метод | Описание |
+|---|---|
+| `configure_obsidian_sync` | Настроить Obsidian vault |
+| `run_obsidian_sync` | Синхронизировать с vault |
+| `get_obsidian_sync_status` | Статус синхронизации |
+
+### `configure_obsidian_sync`
+*(obsidian_sync.py)*  
+Настроить Obsidian vault для синхронизации транскрипций.  
+Params: `{vault_path, folder?, incremental?}`  
+Returns: `{ok, vault_path}`
+
+### `run_obsidian_sync`
+*(obsidian_sync.py)*  
+Синхронизировать записи истории с Obsidian vault как .md файлы с YAML frontmatter.  
+Params: `{force?}` (bool, default false — incremental)  
+Returns: `{ok, synced, skipped, errors}`
+
+### `get_obsidian_sync_status`
+*(obsidian_sync.py)*  
+Статус синхронизации с Obsidian vault.  
+Нет params.  
+Returns: `{configured, vault_path?, last_sync_ts?, synced_count}`
 
 ---
 
 ## Playback Tracker
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `record_playback` | Register a playback event for a history item |
-| `get_playback_stats` | Stats for one item: play_count, total listened |
-| `get_most_replayed` | Top N most-replayed recordings |
+| `record_playback` | Зарегистрировать событие воспроизведения |
+| `get_playback_stats` | Статистика воспроизведения записи |
+| `get_most_replayed` | Топ N воспроизводимых записей |
 
-`record_playback` params: `item_id` (str), `duration_listened_sec` (float).  
-`get_most_replayed` params: optional `limit` (int, default 10).
+### `record_playback`
+*(playback_tracker.py)*  
+Зарегистрировать событие воспроизведения (play count, total listened).  
+Params: `{item_id, duration_listened_sec?}`  
+Returns: `{ok, play_count}`
+
+### `get_playback_stats`
+*(playback_tracker.py)*  
+Статистика воспроизведения записи.  
+Params: `{item_id}` (str)  
+Returns: `{item_id, play_count, total_listened_sec, last_played_ts}`
+
+### `get_most_replayed`
+*(playback_tracker.py)*  
+Топ N наиболее часто воспроизводимых записей.  
+Params: `{limit?}` (default 10)  
+Returns: `{items: [{item_id, play_count, total_listened_sec}, ...]}`
 
 ---
 
-## Text Analysis
+## Search History
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `extract_terms` | Extract key terms from transcript text |
-| `compare_texts` | Structural diff/similarity between two texts |
-| `score_readability` | Readability scoring (Flesch, sentence/word stats) |
-| `score_transcription` | Quality score 0–100 with grade A–F |
-| `analyze_speech_pace` | Speech pace: WPM, CPM, pace category |
-| `get_keyword_cloud` | Keyword cloud data from history |
-| `get_context_memory` | STT context memory: recent words and topics |
-| `get_topic_timeline` | Topic-shift timeline from history |
-| `anonymize_text` | Redact PII from transcript text |
-| `detect_emotion` | Heuristic emotion detection in transcript |
-| `compare_recordings` | Side-by-side comparison of multiple recordings |
-| `post_process_text` | Run text through configurable post-processing pipeline |
-| `list_post_process_steps` | List available post-processing steps |
+| `get_recent_searches` | Последние поисковые запросы |
+| `get_popular_searches` | Наиболее частые запросы |
+| `clear_search_history` | Очистить историю запросов |
 
-### `extract_terms`
-Params: `text` (str, required), optional `language` (str, default `"ru"`)  
-Returns: `{terms: [{term, score, frequency, language, category}, ...]}`
+### `get_recent_searches`
+*(search_history.py)*  
+Последние поисковые запросы пользователя (для autocomplete).  
+Params: `{limit?}` (default 10)  
+Returns: `{searches: [{query, ts}, ...]}`
+
+### `get_popular_searches`
+*(search_history.py)*  
+Наиболее частые поисковые запросы.  
+Params: `{limit?}` (default 10)  
+Returns: `{searches: [{query, count}, ...]}`
+
+### `clear_search_history`
+*(search_history.py)*  
+Очищает всю историю поисковых запросов.  
+Нет params.  
+Returns: `{ok, deleted}`
+
+---
+
+## Archive Manager
+
+| Метод | Описание |
+|---|---|
+| `archive_items` | Переместить записи в архив |
+| `unarchive_items` | Восстановить из архива |
+| `list_archived` | Список архивированных записей |
+| `get_archive_stats` | Статистика архива |
+
+### `archive_items`
+*(archive_manager.py)*  
+Переместить записи истории в отдельный `archive.ndjson` (lean main store).  
+Params: `{ids: [...]}` или `{before_date}`  
+Returns: `{ok, archived_count}`
+
+### `unarchive_items`
+*(archive_manager.py)*  
+Восстановить записи из архива в основную историю.  
+Params: `{ids: [...]}`  
+Returns: `{ok, restored_count}`
+
+### `list_archived`
+*(archive_manager.py)*  
+Список архивированных записей.  
+Params: `{page?, page_size?}`  
+Returns: `{items: [...], total}`
+
+### `get_archive_stats`
+*(archive_manager.py)*  
+Статистика архива: количество, размер, oldest/newest.  
+Нет params.  
+Returns: `{count, size_bytes, oldest_ts?, newest_ts?}`
+
+---
+
+## Text Processing
+
+| Метод | Описание |
+|---|---|
+| `compare_texts` | Сравнение двух текстов/транскрипций |
+| `score_readability` | Оценка читабельности текста |
+| `score_transcription` | Оценка качества транскрипции 0–100 |
+| `detect_emotion` | Определение эмоции в тексте |
+| `expand_abbreviations` | Раскрытие аббревиатур |
+| `remove_abbreviation` | Удалить аббревиатуру |
+| `list_abbreviations` | Список аббревиатур для языка |
+| `post_process_text` | Прогнать текст через пост-обработку |
+| `list_post_process_steps` | Список шагов пост-обработки |
+| `compare_recordings` | Сравнение нескольких записей side-by-side |
+| `extract_terms` | Извлечение ключевых терминов |
+| `replace_word_in_last_transcript` | Замена слова в транскрипте |
 
 ### `compare_texts`
-Params: `text1` + `text2` (str) **or** `item_id_1` + `item_id_2` (str IDs)  
-Returns: `{similarity, text_1, text_2, common_phrases, unique_to_1, unique_to_2, word_count_diff, summary}`
+*(text_processing_service.py)*  
+Сравнивает два текста или две записи истории по ID (word-level diff + similarity score).  
+Params: `{text_a?, text_b?, id_a?, id_b?}` — пары text или id  
+Returns: `{similarity, diff: [{op, text}], word_count_a, word_count_b}`
 
 ### `score_readability`
-Params: `text` (str, required)  
-Returns: `{flesch_score, avg_sentence_length, avg_word_length, vocabulary_level, sentence_count, word_count, longest_sentence, shortest_sentence}`
+*(text_processing_service.py)*  
+Оценивает читабельность текста (Flesch score, sentence complexity, vocabulary).  
+Params: `{text?, id?}`  
+Returns: `{score, grade, avg_sentence_length, vocabulary_richness}`
 
 ### `score_transcription`
-Params: `text` (str), `confidence` (float 0–1), `duration_sec` (float), optional `has_diarization` (bool), `has_llm_enhancement` (bool)  
-Returns: `{overall_score, grade, factors, recommendations}`
-
-### `analyze_speech_pace`
-Params: `text` (str, required), `duration_sec` (float, required)  
-Returns: `{words_per_minute, chars_per_minute, pace_category, estimated_reading_time_sec, word_count, char_count, duration_sec}`
-
-### `get_keyword_cloud`
-Params: optional `max_words` (int, default 100), `language` (str)  
-Returns: `{words: [{word, count, weight, font_size}, ...]}`
-
-### `get_context_memory`
-Params: optional `max_words` (int, default 20), `last_n` (int, default 10), `clear` (bool)  
-Returns: `{context_words, recent_topics, size, window_size}`
-
-### `get_topic_timeline`
-Params: optional `limit` (int, default 50), `days` (int)  
-Returns: `{segments: [{topic, start_ts, items}, ...], total_shifts, current_topic}`
-
-### `anonymize_text`
-Params: `text` (str, required), optional `rules` (list[str]: `"phone"`, `"email"`, `"credit_card"`, etc.)  
-Returns: `{anonymized_text, redaction_count, redactions: [{original, replacement, category, position}, ...]}`
+*(text_processing_service.py)*  
+Оценивает качество транскрибации, балл 0–100 (A–F): confidence, длительность, диаризация, LLM флаги.  
+Params: `{id}`  
+Returns: `{score, grade, breakdown: {confidence, duration, diarization, llm}}`
 
 ### `detect_emotion`
-Params: `text` (str, required), optional `language` (str, default `"ru"`)  
-Returns: `{primary_emotion, confidence, indicators, exclamation_count, question_count, caps_ratio}`
+*(text_processing_service.py)*  
+Эвристическое определение эмоции в тексте транскрипции.  
+Params: `{text?, id?}`  
+Returns: `{emotion: "neutral"|"positive"|"negative"|..., confidence}`
 
-### `compare_recordings`
-Params: `item_ids` (list[str], required)  
-Returns: `{items, similarity_matrix, common_words, unique_words_per_item, stats}`
+### `expand_abbreviations`
+*(text_processing_service.py)*  
+Раскрывает аббревиатуры в тексте транскрипции.  
+Params: `{text, lang?}`  
+Returns: `{text}` — текст с раскрытыми аббревиатурами
+
+### `remove_abbreviation`
+*(text_processing_service.py)*  
+Удалить аббревиатуру из словаря.  
+Params: `{abbreviation, lang?}`  
+Returns: `{ok, removed}`
+
+### `list_abbreviations`
+*(text_processing_service.py)*  
+Список аббревиатур для языка.  
+Params: `{lang?}` (default all)  
+Returns: `{abbreviations: [{abbr, expansion, lang}]}`
 
 ### `post_process_text`
-Params: `text` (str, required), optional `steps` (list[str]; default: strip_whitespace, fix_punctuation, normalize_entities)  
-Returns: `{text, steps_applied, changes_count}`
+*(text_processing_service.py)*  
+Прогнать текст через конвейер пост-обработки (whitespace, punctuation, entities, abbreviations, anonymization).  
+Params: `{text, steps?: [...]}` — steps: список step names (все если не указано)  
+Returns: `{text, applied_steps: [...]}`
 
 ### `list_post_process_steps`
-No params. Returns: `{steps: [...]}`
+*(text_processing_service.py)*  
+Список доступных шагов пост-обработки текста.  
+Нет params.  
+Returns: `{steps: [{name, description}, ...]}`
 
----
+### `compare_recordings`
+*(service.py)*  
+Сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова.  
+Params: `{ids: [...]}` (2–10 элементов)  
+Returns: `{similarity_matrix, shared_words, unique_words, stats: [...]}`
 
-## Analytics (extended)
+### `extract_terms`
+*(service.py)*  
+Извлекает ключевые термины из текста.  
+Params: `{text?, id?}`  
+Returns: `{terms: [{term, frequency, weight}]}`
 
-| Method | Description |
-|---|---|
-| `generate_daily_digest` | Daily digest summary of transcription activity |
-| `analyze_quality_trends` | Confidence/quality trends over N days |
-| `get_recording_insights` | Heuristic insights about recordings |
-| `get_sentiment_trends` | Sentiment trend analysis over N days |
-| `compare_periods` | Compare usage stats between two time periods |
-| `get_analytics_dashboard` | All analytics metrics in a single call |
-| `find_duplicates` | Detect duplicate transcriptions by text similarity |
-
-### `generate_daily_digest`
-Params: optional `date` (ISO date string; default today)  
-Returns: `{date, total_recordings, total_duration_min, total_words, languages_used, top_topics, highlights, markdown}`
-
-### `analyze_quality_trends`
-Params: optional `days` (int, default 30)  
-Returns: `{daily_confidence, overall_trend, trend_slope, best_day, worst_day, confidence_distribution}`
-
-### `get_recording_insights`
-Params: optional `days` (int, default 7)  
-Returns: `{insights: [{type, message, severity}, ...], count, days}`
-
-### `get_sentiment_trends`
-Params: optional `days` (int, default 30)  
-Returns: `{daily_sentiment, overall_trend, mood_shift_count, dominant_emotion}`
-
-### `compare_periods`
-Params: `period1_start`, `period1_end`, `period2_start`, `period2_end` (ISO 8601 datetimes, all required)  
-Returns: `{period1: {...}, period2: {...}, recordings_change_pct, duration_change_pct, confidence_change, new_languages, summary}`
-
-### `get_analytics_dashboard`
-No params. Returns comprehensive analytics snapshot with all metrics.
-
-### `find_duplicates`
-Params: optional `threshold` (float 0–1, default 0.9), `limit` (int)  
-Returns: `{groups: [[item_id, ...], ...], total_duplicates}`
-
----
-
-## Integrity & Migration
-
-| Method | Description |
-|---|---|
-| `check_integrity` | Validate NDJSON data store integrity |
-| `repair_integrity` | Auto-fix fixable integrity problems |
-| `check_migration` | Check if data migration is needed |
-| `run_migration` | Execute data migration between versions |
-
-### `check_integrity`
-No params.  
-Returns: `{status, total_items, orphaned_tombstones, invalid_json_lines, checks: [{name, status, message, auto_fixable}, ...]}`
-
-### `repair_integrity`
-No params.  
-Returns: `{fixed, skipped, details}`
-
-### `check_migration` / `run_migration`
-No required params.  
-`check_migration` returns `{needs_migration, current_version, target_version}`.  
-`run_migration` returns `{migrated, details}`.
-
----
-
-## Abbreviations
-
-| Method | Description |
-|---|---|
-| `expand_abbreviations` | Expand abbreviations in transcript text |
-| `add_abbreviation` | Add a custom abbreviation |
-| `remove_abbreviation` | Remove an abbreviation |
-| `list_abbreviations` | List all abbreviations for a language |
-
-`expand_abbreviations` params: `text` (str), optional `language` (str, default `"ru"`). Returns: `{expanded, changed}`.  
-`add_abbreviation` params: `abbr` (str), `expansion` (str), optional `language` (str), `flags` (str). Returns: `{ok: true}`.  
-`remove_abbreviation` params: `abbr` (str), optional `language` (str). Returns: `{removed: bool}`.  
-`list_abbreviations` params: optional `language` (str). Returns: `{abbreviations, language, count}`.
-
----
-
-## Text Formatting
-
-| Method | Description |
-|---|---|
-| `format_for_paste` | Format text for a specific target application |
-| `list_paste_formatters` | List available paste format targets |
-
-`format_for_paste` params: `text` (str, required), `target` (str: `"telegram"`, `"notes"`, `"email"`, etc.)  
-Returns: `{formatted, target, changes}`.
-
----
-
-## Model Selection
-
-| Method | Description |
-|---|---|
-| `select_model` | Smart STT model selection based on recording conditions |
-| `auto_update_vocabulary` | Smart auto-update STT vocabulary from history |
-| `get_smart_vocabulary_suggestions` | STT vocabulary suggestions from usage patterns |
-
-### `select_model`
-Params: `duration_sec` (float, required), optional `quality` (str, default `"balanced"`), `is_preview` (bool), `system_load` (float 0–1)  
-Returns: `{model_name, reason, estimated_latency_ms, quality_tier}`
-
-### `auto_update_vocabulary`
-Params: optional `min_frequency` (int, default 3), `scan_limit` (int, default 200)  
-Returns: `{new_words, removed_words, total, sources}`
-
-### `get_smart_vocabulary_suggestions`
-Params: optional `scan_limit` (int, default 100), `min_frequency` (int, default 2), `top_k` (int, default 30)  
-Returns: `{suggestions, total}`
-
----
-
-## Config Presets Library
-
-| Method | Description |
-|---|---|
-| `list_config_presets` | List built-in and custom config presets |
-| `apply_config_preset` | Get settings patch for a preset |
-| `create_config_preset` | Create a custom config preset |
-
-`list_config_presets` returns `{presets: [{name, description, is_custom}, ...]}`.  
-`apply_config_preset` params: `name` (str). Returns: `{settings_patch: {...}}`.  
-`create_config_preset` params: `name` (str), `description` (str), `settings_patch` (dict).
-
----
-
-## Normalization Profiles
-
-| Method | Description |
-|---|---|
-| `list_normalization_profiles` | List text normalization profiles |
-| `apply_normalization_profile` | Apply a normalization profile to text |
-
-`apply_normalization_profile` params: `text` (str, required), `profile` (str).  
-Returns: `{text, profile, changed}`.
-
----
-
-## Language Learning
-
-| Method | Description |
-|---|---|
-| `extract_learning_vocabulary` | Extract vocabulary from bilingual transcripts |
-| `generate_flashcards` | Generate flashcards for language learning |
-| `get_learning_stats` | Language learning progress statistics |
-
-`extract_learning_vocabulary` params: optional `limit` (int), `language_pair` (str).  
-Returns: `{vocabulary: [{word, translation, examples}, ...]}`.  
-`generate_flashcards` params: optional `limit` (int, default 20). Returns: `{cards: [{front, back}, ...]}`.  
-`get_learning_stats`: no params. Returns: `{words_seen, cards_generated, top_words}`.
-
----
-
-## Cost Estimation
-
-| Method | Description |
-|---|---|
-| `estimate_recording_cost` | Estimate compute cost for processing a recording |
-| `get_daily_cost_summary` | Today's cumulative compute cost summary |
-
-### `estimate_recording_cost`
-Params: `duration_sec` (float, required), optional `quality` (str: `"balanced"`, `"max"`, `"remote"`), `features` (obj: `{diarization, llm, translation}` bools)  
-Returns: `{compute_time_sec, memory_mb, disk_mb, features_cost, total_relative_cost}`
-
-### `get_daily_cost_summary`
-No params. Returns today's cost rollup dict.
+### `replace_word_in_last_transcript`
+*(service.py)*  
+Заменяет слово в последней (или указанной) записи истории без перезаписи всего текста.  
+Params: `{old_word, new_word, id?}`  
+Returns: `{ok, id, replacements}`
 
 ---
 
 ## Event Replay
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `get_event_log` | Event log for debugging (filter by type/time) |
-| `get_event_stats` | Event counters and rate per minute |
-| `replay_events` | Replay events in a time range |
+| `get_event_log` | Лог событий с фильтрацией |
+| `get_event_stats` | Статистика событий |
+| `replay_events` | Воспроизведение событий |
 
-`get_event_log` params: optional `event_type` (str), `since` (ISO 8601), `limit` (int, default 100).  
-Returns: `{events: [...], count}`.  
-`replay_events` params: `since` (str), optional `until` (str), `event_types` (list[str]).
+### `get_event_log`
+*(event_replay.py)*  
+Лог событий для отладки (фильтрация по типу/времени).  
+Params: `{event_type?, from_ts?, to_ts?, limit?}`  
+Returns: `{events: [{type, ts, data}]}`
+
+### `get_event_stats`
+*(event_replay.py)*  
+Статистика событий: счётчики, скорость/мин.  
+Нет params.  
+Returns: `{by_type: {...}, total, events_per_min}`
+
+### `replay_events`
+*(event_replay.py)*  
+Воспроизведение событий в диапазоне времени.  
+Params: `{from_ts?, to_ts?, event_type?}`  
+Returns: `{ok, replayed}`
 
 ---
 
-## Auto Backup & Export Schedule
+## Config Presets Library
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `get_auto_backup_status` | Status of automatic backup |
-| `configure_auto_export` | Configure auto-export schedule |
-| `get_export_schedule_status` | Status of the auto-export schedule |
-| `list_auto_exports` | List auto-exported files |
+| `list_config_presets` | Список конфигурационных пресетов |
+| `apply_config_preset` | Применить пресет |
+| `create_config_preset` | Создать кастомный пресет |
 
-### `configure_auto_export`
-Params: `format` (str: `srt`, `csv`, `markdown`, `json`, `obsidian`, `html`), optional `interval_hours` (int, default 24), `output_dir` (str), `enabled` (bool, default true)  
-Returns updated schedule status dict.
+### `list_config_presets`
+*(config_presets_library.py)*  
+Список всех конфигурационных пресетов (встроенных и кастомных).  
+Нет params.  
+Returns: `{presets: [{name, description, builtin, keys: [...]}]}`
+
+### `apply_config_preset`
+*(config_presets_library.py)*  
+Применить конфигурационный пресет — вернуть `settings_patch` для применения через `set_settings`.  
+Params: `{name}` (str)  
+Returns: `{name, settings_patch: {...}}`
+
+### `create_config_preset`
+*(config_presets_library.py)*  
+Создать кастомный конфигурационный пресет из текущих настроек или явных значений.  
+Params: `{name, description?, settings_patch?}`  
+Returns: `{ok, name}`
 
 ---
 
-## IPC Utilities
+## Data Migrator
 
-| Method | Description |
+| Метод | Описание |
 |---|---|
-| `batch` | Execute multiple IPC methods in one call (max 50) |
-| `get_throttle_stats` | IPC throttle stats: calls, rejections per method |
-| `get_startup_diagnostics` | Startup diagnostics: all check results |
-| `get_shutdown_status` | Status of the last graceful shutdown |
-| `get_system_info` | System resource monitoring: CPU, RAM, disk, GPU |
-| `search_with_highlights` | Search with match highlights in results |
-| `fuzzy_search` | Fuzzy/approximate search over history |
-| `transcribe_paths` | Transcribe audio files by path list |
-| `preview_transcribe_paths` | Preview transcription of audio paths |
-| `merge_recordings` | Merge multiple history items into one |
-| `preview_merge` | Preview merge result without saving |
-| `enrich_recording` | Auto-enrich recording metadata (word_count, emotion, pace, quality, topics) |
+| `check_migration` | Проверить необходимость миграции |
+| `run_migration` | Выполнить миграцию |
+
+### `check_migration`
+*(data_migrator.py)*  
+Проверяет необходимость миграции данных между версиями схемы.  
+Нет params.  
+Returns: `{needs_migration, current_version, target_version}`
+
+### `run_migration`
+*(data_migrator.py)*  
+Выполняет миграцию данных между версиями.  
+Params: `{dry_run?}` (bool)  
+Returns: `{ok, migrated_records, from_version, to_version}`
+
+---
+
+## Model Cache Manager
+
+| Метод | Описание |
+|---|---|
+| `list_cached_models` | Список кэшированных ML-моделей |
+| `get_model_cache_info` | Информация о кэше модели |
+
+### `list_cached_models`
+*(model_cache_manager.py)*  
+Список кэшированных ML-моделей (HuggingFace cache).  
+Нет params.  
+Returns: `{models: [{name, size_gb, path, last_used}]}`
+
+### `get_model_cache_info`
+*(model_cache_manager.py)*  
+Информация о кэше конкретной модели.  
+Params: `{model_name}` (str)  
+Returns: `{name, size_gb, path, cached, last_used?}`
+
+---
+
+## Wake Word
+
+| Метод | Описание |
+|---|---|
+| `wake_word_list_models` | Список builtin+custom моделей |
+| `wake_word_start` | Запустить прослушивание |
+| `wake_word_stop` | Остановить прослушивание |
+| `wake_word_status` | Статус адаптера |
+
+### `wake_word_list_models`
+*(openwakeword_adapter.py)*  
+Список доступных wake word моделей (openWakeWord builtin + custom "Краб").  
+Нет params.  
+Returns: `{models: [{name, path, type, active}]}`
+
+### `wake_word_start`
+*(openwakeword_adapter.py)*  
+Запустить прослушивание wake word.  
+Params: `{model_name?, sensitivity?}` (float 0–1)  
+Returns: `{ok, model, status}`
+
+### `wake_word_stop`
+*(openwakeword_adapter.py)*  
+Остановить прослушивание wake word.  
+Нет params.  
+Returns: `{ok}`
+
+### `wake_word_status`
+*(openwakeword_adapter.py)*  
+Статус адаптера (active, model, last_detection_ts).  
+Нет params.  
+Returns: `{active, model?, last_detection_ts?, detections_today}`
+
+---
+
+## TTS
+
+| Метод | Описание |
+|---|---|
+| `synthesize_speech` | Синтез речи (text→audio) |
+
+### `synthesize_speech`
+*(tts_service.py)*  
+Синтез речи. Dual-engine: Silero RU primary, Kokoro EN fallback, macOS `say` last resort. Автоопределение языка.  
+Params: `{text, language?, voice?}` — language: `"ru"`, `"en"`, `"auto"`  
+Returns: `{audio_b64?, file_path?, engine_used, duration_sec?}`
+
+---
+
+## Misc
+
+| Метод | Описание |
+|---|---|
+| `batch` | Пакетное выполнение нескольких методов |
+| `get_context_memory` | Контекстная память STT |
 
 ### `batch`
-Params: `requests` (list of `{method, params?}`, max 50)  
-Returns: `{results: [{method, ok, result|error}, ...], total, succeeded, failed}`
+*(service.py)*  
+Пакетное выполнение нескольких IPC-методов за один вызов (макс. 50).  
+Params: `{requests: [{id, method, params}, ...]}`  
+Returns: `{results: [{id, ok, result}]}`
 
-### `fuzzy_search`
-Params: `query` (str, required), optional `limit` (int), `threshold` (float)  
-Returns: `{items: [...], total}`
+**Пример:**
+```json
+Request:  {"id":"b1","method":"batch","params":{"requests":[{"id":"r1","method":"ping","params":{}},{"id":"r2","method":"get_recording_state","params":{}}]}}
+Response: {"id":"b1","ok":true,"result":{"results":[{"id":"r1","ok":true,"result":{...}},{"id":"r2","ok":true,"result":{...}}]}}
+```
 
-### `search_with_highlights`
-Params: `query` (str, required), optional `limit` (int)  
-Returns: `{items: [{...item, highlights: [str]}, ...]}`
+### `get_context_memory`
+*(service.py)*  
+Возвращает текущее состояние контекстной памяти STT (слова и темы из последних транскрибаций).  
+Params: `{max_words?, last_n?}`  
+Returns: `{context_words: [...], recent_topics: [...], size}`
 
-### `transcribe_paths`
-Params: `paths` (list[str], required), optional `quality_profile`, `cleanup_profile`, `lang_hint`, `translation_mode`, `translate_and_paste`  
-Returns: `{items: [...HistoryItem], processed, errors}`
+---
 
-### `preview_transcribe_paths`
-Params: `paths` (list[str], required)  
-Returns preview text without saving to history.
-
-### `merge_recordings`
-Params: `item_ids` (list[str], required), optional `separator` (str)  
-Returns merged HistoryItem dict.
-
-### `preview_merge`
-Params: `item_ids` (list[str], required)  
-Returns `{text, item_count, total_duration_sec}` without saving.
-
-### `enrich_recording`
-Params: `item_id` (str, required)  
-Returns enriched metadata dict: `{word_count, emotion, pace, quality_score, topics}`.
-
-### `get_system_info`
-No params. Returns: `{cpu_percent, memory_percent, disk_percent, gpu_info}`
-
-### `get_startup_diagnostics`
-No params. Returns: `{status, checks: [...], startup_time_ms, errors, warnings}`
-
-### `get_shutdown_status`
-No params. Returns: `{clean, last_shutdown_time}`
+*Документ сгенерирован из `service.py` (строки 905–1233) + делегированных сервисных модулей. Живое количество хэндлеров: `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`.*
