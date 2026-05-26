@@ -1,7 +1,7 @@
 """Умная коррекция пунктуации для вывода STT.
 
 PunctuationFixer применяется как опциональный этап конвейера после TextUtils.cleanup_transcript.
-Поддерживает русский (ru) и испанский (es) языки.
+Поддерживает русский (ru), испанский (es) и английский (en) языки.
 """
 
 import re
@@ -41,6 +41,13 @@ _ES_QUESTION_MISSING_IQUEST_RE = re.compile(r"^(?!¿)(.+\?)$")
 # Испанский: восклицательное без ¡
 _ES_EXCL_MISSING_IEXCL_RE = re.compile(r"^(?!¡)(.+!)$")
 
+# Английский: одиночные прямые кавычки вокруг слов → типографские
+_EN_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
+
+# Английский: двойные ASCII-кавычки вокруг текста → "…"
+_EN_DOUBLE_QUOTE_OPEN_RE = re.compile(r'(?<!\w)"(?=\S)')
+_EN_DOUBLE_QUOTE_CLOSE_RE = re.compile(r'(?<=\S)"(?!\w)')
+
 
 class PunctuationFixer:
     """Детерминированная коррекция пунктуации для вывода STT.
@@ -56,7 +63,7 @@ class PunctuationFixer:
 
         Args:
             text: Исходный текст.
-            language: Код языка: "ru" (русский) или "es" (испанский).
+            language: Код языка: "ru" (русский), "es" (испанский) или "en" (английский).
 
         Returns:
             Откорректированный текст.
@@ -77,6 +84,8 @@ class PunctuationFixer:
             result = self._fix_russian(result)
         elif language == "es":
             result = self._fix_spanish(result)
+        elif language == "en":
+            result = self._fix_english(result)
 
         # Добавить точку в конце если её нет (для всех языков)
         result = _MISSING_PERIOD_RE.sub(r"\1.", result)
@@ -117,6 +126,23 @@ class PunctuationFixer:
 
         return result
 
+    def _fix_english(self, text: str) -> str:
+        """Rules specific to English."""
+        result = text
+
+        # Capitalize first letter of the text
+        if result and result[0].islower():
+            result = result[0].upper() + result[1:]
+
+        # Typographic apostrophes in contractions (it's, don't, I'm, …)
+        result = _EN_APOSTROPHE_RE.sub("’", result)
+
+        # Straight double-quotes → curly open/close
+        result = _EN_DOUBLE_QUOTE_OPEN_RE.sub("“", result)
+        result = _EN_DOUBLE_QUOTE_CLOSE_RE.sub("”", result)
+
+        return result
+
     def get_fixes_applied(self, original: str, fixed: str) -> List[str]:
         """Возвращает список описаний применённых изменений.
 
@@ -151,6 +177,12 @@ class PunctuationFixer:
 
         if '"' in original and "«" in fixed:
             fixes.append("fixed quotation marks to «»")
+
+        if '"' in original and "“" in fixed:
+            fixes.append("fixed quotation marks to “”")
+
+        if "'" in original and "’" in fixed:
+            fixes.append("fixed apostrophes to curly form")
 
         if _CAPITALIZE_AFTER_SENT_RE.search(original):
             fixes.append("capitalized after sentence ending")
