@@ -41,7 +41,7 @@ flask-cors>=4.0.0
 # sentence-transformers>=3.0
 
 # --- Sentry SDK for crash/error telemetry (no-op без DSN в settings) ---
-sentry-sdk>=2.0
+sentry-sdk>=2.0,<3.0
 
 # --- Test parallelization (CI speedup via -n auto) ---
 pytest-xdist>=3.5
