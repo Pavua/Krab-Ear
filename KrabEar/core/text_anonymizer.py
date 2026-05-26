@@ -12,7 +12,47 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ── Checksum helpers ─────────────────────────────────────────────────────────
+# ── ИНН checksum helpers ─────────────────────────────────────────────────────
+
+def _passes_inn_fl_checksum(digits: str) -> bool:
+    """Проверяет контрольную сумму ИНН физического лица (12 цифр).
+
+    Алгоритм:
+    - 11-й знак: коэффициенты [7,2,4,10,3,5,9,4,6,8] для знаков 1–10
+    - 12-й знак: коэффициенты [3,7,2,4,10,3,5,9,4,6,8] для знаков 1–11
+    """
+    if len(digits) != 12:
+        return False
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+    c11 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    c12 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    check11 = sum(d[i] * c11[i] for i in range(10)) % 11 % 10
+    check12 = sum(d[i] * c12[i] for i in range(11)) % 11 % 10
+    return d[10] == check11 and d[11] == check12
+
+
+def _passes_inn_yul_checksum(digits: str) -> bool:
+    """Проверяет контрольную сумму ИНН юридического лица (10 цифр).
+
+    Алгоритм:
+    - Коэффициенты [2,4,10,3,5,9,4,6,8] для знаков 1–9
+    - 10-й знак == sum(d[i]*c[i] for i in range(9)) % 11 % 10
+    """
+    if len(digits) != 10:
+        return False
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+    coefs = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+    check = sum(d[i] * coefs[i] for i in range(9)) % 11 % 10
+    return d[9] == check
+
+
+# ── Luhn checksum helper ─────────────────────────────────────────────────────
 
 def _passes_luhn(digits: str) -> bool:
     """Verify number passes Luhn algorithm (mod 10 checksum)."""
@@ -29,46 +69,6 @@ def _passes_luhn(digits: str) -> bool:
                 num -= 9
         checksum += num
     return checksum % 10 == 0
-
-
-def _snils_valid(digits9: str, check2: int) -> bool:
-    """Проверяет контрольное число СНИЛС (mod 101 алгоритм).
-
-    digits9 — первые 9 цифр (без контрольного числа).
-    check2  — двузначное контрольное число (0-99).
-    """
-    s = sum(int(d) * (9 - i) for i, d in enumerate(digits9))
-    if s < 100:
-        return check2 == s
-    if s in (100, 101):
-        return check2 == 0
-    s = s % 101
-    if s == 100:
-        return check2 == 0
-    return check2 == s
-
-
-def _iban_valid(iban: str) -> bool:
-    """Проверяет IBAN по алгоритму mod-97 (ISO 13616)."""
-    rearranged = iban[4:] + iban[:4]
-    # Буква → число: A=10, B=11, ..., Z=35
-    numeric = "".join(str(ord(c) - 55) if c.isalpha() else c for c in rearranged)
-    try:
-        return int(numeric) % 97 == 1
-    except ValueError:
-        return False
-
-
-# Скомпилированные паттерны для вспомогательной валидации
-
-# СНИЛС: NNN-NNN-NNN NN или NNNNNNNNNNN (11 цифр с разделителями)
-_SNILS_DETAIL_RE = re.compile(r"(\d{3})[\s\-](\d{3})[\s\-](\d{3})[\s\-]?(\d{2})")
-
-# US SSN: AAA-BB-CCCC с исключением невалидных блоков
-_US_SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")
-
-# IBAN: CC99 + 11-30 буквенно-цифровых символов
-_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 
 
 # ── Датаклассы результата ────────────────────────────────────────────────────
@@ -125,7 +125,16 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{16}\b",  # 0000000000000000
         "[КАРТА]",
     ),
+    # ИНН юридического лица (10 цифр) — должен идти раньше passport,
+    # т.к. правило passport тоже матчит \d{10} (паспорт без пробела).
+    # Checksum-валидация в anonymize() отсеивает несовпадения.
+    (
+        "inn_yul",
+        r"\b\d{10}\b",
+        "[ИНН_ЮЛ]",
+    ),
     # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр)
+    # Примечание: \d{10} здесь не поймает ИНН ЮЛ — они уже поглощены выше.
     (
         "passport",
         r"\b(?:\d{4}[\s\-]\d{6}|\d{10})\b",
@@ -148,18 +157,6 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         "snils",
         r"\b\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}\b",
         "[СНИЛС]",
-    ),
-    # US Social Security Number: AAA-BB-CCCC (валидация через lookahead и checksum в коде)
-    (
-        "us_ssn",
-        r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
-        "[SSN]",
-    ),
-    # IBAN (ES/RU/DE и другие): CC99BBBBBBBBBBBBBBBBBBBBBBBBBBB (валидация mod-97 в коде)
-    (
-        "iban",
-        r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
-        "[IBAN]",
     ),
 ]
 
@@ -221,18 +218,13 @@ class TextAnonymizer:
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
                         continue
-                elif name == "snils":
-                    # Validate SNILS mod-101 checksum (F1 fix)
-                    dm = _SNILS_DETAIL_RE.search(m.group(0))
-                    if dm:
-                        digits9 = dm.group(1) + dm.group(2) + dm.group(3)
-                        check2 = int(dm.group(4))
-                        if not _snils_valid(digits9, check2):
-                            continue
-                elif name == "iban":
-                    # Validate IBAN mod-97 checksum (F4 fix)
-                    iban_str = re.sub(r"\s", "", m.group(0)).upper()
-                    if not _iban_valid(iban_str):
+                elif name == "inn_yul":
+                    # Validate ИНН ЮЛ checksum — skip random 10-digit numbers
+                    if not _passes_inn_yul_checksum(m.group(0)):
+                        continue
+                elif name == "inn":
+                    # Validate ИНН ФЛ checksum — skip random 12-digit numbers
+                    if not _passes_inn_fl_checksum(m.group(0)):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
