@@ -45,6 +45,36 @@ _N_FFT = 512
 _HOP = _N_FFT // 4
 
 
+def _has_whispered_segments(audio: np.ndarray, sr: int) -> bool:
+    """Определяет, содержит ли аудио сегменты шёпотной амплитуды.
+
+    Шёпот определяется как ненулевые фреймы в диапазоне -50..-35 dB RMS.
+    Если такие фреймы обнаружены, режим ``strong`` должен смягчиться до
+    ``moderate``, чтобы не подавить речь вместе с шумом.
+
+    Args:
+        audio: 1-D массив float64 в диапазоне [-1, 1].
+        sr: частота дискретизации в Гц.
+
+    Returns:
+        ``True``, если хотя бы один фрейм попадает в диапазон шёпота.
+    """
+    frame = int(0.05 * sr)  # 50 мс фреймы
+    if frame < 1:
+        return False
+
+    # Усечём до кратной длины и разобьём на фреймы
+    n_frames = len(audio) // frame
+    if n_frames == 0:
+        rms_arr = np.array([float(np.sqrt(np.mean(audio ** 2)))])
+    else:
+        frames = audio[: n_frames * frame].reshape(n_frames, frame)
+        rms_arr = np.sqrt(np.mean(frames ** 2, axis=1))
+
+    rms_db = 20.0 * np.log10(np.maximum(rms_arr, 1e-9))
+    return bool(np.any((rms_db > -50.0) & (rms_db < -35.0)))
+
+
 class AudioDenoiser:
     """Адаптивный деноизер аудиосигнала.
 
@@ -55,6 +85,10 @@ class AudioDenoiser:
        b. Вычисляем mask: бины ниже noise_floor * gain_thresh → приглушаем.
        c. Применяем маску в частотной области, восстанавливаем через ISTFT.
        d. Клипуем результат в [-1, 1].
+
+    W1062 F2 fix: при обнаружении шёпотной амплитуды режим ``strong``
+    автоматически понижается до ``moderate``, чтобы не подавить речь.
+    W1062 F4 fix: многоканальный вход логирует предупреждение о потере каналов.
     """
 
     def __init__(self) -> None:
@@ -79,32 +113,49 @@ class AudioDenoiser:
 
         Args:
             audio: numpy float32/float64 массив в диапазоне [-1, 1].
-                   Многоканальное аудио автоматически усредняется в моно.
+                   Многоканальное аудио автоматически усредняется в моно
+                   (W1062 F4: при этом логируется предупреждение).
             sample_rate: частота дискретизации в Гц.
             strength: уровень шумоподавления.
                 ``"off"``      — без обработки (passthrough).
                 ``"light"``    — лёгкое подавление (50%, 1σ).
                 ``"moderate"`` — умеренное подавление (75%, 1.5σ) — дефолт.
-                ``"strong"``   — сильное подавление (95%, 2σ).
+                ``"strong"``   — сильное подавление (95%, 2σ); автоматически
+                                 снижается до ``moderate`` при обнаружении
+                                 шёпотной амплитуды (W1062 F2).
 
         Returns:
-            Аудиомассив той же формы, значения клипованы в [-1, 1].
+            Аудиомассив той же формы (кроме многоканального входа — он
+            возвращается как моно), значения клипованы в [-1, 1].
         """
         if strength == "off":
             return audio
 
-        # Моно-конвертация
+        # Моно-конвертация (F4: предупреждение о потере каналов)
         mono = audio
         if audio.ndim > 1:
+            logger.warning(
+                "[Denoiser] многоканальный вход (%s каналов) будет усреднён в моно; "
+                "выходной массив будет 1-D",
+                audio.shape[1] if audio.ndim == 2 else audio.ndim,
+            )
             mono = audio.mean(axis=1)
         mono = np.asarray(mono, dtype=np.float64)
+
+        # F2: Если режим strong и обнаружен шёпот — понижаем до moderate
+        effective_strength = strength
+        if strength == "strong" and _has_whispered_segments(mono, sample_rate):
+            logger.info(
+                "[Denoiser] шёпотная амплитуда обнаружена, понижаем strong→moderate"
+            )
+            effective_strength = "moderate"
 
         if len(mono) < _N_FFT * 2:
             # Слишком короткое аудио — без обработки
             logger.debug("[Denoiser] аудио слишком короткое, пропускаем")
             return audio
 
-        params = _STRENGTH_PARAMS.get(strength, _STRENGTH_PARAMS["moderate"])
+        params = _STRENGTH_PARAMS.get(effective_strength, _STRENGTH_PARAMS["moderate"])
 
         if self._has_noisereduce:
             denoised = self._denoise_noisereduce(mono, sample_rate, params)
