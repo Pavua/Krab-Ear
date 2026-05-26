@@ -1,7 +1,12 @@
 """Тесты для EventReplayManager (KrabEar/backend/event_replay.py)."""
 
 from __future__ import annotations
-from backend.event_replay import EventReplayManager, _parse_ts
+from backend.event_replay import (
+    EventReplayManager,
+    _parse_ts,
+    _REPLAY_LOG_OPEN_MODE,
+    _open_replay_log,
+)
 import unittest
 
 import json
@@ -331,24 +336,28 @@ class TestPersistenceReload(unittest.TestCase):
             self.assertTrue(nested.exists())
             self.assertEqual(len(nested.read_text().splitlines()), 1)
 
-    def test_append_to_existing_file(self):
-        """Если файл уже существует, события дописываются (append), а не перезаписываются."""
+    def test_new_session_overwrites_file(self):
+        """Каждая новая сессия перезаписывает файл (режим "w"), а не дописывает (append).
+
+        Это ожидаемое поведение после фикса W832/W969: режим "a" приводил к
+        неограниченному росту файла. W1316 закрепил это через константу
+        _REPLAY_LOG_OPEN_MODE = "w" и _open_replay_log().
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "events.ndjson"
             # Первая сессия
             mgr1 = EventReplayManager(persist_path=path, max_buffer=100)
             mgr1.record_event("first", {})
             mgr1.close()
-            # Вторая сессия
+            # Вторая сессия — должна перезаписать файл (write mode)
             mgr2 = EventReplayManager(persist_path=path, max_buffer=100)
             mgr2.record_event("second", {})
             mgr2.close()
 
             lines = path.read_text().splitlines()
-            self.assertEqual(len(lines), 2)
-            types = [json.loads(line)["type"] for line in lines]
-            self.assertIn("first", types)
-            self.assertIn("second", types)
+            # Файл содержит только события второй сессии (overwrite, не append)
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["type"], "second")
 
 
 class TestClearBuffer(unittest.TestCase):
@@ -536,6 +545,54 @@ class TestWave97RequiredCoverage(unittest.TestCase):
         self.assertTrue(any(c > 0 for c in result_counts))
         # All counts are non-negative
         self.assertTrue(all(c >= 0 for c in result_counts))
+
+
+class TestW1316OpenModeConstant(unittest.TestCase):
+    """W1316 regression tests — defends against W970 merge footgun (W1314 F1 CRIT).
+
+    W970 branch diff reverts _open_replay_log() from "w" back to "a",
+    which silently re-introduces the unbounded file-growth regression (W832/W969).
+    These tests catch the regression at import time, making it impossible to
+    ship the wrong mode regardless of PR merge order.
+    """
+
+    def test_replay_log_open_mode_is_w_not_a(self):
+        """_REPLAY_LOG_OPEN_MODE must be 'w', never 'a'.
+
+        Append mode causes unbounded replay-log file growth (W832 regression).
+        This assertion fires immediately on import if the constant is wrong.
+        """
+        self.assertEqual(
+            _REPLAY_LOG_OPEN_MODE,
+            "w",
+            "CRITICAL: _REPLAY_LOG_OPEN_MODE must be 'w' not 'a' — "
+            "append mode causes unbounded file growth (see W832/W969/W1316).",
+        )
+
+    def test_open_replay_log_uses_constant(self):
+        """_open_replay_log() must open the file using _REPLAY_LOG_OPEN_MODE ('w').
+
+        Verifies that the helper function actually uses the constant, so that
+        any future change to the constant is automatically reflected in behaviour.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test_mode.ndjson"
+            # Pre-populate the file with sentinel content
+            path.write_text("sentinel\n", encoding="utf-8")
+
+            fh = _open_replay_log(path)
+            fh.write("new_content\n")
+            fh.close()
+
+            content = path.read_text(encoding="utf-8")
+            # In "w" mode the file is overwritten — sentinel must be gone
+            self.assertNotIn(
+                "sentinel",
+                content,
+                "_open_replay_log() must open in write mode ('w') — "
+                "sentinel from previous write should have been overwritten.",
+            )
+            self.assertIn("new_content", content)
 
 
 if __name__ == "__main__":

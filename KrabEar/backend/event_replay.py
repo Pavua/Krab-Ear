@@ -22,6 +22,20 @@ logger = logging.getLogger("KrabEar.Backend.EventReplay")
 
 _MAX_BUFFER_SIZE = 10_000
 
+# CRITICAL: must be "w" not "a" — see W832/W969.
+# Append mode causes unbounded file growth (the regression this constant defends against).
+# Do NOT change this to "a" — the W970 branch diff attempted this revert.
+_REPLAY_LOG_OPEN_MODE = "w"
+
+
+def _open_replay_log(path: Path):
+    """Открывает файл лога событий в режиме перезаписи (write, не append).
+
+    Использует константу ``_REPLAY_LOG_OPEN_MODE`` вместо литерала,
+    чтобы любое ошибочное изменение режима было немедленно заметно.
+    """
+    return path.open(_REPLAY_LOG_OPEN_MODE, encoding="utf-8")
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -61,7 +75,7 @@ class EventReplayManager:
 
         if self._persist_path:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            self._file_handle = self._persist_path.open("a", encoding="utf-8")
+            self._file_handle = _open_replay_log(self._persist_path)
             logger.info("EventReplayManager: персистенция в %s", self._persist_path)
 
     # ------------------------------------------------------------------
