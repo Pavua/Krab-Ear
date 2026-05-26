@@ -43,6 +43,7 @@ venv/
 .claude/
 .ralphy/
 .remember/
+.claire/
 
 # Runtime artifacts из E4/E5
 data/
@@ -53,6 +54,16 @@ test_whisper.wav
 check_status.command
 KrabEar/tests/benchmark_results.json
 .benchmarks/
+
+# Runtime incident reports (written by smoke-test routines)
+.smoke_incidents/
+
+# Distribution build artifacts (DMG, staging app copy)
+dist/
+
+# Runtime launchd log directory (files already matched by *.log above,
+# but directory listing itself would show in git status)
+logs/
 
 # poc_diarization — отдельный sub-git, не трогаем
 poc_diarization/

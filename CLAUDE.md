@@ -524,6 +524,22 @@ python scripts/check_performance_budget.py
 - Merging Krab/Ear/Voice into a single runtime — they remain separate projects with API boundaries.
 - Krab Ear does not implement web scraping; external tool/reasoning goes through OpenClaw gateway.
 
+## Runtime artifact directories (gitignored, local only)
+
+These top-level directories are created at runtime and are excluded from version control via `.gitignore`. Do NOT commit them.
+
+| Directory | Created by | Contents |
+|-----------|-----------|----------|
+| `.smoke_incidents/` | Smoke-test routines | Timestamped incident `.md` reports (backend down, agent missing, etc.) |
+| `dist/` | `scripts/build_distribution_dmg.command` | Distribution DMG builds and staging app copies |
+| `logs/` | launchd backend/REST launchagents | `krab-ear-backend.{out,err}.log`, `krab-ear-rest.{out,err}.log` |
+| `data/` | E4/E5 runtime | Transcription data dir (dev mode) |
+| `.claire/` | Claire agent sessions | Parallel agent session state (same category as `.ralphy/`, `.remember/`) |
+| `.coordination/` | Autonomous cycle scripts | Agent boundary snapshots |
+| `.benchmarks/` | pytest-benchmark | Benchmark result files |
+| `.hypothesis/` | Hypothesis property tests | Auto-managed; has internal `*` gitignore |
+| `.ruff_cache/` | ruff linter | Auto-managed; has internal `*` gitignore |
+
 ## Working guidelines for Claude sessions
 
 ### Sub-agent model selection (cost-conscious)
