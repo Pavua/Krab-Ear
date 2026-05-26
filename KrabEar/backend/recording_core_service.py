@@ -290,10 +290,40 @@ class RecordingCoreService:
 
     def handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
         """Синхронная транскрибация списка файлов (CLI/legacy путь)."""
-        return self._transcribe_paths_core(params)
+        _t0 = time.monotonic()
+        file_count = len(params.get("paths", [])) if isinstance(params.get("paths"), list) else 0
+        try:
+            result = self._transcribe_paths_core(params)
+            add_breadcrumb(
+                category="recording",
+                message="transcribe_paths",
+                level="info",
+                data={
+                    "ok": True,
+                    "file_count": file_count,
+                    "processed": result.get("processed", 0),
+                    "error_count": len(result.get("errors") or []),
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return result
+        except Exception as exc:
+            add_breadcrumb(
+                category="recording",
+                message="transcribe_paths",
+                level="error",
+                data={
+                    "ok": False,
+                    "file_count": file_count,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
         """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу."""
+        _t0 = time.monotonic()
         raw_paths = params.get("paths", [])
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
@@ -434,6 +464,17 @@ class RecordingCoreService:
             daemon=True,
         )
         thread.start()
+        add_breadcrumb(
+            category="recording",
+            message="transcribe_paths_async",
+            level="info",
+            data={
+                "ok": True,
+                "job_id": job_id,
+                "file_count": total_files,
+                "duration_ms": round((time.monotonic() - _t0) * 1000),
+            },
+        )
         return {"job_id": job_id}
 
     def handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
