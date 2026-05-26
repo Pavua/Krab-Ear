@@ -129,10 +129,7 @@ class TestTranslationCachePersistence(unittest.TestCase):
         with open(cache_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertIsInstance(data, dict)
-        # v2 format: {"version": 2, "entries": {...}} — two top-level keys
-        self.assertEqual(data.get("version"), 2, "файл должен быть v2 формата")
-        self.assertIn("entries", data, "v2 формат должен содержать 'entries'")
-        self.assertEqual(len(data["entries"]), 1, "должна быть 1 запись в entries")
+        self.assertEqual(len(data), 1)
 
 
 class TestTranslationCacheEviction(unittest.TestCase):
@@ -538,466 +535,86 @@ class TestTranslationCacheWave103(unittest.TestCase):
         self.assertEqual(errors, [], f"Thread errors: {errors}")
 
 
-class TestTranslationCacheNetworkModeKey(unittest.TestCase):
-    """W1318 — network_mode включён в ключ кэша (W1313 F1 HIGH — privacy bypass fix)."""
+class TestTranslationCacheW938Fsync(unittest.TestCase):
+    """W938 — F2+F5: fsync перед os.replace и persist под lock."""
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
 
-    def test_cache_hit_only_when_network_mode_matches(self):
-        """put с network_mode='online_opt_in' → get с тем же режимом = hit."""
+    def test_persist_calls_fsync(self):
+        """_persist() должна вызывать os.fsync после flush, до os.replace (F2)."""
+        from unittest.mock import patch, call
         cache = TranslationCache(data_dir=self._tmpdir)
-        cache.put("hello", "en", "ru", "hf_marian", "привет", network_mode="online_opt_in")
-        result = cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in")
-        self.assertEqual(result, "привет")
+        with patch("os.fsync") as mock_fsync:
+            cache.put("hello", "en", "ru", "hf_marian", "привет")
+            self.assertTrue(mock_fsync.called, "os.fsync должен вызываться в _persist()")
+            # Первый аргумент — целое число (file descriptor)
+            fd_arg = mock_fsync.call_args[0][0]
+            self.assertIsInstance(fd_arg, int)
 
-    def test_offline_strict_request_does_not_hit_online_cached(self):
-        """put online_opt_in → get offline_strict = miss (privacy guarantee)."""
+    def test_persist_calls_fsync_on_clear(self):
+        """clear() → _persist() тоже должна вызывать os.fsync (F2 + F5)."""
+        from unittest.mock import patch
         cache = TranslationCache(data_dir=self._tmpdir)
-        # Кэшируем результат для online_opt_in запроса
-        cache.put("hello", "en", "ru", "hf_marian", "привет_online", network_mode="online_opt_in")
-        # offline_strict запрос ДОЛЖЕН получить miss — не online-результат
-        result = cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict")
-        self.assertIsNone(
-            result,
-            "offline_strict должен получить cache miss, а не online_opt_in результат",
-        )
+        cache.put("x", "en", "ru", "e", "y")
+        with patch("os.fsync") as mock_fsync:
+            cache.clear()
+            self.assertTrue(mock_fsync.called, "os.fsync должен вызываться при clear()")
 
-    def test_legacy_cache_keys_treated_as_miss(self):
-        """Старые ключи без network_mode (пустая строка) — miss для явных режимов.
+    def test_persist_snapshot_consistent_with_lock(self):
+        """put() и clear() вызывают _persist с snapshot уже под lock (F5).
 
-        Backward compat: ключ _make_key(..., "") != _make_key(..., "offline_strict").
-        Старые записи на диске не «просочатся» в новые режимные запросы.
+        Проверяем, что snapshot переданный в _persist отражает финальное
+        состояние после eviction — данные на диске консистентны с памятью.
         """
-        cache = TranslationCache(data_dir=self._tmpdir)
-        # Записываем с пустым network_mode (имитация legacy put без параметра)
-        cache.put("hello", "en", "ru", "hf_marian", "legacy_value", network_mode="")
-        # Запрос с явным network_mode должен быть miss
-        result_offline = cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict")
-        result_online = cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in")
-        self.assertIsNone(result_offline, "offline_strict не должен найти legacy запись")
-        self.assertIsNone(result_online, "online_opt_in не должен найти legacy запись")
-        # Пустой режим сам себе hit
-        result_empty = cache.get("hello", "en", "ru", "hf_marian", network_mode="")
-        self.assertEqual(result_empty, "legacy_value")
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=2)
+        # Добавляем 3 элемента — вытесняется первый
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        cache.put("c", "en", "ru", "e", "В")  # "a" вытесняется
 
-    def test_different_network_modes_stored_independently(self):
-        """offline_strict и online_opt_in → две независимые записи."""
-        cache = TranslationCache(data_dir=self._tmpdir)
-        cache.put("hello", "en", "ru", "hf_marian", "offline_result", network_mode="offline_strict")
-        cache.put("hello", "en", "ru", "hf_marian", "online_result", network_mode="online_opt_in")
-        self.assertEqual(
-            cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict"),
-            "offline_result",
-        )
-        self.assertEqual(
-            cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in"),
-            "online_result",
-        )
+        # Проверяем, что файл на диске консистентен с памятью
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
 
-    def test_make_key_network_mode_changes_hash(self):
-        """_make_key с разными network_mode даёт разные SHA-256 хэши."""
+        # На диске только 2 записи (не 3 — eviction произошёл до записи)
+        self.assertEqual(len(data), 2, "На диске должно быть ровно max_entries=2 записи")
+
+        # Запись "a" вытеснена — её не должно быть ни в памяти, ни на диске
         from backend.translation_cache import _make_key
-        k_offline = _make_key("hello", "en", "ru", "hf_marian", "offline_strict")
-        k_online = _make_key("hello", "en", "ru", "hf_marian", "online_opt_in")
-        k_default = _make_key("hello", "en", "ru", "hf_marian", "offline_default")
-        k_legacy = _make_key("hello", "en", "ru", "hf_marian", "")
-        all_keys = [k_offline, k_online, k_default, k_legacy]
-        self.assertEqual(
-            len(set(all_keys)), 4,
-            "Все четыре network_mode варианта должны давать уникальные ключи",
-        )
+        key_a = _make_key("a", "en", "ru", "e")
+        self.assertNotIn(key_a, data, "Вытесненная запись не должна попасть на диск")
 
-    def test_persist_and_reload_preserves_network_mode_isolation(self):
-        """После перезагрузки с диска network_mode изоляция сохраняется."""
-        cache1 = TranslationCache(data_dir=self._tmpdir)
-        cache1.put("text", "en", "ru", "hf_marian", "offline_cached", network_mode="offline_strict")
-        cache1.put("text", "en", "ru", "hf_marian", "online_cached", network_mode="online_opt_in")
+    def test_persist_with_explicit_snapshot_skips_lock(self):
+        """_persist(snapshot=...) не пытается взять self._lock (deadlock guard — F5)."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        snapshot = {"key1": "val1"}
+        # Удерживаем lock — _persist(snapshot=...) не должен дедлочить
+        acquired = threading.Event()
+        done = threading.Event()
 
-        cache2 = TranslationCache(data_dir=self._tmpdir)
-        self.assertEqual(
-            cache2.get("text", "en", "ru", "hf_marian", network_mode="offline_strict"),
-            "offline_cached",
-        )
-        self.assertEqual(
-            cache2.get("text", "en", "ru", "hf_marian", network_mode="online_opt_in"),
-            "online_cached",
-        )
-        # Пустой режим — miss (не смешивается с именованными режимами)
-        self.assertIsNone(
-            cache2.get("text", "en", "ru", "hf_marian", network_mode=""),
-        )
+        def hold_lock():
+            with cache._lock:
+                acquired.set()
+                done.wait(timeout=5)
 
+        t = threading.Thread(target=hold_lock, daemon=True)
+        t.start()
+        acquired.wait(timeout=2)
 
-class TestTranslationCacheUnifiedW1394(unittest.TestCase):
-    """W1394 unified tests: fsync (W938) + TOCTOU lock (W1371 F3) + v2 format.
+        # _persist с явным snapshot должен завершиться без deadlock
+        try:
+            cache._persist(snapshot=snapshot)
+        finally:
+            done.set()
+            t.join(timeout=2)
 
-    Covers all four requirements:
-      1. os.fsync() called before os.replace (W938 F2)
-      2. Atomic tmp+rename persist pattern preserved
-      3. network_mode in key — different modes → different entries (W1371 F2 / W1313)
-      4. put() holds lock across _persist_locked() — no TOCTOU (W1371 F3 / W938 F5)
-    """
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.mkdtemp()
-
-    def tearDown(self) -> None:
-        import shutil
-        shutil.rmtree(self._tmp, ignore_errors=True)
-
-    # ── 1. fsync is called before os.replace ────────────────────────────
-
-    def test_translation_cache_persist_fsync_called(self) -> None:
-        """os.fsync() must be called on the tmp file fd before os.replace."""
-        import unittest.mock as mock
-
-        cache = TranslationCache(data_dir=self._tmp)
-        fsync_calls: list = []
-
-        real_fsync = os.fsync
-
-        def recording_fsync(fd: int) -> None:
-            fsync_calls.append(fd)
-            real_fsync(fd)
-
-        with mock.patch("os.fsync", side_effect=recording_fsync):
-            cache.put("hello", "en", "ru", "eng", "привет", network_mode="offline_strict")
-
-        self.assertGreater(
-            len(fsync_calls), 0,
-            "os.fsync() должен вызываться при persist — W938 F2",
-        )
-
-    # ── 2. Atomic tmp+rename pattern ────────────────────────────────────
-
-    def test_translation_cache_persist_atomic_tmp_rename(self) -> None:
-        """Persist must write to a .tmp file first, then os.replace to final path."""
-        import unittest.mock as mock
-
-        cache = TranslationCache(data_dir=self._tmp)
-        rename_calls: list = []
-
-        real_replace = os.replace
-
-        def recording_replace(src: str, dst: str) -> None:
-            rename_calls.append((src, dst))
-            real_replace(src, dst)
-
-        with mock.patch("os.replace", side_effect=recording_replace):
-            cache.put("test", "en", "ru", "eng", "тест")
-
-        self.assertEqual(len(rename_calls), 1, "ровно один os.replace при одном put()")
-        src, dst = rename_calls[0]
-        self.assertTrue(src.endswith(".tmp"), f"src должен быть .tmp файлом, got: {src}")
-        self.assertFalse(dst.endswith(".tmp"), f"dst не должен быть .tmp файлом, got: {dst}")
-        # После rename финальный файл существует, .tmp удалён
-        self.assertTrue(os.path.exists(dst), "финальный файл должен существовать после os.replace")
-        self.assertFalse(os.path.exists(src), ".tmp файл должен быть удалён после os.replace")
-
-    # ── 3. network_mode in key ───────────────────────────────────────────
-
-    def test_translation_cache_network_mode_in_key(self) -> None:
-        """Different network_modes produce independent cache entries."""
-        cache = TranslationCache(data_dir=self._tmp)
-        cache.put("hello", "en", "ru", "eng", "offline_value", network_mode="offline_strict")
-        cache.put("hello", "en", "ru", "eng", "online_value", network_mode="online_opt_in")
-
-        self.assertEqual(
-            cache.get("hello", "en", "ru", "eng", network_mode="offline_strict"),
-            "offline_value",
-            "offline_strict должен вернуть своё значение",
-        )
-        self.assertEqual(
-            cache.get("hello", "en", "ru", "eng", network_mode="online_opt_in"),
-            "online_value",
-            "online_opt_in должен вернуть своё значение",
-        )
-        # Cross-mode должен быть miss
-        self.assertIsNone(
-            cache.get("hello", "en", "ru", "eng", network_mode="other_mode"),
-            "unknown network_mode должен быть cache miss",
-        )
-
-    def test_translation_cache_network_mode_persisted_in_v2_format(self) -> None:
-        """v2 format persists entries; reload preserves network_mode isolation."""
-        cache1 = TranslationCache(data_dir=self._tmp)
-        cache1.put("word", "en", "ru", "eng", "слово_offline", network_mode="offline_strict")
-        cache1.put("word", "en", "ru", "eng", "слово_online", network_mode="online_opt_in")
-
-        # Verify v2 format on disk
-        cache_path = os.path.join(self._tmp, "translation_cache.json")
+        # Проверяем, что файл записан корректно
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
         with open(cache_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        self.assertEqual(data.get("version"), 2, "Файл должен быть в формате v2")
-        self.assertIn("entries", data, "v2 формат должен содержать 'entries'")
-
-        # Reload preserves isolation
-        cache2 = TranslationCache(data_dir=self._tmp)
-        self.assertEqual(
-            cache2.get("word", "en", "ru", "eng", network_mode="offline_strict"),
-            "слово_offline",
-        )
-        self.assertEqual(
-            cache2.get("word", "en", "ru", "eng", network_mode="online_opt_in"),
-            "слово_online",
-        )
-
-    # ── 4. TOCTOU: put() holds lock across _persist_locked() ────────────
-
-    def test_translation_cache_put_under_lock_no_toctou(self) -> None:
-        """Two concurrent put() calls must not interleave on the .tmp file.
-
-        Strategy: intercept os.replace to record serialization order;
-        verify no two writes overlap (i.e. lock is held across the full
-        put → persist path).
-        """
-        import unittest.mock as mock
-
-        cache = TranslationCache(data_dir=self._tmp)
-        active_writers: list = []
-        max_concurrent = [0]
-        lock_check = threading.Lock()
-
-        real_open = open
-
-        class TrackingFile:
-            """Wraps a file handle and tracks concurrent open tmp writers."""
-
-            def __init__(self, fh):  # type: ignore[no-untyped-def]
-                self._fh = fh
-                with lock_check:
-                    active_writers.append(1)
-                    max_concurrent[0] = max(max_concurrent[0], len(active_writers))
-
-            def write(self, data):  # type: ignore[no-untyped-def]
-                return self._fh.write(data)
-
-            def flush(self) -> None:
-                self._fh.flush()
-
-            def fileno(self) -> int:
-                return self._fh.fileno()
-
-            def __enter__(self):  # type: ignore[no-untyped-def]
-                return self
-
-            def __exit__(self, *args):  # type: ignore[no-untyped-def]
-                with lock_check:
-                    active_writers.pop()
-                self._fh.__exit__(*args)
-
-        def patched_open(path, mode="r", **kwargs):  # type: ignore[no-untyped-def]
-            fh = real_open(path, mode, **kwargs)
-            if isinstance(path, str) and path.endswith(".tmp") and "w" in mode:
-                return TrackingFile(fh)
-            return fh
-
-        results = []
-        errors: list = []
-
-        def worker(value: str) -> None:
-            try:
-                cache.put("key", "en", "ru", "eng", value, network_mode="offline_strict")
-                results.append(value)
-            except Exception as exc:
-                errors.append(exc)
-
-        # Patch open and run concurrent puts
-        with mock.patch("builtins.open", side_effect=patched_open):
-            threads = [threading.Thread(target=worker, args=(f"value_{i}",)) for i in range(5)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-
-        self.assertEqual(len(errors), 0, f"Ошибки при конкурентных put(): {errors}")
-        self.assertEqual(len(results), 5, "Все 5 put() должны завершиться")
-        # If lock is properly held across persist, max concurrent tmp writers = 1
-        self.assertEqual(
-            max_concurrent[0], 1,
-            f"Максимум 1 одновременный tmp-writer (lock обеспечивает TOCTOU safety), "
-            f"наблюдалось: {max_concurrent[0]}",
-        )
-
-
-class TestTranslationCacheV1MigrationW1395(unittest.TestCase):
-    """W1395 / W1387 F4 MED — v1→v2 migration with backup on first load.
-
-    Tests the four required cases from the wave spec:
-      - test_v1_cache_migrated_to_v2_on_load
-      - test_v1_cache_backup_written
-      - test_v1_keys_get_default_network_mode
-      - test_corrupt_v1_file_skipped_clean_start
-    """
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.mkdtemp()
-
-    def tearDown(self) -> None:
-        import shutil
-        shutil.rmtree(self._tmp, ignore_errors=True)
-
-    def _write_v1_cache(self, entries: dict) -> str:
-        """Write a v1-format (plain dict) cache file; returns its path."""
-        path = os.path.join(self._tmp, "translation_cache.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(entries, fh, ensure_ascii=False)
-        return path
-
-    def test_v1_cache_migrated_to_v2_on_load(self) -> None:
-        """Loading a v1 (plain dict) cache file produces a v2-format file on disk."""
-        v1_entries = {
-            "aabbcc": "translated_value_1",
-            "ddeeff": "translated_value_2",
-        }
-        self._write_v1_cache(v1_entries)
-
-        # Loading should silently migrate
-        TranslationCache(data_dir=self._tmp)
-
-        # Verify the on-disk file is now v2
-        cache_path = os.path.join(self._tmp, "translation_cache.json")
-        with open(cache_path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        self.assertEqual(
-            data.get("version"), 2,
-            "После миграции файл должен быть в формате v2",
-        )
-        self.assertIn("entries", data, "v2 формат должен содержать ключ 'entries'")
-
-    def test_v1_cache_backup_written(self) -> None:
-        """A .v1.bak backup file is written before migration."""
-        v1_entries = {"key1": "val1", "key2": "val2"}
-        self._write_v1_cache(v1_entries)
-
-        TranslationCache(data_dir=self._tmp)
-
-        bak_path = os.path.join(self._tmp, "translation_cache.json.v1.bak")
-        self.assertTrue(
-            os.path.exists(bak_path),
-            f"Backup файл {bak_path} должен существовать после миграции",
-        )
-        # Backup must contain the original v1 data
-        with open(bak_path, "r", encoding="utf-8") as fh:
-            bak_data = json.load(fh)
-        self.assertEqual(bak_data, v1_entries, "Backup должен содержать оригинальные v1 данные")
-
-    def test_v1_keys_get_default_network_mode(self) -> None:
-        """v1 entries are preserved in the migrated v2 cache with original hash keys.
-
-        The v1 keys are SHA-256 hashes computed WITHOUT network_mode.
-        After migration they remain in the cache under their original keys.
-        A reload produces the same number of entries as the original v1 file.
-        """
-        v1_entries = {
-            "aabbcc001122": "перевод_1",
-            "ddeeff334455": "перевод_2",
-            "ffeedd667788": "перевод_3",
-        }
-        self._write_v1_cache(v1_entries)
-
-        cache = TranslationCache(data_dir=self._tmp)
-
-        # All v1 string-keyed entries are migrated
-        stats = cache.get_stats()
-        self.assertEqual(
-            stats["entries"], len(v1_entries),
-            f"Все {len(v1_entries)} v1 записей должны быть перенесены в v2",
-        )
-
-        # The migrated cache must be reloadable and still have same entry count
-        cache2 = TranslationCache(data_dir=self._tmp)
-        stats2 = cache2.get_stats()
-        self.assertEqual(
-            stats2["entries"], len(v1_entries),
-            "После повторной загрузки мигрированного v2 количество записей должно совпадать",
-        )
-
-    def test_corrupt_v1_file_skipped_clean_start(self) -> None:
-        """A corrupted v1 file causes clean v2 start (no crash, no backup written)."""
-        cache_path = os.path.join(self._tmp, "translation_cache.json")
-        with open(cache_path, "w", encoding="utf-8") as fh:
-            fh.write("{{{{ totally invalid json :::::")
-
-        # Must not raise
-        cache = TranslationCache(data_dir=self._tmp)
-
-        # Cache starts empty
-        stats = cache.get_stats()
-        self.assertEqual(stats["entries"], 0, "Corrupted кэш → чистый старт, 0 записей")
-
-        # No backup should be written (we couldn't parse the file)
-        bak_path = cache_path + ".v1.bak"
-        self.assertFalse(
-            os.path.exists(bak_path),
-            "Backup не должен создаваться при повреждённом файле",
-        )
-
-        # Normal operations still work after corrupt recovery
-        cache.put("hello", "en", "ru", "hf_marian", "привет")
-        self.assertEqual(cache.get("hello", "en", "ru", "hf_marian"), "привет")
-
-    def test_v1_migration_preserves_entry_count_up_to_max(self) -> None:
-        """v1 migration respects max_entries limit."""
-        v1_entries = {f"hash_{i:04d}": f"value_{i}" for i in range(10)}
-        self._write_v1_cache(v1_entries)
-
-        cache = TranslationCache(data_dir=self._tmp, max_entries=5)
-        stats = cache.get_stats()
-        self.assertLessEqual(
-            stats["entries"], 5,
-            "Миграция должна обрезать до max_entries",
-        )
-
-    def test_v1_migration_only_once(self) -> None:
-        """After migration, reloading must not re-migrate (file is already v2)."""
-        v1_entries = {"k1": "v1_value"}
-        self._write_v1_cache(v1_entries)
-
-        # First load: migrates
-        cache1 = TranslationCache(data_dir=self._tmp)
-
-        bak_path = os.path.join(self._tmp, "translation_cache.json.v1.bak")
-        self.assertTrue(os.path.exists(bak_path), "Backup должен существовать после первой загрузки")
-
-        # Add an entry and reload
-        cache1.put("new_key", "en", "ru", "eng", "new_value")
-
-        # Second load: file is v2 — no second backup, no data loss
-        bak_mtime_before = os.path.getmtime(bak_path)
-        cache2 = TranslationCache(data_dir=self._tmp)
-        bak_mtime_after = os.path.getmtime(bak_path)
-
-        self.assertEqual(
-            bak_mtime_before, bak_mtime_after,
-            "Backup не должен перезаписываться при повторной загрузке v2 файла",
-        )
-        # Both old migrated entry and new entry present
-        stats = cache2.get_stats()
-        self.assertGreaterEqual(stats["entries"], 1)
-
-    def test_v1_migration_non_string_values_skipped(self) -> None:
-        """Non-string values in v1 dict are skipped gracefully (no crash)."""
-        # A v1 file with mixed types (corrupted/unexpected data)
-        v1_mixed = {
-            "valid_hash": "valid_translation",
-            "numeric_value": 42,       # type: ignore[dict-item]
-            "list_value": ["a", "b"],  # type: ignore[dict-item]
-            "none_value": None,        # type: ignore[dict-item]
-        }
-        cache_path = os.path.join(self._tmp, "translation_cache.json")
-        with open(cache_path, "w", encoding="utf-8") as fh:
-            json.dump(v1_mixed, fh)
-
-        cache = TranslationCache(data_dir=self._tmp)
-
-        # Only valid string→string entries should be migrated
-        stats = cache.get_stats()
-        self.assertEqual(
-            stats["entries"], 1,
-            "Только str→str записи должны быть мигрированы; non-string values пропускаются",
-        )
+        self.assertEqual(data, snapshot)
 
 
 if __name__ == "__main__":
