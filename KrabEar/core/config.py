@@ -197,6 +197,14 @@ class Settings(BaseSettings):
     STT_DENOISE_SNR_THRESHOLD_DB: float = 15.0
     STT_DENOISE_STRENGTH: str = "moderate"
 
+    # --- Нормализация усиления перед STT (GainNormalizer) ---
+    # При STT_GAIN_NORMALIZE_ENABLED=True: после шумоподавления выравниваем
+    # уровень сигнала до целевого RMS (-20 дБFS) через GainNormalizer.auto_gain.
+    # Помогает при тихих записях (слабый микрофон, дальнее расстояние).
+    # Применяется только к numpy-массивам (живые записи); файловые импорты
+    # нормализуются отдельно через normalize_audio().
+    STT_GAIN_NORMALIZE_ENABLED: bool = True
+
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
 

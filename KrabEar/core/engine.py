@@ -841,6 +841,27 @@ class AudioEngine:
             ):
                 audio_data = self._maybe_denoise(audio_data)
 
+            # 2.6 Нормализация усиления (GainNormalizer.auto_gain).
+            # Выравнивает тихие записи до -20 дБFS RMS, ограничивает громкие
+            # через soft-knee limiter. При ошибке — продолжаем с оригинальным аудио.
+            if (
+                settings.STT_GAIN_NORMALIZE_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                try:
+                    from core.gain_normalizer import GainNormalizer
+                    _gain_result = GainNormalizer().auto_gain(audio_data)
+                    audio_data = _gain_result.audio
+                    logger.debug(
+                        "GainNorm: вход=%.1f дБ, усиление=%.1f дБ, клипп.=%d",
+                        _gain_result.input_rms_db,
+                        _gain_result.gain_applied_db,
+                        _gain_result.clipped_samples,
+                    )
+                except Exception:
+                    logger.debug("GainNorm: ошибка нормализации, используем оригинальное аудио")
+
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
 
