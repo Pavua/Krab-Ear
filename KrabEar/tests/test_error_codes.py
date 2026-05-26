@@ -105,9 +105,56 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "rewriter.lm_studio_stream_gpu_lost",
             # Added W860 F1 — dedicated disk.critical code (previously missing from
             # registry; _push_disk_critical_error fell back to empty user_msg_ru).
+            # Also W1232 fix — Wave 82 codes claimed shipped but never added.
             "disk.critical",
+            "system.proc_cmdline_permission",
             # Added W905 F2 — startup.stt_model_cache_miss: STT model not yet in
             # HF cache at startup; pushed by startup diagnostics / engine init path.
             "startup.stt_model_cache_miss",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
+
+    # ── Wave 82 regression tests (W1232) ─────────────────────────────────────
+
+    def test_disk_critical_in_registry(self):
+        """disk.critical must be present with correct severity and actionable=True."""
+        self.assertIn("disk.critical", ERROR_REGISTRY)
+        entry = ERROR_REGISTRY["disk.critical"]
+        self.assertEqual(entry["severity"], "critical")
+        self.assertTrue(entry["actionable"])
+        self.assertIsNotNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 300)
+        self.assertTrue(entry["user_msg_ru"])
+
+    def test_proc_cmdline_permission_in_registry(self):
+        """system.proc_cmdline_permission must be present as a non-actionable warn."""
+        self.assertIn("system.proc_cmdline_permission", ERROR_REGISTRY)
+        entry = ERROR_REGISTRY["system.proc_cmdline_permission"]
+        self.assertEqual(entry["severity"], "warn")
+        self.assertFalse(entry["actionable"])
+        self.assertIsNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 3600)
+        self.assertTrue(entry["user_msg_ru"])
+
+    def test_stt_model_cache_miss_in_registry(self):
+        """startup.stt_model_cache_miss must be present as a non-actionable warn."""
+        self.assertIn("startup.stt_model_cache_miss", ERROR_REGISTRY)
+        entry = ERROR_REGISTRY["startup.stt_model_cache_miss"]
+        self.assertEqual(entry["severity"], "warn")
+        self.assertFalse(entry["actionable"])
+        self.assertIsNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 3600)
+        self.assertTrue(entry["user_msg_ru"])
+
+    def test_error_registry_count_matches_documentation(self):
+        """Registry must contain exactly the documented number of codes.
+
+        Historical counts: initial Phase B = 24, Wave 60 +5, Wave 61 +3,
+        Wave 64 +5, Wave 77 +3, Wave 78 +5, Wave 306 +1 = 46,
+        plus rewriter.channel_error / rewriter.fallback_used /
+        rewriter.unauthorized / rewriter.warmup_failed / stt.mlx_timeout /
+        stt.padding_mismatch / diarization.vad_gated / agent.binary_drift = 54
+        Wave 82 (W1232) added 3 more; test_expected_codes_present guards the
+        exact set so this count test is a redundant but cheap invariant.
+        """
+        self.assertEqual(len(ERROR_REGISTRY), 54)
