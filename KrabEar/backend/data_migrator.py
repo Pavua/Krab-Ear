@@ -265,6 +265,28 @@ class DataMigrator:
             "backup_path": result.backup_path,
         }
 
+    def handle_rollback_migration(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC-обработчик rollback_migration.
+
+        Восстанавливает данные из резервной копии, созданной при миграции.
+
+        Params:
+            data_dir (str): путь к директории данных.
+            backup_path (str): путь к директории резервной копии (из MigrationResult.backup_path).
+
+        Returns:
+            restored_files (list[str]), backup_path (str)
+        """
+        raw_dir = str(params.get("data_dir", "")).strip()
+        if not raw_dir:
+            raise ValueError("Параметр data_dir обязателен")
+
+        backup_path = str(params.get("backup_path", "")).strip()
+        if not backup_path:
+            raise ValueError("Параметр backup_path обязателен")
+
+        return self.rollback_migration(Path(raw_dir), backup_path)
+
     def rollback_migration(self, data_dir: Path, backup_path: str) -> dict[str, Any]:
         """Откатывает последнюю миграцию, восстанавливая файлы из резервной копии.
 

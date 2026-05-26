@@ -602,5 +602,200 @@ class TestUnicodeDataPreserved(unittest.TestCase):
         self.assertIn("migration_backup_ts", meta)
 
 
+class DataMigratorRollbackIPCTestCase(unittest.TestCase):
+    """Тесты IPC-обёртки handle_rollback_migration (W1026 F3)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._tmpdir = Path(self._tmp.name)
+        self._migrator = DataMigrator()
+
+    def _make_v1_history(self) -> None:
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item("id1", "Тест")])
+
+    def test_handle_rollback_migration_restores_files(self) -> None:
+        """handle_rollback_migration восстанавливает файлы из резервной копии."""
+        self._make_v1_history()
+        result = self._migrator.migrate(self._tmpdir)
+        backup_path = result.backup_path
+
+        # Simulate corrupted history after migration
+        corrupt_line = json.dumps({"id": "bad", "text": "corrupted"})
+        (self._tmpdir / "history.ndjson").write_text(corrupt_line + "\n", encoding="utf-8")
+
+        rollback_result = self._migrator.handle_rollback_migration({
+            "data_dir": str(self._tmpdir),
+            "backup_path": backup_path,
+        })
+
+        self.assertIn("restored_files", rollback_result)
+        self.assertIn("history.ndjson", rollback_result["restored_files"])
+        self.assertEqual(rollback_result["backup_path"], backup_path)
+
+    def test_handle_rollback_migration_missing_data_dir_raises(self) -> None:
+        """handle_rollback_migration требует data_dir."""
+        with self.assertRaises(ValueError):
+            self._migrator.handle_rollback_migration({"backup_path": "/some/path"})
+
+    def test_handle_rollback_migration_missing_backup_path_raises(self) -> None:
+        """handle_rollback_migration требует backup_path."""
+        with self.assertRaises(ValueError):
+            self._migrator.handle_rollback_migration({"data_dir": str(self._tmpdir)})
+
+    def test_handle_rollback_migration_invalid_backup_path_raises(self) -> None:
+        """handle_rollback_migration выбрасывает ValueError при несуществующем backup."""
+        with self.assertRaises(ValueError):
+            self._migrator.handle_rollback_migration({
+                "data_dir": str(self._tmpdir),
+                "backup_path": "/nonexistent/backup/dir",
+            })
+
+
+class _StubEngine:
+    """Минимальный stub AudioEngine для тестов DataMigratorStartupWiringTestCase."""
+    quality_profile: str = "balanced"
+    current_model: str = "stub-model"
+    _llm_rewriter = None
+    _settings_get = None
+
+    def _resolve_diarization_device(self) -> str:
+        return "cpu"
+
+    def warmup(self) -> None:
+        pass
+
+
+class _StubTranscriber:
+    """Минимальный stub Transcriber для тестов DataMigratorStartupWiringTestCase."""
+
+    def __init__(self) -> None:
+        self.engine = _StubEngine()
+        self._error_bus = None
+
+    def transcribe(self, audio, **kw) -> str:
+        return "test transcription"
+
+    def transcribe_preview(self, audio, **kw) -> str:
+        return "preview"
+
+
+class _StubRecorder:
+    """Минимальный stub AudioRecorder."""
+    is_recording = False
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> bytes:
+        return b""
+
+
+class _StubTranslator:
+    """Минимальный stub Translator."""
+
+    def translate(self, text, **kw):
+        from backend.translator import TranslationResult
+        return TranslationResult(
+            text=text,
+            status="ok",
+            source_lang="ru",
+            target_lang="ru",
+            mode="off",
+            engine="stub",
+        )
+
+
+class DataMigratorStartupWiringTestCase(unittest.TestCase):
+    """Тесты что BackendService запускает миграцию при старте если v1.0 данные (W1026 F1)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _write_v1_history(self, data_dir: Path) -> None:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        history_path = data_dir / "history.ndjson"
+        v1_item = {"id": "item1", "text": "Привет мир", "timestamp": 1700000000.0}
+        _write_ndjson(history_path, [v1_item])
+
+    def _make_service(self, data_dir: Path):
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+        store = StateStore(data_dir)
+        return BackendService(
+            store=store,
+            recorder=_StubRecorder(),
+            transcriber=_StubTranscriber(),
+            translator=_StubTranslator(),
+        )
+
+    def test_data_migrator_runs_at_startup_when_needed(self) -> None:
+        """BackendService автоматически мигрирует v1.0 данные при инициализации."""
+        data_dir = Path(self._tmp.name) / "data"
+        self._write_v1_history(data_dir)
+
+        # Verify pre-migration state has no v2.0 fields
+        history_path = data_dir / "history.ndjson"
+        raw_items = _read_ndjson(history_path)
+        self.assertEqual(len(raw_items), 1)
+        self.assertNotIn("tags", raw_items[0])
+        self.assertNotIn("favorite", raw_items[0])
+
+        self._make_service(data_dir)
+
+        # After __init__, history.ndjson should have v2.0 fields
+        migrated_items = _read_ndjson(history_path)
+        self.assertEqual(len(migrated_items), 1)
+        self.assertIn("tags", migrated_items[0])
+        self.assertIn("favorite", migrated_items[0])
+        self.assertIn("annotation", migrated_items[0])
+        self.assertEqual(migrated_items[0]["tags"], [])
+        self.assertFalse(migrated_items[0]["favorite"])
+
+    def test_data_migrator_skipped_when_already_v2(self) -> None:
+        """BackendService не перезаписывает v2.0 данные при инициализации."""
+        data_dir = Path(self._tmp.name) / "data2"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        history_path = data_dir / "history.ndjson"
+
+        # Write v2.0 item (already has tags/favorite)
+        v2_item = {
+            "id": "item2",
+            "text": "Уже v2",
+            "timestamp": 1700000001.0,
+            "tags": ["test"],
+            "favorite": True,
+            "annotation": "ok",
+        }
+        _write_ndjson(history_path, [v2_item])
+
+        self._make_service(data_dir)
+
+        # Data should be unchanged
+        items_after = _read_ndjson(history_path)
+        self.assertEqual(len(items_after), 1)
+        self.assertEqual(items_after[0]["tags"], ["test"])
+        self.assertTrue(items_after[0]["favorite"])
+
+    def test_rollback_migration_ipc_registered(self) -> None:
+        """rollback_migration зарегистрирован как IPC handler в BackendService."""
+        data_dir = Path(self._tmp.name) / "data3"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        svc = self._make_service(data_dir)
+
+        # Call rollback_migration IPC — should fail with ValueError (no valid backup)
+        # but handler must be registered (not "unknown method" -32601)
+        resp = svc.handle_request({
+            "id": "t1",
+            "method": "rollback_migration",
+            "params": {"data_dir": str(data_dir), "backup_path": "/nonexistent"},
+        })
+        # Must NOT return "unknown method" error
+        self.assertNotEqual(resp.get("error", {}).get("code"), -32601)
+
+
 if __name__ == "__main__":
     unittest.main()
