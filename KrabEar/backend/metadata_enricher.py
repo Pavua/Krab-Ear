@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any, Callable, Optional
+from typing import Any
 
 from core.auto_title import AutoTitleGenerator
 from core.emotion_detector import EmotionDetector
@@ -63,20 +63,7 @@ class MetadataEnricher:
         stats = enricher.get_enrichment_stats()
     """
 
-    def __init__(
-        self,
-        settings_provider: Optional[Callable[[], dict]] = None,
-    ) -> None:
-        """Инициализация обогатителя метаданных.
-
-        Args:
-            settings_provider: опциональный callable, возвращающий текущий dict
-                настроек (runtime). Используется для проверки ``privacy_mode_enabled``.
-                Если ``None`` — приватный режим считается выключенным (безопасное
-                поведение по умолчанию).
-        """
-        self._settings_provider = settings_provider
-
+    def __init__(self) -> None:
         self._language_detector = LanguageDetector()
         self._emotion_detector = EmotionDetector()
         self._pace_analyzer = SpeechPaceAnalyzer()
@@ -90,7 +77,11 @@ class MetadataEnricher:
 
     # ── Основной API ──────────────────────────────────────────────────────────
 
-    def enrich(self, item: dict[str, Any]) -> dict[str, Any]:
+    def enrich(
+        self,
+        item: dict[str, Any],
+        privacy_mode: bool = False,
+    ) -> dict[str, Any]:
         """Обогащает одну запись истории вычисляемыми метаданными.
 
         Добавляет ключ ``metadata`` в копию *item* (исходный словарь
@@ -104,6 +95,7 @@ class MetadataEnricher:
                   - ``has_diarization`` (bool, опционально).
                   - ``has_llm_enhancement`` (bool, опционально).
                   - ``timestamp`` (str, опционально) — ISO 8601.
+            privacy_mode: если True — поле ``topics`` не заполняется (W1277 F5).
 
         Returns:
             Новый словарь с добавленным ключом ``metadata``.
@@ -154,14 +146,9 @@ class MetadataEnricher:
         # ── Темы (извлекаем ключевые слова текущей записи) ───────────────────
         # TopicTracker работает со списком элементов; передаём одну запись
         # и получаем её ключевые слова как topics.
-        # W1277 F5: в privacy_mode пропускаем обогащение темами — топики могут
-        # раскрывать паттерны содержимого записи.
-        privacy_mode = bool(self._get_runtime_setting("privacy_mode_enabled", False))
-        if privacy_mode:
-            topics: list[str] = []
-            logger.debug("MetadataEnricher: topic enrichment skipped (privacy_mode_enabled=True)")
-        else:
-            topics = self._extract_topics_for_item(item)
+        # W1277 F5: skip topic extraction in privacy_mode — transcript content
+        # must not be processed beyond the minimum required for STT output.
+        topics = [] if privacy_mode else self._extract_topics_for_item(item)
 
         elapsed = time.monotonic() - t0
         self._enriched_count += 1
@@ -242,26 +229,14 @@ class MetadataEnricher:
         if not isinstance(item, dict):
             raise RuntimeError("Параметр item должен быть объектом")
 
-        enriched = self.enrich(item)
+        privacy_mode = bool(params.get("privacy_mode", False))
+        enriched = self.enrich(item, privacy_mode=privacy_mode)
         return {
             "enriched_item": enriched,
             "stats": self.get_enrichment_stats(),
         }
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
-
-    def _get_runtime_setting(self, key: str, default: Any) -> Any:
-        """Читает runtime-настройку через settings_provider.
-
-        Если ``settings_provider`` не задан или выбросил исключение,
-        возвращает ``default``.
-        """
-        if self._settings_provider is None:
-            return default
-        try:
-            return self._settings_provider().get(key, default)
-        except Exception:
-            return default
 
     def _extract_topics_for_item(self, item: dict[str, Any]) -> list[str]:
         """Извлекает ключевые слова-темы из одной записи."""
