@@ -99,6 +99,7 @@ from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
 from backend.ipc_throttle import IPCThrottle
+from backend.input_sanitizer import InputSanitizer
 from backend.ipc_constants import (
     IPC_SOCKET_BACKLOG,
     IPC_SOCKET_TIMEOUT_SEC,
@@ -430,6 +431,11 @@ class BackendService:
         self._request_signer: RequestSigner | None = (
             RequestSigner() if settings.IPC_SIGNING_ENABLED else None
         )
+        # W867: InputSanitizer — санитизация параметров IPC-запросов.
+        # Ранее был мёртвым кодом (0 call sites). Сейчас включён в warn-only режиме:
+        # ошибка валидации логируется, но не прерывает выполнение запроса —
+        # это позволяет избежать регрессий пока все тесты/клиенты не обновлены.
+        self._input_sanitizer = InputSanitizer()
         self._paste_formatter = PasteFormatter(data_dir=self.store.data_dir)
         self._paste_app_memory = PasteAppMemory(
             data_dir=self.store.data_dir,
@@ -930,6 +936,17 @@ class BackendService:
         handler = handlers.get(method)
         if handler is None:
             return self._error(request_id, "unknown_method", f"Неизвестный метод: {method}")
+
+        # W867: санитизация параметров — warn-only режим.
+        # ValueError (path traversal, слишком длинные строки и т.д.) логируется, но не
+        # прерывает выполнение — чтобы избежать регрессий. Переключить на strict путём
+        # замены блока except на return self._error(...).
+        try:
+            params = self._input_sanitizer.sanitize_params(method, params)
+        except ValueError as _san_err:
+            logger.warning(
+                "InputSanitizer warn-only: method=%s error=%s", method, _san_err
+            )
 
         # IPC signing: верифицируем HMAC-SHA256 подпись если включено
         if self._request_signer is not None:
