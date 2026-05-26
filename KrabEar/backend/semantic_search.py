@@ -301,6 +301,14 @@ class SemanticSearcher:
                 embeddings = np.load(str(self._embeddings_path))
                 with open(self._index_path, encoding="utf-8") as f:
                     index = json.load(f)
+                if embeddings.shape[0] != len(index):
+                    logger.error(
+                        "semantic_search: несоответствие размеров при загрузке с диска "
+                        "(embeddings=%d, index=%d) — пропускаем загрузку, сброс к пустому индексу",
+                        embeddings.shape[0],
+                        len(index),
+                    )
+                    return
                 with self._index_lock:
                     self._embeddings = embeddings
                     self._index = index
