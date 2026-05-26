@@ -15,6 +15,39 @@ logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 _TIMESTAMP_SEP = "\n\n"
 
 
+class MergeRollbackError(RuntimeError):
+    """Raised when the delete phase of merge_items fails mid-loop.
+
+    The new merged item has been created but some originals could not be
+    tombstoned.  A best-effort rollback tombstone was applied to the merged
+    item; callers should surface this error to the user rather than silently
+    swallowing it.
+
+    Attributes:
+        new_item_id    — ID of the merged item that was created.
+        deleted_ids    — IDs of originals successfully tombstoned before failure.
+        failed_id      — ID of the original whose delete triggered the exception.
+        rollback_ok    — True if the best-effort rollback tombstone succeeded.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        new_item_id: str,
+        deleted_ids: list[str],
+        failed_id: str,
+        rollback_ok: bool,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(message)
+        self.new_item_id = new_item_id
+        self.deleted_ids = deleted_ids
+        self.failed_id = failed_id
+        self.rollback_ok = rollback_ok
+        self.__cause__ = cause
+
+
 class RecordingMerger:
     """Объединяет несколько записей истории в одну.
 
@@ -93,10 +126,49 @@ class RecordingMerger:
                         original_ids,
                     )
 
+            # Phase 2: delete originals — transactional with rollback.
+            # If any delete raises mid-loop the new merged item is tombstoned
+            # (best-effort) and a MergeRollbackError is re-raised so the caller
+            # can surface the failure to the user.
             deleted_ids: list[str] = []
-            for item in items:
-                if store.delete_history_item(item.id):
-                    deleted_ids.append(item.id)
+            _last_item = None
+            try:
+                for item in items:
+                    _last_item = item
+                    if store.delete_history_item(item.id):
+                        deleted_ids.append(item.id)
+            except Exception as exc:  # noqa: BLE001
+                failed_id = _last_item.id if _last_item is not None else "unknown"
+                logger.exception(
+                    "Ошибка удаления оригинала %s при слиянии → %s; "
+                    "откат: tombstone новой записи",
+                    failed_id,
+                    new_item.id,
+                )
+                # Best-effort rollback: tombstone the newly created merged item.
+                rollback_ok = False
+                try:
+                    store.delete_history_item(new_item.id)
+                    rollback_ok = True
+                    logger.info(
+                        "Откат слияния выполнен: запись %s помечена tombstone",
+                        new_item.id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Не удалось откатить объединённую запись %s — "
+                        "требуется ручная очистка",
+                        new_item.id,
+                    )
+                raise MergeRollbackError(
+                    f"Слияние прервано при удалении оригинала {failed_id!r}; "
+                    f"откат {'выполнен' if rollback_ok else 'НЕ ВЫПОЛНЕН'}",
+                    new_item_id=new_item.id,
+                    deleted_ids=deleted_ids,
+                    failed_id=failed_id,
+                    rollback_ok=rollback_ok,
+                    cause=exc,
+                ) from exc
 
             # --- Step 2: replace originals with merged item in each chain ---
             if chain_membership and self.recording_chain_mgr is not None:
