@@ -535,5 +535,87 @@ class TestTranslationCacheWave103(unittest.TestCase):
         self.assertEqual(errors, [], f"Thread errors: {errors}")
 
 
+class TestTranslationCacheW938Fsync(unittest.TestCase):
+    """W938 — F2+F5: fsync перед os.replace и persist под lock."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def test_persist_calls_fsync(self):
+        """_persist() должна вызывать os.fsync после flush, до os.replace (F2)."""
+        from unittest.mock import patch, call
+        cache = TranslationCache(data_dir=self._tmpdir)
+        with patch("os.fsync") as mock_fsync:
+            cache.put("hello", "en", "ru", "hf_marian", "привет")
+            self.assertTrue(mock_fsync.called, "os.fsync должен вызываться в _persist()")
+            # Первый аргумент — целое число (file descriptor)
+            fd_arg = mock_fsync.call_args[0][0]
+            self.assertIsInstance(fd_arg, int)
+
+    def test_persist_calls_fsync_on_clear(self):
+        """clear() → _persist() тоже должна вызывать os.fsync (F2 + F5)."""
+        from unittest.mock import patch
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put("x", "en", "ru", "e", "y")
+        with patch("os.fsync") as mock_fsync:
+            cache.clear()
+            self.assertTrue(mock_fsync.called, "os.fsync должен вызываться при clear()")
+
+    def test_persist_snapshot_consistent_with_lock(self):
+        """put() и clear() вызывают _persist с snapshot уже под lock (F5).
+
+        Проверяем, что snapshot переданный в _persist отражает финальное
+        состояние после eviction — данные на диске консистентны с памятью.
+        """
+        cache = TranslationCache(data_dir=self._tmpdir, max_entries=2)
+        # Добавляем 3 элемента — вытесняется первый
+        cache.put("a", "en", "ru", "e", "А")
+        cache.put("b", "en", "ru", "e", "Б")
+        cache.put("c", "en", "ru", "e", "В")  # "a" вытесняется
+
+        # Проверяем, что файл на диске консистентен с памятью
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        # На диске только 2 записи (не 3 — eviction произошёл до записи)
+        self.assertEqual(len(data), 2, "На диске должно быть ровно max_entries=2 записи")
+
+        # Запись "a" вытеснена — её не должно быть ни в памяти, ни на диске
+        from backend.translation_cache import _make_key
+        key_a = _make_key("a", "en", "ru", "e")
+        self.assertNotIn(key_a, data, "Вытесненная запись не должна попасть на диск")
+
+    def test_persist_with_explicit_snapshot_skips_lock(self):
+        """_persist(snapshot=...) не пытается взять self._lock (deadlock guard — F5)."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        snapshot = {"key1": "val1"}
+        # Удерживаем lock — _persist(snapshot=...) не должен дедлочить
+        acquired = threading.Event()
+        done = threading.Event()
+
+        def hold_lock():
+            with cache._lock:
+                acquired.set()
+                done.wait(timeout=5)
+
+        t = threading.Thread(target=hold_lock, daemon=True)
+        t.start()
+        acquired.wait(timeout=2)
+
+        # _persist с явным snapshot должен завершиться без deadlock
+        try:
+            cache._persist(snapshot=snapshot)
+        finally:
+            done.set()
+            t.join(timeout=2)
+
+        # Проверяем, что файл записан корректно
+        cache_path = os.path.join(self._tmpdir, "translation_cache.json")
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(data, snapshot)
+
+
 if __name__ == "__main__":
     unittest.main()

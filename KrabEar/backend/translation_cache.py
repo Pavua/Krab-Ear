@@ -68,7 +68,8 @@ class TranslationCache:
             # Вытесняем старые записи
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
-        self._persist()
+            # Персистируем под тем же lock — snapshot берём здесь, до release
+            self._persist(snapshot=dict(self._cache))
 
     def get_stats(self) -> dict:
         """Возвращает статистику кэша."""
@@ -88,7 +89,8 @@ class TranslationCache:
             self._cache.clear()
             self._hits = 0
             self._misses = 0
-        self._persist()
+            # Персистируем под тем же lock — snapshot пустой dict
+            self._persist(snapshot={})
 
     # ── Private helpers ─────────────────────────────────────────────────
 
@@ -106,15 +108,28 @@ class TranslationCache:
         except Exception as exc:
             logger.warning("Не удалось загрузить translation_cache.json: %s", exc)
 
-    def _persist(self) -> None:
-        """Записывает кэш на диск (без lock — вызывается после release)."""
+    def _persist(self, snapshot: Optional[dict] = None) -> None:
+        """Записывает кэш на диск атомарно через .tmp + os.replace.
+
+        Принимает необязательный ``snapshot`` — уже снятую копию кэша.
+        Если не передан — берёт snapshot под self._lock самостоятельно
+        (для обратной совместимости с возможными внешними вызовами).
+
+        F2: fh.flush() + os.fsync() перед os.replace гарантируют, что данные
+        попадают на диск до атомарного rename — защита от потери при сбое питания.
+        F5: callers (put/clear) передают snapshot изнутри своего with self._lock,
+        поэтому повторное взятие lock здесь не нужно.
+        """
         try:
             os.makedirs(self._data_dir, exist_ok=True)
-            with self._lock:
-                snapshot = dict(self._cache)
+            if snapshot is None:
+                with self._lock:
+                    snapshot = dict(self._cache)
             tmp_path = self._path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 json.dump(snapshot, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp_path, self._path)
         except Exception as exc:
             logger.warning("Не удалось сохранить translation_cache.json: %s", exc)
