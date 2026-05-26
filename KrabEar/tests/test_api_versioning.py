@@ -368,5 +368,82 @@ class TestConcurrentNegotiate(unittest.TestCase):
             self.assertEqual(actual, expected)
 
 
+class TestDeprecationAutoInjection(unittest.TestCase):
+    """api_version_header() auto-injects Sunset+Deprecation for deprecated versions (W980 F2)."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self.client = self.app.test_client()
+
+    def test_deprecated_version_injects_sunset_header(self):
+        """When V1 is deprecated, Sunset header appears on /v1/ responses."""
+        import backend.api_versioning as av
+        original = dict(av.DEPRECATED_VERSIONS)
+        av.DEPRECATED_VERSIONS[av.APIVersion.V1] = "2027-01-01"
+        try:
+            resp = self.client.get("/v1/ping")
+            self.assertIn("Sunset", resp.headers)
+            self.assertEqual(resp.headers["Sunset"], "2027-01-01")
+            self.assertIn("Deprecation", resp.headers)
+            self.assertIn("v1", resp.headers["Deprecation"])
+        finally:
+            av.DEPRECATED_VERSIONS.clear()
+            av.DEPRECATED_VERSIONS.update(original)
+
+    def test_non_deprecated_version_no_sunset_header(self):
+        """When no versions are deprecated, Sunset header must be absent."""
+        import backend.api_versioning as av
+        original = dict(av.DEPRECATED_VERSIONS)
+        av.DEPRECATED_VERSIONS.clear()
+        try:
+            resp = self.client.get("/v1/ping")
+            self.assertNotIn("Sunset", resp.headers)
+            self.assertNotIn("Deprecation", resp.headers)
+        finally:
+            av.DEPRECATED_VERSIONS.update(original)
+
+
+class TestUnknownVersionWarningHeader(unittest.TestCase):
+    """api_version_header() emits X-API-Version-Warning for unknown versions (W980 F4)."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self.client = self.app.test_client()
+
+    def test_unknown_version_via_query_param_sets_warning_header(self):
+        """Unknown ?api_version=v99 causes X-API-Version-Warning header."""
+        resp = self.client.get("/ping?api_version=v99")
+        self.assertIn("X-API-Version-Warning", resp.headers)
+        self.assertIn("v99", resp.headers["X-API-Version-Warning"])
+        self.assertIn("unknown_version_requested", resp.headers["X-API-Version-Warning"])
+
+    def test_unknown_version_via_url_prefix_sets_warning_header(self):
+        """URL with unknown /v99/ prefix causes X-API-Version-Warning."""
+        # Register a route so Flask doesn't 404 before our after_request fires.
+        @self.app.route("/v99/ping")
+        def v99_ping():
+            from flask import jsonify
+            return jsonify({"ok": True})
+
+        resp = self.client.get("/v99/ping")
+        self.assertIn("X-API-Version-Warning", resp.headers)
+        self.assertIn("v99", resp.headers["X-API-Version-Warning"])
+
+    def test_known_version_no_warning_header(self):
+        """Known version must NOT produce a warning header."""
+        resp = self.client.get("/v1/ping")
+        self.assertNotIn("X-API-Version-Warning", resp.headers)
+
+    def test_no_version_hint_no_warning_header(self):
+        """Pure fallback to default (no hint) must not produce a warning header."""
+        resp = self.client.get("/ping")
+        self.assertNotIn("X-API-Version-Warning", resp.headers)
+
+    def test_unknown_version_still_returns_default_api_version_header(self):
+        """Unknown version warning still returns default X-API-Version value."""
+        resp = self.client.get("/ping?api_version=v99")
+        self.assertEqual(resp.headers["X-API-Version"], "v1")
+
+
 if __name__ == "__main__":
     unittest.main()

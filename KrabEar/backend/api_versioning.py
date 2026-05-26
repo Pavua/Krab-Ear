@@ -25,10 +25,8 @@ DEFAULT_VERSION = APIVersion.V1
 # Versions that are deprecated, mapped to their sunset ISO-8601 date.
 DEPRECATED_VERSIONS: dict[APIVersion, str] = {}
 
-# All versions the server actively serves.
-# NOTE: APIVersion.V2 is defined in the enum for future use but is NOT yet
-# implemented — /v2/* routes return 501 Not Implemented.  Only V1 is served.
-SUPPORTED_VERSIONS: tuple[APIVersion, ...] = (APIVersion.V1,)
+# All versions the server understands.
+SUPPORTED_VERSIONS = [APIVersion.V1, APIVersion.V2]
 
 
 def get_api_version(req=None) -> APIVersion:
@@ -72,21 +70,85 @@ def get_api_version(req=None) -> APIVersion:
     return DEFAULT_VERSION
 
 
-def api_version_header():
-    """Return a Flask ``after_request`` handler that stamps ``X-API-Version`` on every response.
+def _extract_raw_version_hint(req=None) -> str | None:
+    """Return the raw version token the client asked for, or ``None`` if absent.
 
-    Usage::
+    Used by :func:`api_version_header` to detect unknown version requests
+    (F4: client asked for a token that didn't match any supported version).
+
+    Returns:
+        A non-empty lowercase string like ``"v99"`` when the client supplied
+        an explicit version hint that didn't match a known version, or
+        ``None`` when no explicit hint was present (pure fallback to default).
+    """
+    if req is None:
+        req = request
+
+    # 1. URL prefix
+    path = req.path or ""
+    for version in SUPPORTED_VERSIONS:
+        prefix = f"/{version.value}/"
+        if path.startswith(prefix) or path == f"/{version.value}":
+            return None  # known version — not an unknown request
+
+    # Check for any /vX/ pattern in path that didn't match a supported version
+    import re as _re
+    m = _re.match(r"^/(v\d+)", path)
+    if m:
+        return m.group(1)
+
+    # 2. Accept header
+    accept = req.headers.get("Accept", "")
+    for version in SUPPORTED_VERSIONS:
+        if f"vnd.krabear.{version.value}" in accept:
+            return None  # known version
+
+    m = _re.search(r"vnd\.krabear\.(v\d+)", accept)
+    if m:
+        return m.group(1)
+
+    # 3. Query parameter
+    qp = req.args.get("api_version", "").strip().lower()
+    if qp:
+        for version in SUPPORTED_VERSIONS:
+            if qp == version.value:
+                return None  # known version
+        return qp  # non-empty but unrecognised
+
+    return None  # no explicit hint at all
+
+
+def api_version_header():
+    """Flask ``after_request`` handler that adds ``X-API-Version`` to every response.
+
+    Register with::
 
         app.after_request(api_version_header())
 
-    Note the call parentheses — this factory returns the inner ``handler``
-    function which Flask then invokes per request.  The header value reflects
-    whichever version was resolved for that request via :func:`get_api_version`.
+    The header value reflects whichever version was resolved for the request.
+
+    Additionally (W980 F2 + F4):
+    - If the resolved version appears in :data:`DEPRECATED_VERSIONS`, injects
+      ``Sunset`` and ``Deprecation`` headers via :func:`deprecation_warning`.
+    - If the client supplied an explicit version hint that is not in
+      :data:`SUPPORTED_VERSIONS`, adds
+      ``X-API-Version-Warning: unknown_version_requested_<hint>``.
     """
     def handler(response: Response) -> Response:
         try:
             version = get_api_version()
             response.headers["X-API-Version"] = version.value
+
+            # F2: inject deprecation headers when the resolved version is deprecated.
+            if version in DEPRECATED_VERSIONS:
+                deprecation_warning(response, version.value, DEPRECATED_VERSIONS[version])
+
+            # F4: warn when client asked for a version we don't know about.
+            raw_hint = _extract_raw_version_hint()
+            if raw_hint is not None:
+                response.headers["X-API-Version-Warning"] = (
+                    f"unknown_version_requested_{raw_hint}"
+                )
         except RuntimeError:
             # Outside of a request context (e.g. tests that call directly).
             response.headers["X-API-Version"] = DEFAULT_VERSION.value
