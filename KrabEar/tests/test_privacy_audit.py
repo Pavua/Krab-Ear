@@ -338,12 +338,18 @@ class TestPrivacyAuditRedactSensitiveData(unittest.TestCase):
         self.assertIn("method", entry["details"])
 
     def test_log_contains_only_metadata_keys(self):
-        """Запись содержит только ожидаемые ключи верхнего уровня."""
+        """Запись содержит только ожидаемые ключи верхнего уровня.
+
+        После добавления HMAC-цепочки (W952 F-3) записи также содержат
+        поля ``prev_hash`` и ``entry_hash``.
+        """
         self.logger.log_event("sentry", "blocked", {})
         entries = self.logger.read_entries()
         self.assertEqual(len(entries), 1)
         keys = set(entries[0].keys())
-        self.assertEqual(keys, {"ts", "category", "action", "details"})
+        # prev_hash и entry_hash добавлены в рамках W952 F-3 tamper detection
+        expected_keys = {"ts", "category", "action", "details", "prev_hash", "entry_hash"}
+        self.assertEqual(keys, expected_keys)
 
 
 class TestPrivacyAuditAtomicAppend(unittest.TestCase):
