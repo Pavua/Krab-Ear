@@ -20,6 +20,7 @@ from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
 from backend.timeline_export import TimelineExporter
 from backend.auto_deduplication import AutoDeduplicator
+from backend.bulk_reprocess import BulkReprocessor
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
@@ -438,6 +439,12 @@ class BackendService:
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
+        self._bulk_reprocessor = BulkReprocessor(
+            store=self.store,
+            transcriber=self.transcriber,
+            version_manager=self._transcript_versioning,
+            event_bus=event_bus,
+        )
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
@@ -1213,6 +1220,10 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
+            # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---
+            "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # массовое перетранскрибирование с текущими настройками STT
+            "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отменить текущий запуск bulk reprocess
+            "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус: активен ли cancel_event
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
@@ -3595,6 +3606,51 @@ end tell'''
             dict: total_checked, duplicates_found, chars_saved, dedup_rate.
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
+
+    # ------------------------------------------------------------------
+    # BulkReprocessor handlers (Wave 1044 — re-wired after Wave 65 removal)
+    # ------------------------------------------------------------------
+
+    def _handle_bulk_reprocess_start(self, params: dict) -> dict:
+        """Запускает массовое перетранскрибирование истории с текущими настройками STT.
+
+        Params:
+            only_low_confidence (bool, optional): перетранскрибировать только записи с
+                confidence < threshold (по умолчанию True).
+            threshold (float, optional): порог confidence [0..1] (по умолчанию 0.7).
+            dry_run (bool, optional): только подсчёт, без реального STT (по умолчанию False).
+            task_id (str, optional): произвольный ID задачи для событий прогресса.
+
+        Returns:
+            dict: total, reprocessed, skipped, errors, cancelled.
+        """
+        only_low_confidence = bool(params.get("only_low_confidence", True))
+        threshold = float(params.get("threshold", 0.7))
+        dry_run = bool(params.get("dry_run", False))
+        task_id = str(params.get("task_id", ""))
+        return self._bulk_reprocessor.reprocess(
+            only_low_confidence=only_low_confidence,
+            threshold=threshold,
+            dry_run=dry_run,
+            task_id=task_id,
+        )
+
+    def _handle_bulk_reprocess_cancel(self, params: dict) -> dict:
+        """Запрашивает отмену текущего запуска BulkReprocessor.
+
+        Returns:
+            dict: {"ok": True}
+        """
+        self._bulk_reprocessor.cancel()
+        return {"ok": True}
+
+    def _handle_bulk_reprocess_status(self, params: dict) -> dict:
+        """Возвращает статус BulkReprocessor: активен ли cancel_event.
+
+        Returns:
+            dict: {"cancel_requested": bool}
+        """
+        return {"cancel_requested": self._bulk_reprocessor._cancel_event.is_set()}
 
     def _handle_score_transcription(self, params: dict) -> dict:
         """Delegated to TextProcessingService."""
