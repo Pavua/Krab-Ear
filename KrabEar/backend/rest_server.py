@@ -5,6 +5,7 @@ OpenAPI 3.0 документация доступна по адресу /api/doc
 """
 
 import atexit
+import concurrent.futures
 import hmac
 import json
 import math
@@ -175,6 +176,73 @@ def require_api_key(f):
         # Mode 3: auth disabled — pass through
         return f(*args, **kwargs)
     return decorated
+
+
+# ---------------------------------------------------------------------------
+# F1: Magic byte validation (W1213)
+# Extension-only allowlists are trivially bypassed; validate actual file
+# signatures so crafted payloads don't reach libsndfile/ffmpeg/mlx-whisper.
+# ---------------------------------------------------------------------------
+
+# Maximum audio duration accepted at the REST layer (seconds).  Files longer
+# than this would expand to ~2 GB RAM when soundfile.read() decodes PCM — DoS
+# vector (W1213 F2).
+_MAX_AUDIO_DURATION_SEC = 3600  # 1 hour
+
+# Wall-clock timeout for a single transcription call at the REST layer.
+_TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
+
+
+def _validate_audio_magic_bytes(data: bytes) -> bool:
+    """Return True if *data* starts with a recognised audio file signature.
+
+    Checks the first 16 bytes against known magic sequences for all formats
+    accepted by ALLOWED_EXTENSIONS.  Rejects anything that doesn't match,
+    even if the filename extension looks legitimate (W1213 F1).
+    """
+    if len(data) < 4:
+        return False
+    # WAV: "RIFF" at 0..3, "WAVE" at 8..11
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WAVE":
+        return True
+    # MP3: ID3 tag or sync-word frame header (\xff\xfb | \xff\xf3 | \xff\xf2)
+    if data[:3] == b"ID3":
+        return True
+    if len(data) >= 2 and data[0] == 0xFF and data[1] in (0xFB, 0xF3, 0xF2):
+        return True
+    # FLAC
+    if data[:4] == b"fLaC":
+        return True
+    # OGG (Ogg / Opus)
+    if data[:4] == b"OggS":
+        return True
+    # WebM / Matroska: EBML magic
+    if data[:4] == b"\x1A\x45\xDF\xA3":
+        return True
+    # M4A / AAC / MP4: "ftyp" box at offset 4
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return True
+    # AAC ADTS sync word: \xff\xf1 or \xff\xf9
+    if len(data) >= 2 and data[0] == 0xFF and data[1] in (0xF1, 0xF9):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# F3: Privacy-mode helper (W1213)
+# Read privacy_mode_enabled from settings.json without importing BackendService.
+# ---------------------------------------------------------------------------
+
+def _load_settings_field(key: str, default):
+    """Read a single field from settings.json in DATA_DIR.  Returns *default*
+    on any error (file missing, parse failure, key absent)."""
+    try:
+        settings_path = settings.DATA_DIR / "settings.json"
+        with open(str(settings_path), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get(key, default)
+    except Exception:
+        return default
 
 
 ALLOWED_EXTENSIONS = {'.wav', '.mp3', '.ogg', '.m4a', '.flac', '.opus', '.webm', '.mp4', '.aac'}
@@ -888,14 +956,42 @@ def transcribe_audio():
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
 
-    filename = secure_filename(file.filename)
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        return jsonify({"error": f"Unsupported file type: {ext}"}), 400
-    temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{filename}"
+    # F4: extract extension from ORIGINAL filename BEFORE secure_filename(),
+    # which strips non-ASCII characters — "тест.wav" → "wav" (loses the dot).
+    original_filename = file.filename or ""
+    original_ext = os.path.splitext(original_filename)[1].lower()
+    if original_ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": f"Unsupported file type: {original_ext}"}), 400
+
+    safe_base = secure_filename(original_filename) or "upload"
+    # Ensure the safe basename carries the correct extension even for Unicode names.
+    if not safe_base.endswith(original_ext):
+        safe_base = os.path.splitext(safe_base)[0] + original_ext
+
+    temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{safe_base}"
     file.save(str(temp_path))
 
     try:
+        # F1: Validate magic bytes before handing the file to any decoder.
+        with open(str(temp_path), "rb") as _fh:
+            _header = _fh.read(16)
+        if not _validate_audio_magic_bytes(_header):
+            return jsonify({"error": "File content does not match a recognised audio format"}), 400
+
+        # F2: Reject audio exceeding 1 hour to prevent PCM-expansion OOM DoS.
+        try:
+            import soundfile as _sf  # type: ignore
+            _info = _sf.info(str(temp_path))
+            if _info.duration > _MAX_AUDIO_DURATION_SEC:
+                return jsonify({
+                    "error": f"Audio too long: {_info.duration:.0f}s (max {_MAX_AUDIO_DURATION_SEC}s)"
+                }), 400
+        except Exception:
+            # soundfile.info may not support all containers (e.g. MP3); continue
+            # — libsndfile will surface a proper error inside transcribe() if
+            # the file is truly unreadable.
+            pass
+
         engine.normalize_audio(str(temp_path))
 
         quality = request.form.get("quality_profile", "balanced")
@@ -913,24 +1009,45 @@ def transcribe_audio():
         req_vocab = [w.strip() for w in req_vocab_raw.split(",") if w.strip()] if req_vocab_raw else []
         full_vocabulary = list(set(store.load_vocabulary() + req_vocab))
 
+        # F2: Wrap transcription in a thread pool with a wall-clock timeout so a
+        # hung decoder cannot occupy a worker forever.
         start_ts = time.monotonic()
-        result = transcriber.transcribe(
-            str(temp_path),
+        _transcribe_path = str(temp_path)
+        _transcribe_kwargs = dict(
             quality_profile=quality,
             cleanup_profile=cleanup,
             domain=domain,
             extra_vocabulary=full_vocabulary,
             lang_hint=lang_hint,
         )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            _future = _pool.submit(transcriber.transcribe, _transcribe_path, **_transcribe_kwargs)
+            try:
+                result = _future.result(timeout=_TRANSCRIBE_TIMEOUT_SEC)
+            except concurrent.futures.TimeoutError:
+                _future.cancel()
+                logger.error(
+                    "Transcription timed out after %ss for %s",
+                    _TRANSCRIBE_TIMEOUT_SEC,
+                    safe_base,
+                )
+                return jsonify({"error": "Transcription timeout"}), 504
         elapsed_sec = time.monotonic() - start_ts
 
         text = result.get("text", "")
-        history_item = store.add_history_item(
-            text=text,
-            chat_id=chat_id or "",
-            message_id=message_id or "",
-            source_text=result.get("raw_text", text),
-        )
+
+        # F3: Respect privacy_mode_enabled — skip history persistence when active.
+        _privacy_mode = _load_settings_field("privacy_mode_enabled", False)
+        if _privacy_mode:
+            history_item_id = ""
+        else:
+            history_item = store.add_history_item(
+                text=text,
+                chat_id=chat_id or "",
+                message_id=message_id or "",
+                source_text=result.get("raw_text", text),
+            )
+            history_item_id = history_item.id
 
         metrics.record(
             latency_ms=result.get("duration_ms", int(elapsed_sec * 1000)),
@@ -947,7 +1064,7 @@ def transcribe_audio():
             "language": result.get("language"),
             "segments": result.get("segments", []),
             "diarization": result.get("diarization", {}),
-            "history_id": history_item.id,
+            "history_id": history_item_id,
         })
 
     except Exception:
