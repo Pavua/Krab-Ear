@@ -2,7 +2,8 @@
 
 Подготавливает данные частоты слов для визуализации word cloud:
 - фильтрация стоп-слов (RU/ES/EN/UK)
-- нормализация регистра и ё→е (до фильтрации стоп-слов)
+- нормализация регистра
+- слияние похожих форм слов
 - генерация SVG-облака с позиционированием по весу
 """
 
@@ -54,20 +55,21 @@ _MIN_WORD_LENGTH = 2
 _FONT_SIZE_MIN = 12
 _FONT_SIZE_MAX = 72
 
+# Верхняя граница max_words на уровне модуля (защита от OOM при огромных значениях)
+_MAX_WORDS_LIMIT = 1000
+
 # ---------------------------------------------------------------------------
-# Таблица нормализации: ё → е (применяется на этапе токенизации, до стоп-слов)
+# Похожие слова: пары вариантов написания для слияния
 # ---------------------------------------------------------------------------
-_YO_TABLE = str.maketrans("ёЁ", "еЕ")
+_MERGE_PAIRS: list[tuple[str, str]] = [
+    # Русские варианты «е» / «ё»
+    ("ещё", "еще"),
+    ("её", "ее"),
+]
 
-
-def _normalize_yo(text: str) -> str:
-    """Заменяет букву ё/Ё на е/Е во всём тексте перед токенизацией.
-
-    Это необходимо, чтобы варианты написания одного слова («жёсткий» и
-    «жесткий», «ещё» и «еще») суммировались в единый счётчик, а не
-    расщеплялись на два отдельных ключевых слова.
-    """
-    return text.translate(_YO_TABLE)
+# Словарь слияния похожих слов (вариант → канонический вид).
+# Построен один раз на уровне модуля, не пересоздаётся при каждом вызове.
+_MERGE_MAP: dict[str, str] = {variant: canonical for canonical, variant in _MERGE_PAIRS}
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +147,18 @@ class KeywordCloudGenerator:
         if not items:
             return []
 
+        # Зажать max_words в диапазон [0, _MAX_WORDS_LIMIT] на уровне генератора.
+        # max_words <= 0 означает «вернуть пустой список».
+        max_words = min(max(0, int(max_words)), _MAX_WORDS_LIMIT)
+        if max_words == 0:
+            return []
+
         words = self._collect_words(items, language=language)
         if not words:
             return []
 
         counter = Counter(words)
-        top_n = counter.most_common(max(1, max_words))
+        top_n = counter.most_common(max_words)
 
         if not top_n:
             return []
@@ -266,12 +274,21 @@ class KeywordCloudGenerator:
             ]
             words.extend(filtered)
 
-        return words
+        return self._merge_similar(words)
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Разбивает текст на слова (нижний регистр, ё→е, только буквы)."""
-        return re.findall(r"[^\W\d_]+", _normalize_yo(text).lower(), re.UNICODE)
+        """Разбивает текст на слова (нижний регистр, только буквы)."""
+        return re.findall(r"[^\W\d_]+", text.lower(), re.UNICODE)
+
+    @staticmethod
+    def _merge_similar(words: list[str]) -> list[str]:
+        """Объединяет известные варианты написания одного слова.
+
+        Использует модульную константу _MERGE_MAP (вариант → канонический вид),
+        которая построена один раз при загрузке модуля.
+        """
+        return [_MERGE_MAP.get(w, w) for w in words]
 
     def _scale_font(self, weight: float) -> int:
         """Масштабирует вес (0-1) в размер шрифта (font_size_min..font_size_max)."""
