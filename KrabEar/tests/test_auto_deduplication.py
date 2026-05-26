@@ -394,6 +394,109 @@ class AutoDedupIPCTestCase(unittest.TestCase):
         self.assertGreater(after_count, before_count)
 
 
+class PrivacyModeGuardTestCase(unittest.TestCase):
+    """W1004 F2 — AutoDeduplicator пропускает дедупликацию в режиме конфиденциальности."""
+
+    def test_auto_dedup_skips_in_privacy_mode(self) -> None:
+        """check_duplicate возвращает 'kept' когда privacy_mode=True."""
+        # Мок-провайдер настроек с включённым privacy_mode
+        def privacy_settings() -> dict:
+            return {"privacy_mode": True}
+
+        deduplicator = AutoDeduplicator(settings_provider=privacy_settings)
+
+        # Store с существующей идентичной записью
+        existing_item = {
+            "id": "orig-001",
+            "text": "Секретная транскрипция для проверки приватного режима",
+            "ts": _now_iso(),
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([existing_item], None)
+
+        result = deduplicator.check_duplicate(
+            text="Секретная транскрипция для проверки приватного режима",
+            timestamp=_now_iso(),
+            store=mock_store,
+        )
+
+        # В privacy_mode дедупликация не должна выполняться
+        self.assertFalse(result.is_duplicate, "В privacy_mode дубликаты не должны определяться")
+        self.assertIsNone(result.duplicate_of)
+        self.assertEqual(result.action_taken, "kept")
+        # Store не должен вызываться — данные не читаются в privacy_mode
+        mock_store.get_history_page.assert_not_called()
+
+    def test_auto_dedup_active_when_privacy_mode_disabled(self) -> None:
+        """check_duplicate работает штатно когда privacy_mode=False."""
+        def normal_settings() -> dict:
+            return {"privacy_mode": False}
+
+        deduplicator = AutoDeduplicator(settings_provider=normal_settings)
+
+        existing_item = {
+            "id": "orig-002",
+            "text": "Обычная транскрипция без приватного режима",
+            "ts": _now_iso(),
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([existing_item], None)
+
+        result = deduplicator.check_duplicate(
+            text="Обычная транскрипция без приватного режима",
+            timestamp=_now_iso(),
+            store=mock_store,
+        )
+
+        # Дедупликация должна выполняться в обычном режиме
+        self.assertTrue(result.is_duplicate, "Идентичный текст должен быть определён как дубликат")
+        mock_store.get_history_page.assert_called_once()
+
+    def test_privacy_mode_no_settings_provider_runs_dedup(self) -> None:
+        """AutoDeduplicator без settings_provider работает как раньше (без privacy guard)."""
+        deduplicator = AutoDeduplicator()  # settings_provider=None
+
+        existing_item = {
+            "id": "orig-003",
+            "text": "Транскрипция без провайдера настроек",
+            "ts": _now_iso(),
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([existing_item], None)
+
+        result = deduplicator.check_duplicate(
+            text="Транскрипция без провайдера настроек",
+            timestamp=_now_iso(),
+            store=mock_store,
+        )
+        # Без settings_provider — обычная дедупликация
+        self.assertTrue(result.is_duplicate)
+
+    def test_privacy_mode_settings_provider_exception_safe(self) -> None:
+        """Если settings_provider бросает исключение — privacy_mode считается False (fail-safe)."""
+        def broken_settings() -> dict:
+            raise RuntimeError("Ошибка получения настроек")
+
+        deduplicator = AutoDeduplicator(settings_provider=broken_settings)
+
+        # При ошибке провайдера настроек — дедупликация продолжается (не ломается)
+        existing_item = {
+            "id": "orig-004",
+            "text": "Транскрипция при сломанном провайдере",
+            "ts": _now_iso(),
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([existing_item], None)
+
+        # Не должно бросать исключение
+        result = deduplicator.check_duplicate(
+            text="Транскрипция при сломанном провайдере",
+            timestamp=_now_iso(),
+            store=mock_store,
+        )
+        self.assertIn(result.action_taken, ("kept", "skipped", "merged"))
+
+
 class AutoDedupConstantsTestCase(unittest.TestCase):
     """Тесты констант и настроек модуля."""
 

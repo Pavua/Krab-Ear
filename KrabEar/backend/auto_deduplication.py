@@ -44,15 +44,39 @@ class AutoDeduplicator:
     Потокобезопасен: все счётчики защищены RLock.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings_provider: Any = None) -> None:
+        """Инициализирует AutoDeduplicator.
+
+        Args:
+            settings_provider: необязательный callable() → dict с runtime-настройками.
+                Если передан, используется для проверки флага privacy_mode перед дедупликацией.
+                Если не передан — privacy guard отключён (обратная совместимость).
+        """
         self._detector = DuplicateDetector()
         self._lock = threading.RLock()
+        self._settings_provider = settings_provider
 
         # Статистика работы дедупликатора
         self._total_checked: int = 0
         self._duplicates_found: int = 0
         # Суммарная длина (chars) отклонённых дубликатов — для оценки сэкономленного места
         self._chars_saved: int = 0
+
+    def _is_privacy_mode(self) -> bool:
+        """Проверяет, включён ли режим конфиденциальности.
+
+        Returns:
+            True если privacy_mode=True в runtime-настройках, иначе False.
+            Возвращает False при любой ошибке получения настроек.
+        """
+        if self._settings_provider is None:
+            return False
+        try:
+            settings = self._settings_provider()
+            return bool(settings.get("privacy_mode", False))
+        except Exception:
+            logger.debug("Ошибка получения настроек для проверки privacy_mode")
+            return False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -79,6 +103,16 @@ class AutoDeduplicator:
         Returns:
             DedupResult с полями is_duplicate, duplicate_of, similarity, action_taken.
         """
+        # Режим конфиденциальности: дедупликация отключена для защиты данных
+        if self._is_privacy_mode():
+            logger.debug("Дедупликация пропущена: активен режим конфиденциальности")
+            return DedupResult(
+                is_duplicate=False,
+                duplicate_of=None,
+                similarity=0.0,
+                action_taken="kept",
+            )
+
         text = (text or "").strip()
         if not text:
             return DedupResult(

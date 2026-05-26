@@ -2,14 +2,16 @@
 
 Использует SequenceMatcher для вычисления текстового сходства.
 Оптимизация: сравниваются только записи в пределах 60-секундного временного окна.
+Группировка: union-find для транзитивного объединения (A≈B, B≈C → {A,B,C}).
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -59,6 +61,9 @@ class DuplicateDetector:
     ) -> list[DuplicateGroup]:
         """Находит группы похожих записей в пределах 60-секундного окна.
 
+        Использует union-find для корректного транзитивного объединения:
+        если A≈B и B≈C, то {A,B,C} попадают в одну группу, даже если A≉C.
+
         Args:
             items: список записей истории (dict с полями text/ts).
             similarity_threshold: порог сходства [0..1], по умолчанию 0.9.
@@ -70,50 +75,81 @@ class DuplicateDetector:
         if not items:
             return []
 
-        # Индекс уже назначенных в группу элементов
-        assigned: set[int] = set()
-        groups: list[DuplicateGroup] = []
+        n = len(items)
 
-        for i, item_i in enumerate(items):
-            if i in assigned:
+        # Union-Find: инициализируем каждый элемент как свой собственный корень
+        parent: list[int] = list(range(n))
+
+        def _find(x: int) -> int:
+            """Находит корень с path compression."""
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]  # сжатие пути (halving)
+                x = parent[x]
+            return x
+
+        def _union(a: int, b: int) -> None:
+            """Объединяет два множества."""
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        # Кэшируем тексты и временные метки (избегаем повторных вызовов)
+        texts: list[str] = [self._get_text(item) for item in items]
+        timestamps: list[Optional[float]] = [self._get_timestamp(item) for item in items]
+
+        # Попарное сравнение: объединяем схожие элементы
+        # Отслеживаем максимальное сходство для каждой пары корней
+        pair_max_sim: Dict[tuple, float] = {}
+
+        for i in range(n):
+            if not texts[i]:
                 continue
-
-            text_i = self._get_text(item_i)
-            if not text_i:
-                continue
-
-            ts_i = self._get_timestamp(item_i)
-            group_indices: list[int] = [i]
-            group_max_sim: float = 0.0
-
-            for j, item_j in enumerate(items):
-                if j <= i or j in assigned:
-                    continue
-
-                text_j = self._get_text(item_j)
-                if not text_j:
+            for j in range(i + 1, n):
+                if not texts[j]:
                     continue
 
                 # Проверка временного окна
-                ts_j = self._get_timestamp(item_j)
+                ts_i, ts_j = timestamps[i], timestamps[j]
                 if ts_i is not None and ts_j is not None:
                     if abs(ts_i - ts_j) > self.DEFAULT_TIME_WINDOW_SECONDS:
                         continue
 
-                ratio = SequenceMatcher(None, text_i, text_j).ratio()
+                ratio = SequenceMatcher(None, texts[i], texts[j]).ratio()
                 if ratio >= similarity_threshold:
-                    group_indices.append(j)
-                    if ratio > group_max_sim:
-                        group_max_sim = ratio
+                    _union(i, j)
+                    # Сохраняем максимальное сходство для последующего расчёта
+                    ri, rj = _find(i), _find(j)
+                    root_pair = (min(ri, rj), max(ri, rj))
+                    if ratio > pair_max_sim.get(root_pair, 0.0):
+                        pair_max_sim[root_pair] = ratio
 
-            if len(group_indices) > 1:
-                for idx in group_indices:
-                    assigned.add(idx)
-                groups.append(
-                    DuplicateGroup(
-                        items=[items[idx] for idx in group_indices],
-                        similarity=round(group_max_sim, 4),
-                    )
+        # Группируем элементы по корню union-find
+        root_to_indices: Dict[int, list[int]] = defaultdict(list)
+        for i in range(n):
+            if texts[i]:  # пропускаем элементы с пустым текстом
+                root_to_indices[_find(i)].append(i)
+
+        # Строим DuplicateGroup для групп из 2+ элементов
+        groups: list[DuplicateGroup] = []
+        for root, indices in root_to_indices.items():
+            if len(indices) < 2:
+                continue
+
+            # Максимальное сходство внутри группы: пересчитываем точно
+            group_items = [items[idx] for idx in indices]
+            max_sim: float = 0.0
+            group_texts = [texts[idx] for idx in indices]
+            for gi in range(len(group_texts)):
+                for gj in range(gi + 1, len(group_texts)):
+                    r = SequenceMatcher(None, group_texts[gi], group_texts[gj]).ratio()
+                    if r > max_sim:
+                        max_sim = r
+
+            groups.append(
+                DuplicateGroup(
+                    items=group_items,
+                    similarity=round(max_sim, 4),
                 )
+            )
 
         return groups
