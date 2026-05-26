@@ -131,8 +131,7 @@ class DailyDigestGenerator:
 
         # Загружаем все активные записи
         try:
-            with store._lock():
-                all_items = store._load_active_items_unlocked()
+            all_items = store._load_active_items_with_lock()
         except Exception:
             logger.exception("Ошибка при загрузке истории из store")
             return self._empty_digest(date_str)
@@ -199,7 +198,7 @@ class DailyDigestGenerator:
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts).date()
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
         except ValueError:
             return None
 
