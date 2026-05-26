@@ -46,6 +46,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
         run: |
           python -m pytest KrabEar/tests/ -v --tb=short -n auto
+      - name: Audit orphan imports in service.py
+        run: python3 scripts/audit_orphan_imports.py
+
       - name: Compare benchmark history (regression gate)
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
