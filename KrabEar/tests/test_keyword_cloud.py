@@ -12,7 +12,7 @@
 9. generate_cloud_svg — валидный SVG
 10. generate_cloud_svg — пустой SVG при отсутствии данных
 11. generate_cloud — объекты с атрибутами (не словари)
-12. _merge_similar — слияние вариантов написания
+12. Нормализация ё→е на этапе токенизации (W1291 F1 MED)
 """
 
 from __future__ import annotations
@@ -215,21 +215,50 @@ class TestGenerateCloudObjectItems(unittest.TestCase):
         self.assertNotIn("кошка", words)
 
 
-class TestMergeSimilar(unittest.TestCase):
-    """Тесты слияния похожих слов (е/ё варианты)."""
+class TestYoNormalization(unittest.TestCase):
+    """Тесты нормализации ё→е на этапе токенизации (W1291 F1 MED).
 
-    def setUp(self) -> None:
-        self.gen = KeywordCloudGenerator()
+    После нормализации все варианты написания с ё и е объединяются в одно слово
+    с суммарной частотой. Нормализация применяется ДО фильтрации стоп-слов,
+    поэтому затрагивает все слова — и контентные, и служебные.
+    """
 
-    def test_eshche_merged(self) -> None:
-        # «еще» должен быть смержен в «ещё» — но оба являются стоп-словами,
-        # поэтому используем кастомный генератор без стоп-слов для теста слияния.
+    def test_kyzhestkij_and_zhestkij_merge_into_one(self) -> None:
+        """«жёсткий» и «жесткий» должны слиться в одно слово «жесткий» (ё→е)."""
         gen = KeywordCloudGenerator(stop_words=frozenset())
-        items = [_dict_item("еще ещё еще")]
+        items = [_dict_item("жёсткий жесткий жёсткий")]
         result = gen.generate_cloud(items)
         self.assertEqual(len(result), 1)
-        # canonical форма — «ещё»
-        self.assertEqual(result[0].word, "ещё")
+        self.assertEqual(result[0].word, "жесткий")
+        self.assertEqual(result[0].count, 3)
+
+    def test_yo_normalization_applied_before_stopword_filter(self) -> None:
+        """ё→е применяется до фильтрации, поэтому «её» (стоп-слово) фильтруется.
+
+        Исходный «ё»-вариант «её» и «е»-вариант «ее» оба являются стоп-словами
+        в дефолтном словаре; оба должны быть отфильтрованы, а контентное слово
+        «кошка» остаётся.
+        """
+        gen = KeywordCloudGenerator()
+        # «её», «ее» — стоп-слова; «кошка» — нет
+        items = [_dict_item("кошка её кошка ее кошка")]
+        result = gen.generate_cloud(items)
+        words = {cw.word for cw in result}
+        self.assertIn("кошка", words)
+        self.assertNotIn("её", words)
+        self.assertNotIn("ее", words)
+        # суммарный count кошки = 3
+        counts = {cw.word: cw.count for cw in result}
+        self.assertEqual(counts["кошка"], 3)
+
+    def test_lowercase_yo_capital_yo_both_normalized(self) -> None:
+        """Строчная ё и заглавная Ё нормализуются одинаково."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        # «Ёж» и «ёж» и «еж» — всё одно слово после нормализации
+        items = [_dict_item("Ёж ёж еж")]
+        result = gen.generate_cloud(items)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].word, "еж")
         self.assertEqual(result[0].count, 3)
 
 
