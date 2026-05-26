@@ -1,8 +1,8 @@
 """HealthCheckService — обработчики IPC-методов диагностики и проверки здоровья Krab Ear.
 
 Выделен из backend/service.py для снижения размера монолитного модуля.
-Содержит 6 IPC-обработчиков: ping, health_check, get_diagnostics,
-probe_llm_http, get_startup_diagnostics, check_integrity.
+Содержит 7 IPC-обработчиков: ping, health_check, get_diagnostics,
+probe_llm_http, get_startup_diagnostics, check_integrity, handshake.
 
 КРИТИЧНО: контракт handle_ping должен оставаться bit-exact —
 HealthMonitor.swift проверяет поле status == "ok" по каждому 3-секундному тику.
@@ -205,4 +205,33 @@ class HealthCheckService:
                 }
                 for c in report.checks
             ],
+        }
+
+    # ------------------------------------------------------------------
+    # handle_handshake  (W795 — moved from BackendService)
+    # ------------------------------------------------------------------
+
+    def handle_handshake(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Swift→backend handshake on connect.
+
+        Verifies version compatibility and returns backend metadata.
+        Swift sends this once immediately after establishing a connection.
+
+        Params:
+            swift_agent_version (str): Swift agent bundle version, e.g. "1.0.0"
+            capabilities (list[str]): declared Swift capabilities,
+                e.g. ["error_bus_consumer", "live_subs", "selection_translator"]
+        """
+        swift_version = params.get("swift_agent_version", "unknown")
+        swift_capabilities = params.get("capabilities", [])
+        logger.info(
+            "IPC handshake: swift_version=%s capabilities=%s",
+            swift_version, swift_capabilities,
+        )
+        return {
+            "ok": True,
+            "backend_version": self._app_version or "1.0.0",
+            "phase_b_capable": True,   # has list_recent_errors, report_paste_failure, etc.
+            "phase_c_capable": True,   # has handshake, report_reconnect
+            "swift_version_ack": swift_version,
         }
