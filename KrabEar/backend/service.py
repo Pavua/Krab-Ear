@@ -943,7 +943,7 @@ class BackendService:
             "search_with_highlights": self._history.handle_search_with_highlights,  # поиск с подсветкой совпадений в результатах
             "search_by_speaker": self._history.handle_search_by_speaker,
             "delete_history_item": self._history.handle_delete_history_item,  # VERIFIED: called from Swift (HistoryPanel)
-            "set_paste_status": self._handle_set_paste_status,  # VERIFIED: called from Swift (main)
+            "set_paste_status": self._recording_core_svc.handle_set_paste_status,  # VERIFIED: called from Swift (main)
             "get_settings": self._settings_svc.handle_get_settings,  # VERIFIED: called from Swift (main)
             "set_settings": self._settings_svc.handle_set_settings,  # VERIFIED: called from Swift (main)
             "compact_history": self._history.handle_compact_history,  # VERIFIED: called from Swift (main, HistoryPanel)
@@ -1461,10 +1461,6 @@ class BackendService:
     def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU."""
         return self._system_monitor.get_system_info()
-
-    def _handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Delegated to RecordingCoreService.handle_set_paste_status (W796)."""
-        return self._recording_core_svc.handle_set_paste_status(params)
 
     # ------------------------------------------------------------------
     # Audio converter IPC handlers
