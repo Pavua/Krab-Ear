@@ -12,7 +12,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
+
+from backend.observability import add_breadcrumb, mask_phone
 
 logger = logging.getLogger("KrabEar.Backend.CallSession")
 
@@ -43,6 +46,7 @@ class CallSessionService:
         Возвращает:
           {session_id, status, created_at}
         """
+        _t0 = time.monotonic()
         phone = str(params.get("phone") or "").strip()
         if not phone:
             raise ValueError("Параметр 'phone' обязателен")
@@ -50,11 +54,36 @@ class CallSessionService:
         if not goal:
             raise ValueError("Параметр 'goal_text' обязателен")
 
-        session = self._store.create(
-            phone_number=phone,
-            goal_text=goal,
-        )
-        return {"session_id": session.id, "status": session.status, "created_at": session.created_at}
+        try:
+            session = self._store.create(
+                phone_number=phone,
+                goal_text=goal,
+            )
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_create",
+                level="info",
+                data={
+                    "ok": True,
+                    "phone": mask_phone(phone),
+                    "session_id": session.id,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return {"session_id": session.id, "status": session.status, "created_at": session.created_at}
+        except Exception as exc:
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_create",
+                level="error",
+                data={
+                    "ok": False,
+                    "phone": mask_phone(phone),
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_call_session_get(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает полную запись сессии по id.
@@ -103,6 +132,7 @@ class CallSessionService:
         Возвращает:
           {session_id, status}
         """
+        _t0 = time.monotonic()
         session_id = str(params.get("id") or "").strip()
         if not session_id:
             raise ValueError("Параметр 'id' обязателен")
@@ -110,8 +140,34 @@ class CallSessionService:
         if not new_status:
             raise ValueError("Параметр 'status' обязателен")
 
-        session = self._store.update_status(session_id=session_id, new_status=new_status)
-        return {"session_id": session.id, "status": session.status}
+        try:
+            session = self._store.update_status(session_id=session_id, new_status=new_status)
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_update_status",
+                level="info",
+                data={
+                    "ok": True,
+                    "session_id": session_id,
+                    "new_status": new_status,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return {"session_id": session.id, "status": session.status}
+        except Exception as exc:
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_update_status",
+                level="error",
+                data={
+                    "ok": False,
+                    "session_id": session_id,
+                    "new_status": new_status,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_call_session_add_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
         """Добавляет реплику в транскрипт сессии.
@@ -156,6 +212,7 @@ class CallSessionService:
         Возвращает:
           {session_id, status, duration_sec, cost_usd, end_reason}
         """
+        _t0 = time.monotonic()
         session_id = str(params.get("id") or "").strip()
         if not session_id:
             raise ValueError("Параметр 'id' обязателен")
@@ -163,23 +220,51 @@ class CallSessionService:
         cost_usd = float(params.get("cost_usd") or 0.0)
         failed = bool(params.get("failed", False))
 
-        if failed:
-            session = self._store.mark_failed(
-                session_id=session_id,
-                end_reason=reason,
-                cost_usd=cost_usd,
+        try:
+            if failed:
+                session = self._store.mark_failed(
+                    session_id=session_id,
+                    end_reason=reason,
+                    cost_usd=cost_usd,
+                )
+            else:
+                session = self._store.mark_completed(
+                    session_id=session_id,
+                    end_reason=reason,
+                    cost_usd=cost_usd,
+                )
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_end",
+                level="info",
+                data={
+                    "ok": True,
+                    "session_id": session_id,
+                    "end_reason": reason,
+                    "failed": failed,
+                    "duration_sec": session.duration_sec,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
             )
-        else:
-            session = self._store.mark_completed(
-                session_id=session_id,
-                end_reason=reason,
-                cost_usd=cost_usd,
+            return {
+                "session_id": session.id,
+                "status": session.status,
+                "duration_sec": session.duration_sec,
+                "cost_usd": session.cost_usd,
+                "end_reason": session.end_reason,
+            }
+        except Exception as exc:
+            add_breadcrumb(
+                category="call_session",
+                message="call_session_end",
+                level="error",
+                data={
+                    "ok": False,
+                    "session_id": session_id,
+                    "end_reason": reason,
+                    "failed": failed,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
             )
-
-        return {
-            "session_id": session.id,
-            "status": session.status,
-            "duration_sec": session.duration_sec,
-            "cost_usd": session.cost_usd,
-            "end_reason": session.end_reason,
-        }
+            raise

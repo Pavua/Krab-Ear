@@ -17,10 +17,13 @@ Handlers (8):
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from backend.observability import add_breadcrumb
 
 logger = logging.getLogger("KrabEar.Backend.AudioAnalytics")
 
@@ -67,12 +70,38 @@ class AudioAnalyticsService:
         """
         from core.audio_quality import analyze_file
 
+        _t0 = time.monotonic()
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
-        report = analyze_file(file_path)
-        return report.to_dict()
+        try:
+            report = analyze_file(file_path)
+            result = report.to_dict()
+            add_breadcrumb(
+                category="audio_analytics",
+                message="analyze_audio_quality",
+                level="info",
+                data={
+                    "ok": True,
+                    "quality_score": result.get("quality_score"),
+                    "warning_count": len(result.get("warnings") or []),
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return result
+        except Exception as exc:
+            add_breadcrumb(
+                category="audio_analytics",
+                message="analyze_audio_quality",
+                level="error",
+                data={
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
         """Обнаруживает участки тишины в аудиофайле.
@@ -95,21 +124,49 @@ class AudioAnalyticsService:
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды качества распознавания за последние N дней."""
+        _t0 = time.monotonic()
         days = int(params.get("days", 30))
         try:
-            with self._store._lock():
-                items = self._store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._quality_trends.analyze_trends(items, days=days)
-        return {
-            "daily_confidence": report.daily_confidence,
-            "overall_trend": report.overall_trend,
-            "trend_slope": report.trend_slope,
-            "best_day": report.best_day,
-            "worst_day": report.worst_day,
-            "confidence_distribution": report.confidence_distribution,
-        }
+            try:
+                with self._store._lock():
+                    items = self._store._load_active_items_unlocked()
+            except Exception:
+                items = []
+            report = self._quality_trends.analyze_trends(items, days=days)
+            result = {
+                "daily_confidence": report.daily_confidence,
+                "overall_trend": report.overall_trend,
+                "trend_slope": report.trend_slope,
+                "best_day": report.best_day,
+                "worst_day": report.worst_day,
+                "confidence_distribution": report.confidence_distribution,
+            }
+            add_breadcrumb(
+                category="audio_analytics",
+                message="analyze_quality_trends",
+                level="info",
+                data={
+                    "ok": True,
+                    "days": days,
+                    "item_count": len(items),
+                    "overall_trend": report.overall_trend,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return result
+        except Exception as exc:
+            add_breadcrumb(
+                category="audio_analytics",
+                message="analyze_quality_trends",
+                level="error",
+                data={
+                    "ok": False,
+                    "days": days,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_analyze_word_timing(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует ритм речи по пословным таймстемпам Whisper.
@@ -151,20 +208,47 @@ class AudioAnalyticsService:
         """
         from core.waveform_generator import WaveformGenerator
 
+        _t0 = time.monotonic()
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
         num_points = int(params.get("num_points", 200))
-        gen = WaveformGenerator()
-        wf = gen.generate_from_file(file_path, num_points=num_points)
-        return {
-            "points": wf.points,
-            "duration_sec": wf.duration_sec,
-            "sample_rate": wf.sample_rate,
-            "peak_amplitude": wf.peak_amplitude,
-            "rms_amplitude": wf.rms_amplitude,
-        }
+        try:
+            gen = WaveformGenerator()
+            wf = gen.generate_from_file(file_path, num_points=num_points)
+            result = {
+                "points": wf.points,
+                "duration_sec": wf.duration_sec,
+                "sample_rate": wf.sample_rate,
+                "peak_amplitude": wf.peak_amplitude,
+                "rms_amplitude": wf.rms_amplitude,
+            }
+            add_breadcrumb(
+                category="audio_analytics",
+                message="get_waveform",
+                level="info",
+                data={
+                    "ok": True,
+                    "num_points": num_points,
+                    "duration_sec": wf.duration_sec,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            return result
+        except Exception as exc:
+            add_breadcrumb(
+                category="audio_analytics",
+                message="get_waveform",
+                level="error",
+                data={
+                    "ok": False,
+                    "num_points": num_points,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                },
+            )
+            raise
 
     def handle_profile_noise(self, params: dict[str, Any]) -> dict[str, Any]:
         """Профилирует фоновый шум в аудиофайле.
