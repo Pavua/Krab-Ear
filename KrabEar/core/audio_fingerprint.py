@@ -1,7 +1,16 @@
 """AudioFingerprinter — аудио-фингерпринтинг для обнаружения дублирующихся аудиозаписей.
 
 Генерирует компактный хеш из спектральных признаков аудио (спектральный центроид
-и частота пересечений нуля) и сравнивает отпечатки для выявления дубликатов.
+и частота пересечений нуля) и сравнивает отпечатки для выявления **точных** дубликатов.
+
+ВАЖНО: Фингерпринт основан на SHA-256 от квантованных признаков. Из-за лавинного
+эффекта криптографических хешей «расстояние Хэмминга» между двумя разными SHA-256
+хешами статистически бессмысленно (~50% совпадающих бит для ЛЮБОЙ пары неидентичных
+входов). Перцептивное сходство («почти одинаковые») НЕ поддерживается.
+
+Используйте :meth:`equals` для точного совпадения (единственная корректная семантика).
+:meth:`compare` оставлен как deprecated shim для обратной совместимости — возвращает
+1.0 при точном совпадении и 0.0 во всех остальных случаях.
 
 Зависимости: только numpy (без внешних библиотек).
 """
@@ -9,11 +18,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import struct
+import warnings
 from typing import Sequence
 
 import numpy as np
 
+
+logger = logging.getLogger(__name__)
 
 # Параметр окна анализа: ~23 мс при 16 кГц
 _DEFAULT_WINDOW_SIZE = 512
@@ -22,14 +35,17 @@ _SPECTRAL_BINS = 256
 
 
 class AudioFingerprinter:
-    """Генерирует и сравнивает аудио-фингерпринты для обнаружения дубликатов.
+    """Контент-адресный фингерпринт для обнаружения ТОЧНЫХ дубликатов аудио.
 
     Алгоритм:
       1. Аудио разбивается на фреймы фиксированной длины.
       2. Для каждого фрейма вычисляется спектральный центроид (через FFT)
          и частота пересечений нуля (Zero Crossing Rate).
-      3. Среднее и стандартное отклонение признаков квантуются в 8-битные значения.
+      3. Среднее и стандартное отклонение признаков квантуются в 16-битные значения.
       4. Квантованные значения сериализуются и хешируются SHA-256.
+
+    Ограничение: перцептивное сходство («похожие») НЕ поддерживается.
+    Используйте :meth:`equals` для точного совпадения.
     """
 
     def __init__(self, window_size: int = _DEFAULT_WINDOW_SIZE) -> None:
@@ -53,37 +69,59 @@ class AudioFingerprinter:
         features = self._extract_features(mono, sample_rate)
         return self._hash_features(features)
 
-    def compare(self, fp1: str, fp2: str) -> float:
-        """Сравнивает два фингерпринта и возвращает сходство [0.0, 1.0].
+    def equals(self, fp1: str, fp2: str) -> bool:
+        """Проверяет точное совпадение двух фингерпринтов.
 
-        Точное совпадение возвращает 1.0, разные строки SHA-256 сравниваются
-        побайтово (число совпадающих битов Хэмминга, нормализованное).
+        Это единственная корректная операция сравнения для SHA-256 хешей.
+        Перцептивное сходство («почти одинаковые аудио») не поддерживается —
+        см. описание класса.
 
         Args:
             fp1: SHA-256 hex-строка от :meth:`fingerprint`.
             fp2: SHA-256 hex-строка от :meth:`fingerprint`.
 
         Returns:
-            Значение сходства: 1.0 — идентично, 0.0 — максимально различно.
+            True если fp1 и fp2 идентичны, False иначе.
         """
         if not fp1 or not fp2:
-            return 0.0
-        if fp1 == fp2:
-            return 1.0
+            return False
+        return fp1 == fp2
 
-        try:
-            bytes1 = bytes.fromhex(fp1)
-            bytes2 = bytes.fromhex(fp2)
-        except ValueError:
-            return 0.0
+    def compare(self, fp1: str, fp2: str) -> float:
+        """DEPRECATED: используйте :meth:`equals`.
 
-        if len(bytes1) != len(bytes2):
-            return 0.0
+        Возвращает 1.0 при точном совпадении и 0.0 во всех остальных случаях.
 
-        # Число совпадающих бит (дополнение расстояния Хэмминга)
-        total_bits = len(bytes1) * 8
-        differing_bits = sum(bin(b1 ^ b2).count("1") for b1, b2 in zip(bytes1, bytes2))
-        return (total_bits - differing_bits) / total_bits
+        Ранее этот метод вычислял расстояние Хэмминга между SHA-256 хешами,
+        что статистически бессмысленно: любые два неидентичных SHA-256 хеша
+        имеют ~50% совпадающих бит (лавинный эффект). Значения в диапазоне
+        (0.0, 1.0) были артефактом и не отражали реальное акустическое сходство.
+
+        .. deprecated::
+            Используйте ``equals(fp1, fp2)`` для точного совпадения.
+
+        Args:
+            fp1: SHA-256 hex-строка от :meth:`fingerprint`.
+            fp2: SHA-256 hex-строка от :meth:`fingerprint`.
+
+        Returns:
+            1.0 если fp1 == fp2, иначе 0.0.
+        """
+        warnings.warn(
+            "AudioFingerprinter.compare() is deprecated and will be removed in a future version. "
+            "Use AudioFingerprinter.equals() instead. "
+            "SHA-256 Hamming distance is statistically meaningless (W1063 CRITICAL).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        logger.warning(
+            "AudioFingerprinter.compare() deprecated — use equals(). "
+            "SHA-256 Hamming similarity is statistically meaningless (W1063).",
+            extra={"method": "compare", "issue": "W1063"},
+        )
+        if not fp1 or not fp2:
+            return 0.0
+        return 1.0 if fp1 == fp2 else 0.0
 
     def is_duplicate_audio(
         self,
@@ -92,20 +130,27 @@ class AudioFingerprinter:
         sample_rate: int = 16000,
         threshold: float = 0.95,
     ) -> bool:
-        """Проверяет, являются ли два аудио-массива дубликатами.
+        """Проверяет, являются ли два аудио-массива точными дубликатами.
+
+        Использует точное совпадение фингерпринтов. Параметр ``threshold``
+        сохранён для обратной совместимости: значение >= 1.0 (включая default 0.95
+        при точном совпадении) трактуется как «только точное совпадение».
 
         Args:
             audio1: первый аудио-массив.
             audio2: второй аудио-массив.
             sample_rate: частота дискретизации (одинакова для обоих массивов).
-            threshold: порог сходства [0..1], по умолчанию 0.95.
+            threshold: порог [0..1]; значение 0.0 означает «всегда дубликат»,
+                       любое значение > 0.0 требует точного совпадения хешей.
 
         Returns:
-            True, если сходство фингерпринтов >= threshold.
+            True, если фингерпринты идентичны (или threshold == 0.0).
         """
         fp1 = self.fingerprint(audio1, sample_rate)
         fp2 = self.fingerprint(audio2, sample_rate)
-        return self.compare(fp1, fp2) >= threshold
+        if threshold <= 0.0:
+            return True
+        return self.equals(fp1, fp2)
 
     # ── Внутренние методы ────────────────────────────────────────────────────
 
