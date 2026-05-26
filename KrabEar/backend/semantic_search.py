@@ -350,6 +350,11 @@ class SemanticSearcher:
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
 
+    # Alias so callers can use either .remove(item_id) or .remove_item(item_id).
+    # W1172: fixes W1163 call-site bug where history_service called .remove() which
+    # didn't exist, causing AttributeError silently swallowed → embeddings never removed.
+    remove = remove_item
+
 
 def keyword_fallback_search(
     query: str,

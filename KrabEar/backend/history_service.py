@@ -24,52 +24,8 @@ from backend.summary_profiles import SummaryProfileManager
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
-    from backend.playback_tracker import PlaybackTracker
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
-
-# ---------------------------------------------------------------------------
-# Module-level export path allowlist (W1432 / W1426-F3 HIGH)
-# ---------------------------------------------------------------------------
-# These roots define where IPC callers may write export files.  The list is
-# intentionally permissive enough for common user workflows while preventing
-# writes to sensitive directories (e.g. ~/.ssh, ~/Library/Keychains, /etc).
-# Note: data_dir is NOT included here because it is only known at runtime;
-# the instance method _resolve_export_dir additionally allows data_dir.
-
-_EXPORT_ALLOWED_ROOTS: list[Path] = [
-    Path.home() / "Documents",
-    Path.home() / "Desktop",
-    Path.home() / "Downloads",
-    Path("/tmp"),
-    Path("/private/tmp"),
-]
-
-
-def _is_safe_export_dir(out_dir: Path) -> bool:
-    """Return True if *out_dir* is within one of the module-level allowed roots.
-
-    Expands user home (``~``) and resolves symlinks before comparison so that
-    path-traversal payloads like ``~/Documents/../../../../etc`` are caught.
-
-    This function intentionally does NOT include ``data_dir`` because that is
-    only available inside a ``HistoryService`` instance.  Use
-    ``HistoryService._resolve_export_dir`` when an instance is available, as
-    it additionally permits the app data directory.
-
-    >>> _is_safe_export_dir(Path("/tmp/krab_export"))
-    True
-    >>> _is_safe_export_dir(Path("/etc/passwd").parent)
-    False
-    """
-    resolved = out_dir.expanduser().resolve()
-    for root in _EXPORT_ALLOWED_ROOTS:
-        try:
-            resolved.relative_to(root.expanduser().resolve())
-            return True
-        except ValueError:
-            continue
-    return False
 
 
 class HistoryService:
@@ -80,8 +36,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
-        auto_glossary_builder: Any | None = None,
-        playback_tracker: "PlaybackTracker | None" = None,
+        semantic_searcher: Any = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -89,35 +44,14 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
-        # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
-        # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
-        self._auto_glossary = auto_glossary_builder
-        # PlaybackTracker для каскадного удаления статистики воспроизведения (F4 W1343).
-        self._playback_tracker = playback_tracker
+        # SemanticSearcher — синхронизируем удаление из индекса при delete_history_item.
+        # W1172: fix W1163 broken wiring (was .remove() → AttributeError silently swallowed).
+        self._semantic_searcher = semantic_searcher
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
-        # SemanticSearcher для чистки индекса при удалении записей (опционально).
-        self._semantic_searcher = None
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
-        # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
-        self._recording_chain_mgr = None
-
-    # ------------------------------------------------------------------
-    # Privacy helpers
-    # ------------------------------------------------------------------
-
-    def _is_privacy_mode(self) -> bool:
-        """Возвращает True, если включён режим конфиденциальности (privacy_mode_enabled).
-
-        Читает актуальные настройки из store для корректной работы в runtime.
-        """
-        try:
-            settings = self.store.load_settings()
-            return bool(settings.get("privacy_mode_enabled", False))
-        except Exception:  # noqa: BLE001
-            return False
 
     # ------------------------------------------------------------------
     # История
@@ -139,13 +73,6 @@ class HistoryService:
             translation_status=str(params.get("translation_status", "not_requested")).strip() or "not_requested",
             translation_engine=str(params.get("translation_engine", "")).strip(),
         )
-        # Инвалидируем кэш автоглоссария после добавления новой записи.
-        # Новые имена собственные сразу попадут в STT-промпт при следующем вызове.
-        if self._auto_glossary is not None:
-            try:
-                self._auto_glossary.invalidate()
-            except Exception as _ag_exc:
-                logger.warning("auto_glossary invalidate error after add_history_item: %s", _ag_exc)
         return item.to_dict()
 
     def handle_get_history_page(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -211,9 +138,6 @@ class HistoryService:
         Returns:
             {"matches": [{"id": ..., "text": ..., "score": ...}, ...]}
         """
-        if self._is_privacy_mode():
-            return {"ok": True, "results": [], "reason": "privacy_mode_active"}
-
         query = str(params.get("query", "")).strip()
         threshold = float(params.get("threshold", 0.6))
         limit = int(params.get("limit", 50))
@@ -325,20 +249,17 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
-        # W1148 F1: clean up semantic search index on delete to prevent unbounded growth
+        # W1163/W1172: remove embedding from semantic index when history item is deleted.
+        # Use .remove_item() — the canonical method name on SemanticSearcher.
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.remove_item(item_id)
             except Exception as _exc:
                 logger.warning(
-                    "semantic_search: не удалось удалить запись из индекса: %s", _exc
+                    "handle_delete_history_item: не удалось удалить embedding %s: %s",
+                    item_id,
+                    _exc,
                 )
-        # F4 W1343: cascade-delete orphan playback stats to prevent accumulation.
-        if self._playback_tracker is not None:
-            self._playback_tracker.remove_stats(item_id)
-        # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
-        if self._recording_chain_mgr is not None:
-            self._recording_chain_mgr.remove_item_from_all_chains(item_id)
         add_breadcrumb(
             category="history",
             message="delete_history_item",
@@ -847,16 +768,14 @@ class HistoryService:
 
         speakers = {t.get("speaker") for t in turns if t.get("speaker")}
         srt_lines: list[str] = []
-        idx = 0
-        for turn in turns:
+        for seq, turn in enumerate(turns, start=1):
             speaker = turn.get("speaker", "SPEAKER_00")
             turn_text = str(turn.get("text", "")).strip()
             if not turn_text:
                 continue
-            idx += 1
             start_sec = float(turn.get("start", 0.0) or 0.0)
             end_sec = float(turn.get("end", start_sec + 1.0) or start_sec + 1.0)
-            srt_lines.append(str(idx))
+            srt_lines.append(str(seq))
             srt_lines.append(f"{self._srt_timestamp(start_sec)} --> {self._srt_timestamp(end_sec)}")
             if self._should_include_speaker_labels(params):
                 lbl = self._resolve_speaker_name(speaker, lang=getattr(target_item, "source_lang", None))
@@ -1391,11 +1310,6 @@ class HistoryService:
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
-
-        # Каскадное удаление ghost item_ids из цепочек для каждой удалённой записи (W1253 RC-3).
-        if self._recording_chain_mgr is not None:
-            for item in to_delete:
-                self._recording_chain_mgr.remove_item_from_all_chains(item.id)
 
         add_breadcrumb(
             category="history",
@@ -1972,61 +1886,6 @@ class HistoryService:
     # Экспорт в формат Obsidian
     # ------------------------------------------------------------------
 
-    # Allowed roots for export output_dir.  These are intentionally permissive
-    # so that legitimate user workflows (export to ~/Documents, ~/Downloads,
-    # ~/Desktop, or the app data dir) all work without friction.  Any path
-    # outside this set is rejected to prevent IPC-based path traversal writes
-    # to sensitive locations (e.g. ~/.ssh, ~/Library/Keychains).
-    _ALLOWED_EXPORT_ROOTS: tuple[Path, ...] = ()  # populated lazily by _resolve_export_dir
-
-    def _resolve_export_dir(self, output_dir: str | None) -> Path | None:
-        """Validates *output_dir* against the export allowlist.
-
-        Returns the resolved absolute Path when *output_dir* is provided and
-        allowed, or ``None`` when *output_dir* is ``None`` / empty (callers
-        should fall back to their default directory).
-
-        Raises ``ValueError`` if the resolved path is not relative to any
-        allowed root.
-
-        Allowed roots (evaluated at call time so that data_dir changes in
-        tests are respected):
-          - ``self.store.data_dir``
-          - ``~/Documents``
-          - ``~/Downloads``
-          - ``~/Desktop``
-          - ``/tmp`` / ``tempfile.gettempdir()``  (for tests / scripts)
-        """
-        import tempfile as _tempfile
-
-        if not output_dir:
-            return None
-
-        resolved = Path(output_dir).expanduser().resolve()
-
-        data_dir_root = Path(self.store.data_dir).resolve()
-        home = Path.home()
-        allowed_roots: list[Path] = [
-            data_dir_root,
-            (home / "Documents").resolve(),
-            (home / "Downloads").resolve(),
-            (home / "Desktop").resolve(),
-            Path("/tmp").resolve(),
-            Path(_tempfile.gettempdir()).resolve(),
-        ]
-
-        for root in allowed_roots:
-            try:
-                resolved.relative_to(root)
-                return resolved
-            except ValueError:
-                continue
-
-        raise ValueError(
-            f"export output_dir is outside allowed directories: {resolved!s}. "
-            f"Allowed roots: {[str(r) for r in allowed_roots]}"
-        )
-
     def handle_export_obsidian(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует транскрипции в формат Obsidian-совместимого Markdown.
 
@@ -2262,8 +2121,10 @@ class HistoryService:
         content = "\n".join(fm_lines) + "\n" + "\n".join(body_lines)
 
         # --- Сохраняем ---
-        validated = self._resolve_export_dir(output_dir_param)
-        out_dir = validated if validated is not None else Path(self.store.data_dir) / "transcripts"
+        if output_dir_param:
+            out_dir = Path(output_dir_param).expanduser().resolve()
+        else:
+            out_dir = Path(self.store.data_dir) / "transcripts"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         safe_title = (
@@ -2770,8 +2631,10 @@ class HistoryService:
 
         # Создаём директорию бандла
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        validated_base = self._resolve_export_dir(output_dir_param)
-        base_dir = validated_base if validated_base is not None else Path(self.store.data_dir) / "exports"
+        if output_dir_param:
+            base_dir = Path(output_dir_param).expanduser().resolve()
+        else:
+            base_dir = Path(self.store.data_dir) / "exports"
         bundle_dir = base_dir / f"export_{timestamp_str}"
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
