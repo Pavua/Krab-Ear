@@ -48,7 +48,7 @@ macOS Sequoia 26 issue categories.
 |-------|-----|----------------|
 | TCC doesn't persist across System Settings UI on Sequoia | Cannot test TCC.db state machine without real user interaction | Add to manual QA checklist; instrument `tccutil` output in CI smoke test |
 | macOS daily auto-update reboot (14:04 CEST) | System behaviour, not testable in unit scope | Monitor via Datadog uptime alert; document in runbook |
-| PyTorch MPS concurrent inference (MLX inter-process lock) | Requires actual MLX inference + Metal GPU — prohibited by Wave 521 constraint | Add to integration-level soak test (`docs/SOAK_TESTING.md`) |
+| PyTorch MPS concurrent inference (MLX inter-process lock) | Requires actual MLX inference + Metal GPU — prohibited by Wave 521 constraint | Add to integration-level soak test (archived: `docs/archive/2026-05-26-pre-marathon/SOAK_TESTING.md`) |
 | `lsregister` worktree shadow drift | Shell-level command, not Swift unit-testable | `scripts/cleanup_worktree_shadows.command` covers this; add to CI post-build step |
 | Real dwarfdump execution | Intentionally mocked — UUID parser logic is tested, not subprocess | Add to `make verify-binary-sync` Make target that runs real dwarfdump post-build |
 
