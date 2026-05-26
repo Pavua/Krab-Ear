@@ -472,7 +472,7 @@ class NumberNormalizer:
 
         # Строим паттерн: одно или несколько числительных слов подряд
         word_pat = "|".join(re.escape(w) for w in num_words + ["и"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)(?!\w)"
 
         # Единицы
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
@@ -511,7 +511,7 @@ class NumberNormalizer:
         unit_words = list(_ES_UNIT_WORDS.keys())
 
         word_pat = "|".join(re.escape(w) for w in num_words + ["y"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:\s+(?:{word_pat}))*)(?!\w)"
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
         full_pat = rf"(menos\s+)?({num_seq_pat})(?:\s+({unit_pat}))?"
 
@@ -558,7 +558,7 @@ class NumberNormalizer:
         unit_words = list(_EN_UNIT_WORDS.keys())
 
         word_pat = "|".join(re.escape(w) for w in num_words + ["and"])
-        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:[\s-]+(?:{word_pat}))*)"
+        num_seq_pat = rf"(?<!\w)(?:(?:{word_pat})(?:[\s-]+(?:{word_pat}))*)(?!\w)"
         unit_pat = "|".join(re.escape(u) for u in sorted(unit_words, key=len, reverse=True))
         full_pat = rf"(minus\s+|negative\s+)?({num_seq_pat})(?:\s+({unit_pat}))?"
 

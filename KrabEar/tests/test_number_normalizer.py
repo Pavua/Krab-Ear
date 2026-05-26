@@ -401,5 +401,141 @@ class TestNumberNormalizerConcurrent(unittest.TestCase):
             self.assertIn(_expected[tid], val, f"Thread {tid} ({lang}): {val!r}")
 
 
+class TestNumberNormalizerCompoundWordBoundary(unittest.TestCase):
+    """W991 F1 HIGH — right-boundary guard prevents compound word corruption.
+
+    Without (?!\w) at the tail of num_seq_pat, a decade prefix such as
+    «двадцать» matches inside «двадцатилетний» and corrupts it to
+    «2дцатилетний».  This suite verifies the fix across RU / ES / EN.
+    """
+
+    def setUp(self):
+        self.n = NumberNormalizer()
+
+    # ------------------------------------------------------------------
+    # Russian compound words (W991 F1 production examples)
+    # ------------------------------------------------------------------
+
+    def test_compound_word_not_corrupted_ru_dvadtsatiletni(self):
+        """«двадцатилетний опыт» MUST pass through verbatim (W991 F1 HIGH)."""
+        text = "двадцатилетний опыт"
+        result = self.n.normalize(text, "ru")
+        self.assertEqual(
+            result,
+            text,
+            f"Compound word corrupted: expected {text!r}, got {result!r}",
+        )
+
+    def test_compound_word_not_corrupted_ru_tridtsatigradusny(self):
+        """«тридцатиградусный» MUST pass through verbatim (W991 F1 HIGH)."""
+        text = "тридцатиградусный"
+        result = self.n.normalize(text, "ru")
+        self.assertEqual(
+            result,
+            text,
+            f"Compound word corrupted: expected {text!r}, got {result!r}",
+        )
+
+    def test_compound_word_in_sentence_ru(self):
+        """Compound word is preserved while standalone numbers in same sentence are converted."""
+        text = "У него двадцатилетний опыт и сорок рублей"
+        result = self.n.normalize(text, "ru")
+        self.assertIn("двадцатилетний", result, "Compound word was corrupted")
+        self.assertIn("40", result, "Standalone number was not converted")
+
+    def test_compound_word_not_corrupted_ru_pyatiletka(self):
+        """«пятилетка» (five-year plan) MUST not be corrupted by «пять» match."""
+        text = "пятилетка"
+        result = self.n.normalize(text, "ru")
+        self.assertEqual(result, text, f"Compound word corrupted: {result!r}")
+
+    def test_compound_word_not_corrupted_ru_stoprocentny(self):
+        """«стопроцентный» (hundred-percent) MUST not be corrupted by «сто» match."""
+        text = "стопроцентный результат"
+        result = self.n.normalize(text, "ru")
+        self.assertIn("стопроцентный", result, f"Compound word corrupted: {result!r}")
+
+    # ------------------------------------------------------------------
+    # Spanish compound words
+    # ------------------------------------------------------------------
+
+    def test_compound_word_not_corrupted_es_veintinueve(self):
+        """«veintinueve» standalone → «29»; embedded form must not corrupt."""
+        # standalone → should convert
+        standalone = self.n.normalize("veintinueve", "es")
+        self.assertIn("29", standalone, "Standalone 'veintinueve' should convert to 29")
+
+        # embedded — if a hypothetical compound were in the text, it must not match mid-word
+        # We verify that the right-boundary guard is in place by checking a word that
+        # starts with «dos» does not get mangled.
+        text = "dosificación"  # starts with «dos» (2)
+        result = self.n.normalize(text, "es")
+        self.assertEqual(result, text, f"Spanish compound word corrupted: {result!r}")
+
+    def test_compound_word_not_corrupted_es_ciento(self):
+        """Words starting with «cien» fragment are not corrupted."""
+        text = "ciencias"  # starts with «cien» (100) but is not a numeral
+        result = self.n.normalize(text, "es")
+        self.assertEqual(result, text, f"Spanish word corrupted: {result!r}")
+
+    # ------------------------------------------------------------------
+    # English compound words
+    # ------------------------------------------------------------------
+
+    def test_compound_word_not_corrupted_en_threesome(self):
+        """«threesome» MUST not be corrupted by «three» match."""
+        text = "threesome"
+        result = self.n.normalize(text, "en")
+        self.assertEqual(result, text, f"English compound word corrupted: {result!r}")
+
+    def test_compound_word_not_corrupted_en_sixteen(self):
+        """«sixteenth» MUST not be corrupted by «six» match (ordinal suffix)."""
+        text = "sixteenth"
+        result = self.n.normalize(text, "en")
+        # «sixteen» is in _EN_ONES (value 16). Without right-boundary guard,
+        # «sixteen» would match inside «sixteenth» → «16th».
+        # With the guard, «sixteenth» has no trailing word boundary → untouched.
+        self.assertEqual(result, text, f"English word corrupted: {result!r}")
+
+    # ------------------------------------------------------------------
+    # Regression: standalone numerals still convert (right-boundary must not block)
+    # ------------------------------------------------------------------
+
+    def test_standalone_number_still_replaced_ru_dvadtsat(self):
+        """«двадцать» standalone → «20» (regression guard for right-boundary fix)."""
+        result = self.n.normalize("двадцать", "ru")
+        self.assertEqual(result, "20")
+
+    def test_standalone_number_still_replaced_ru_in_sentence(self):
+        """«двадцать рублей» → contains «20» (regression guard)."""
+        result = self.n.normalize("двадцать рублей", "ru")
+        self.assertIn("20", result)
+
+    def test_standalone_number_still_replaced_ru_compound_number(self):
+        """«сто двадцать три» → «123» (multi-word number not broken by fix)."""
+        result = self.n.normalize("сто двадцать три", "ru")
+        self.assertEqual(result, "123")
+
+    def test_standalone_number_still_replaced_ru_tridtsat(self):
+        """«тридцать» standalone → «30» (regression guard)."""
+        result = self.n.normalize("тридцать", "ru")
+        self.assertEqual(result, "30")
+
+    def test_standalone_number_still_replaced_es_treinta(self):
+        """«treinta» standalone → «30» (Spanish regression guard)."""
+        result = self.n.normalize("treinta", "es")
+        self.assertEqual(result, "30")
+
+    def test_standalone_number_still_replaced_en_twenty(self):
+        """«twenty» standalone → «20» (English regression guard)."""
+        result = self.n.normalize("twenty", "en")
+        self.assertEqual(result, "20")
+
+    def test_standalone_number_still_replaced_en_thirty_two(self):
+        """«thirty-two» → «32» (hyphenated EN compound, regression guard)."""
+        result = self.n.normalize("thirty-two", "en")
+        self.assertEqual(result, "32")
+
+
 if __name__ == "__main__":
     unittest.main()
