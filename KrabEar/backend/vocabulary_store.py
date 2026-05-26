@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -34,6 +35,7 @@ class VocabularyStore:
         self.data_dir = data_dir
         self.path = data_dir / _VOCABULARY_FILENAME
         data_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         # Phase B.2 — error_bus late-injection
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
@@ -126,7 +128,8 @@ class VocabularyStore:
                 encoding="utf-8",
             )
             tmp_path.replace(self.path)
-        except OSError as exc:
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
             logger.error("Ошибка сохранения vocabulary.json: %s", exc)
             raise
 
@@ -144,18 +147,20 @@ class VocabularyStore:
 
         Возвращает итоговый список.
         """
-        current = set(self.load())
-        current.update(w.strip() for w in new_words if isinstance(w, str) and w.strip())
-        merged = sorted(current)
-        self.save(merged)
-        return merged
+        with self._lock:
+            current = set(self.load())
+            current.update(w.strip() for w in new_words if isinstance(w, str) and w.strip())
+            merged = sorted(current)
+            self.save(merged)
+            return merged
 
     def remove_words(self, words_to_remove: List[str]) -> List[str]:
         """Удаляет слова из словаря и сохраняет на диск.
 
         Возвращает итоговый список.
         """
-        remove_set = {w.strip() for w in words_to_remove if isinstance(w, str) and w.strip()}
-        current = [w for w in self.load() if w not in remove_set]
-        self.save(current)
-        return current
+        with self._lock:
+            remove_set = {w.strip() for w in words_to_remove if isinstance(w, str) and w.strip()}
+            current = [w for w in self.load() if w not in remove_set]
+            self.save(current)
+            return current
