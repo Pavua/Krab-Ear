@@ -179,6 +179,8 @@ class RecordingChainManager:
 
     def list_chains(self, limit: int = 20) -> list[dict[str, Any]]:
         """Возвращает список цепочек (краткая форма), отсортированных по дате создания убыванием."""
+        # F1 guard: отрицательные значения и превышение разумного лимита недопустимы
+        limit = max(0, min(limit, 1000))
         with self._lock:
             chains = list(self._data["chains"].values())
 
@@ -193,6 +195,19 @@ class RecordingChainManager:
                 "item_count": len(c.get("item_ids", [])),
             })
         return result
+
+    def delete_all_chains(self) -> int:
+        """Удаляет все цепочки (используется при полной очистке данных / privacy-purge).
+
+        Returns:
+            int: количество удалённых цепочек.
+        """
+        with self._lock:
+            count = len(self._data["chains"])
+            self._data = {"chains": {}}
+            self._save()
+        logger.info("delete_all_chains: удалено %d цепочек", count)
+        return count
 
     def merge_chain_text(self, chain_id: str) -> str:
         """Конкатенирует тексты всех записей цепочки в порядке добавления."""
