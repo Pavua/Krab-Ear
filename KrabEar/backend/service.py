@@ -20,7 +20,6 @@ from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
 from backend.timeline_export import TimelineExporter
 from backend.auto_deduplication import AutoDeduplicator
-from backend.bulk_reprocess import BulkReprocessor
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
@@ -29,12 +28,7 @@ from backend.playback_tracker import PlaybackTracker
 from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.sentiment_trends import SentimentTrendAnalyzer
-# W924/W949: TranscriptionQueue import removed — module is DEAD CODE in production.
-# process_next() was never called; jobs enqueued via IPC accumulated in `pending` forever.
-# The 4 IPC handlers (enqueue_transcription, cancel_transcription, get_queue_status,
-# list_transcription_queue) have been removed from the dispatch table below.
-# Unit tests in test_transcription_queue.py remain for future resurrection.
-# Actual batch transcription uses transcribe_paths_async / JobTracker instead.
+from backend.transcription_queue import TranscriptionQueue
 from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
@@ -97,6 +91,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -156,26 +151,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 logger = logging.getLogger("KrabEar.Backend.Service")
-
-
-def _escape_as_str(s: str) -> str:
-    """Escape a string for safe inclusion in an AppleScript double-quoted literal.
-
-    Prevents newline-based injection where a ``\\n`` in user input would
-    close the current string literal and allow arbitrary AppleScript to run.
-
-    Order of operations is important:
-      1. Strip NUL, CR, LF — they break out of the string literal.
-      2. Escape backslash first (so we don't double-escape the next step).
-      3. Escape double-quote.
-    """
-    if not isinstance(s, str):
-        s = str(s)
-    # Strip newlines + carriage returns + NUL to prevent break-out
-    s = re.sub(r'[\r\n\x00]', ' ', s)
-    # Escape backslash THEN quote (order matters)
-    s = s.replace('\\', '\\\\').replace('"', '\\"')
-    return s
 
 
 class BackendService:
@@ -437,8 +412,7 @@ class BackendService:
         )
         self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
-        # W924/W949: self._transcription_queue removed — TranscriptionQueue was dead code.
-        # process_next() was never called; see comment near import for full rationale.
+        self._transcription_queue = TranscriptionQueue()
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
@@ -465,12 +439,6 @@ class BackendService:
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
-        self._bulk_reprocessor = BulkReprocessor(
-            store=self.store,
-            transcriber=self.transcriber,
-            version_manager=self._transcript_versioning,
-            event_bus=event_bus,
-        )
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
@@ -1069,9 +1037,6 @@ class BackendService:
             "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
             "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
             "list_normalization_profiles": self._handle_list_normalization_profiles,  # список профилей нормализации текста
-            "add_normalization_profile": self._handle_add_normalization_profile,  # добавить пользовательский профиль нормализации
-            "remove_normalization_profile": self._handle_remove_normalization_profile,  # удалить пользовательский профиль нормализации
-            "apply_normalization_profile": self._handle_apply_normalization_profile,  # применить профиль нормализации к тексту
             "get_collection_items": self._collections.handle_get_collection_items,  # получить записи истории из коллекции
             "start_chain": self._chains.handle_start_chain,  # начать цепочку связанных записей
             "add_to_chain": self._chains.handle_add_to_chain,  # добавить запись в цепочку
@@ -1124,18 +1089,16 @@ class BackendService:
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
-            # W924/W949: enqueue_transcription / cancel_transcription / get_queue_status /
-            # list_transcription_queue removed — TranscriptionQueue.process_next() was never
-            # called in production; enqueued jobs accumulated silently. Handlers removed to
-            # prevent the misleading illusion of a working batch queue. JobTracker +
-            # transcribe_paths_async remains the real async-transcription path.
+            "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
+            "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
+            "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
+            "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
             "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
-            "add_abbreviation": self._text_processing_svc.handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
             "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
@@ -1251,10 +1214,6 @@ class BackendService:
             "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
-            # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---
-            "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # массовое перетранскрибирование с текущими настройками STT
-            "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отменить текущий запуск bulk reprocess
-            "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус: активен ли cancel_event
             # --- LM Studio model discovery ---
             "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
@@ -1264,8 +1223,10 @@ class BackendService:
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
-            # --- Speech pace analysis ---
-            "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
+            # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
+            "export_timeline_svg": self._handle_export_timeline_svg,  # экспорт таймлайна в SVG-файл
+            "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
+            "export_timeline_ical": self._handle_export_timeline_ical,  # экспорт таймлайна в iCalendar (.ics) файл
             # --- Default STT hotwords seed ---
         }
 
@@ -1486,34 +1447,6 @@ class BackendService:
     def _handle_list_normalization_profiles(self, params: dict) -> dict:
         """Возвращает список всех профилей нормализации текста."""
         return {"profiles": self._norm_profiles.list_profiles()}
-
-    def _handle_add_normalization_profile(self, params: dict) -> dict:
-        """Добавляет пользовательский профиль нормализации текста."""
-        name = str(params.get("name", "")).strip()
-        if not name:
-            raise ValueError("Параметр 'name' обязателен")
-        rules = list(params.get("rules", []))
-        description = str(params.get("description", ""))
-        overwrite = bool(params.get("overwrite", False))
-        profile = self._norm_profiles.add_profile(name, rules, description, overwrite=overwrite)
-        return {"profile": profile.to_dict()}
-
-    def _handle_remove_normalization_profile(self, params: dict) -> dict:
-        """Удаляет пользовательский профиль нормализации текста."""
-        name = str(params.get("name", "")).strip()
-        if not name:
-            raise ValueError("Параметр 'name' обязателен")
-        removed = self._norm_profiles.remove_profile(name)
-        return {"removed": removed, "name": name}
-
-    def _handle_apply_normalization_profile(self, params: dict) -> dict:
-        """Применяет профиль нормализации к тексту и возвращает результат."""
-        text = str(params.get("text", ""))
-        profile_name = str(params.get("profile_name", "")).strip()
-        if not profile_name:
-            raise ValueError("Параметр 'profile_name' обязателен")
-        normalized = self._norm_profiles.apply_profile(text, profile_name)
-        return {"text": normalized, "profile_name": profile_name}
 
     def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU."""
@@ -2464,34 +2397,6 @@ class BackendService:
             "audio_duration_s": audio_duration_s,
         }
 
-    def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует темп речи по тексту и длительности аудио.
-
-        Параметры:
-            text         — транскрибированный текст (обязательно).
-            duration_sec — длительность аудиозаписи в секундах (float, обязательно).
-
-        Возвращает:
-            words_per_minute          — слов в минуту.
-            chars_per_minute          — символов в минуту.
-            pace_category             — «slow» | «normal» | «fast» | «very_fast».
-            estimated_reading_time_sec — расчётное время чтения при 150 wpm.
-            word_count                — количество слов.
-            char_count                — количество символов (без пробелов).
-            duration_sec              — фактическая длительность записи.
-        """
-        text = str(params.get("text", ""))
-        raw_dur = params.get("duration_sec")
-        if raw_dur is None:
-            return {"error": "duration_sec is required"}
-        try:
-            duration_sec = float(raw_dur)
-        except (TypeError, ValueError):
-            return {"error": "duration_sec must be a number"}
-
-        report = self._speech_pace_analyzer.analyze(text, duration_sec)
-        return report.as_dict()
-
     def _build_virtual_adapters_for_routing(self) -> "list[Any]":
         """Создаёт список виртуальных адаптеров для scored selection.
 
@@ -3057,8 +2962,6 @@ class BackendService:
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует данные облака ключевых слов из истории транскрипций."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
         max_words = int(params.get("max_words", 100))
         language = params.get("language")
         try:
@@ -3152,12 +3055,12 @@ class BackendService:
         """
         import subprocess
 
-        title = _escape_as_str(params.get("title", "Krab Ear note"))
-        body = _escape_as_str(params.get("body", ""))
+        title = params.get("title", "Krab Ear note").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
         folder = params.get("folder", "") or ""
 
         if folder:
-            folder_escaped = _escape_as_str(folder)
+            folder_escaped = folder.replace('"', '\\"')
             script = f'''
 tell application "Notes"
     tell account "iCloud"
@@ -3194,8 +3097,8 @@ end tell
         """
         import subprocess
 
-        title = _escape_as_str(params.get("title", "Krab Ear reminder"))
-        body = _escape_as_str(params.get("body", ""))
+        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
         list_name = params.get("list_name") or None
         due_date = params.get("due_date") or None
 
@@ -3204,11 +3107,11 @@ end tell
         if body:
             properties += f', body:"{body}"'
         if due_date:
-            due_date_escaped = _escape_as_str(due_date)
+            due_date_escaped = due_date.replace('"', '\\"')
             properties += f', due date:date "{due_date_escaped}"'
 
         if list_name:
-            list_name_escaped = _escape_as_str(list_name)
+            list_name_escaped = list_name.replace('"', '\\"')
             script = f'''
 tell application "Reminders"
     tell list "{list_name_escaped}"
@@ -3255,13 +3158,13 @@ end tell
         if not title:
             return {"ok": False, "error": "title is required"}
 
-        title_esc = _escape_as_str(title)
+        title_esc = title.replace('"', '\\"')
         notes = params.get("notes", "") or ""
-        notes_esc = _escape_as_str(notes)
+        notes_esc = notes.replace('"', '\\"')
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}
-        start_date_esc = _escape_as_str(start_date)
+        start_date_esc = start_date.replace('"', '\\"')
         duration_minutes = int(params.get("duration_minutes", 30) or 30)
         calendar_name = params.get("calendar_name") or None
 
@@ -3271,7 +3174,7 @@ end tell
         make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
 
         if calendar_name:
-            cal_esc = _escape_as_str(calendar_name)
+            cal_esc = calendar_name.replace('"', '\\"')
             script = f'''tell application "Calendar"
     tell calendar "{cal_esc}"{event_block}
     end tell
@@ -3323,9 +3226,9 @@ end tell'''
         # Map service name to AppleScript service type constant
         service_type = "iMessage" if service_name == "iMessage" else "SMS"
 
-        # Escape to prevent AppleScript injection (quotes, newlines, backslashes)
-        recipient_esc = _escape_as_str(recipient)
-        body_esc = _escape_as_str(body)
+        # Escape double quotes to prevent AppleScript injection
+        recipient_esc = recipient.replace('"', '\\"')
+        body_esc = body.replace('"', '\\"')
 
         script = f'''tell application "Messages"
     set targetService to 1st service whose service type = {service_type}
@@ -3698,54 +3601,181 @@ end tell'''
         """
         return self._auto_deduplicator.handle_get_dedup_stats(params)
 
-    # ------------------------------------------------------------------
-    # BulkReprocessor handlers (Wave 1044 — re-wired after Wave 65 removal)
-    # ------------------------------------------------------------------
-
-    def _handle_bulk_reprocess_start(self, params: dict) -> dict:
-        """Запускает массовое перетранскрибирование истории с текущими настройками STT.
-
-        Params:
-            only_low_confidence (bool, optional): перетранскрибировать только записи с
-                confidence < threshold (по умолчанию True).
-            threshold (float, optional): порог confidence [0..1] (по умолчанию 0.7).
-            dry_run (bool, optional): только подсчёт, без реального STT (по умолчанию False).
-            task_id (str, optional): произвольный ID задачи для событий прогресса.
-
-        Returns:
-            dict: total, reprocessed, skipped, errors, cancelled.
-        """
-        only_low_confidence = bool(params.get("only_low_confidence", True))
-        threshold = float(params.get("threshold", 0.7))
-        dry_run = bool(params.get("dry_run", False))
-        task_id = str(params.get("task_id", ""))
-        return self._bulk_reprocessor.reprocess(
-            only_low_confidence=only_low_confidence,
-            threshold=threshold,
-            dry_run=dry_run,
-            task_id=task_id,
-        )
-
-    def _handle_bulk_reprocess_cancel(self, params: dict) -> dict:
-        """Запрашивает отмену текущего запуска BulkReprocessor.
-
-        Returns:
-            dict: {"ok": True}
-        """
-        self._bulk_reprocessor.cancel()
-        return {"ok": True}
-
-    def _handle_bulk_reprocess_status(self, params: dict) -> dict:
-        """Возвращает статус BulkReprocessor: активен ли cancel_event.
-
-        Returns:
-            dict: {"cancel_requested": bool}
-        """
-        return {"cancel_requested": self._bulk_reprocessor._cancel_event.is_set()}
-
     def _handle_score_transcription(self, params: dict) -> dict:
         """Delegated to TextProcessingService."""
         return self._text_processing_svc.handle_score_transcription(params)
+
+    # ------------------------------------------------------------------ #
+    #  W1284 — TimelineExporter IPC handlers (W1279 F3 LOW)               #
+    # ------------------------------------------------------------------ #
+
+    def _resolve_timeline_export_dir(self, output_dir: str | None) -> "Path":
+        """Резолвит директорию экспорта с проверкой allowlist.
+
+        Допустимые корни: data_dir, home, /tmp, tempfile.gettempdir().
+        При None возвращает <data_dir>/exports/timeline.
+        Бросает ValueError при path traversal.
+        """
+        import tempfile
+        from pathlib import Path
+
+        if output_dir is None:
+            out = Path(self.store.data_dir) / "exports" / "timeline"
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+
+        resolved = Path(output_dir).expanduser().resolve()
+        allowed_roots = [
+            Path(self.store.data_dir).resolve(),
+            Path.home().resolve(),
+            Path("/tmp").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
+        ]
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            raise ValueError(
+                f"output_dir вне разрешённых директорий: {resolved}"
+            )
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _handle_export_timeline_svg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в SVG-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+            width       (int):      ширина SVG в пикселях (по умолчанию 1200).
+            height      (int):      высота SVG в пикселях (по умолчанию 400).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому SVG-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+        width = max(200, int(params.get("width", 1200)))
+        height = max(100, int(params.get("height", 400)))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        svg_content = self._timeline_exporter.export_svg(block_dicts, width=width, height=height)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.svg"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(svg_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_json(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в структурированный JSON-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому JSON-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        json_content = self._timeline_exporter.export_json(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.json"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(json_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_ical(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в iCalendar (.ics) файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому .ics-файлу.
+            blocks      (int): количество временных блоков (VEVENT в файле).
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        ical_content = self._timeline_exporter.export_ical(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.ics"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(ical_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
 
 
 class IPCServer:
