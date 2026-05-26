@@ -485,5 +485,70 @@ class TestIsTccDenial(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestConcurrentFindActiveEventNoTornCache(_DarwinPatchedTestCase):
+    """W1028 F2 HIGH — verify no torn cache state under concurrent access."""
+
+    def test_concurrent_find_active_event_no_torn_cache(self):
+        """10 threads calling find_active_event concurrently: no exception, cache stays consistent.
+
+        A torn cache write could leave _cache_window_key updated but _cached_result stale
+        (or vice-versa), causing threads to return an incorrect cached value.  With the lock
+        in place, every read of the trio (_cache_window_key, _cache_at_time, _cached_result)
+        is atomic relative to writes, so all threads see a coherent state.
+        """
+        import threading
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = SAMPLE_RAW
+        mock_proc.stderr = ""
+
+        errors: list[Exception] = []
+        results: list[dict | None] = []
+        lock = threading.Lock()
+
+        def call_linker(linker: CalendarLinker, at_time: datetime) -> None:
+            try:
+                r = linker.find_active_event(at_time=at_time)
+                with lock:
+                    results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
+            linker = CalendarLinker(cache_minutes=5)
+            at_time = datetime(2024, 4, 25, 10, 0)
+            threads = [
+                threading.Thread(target=call_linker, args=(linker, at_time))
+                for _ in range(10)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+        # No thread must raise an exception
+        self.assertEqual(errors, [], f"Unexpected exceptions: {errors}")
+
+        # All 10 threads must have produced a result
+        self.assertEqual(len(results), 10)
+
+        # All non-None results must be the expected event (no torn partial state)
+        for r in results:
+            if r is not None:
+                self.assertEqual(r["title"], "Stand-up")
+                self.assertNotIn("_start_epoch", r)
+
+        # Cache internal state must be self-consistent after all threads finish:
+        # if window key is set, cached_result must be valid (not a partially written state)
+        if linker._cache_window_key:
+            # Cache was populated — result must be the known event or None (no event found)
+            self.assertIn(
+                linker._cached_result["title"] if linker._cached_result else None,
+                ("Stand-up", None),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
