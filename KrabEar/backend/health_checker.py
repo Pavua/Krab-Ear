@@ -87,14 +87,21 @@ class HealthChecker:
             if current_model:
                 return {"status": "ok", "model": current_model, "cached": cached}
             else:
-                # Модель известна из конфига, но не загружена — это нормально
+                # current_model is None означает, что MLX ещё не прогрел модель.
+                # Если при этом модель не кэширована — это состояние cold-start warming_up,
+                # а не "ok". Возвращаем специальный статус, чтобы не давать
+                # ложно-здоровый сигнал до завершения инициализации STT.
+                if not cached:
+                    return {"status": "warming_up", "model": None, "cached": False}
+                # cached=True но current_model=None — редкий переходный случай;
+                # берём имя модели из конфига как hint.
                 try:
                     from core.config import settings
                     model_name = settings.MODEL_BALANCED
                 except Exception as exc:
                     logger.debug("Не удалось прочитать MODEL_BALANCED из config: %s", exc)
                     model_name = "unknown"
-                return {"status": "ok", "model": model_name, "cached": False}
+                return {"status": "ok", "model": model_name, "cached": True}
 
         except Exception as exc:
             logger.warning("stt_model health check failed: %s", exc)
@@ -205,7 +212,7 @@ class HealthChecker:
 
         for result in checks.values():
             status = result.get("status", "ok")
-            if status in ("warning", "circuit_open", "error", "critical"):
+            if status in ("warning", "circuit_open", "error", "critical", "warming_up"):
                 return "degraded"
 
         return "healthy"
