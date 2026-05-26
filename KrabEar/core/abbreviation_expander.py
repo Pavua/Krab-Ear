@@ -4,6 +4,18 @@ AbbreviationExpander заменяет стандартные сокращени�
 Поддерживает русский (ru), английский (en) и испанский (es) языки.
 Персистирует пользовательские аббревиатуры в {data_dir}/abbreviations.json.
 Контекстно-зависимый: не разворачивает аббревиатуры внутри URL или кода.
+
+По умолчанию разворачиваются только **однозначные** аббревиатуры.  Аббревиатуры
+с несколькими значениями (например ``гл.`` = глава | главный) исключены из
+набора по умолчанию во избежание семантической порчи транскрипций.  Для
+включения устаревшего поведения передайте ``expand_ambiguous=True`` в
+``__init__`` или ``expand()``.
+
+Список неоднозначных RU-аббревиатур (не включаются по умолчанию):
+  гл.  — глава vs главный (гл.врач)
+  ст.  — старый vs статья vs строка
+  п.   — пункт vs поселок vs страница
+  с.   — село vs страница vs север
 """
 
 from __future__ import annotations
@@ -11,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +37,9 @@ _CODE_SPAN_RE = re.compile(r"`[^`]+`")
 
 # Каждая запись — (pattern, expansion, flags).
 # Флаги: "no_after_digit" — не раскрывать, если непосредственно перед стоит цифра.
-_BUILTIN_RU: list[tuple[str, str, str]] = [
+
+# Однозначные RU-аббревиатуры — включаются по умолчанию.
+_BUILTIN_RU_UNAMBIGUOUS: list[tuple[str, str, str]] = [
     # Общие
     ("т.е.", "то есть", ""),
     ("т.к.", "так как", ""),
@@ -36,7 +51,7 @@ _BUILTIN_RU: list[tuple[str, str, str]] = [
     ("др.", "другие", ""),
     ("пр.", "прочее", ""),
     ("проч.", "прочее", ""),
-    ("обл.", "область", "no_after_digit"),
+    ("обл.", "область", ""),
     ("р-н", "район", ""),
     # Контекстно-зависимые
     ("ул.", "улица", ""),
@@ -44,10 +59,12 @@ _BUILTIN_RU: list[tuple[str, str, str]] = [
     ("кв.", "квартира", "no_after_digit"),
     ("пл.", "площадь", "no_after_digit"),
     ("пр-т", "проспект", ""),
+    ("д.", "дом", "no_after_digit"),
     # Должности / звания
     ("проф.", "профессор", ""),
     ("акад.", "академик", ""),
     ("зам.", "заместитель", ""),
+    ("ред.", "редактор", ""),
     # Единицы
     ("тыс.", "тысяч", ""),
     ("млн.", "миллионов", ""),
@@ -55,6 +72,23 @@ _BUILTIN_RU: list[tuple[str, str, str]] = [
     ("руб.", "рублей", ""),
     ("коп.", "копеек", ""),
 ]
+
+# Неоднозначные RU-аббревиатуры — НЕ включаются по умолчанию.
+# Включить opt-in: AbbreviationExpander(expand_ambiguous=True)
+# или expand(..., expand_ambiguous=True).
+#
+# Примеры конфликтов:
+#   гл. → глава  vs  гл.врач (главный врач)
+#   св. → святой vs  св.  (свежий, свободен в объявлениях)
+_BUILTIN_RU_AMBIGUOUS: list[tuple[str, str, str]] = [
+    ("гл.", "глава", ""),      # главный (гл.врач, гл.редактор)
+    ("св.", "святой", ""),     # свежий / свободен
+]
+
+# Для обратной совместимости: полный список (как было до W1081).
+_BUILTIN_RU: list[tuple[str, str, str]] = (
+    _BUILTIN_RU_UNAMBIGUOUS + _BUILTIN_RU_AMBIGUOUS
+)
 
 _BUILTIN_EN: list[tuple[str, str, str]] = [
     ("e.g.", "for example", ""),
@@ -110,6 +144,20 @@ _BUILTINS: dict[str, list[tuple[str, str, str]]] = {
     "es": _BUILTIN_ES,
 }
 
+# Defaults per language (однозначные только).
+_BUILTINS_UNAMBIGUOUS: dict[str, list[tuple[str, str, str]]] = {
+    "ru": _BUILTIN_RU_UNAMBIGUOUS,
+    "en": _BUILTIN_EN,   # EN/ES lists have no ambiguous entries yet
+    "es": _BUILTIN_ES,
+}
+
+# Ambiguous-only per language (для opt-in).
+_BUILTINS_AMBIGUOUS_ONLY: dict[str, list[tuple[str, str, str]]] = {
+    "ru": _BUILTIN_RU_AMBIGUOUS,
+    "en": [],
+    "es": [],
+}
+
 
 def _make_pattern(abbr: str) -> re.Pattern:
     """Компилирует regex для точного совпадения аббревиатуры (с учётом пунктуации)."""
@@ -121,27 +169,66 @@ def _make_pattern(abbr: str) -> re.Pattern:
 class AbbreviationExpander:
     """Разворачивает аббревиатуры в транскрипциях.
 
+    По умолчанию загружаются только **однозначные** встроенные аббревиатуры.
+    Неоднозначные (например ``гл.`` = глава | главный врач) пропускаются,
+    чтобы не искажать смысл транскрипций.
+
     Использование:
         expander = AbbreviationExpander(data_dir=Path("~/.krab_ear_data"))
         result = expander.expand("т.е. это верно, напр. вот так")
         # → "то есть это верно, например вот так"
+
+        # Opt-in к полному (legacy) набору:
+        expander_full = AbbreviationExpander(expand_ambiguous=True)
+        result2 = expander_full.expand("гл. врач")
+        # → "глава врач"  (осторожно: семантически некорректно в контексте!)
     """
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        expand_ambiguous: bool = False,
+    ) -> None:
+        """Инициализирует расширитель аббревиатур.
+
+        Args:
+            data_dir: Путь к директории с пользовательскими данными
+                      (``abbreviations.json``).  Если ``None`` — только in-memory.
+            expand_ambiguous: Если ``True``, включать неоднозначные встроенные
+                аббревиатуры (устаревшее поведение до W1081).  По умолчанию
+                ``False`` — безопасный режим без семантических искажений.
+        """
         self._data_dir = data_dir
-        # {language: {abbr: {"expansion": str, "flags": str, "builtin": bool}}}
+        self._expand_ambiguous = expand_ambiguous
+        self._lock = threading.RLock()
+        # {language: {abbr: {"expansion": str, "flags": str, "builtin": bool,
+        #                     "ambiguous": bool}}}
         self._abbrevs: dict[str, dict[str, dict[str, Any]]] = {}
         # Кэш скомпилированных паттернов: {language: [(pattern, expansion, flags, abbr)]}
         self._compiled: dict[str, list[tuple[re.Pattern, str, str, str]]] = {}
 
-        # Загружаем встроенные аббревиатуры
-        for lang, entries in _BUILTINS.items():
+        # Загружаем однозначные встроенные аббревиатуры (ambiguous=False всегда).
+        for lang, entries in _BUILTINS_UNAMBIGUOUS.items():
             self._abbrevs[lang] = {}
             for abbr, expansion, flags in entries:
                 self._abbrevs[lang][abbr] = {
                     "expansion": expansion,
                     "flags": flags,
                     "builtin": True,
+                    "ambiguous": False,
+                }
+        # Добавляем неоднозначные с пометкой ambiguous=True.
+        # Они всегда присутствуют в словаре (для list_abbreviations),
+        # но expand() пропускает их если allow_ambiguous=False.
+        for lang, ambiguous_entries in _BUILTINS_AMBIGUOUS_ONLY.items():
+            if lang not in self._abbrevs:
+                self._abbrevs[lang] = {}
+            for abbr, expansion, flags in ambiguous_entries:
+                self._abbrevs[lang][abbr] = {
+                    "expansion": expansion,
+                    "flags": flags,
+                    "builtin": True,
+                    "ambiguous": True,
                 }
 
         # Загружаем пользовательские из файла (перезаписывают встроенные)
@@ -151,12 +238,20 @@ class AbbreviationExpander:
 
     # ── Публичный API ──────────────────────────────────────────────────────────
 
-    def expand(self, text: str, language: str = "ru") -> str:
+    def expand(
+        self,
+        text: str,
+        language: str = "ru",
+        expand_ambiguous: bool | None = None,
+    ) -> str:
         """Разворачивает аббревиатуры в тексте.
 
         Args:
             text: Исходный текст транскрипции.
             language: Код языка: "ru", "en", "es".
+            expand_ambiguous: Переопределить инстанс-уровневый флаг для
+                данного вызова.  ``None`` — использовать значение, заданное
+                в ``__init__``.
 
         Returns:
             Текст с раскрытыми аббревиатурами.
@@ -165,8 +260,15 @@ class AbbreviationExpander:
             return text
 
         lang = language.lower()
-        if lang not in self._compiled:
-            return text
+        with self._lock:
+            if lang not in self._compiled:
+                return text
+            compiled_list = list(self._compiled[lang])
+
+        # Определяем, нужно ли разворачивать неоднозначные аббревиатуры
+        allow_ambiguous = (
+            self._expand_ambiguous if expand_ambiguous is None else expand_ambiguous
+        )
 
         # Находим защищённые зоны (URL и code spans) — в них не заменяем
         protected: list[tuple[int, int]] = []
@@ -175,12 +277,13 @@ class AbbreviationExpander:
         for m in _CODE_SPAN_RE.finditer(text):
             protected.append((m.start(), m.end()))
 
-        result = text
-        offset = 0  # смещение при замене
-
         # Собираем все совпадения
         matches: list[tuple[int, int, str, str, str]] = []
-        for compiled_re, expansion, flags, abbr in self._compiled[lang]:
+        for compiled_re, expansion, flags, abbr in compiled_list:
+            # Пропускаем неоднозначные если opt-in не включён
+            entry = self._abbrevs.get(lang, {}).get(abbr, {})
+            if entry.get("ambiguous", False) and not allow_ambiguous:
+                continue
             for m in compiled_re.finditer(text):
                 start, end = m.start(), m.end()
                 # Пропускаем защищённые зоны
@@ -227,14 +330,16 @@ class AbbreviationExpander:
             flags: Дополнительные флаги (например, "no_after_digit").
         """
         lang = language.lower()
-        if lang not in self._abbrevs:
-            self._abbrevs[lang] = {}
-        self._abbrevs[lang][abbr] = {
-            "expansion": expansion,
-            "flags": flags,
-            "builtin": False,
-        }
-        self._rebuild_compiled(lang)
+        with self._lock:
+            if lang not in self._abbrevs:
+                self._abbrevs[lang] = {}
+            self._abbrevs[lang][abbr] = {
+                "expansion": expansion,
+                "flags": flags,
+                "builtin": False,
+                "ambiguous": False,  # пользовательские записи всегда однозначны
+            }
+            self._rebuild_compiled(lang)
         self._save_custom()
         logger.debug("Добавлена аббревиатура [%s] %r → %r", lang, abbr, expansion)
 
@@ -249,10 +354,11 @@ class AbbreviationExpander:
             True если аббревиатура была удалена, False если не найдена.
         """
         lang = language.lower()
-        if lang not in self._abbrevs or abbr not in self._abbrevs[lang]:
-            return False
-        del self._abbrevs[lang][abbr]
-        self._rebuild_compiled(lang)
+        with self._lock:
+            if lang not in self._abbrevs or abbr not in self._abbrevs[lang]:
+                return False
+            del self._abbrevs[lang][abbr]
+            self._rebuild_compiled(lang)
         self._save_custom()
         logger.debug("Удалена аббревиатура [%s] %r", lang, abbr)
         return True
@@ -264,20 +370,24 @@ class AbbreviationExpander:
             language: Код языка.
 
         Returns:
-            Список словарей с ключами: abbr, expansion, flags, builtin.
+            Список словарей с ключами: abbr, expansion, flags, builtin, ambiguous.
+            Неоднозначные аббревиатуры (``ambiguous=True``) не разворачиваются
+            по умолчанию — только при ``expand_ambiguous=True``.
         """
         lang = language.lower()
-        if lang not in self._abbrevs:
-            return []
-        return [
-            {
-                "abbr": abbr,
-                "expansion": entry["expansion"],
-                "flags": entry.get("flags", ""),
-                "builtin": entry.get("builtin", False),
-            }
-            for abbr, entry in sorted(self._abbrevs[lang].items())
-        ]
+        with self._lock:
+            if lang not in self._abbrevs:
+                return []
+            return [
+                {
+                    "abbr": abbr,
+                    "expansion": entry["expansion"],
+                    "flags": entry.get("flags", ""),
+                    "builtin": entry.get("builtin", False),
+                    "ambiguous": entry.get("ambiguous", False),
+                }
+                for abbr, entry in sorted(self._abbrevs[lang].items())
+            ]
 
     # ── Вспомогательные методы ─────────────────────────────────────────────────
 
@@ -319,11 +429,14 @@ class AbbreviationExpander:
                 if lang not in self._abbrevs:
                     self._abbrevs[lang] = {}
                 for abbr, entry in entries.items():
-                    # Пользовательские записи перезаписывают встроенные
+                    # Пользовательские записи перезаписывают встроенные;
+                    # пользовательские записи никогда не помечаются как
+                    # ambiguous — пользователь выбрал расширение явно.
                     self._abbrevs[lang][abbr] = {
                         "expansion": entry.get("expansion", ""),
                         "flags": entry.get("flags", ""),
                         "builtin": False,
+                        "ambiguous": False,
                     }
             logger.debug("Загружены пользовательские аббревиатуры из %s", path)
         except (json.JSONDecodeError, OSError) as exc:
