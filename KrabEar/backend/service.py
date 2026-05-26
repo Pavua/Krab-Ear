@@ -3136,6 +3136,19 @@ end tell
 
     # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
 
+    @staticmethod
+    def _escape_as_str(s: str) -> str:
+        """Escape a string for safe embedding inside an AppleScript double-quoted string.
+
+        Backslashes MUST be doubled before quotes so that a trailing backslash
+        cannot cancel the closing-quote escape (W1028-F5 / W944 fix).
+        Also strips control characters (CR, LF, NUL) that would break the script.
+        """
+        s = re.sub(r'[\r\n\x00]', ' ', s)
+        s = s.replace('\\', '\\\\')  # backslash FIRST — prevents Stand\" → Stand\\"
+        s = s.replace('"', '\\"')
+        return s
+
     def _handle_create_calendar_event(self, params: dict) -> dict:
         """Create Apple Calendar event via osascript.
 
@@ -3153,13 +3166,13 @@ end tell
         if not title:
             return {"ok": False, "error": "title is required"}
 
-        title_esc = title.replace('"', '\\"')
+        title_esc = self._escape_as_str(title)
         notes = params.get("notes", "") or ""
-        notes_esc = notes.replace('"', '\\"')
+        notes_esc = self._escape_as_str(notes)
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}
-        start_date_esc = start_date.replace('"', '\\"')
+        start_date_esc = self._escape_as_str(start_date)
         duration_minutes = int(params.get("duration_minutes", 30) or 30)
         calendar_name = params.get("calendar_name") or None
 
@@ -3169,7 +3182,7 @@ end tell
         make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
 
         if calendar_name:
-            cal_esc = calendar_name.replace('"', '\\"')
+            cal_esc = self._escape_as_str(calendar_name)
             script = f'''tell application "Calendar"
     tell calendar "{cal_esc}"{event_block}
     end tell
