@@ -403,13 +403,11 @@ class RecordingComparisonIdenticalTestCase(unittest.TestCase):
         result = self.svc.compare(["diff1", "diff2"], self.store)
         self.assertEqual(result.common_words, [])
 
-    def test_single_item_compare_returns_view(self) -> None:
-        """Один элемент в compare() возвращает ComparisonView (диагональ == 1.0)."""
+    def test_single_item_compare_raises(self) -> None:
+        """Один элемент в compare() вызывает ValueError (требуется минимум 2)."""
         self.store.add_item("solo", text="единственный текст здесь")
-        result = self.svc.compare(["solo"], self.store)
-        self.assertIsInstance(result, ComparisonView)
-        self.assertEqual(len(result.items), 1)
-        self.assertAlmostEqual(result.text_similarity_matrix[0][0], 1.0)
+        with self.assertRaises(ValueError):
+            self.svc.compare(["solo"], self.store)
 
     def test_three_items_pairwise_matrix(self) -> None:
         """Три записи: матрица 3x3, все off-diagonal значения >= 0."""

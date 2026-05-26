@@ -2853,6 +2853,8 @@ class BackendService:
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "insights": [], "skipped": "privacy_mode"}
         days = int(params.get("days", 7))
         try:
             with self.store._lock():
