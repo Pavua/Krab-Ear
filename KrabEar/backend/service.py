@@ -123,8 +123,10 @@ from backend.observability import (
     init_sentry,
     install_signal_handlers,
 )
+from backend.analytics_service import AnalyticsService
 from backend.apple_integration_service import AppleIntegrationService
 from backend.calendar_link import CalendarLinker
+from backend.text_scoring_service import TextScoringService
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
@@ -490,6 +492,22 @@ class BackendService:
         )
         # Wave 734: AppleIntegrationService — IPC handlers for Telegram + macOS app integrations.
         self._apple_integration_svc = AppleIntegrationService(self._telegram_bridge)
+        # Wave 747: TextScoringService wiring (W404 orphan module).
+        self._text_scoring_svc = TextScoringService(
+            llm_rewriter=self._llm_rewriter,
+            term_extractor=self._term_extractor,
+            auto_title_generator=self._auto_title_generator,
+            get_runtime_setting=self._get_runtime_setting,
+        )
+        # Wave 747: AnalyticsService wiring (W392 orphan module).
+        self._analytics_svc = AnalyticsService(
+            analytics_dashboard=self._analytics_dashboard,
+            sentiment_trends=self._sentiment_trends,
+            activity_calendar=self._activity_calendar,
+            keyword_cloud_gen=self._keyword_cloud_gen,
+            timeline_view=self._timeline_view,
+            store=self.store,
+        )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
         # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
@@ -2061,29 +2079,8 @@ class BackendService:
         return self._stt_mgmt_svc.handle_warmup_stt(params)
 
     def _handle_warmup_rewriter(self, params: dict) -> dict:
-        """Ручной запуск LLM rewriter warmup probe.
-
-        Отправляет минимальный (max_tokens=1) запрос в LM Studio для прогрева модели.
-        НЕ трогает circuit breaker — warmup не является user-facing вызовом.
-
-        Params:
-            timeout_sec (float | None): таймаут в секундах; по умолчанию из настроек.
-
-        Returns:
-            {
-              "ok": bool,          # True если HTTP 200
-              "latency_ms": int,   # время ответа в мс
-              "error": str | None, # описание ошибки или None
-              "model": str | None  # имя используемой модели
-            }
-        """
-        if self._llm_rewriter is None:
-            return {"ok": False, "latency_ms": 0, "error": "rewriter_disabled", "model": None}
-        runtime_timeout = self._get_runtime_setting("rewriter_warmup_timeout_sec", 15)
-        timeout_sec = float(params.get("timeout_sec") or runtime_timeout)
-        result = self._llm_rewriter.warmup_probe(timeout_sec=timeout_sec)
-        result["model"] = getattr(self._llm_rewriter, "_model", None)
-        return result
+        """Delegated to TextScoringService (Wave 747 wiring)."""
+        return self._text_scoring_svc.handle_warmup_rewriter(params)
 
     def _handle_get_shutdown_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статус последнего graceful shutdown.
@@ -2727,60 +2724,12 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов."""
-        p1_start = params.get("period1_start")
-        p1_end = params.get("period1_end")
-        p2_start = params.get("period2_start")
-        p2_end = params.get("period2_end")
-        if not all([p1_start, p1_end, p2_start, p2_end]):
-            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
-        report = _compare_periods_fn(
-            store=self.store,
-            period1_start=p1_start,
-            period1_end=p1_end,
-            period2_start=p2_start,
-            period2_end=p2_end,
-        )
-        return {
-            "period1": {
-                "recordings": report.period1.recordings,
-                "duration_sec": report.period1.duration_sec,
-                "words": report.period1.words,
-                "avg_confidence": report.period1.avg_confidence,
-                "languages": report.period1.languages,
-            },
-            "period2": {
-                "recordings": report.period2.recordings,
-                "duration_sec": report.period2.duration_sec,
-                "words": report.period2.words,
-                "avg_confidence": report.period2.avg_confidence,
-                "languages": report.period2.languages,
-            },
-            "recordings_change_pct": report.recordings_change_pct,
-            "duration_change_pct": report.duration_change_pct,
-            "confidence_change": report.confidence_change,
-            "new_languages": report.new_languages,
-            "summary": report.summary,
-        }
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_compare_periods(params)
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
-        months = int(params.get("months", 12))
-        months = max(1, min(months, 24))
-        include_svg = bool(params.get("include_svg", False))
-        cell_size = int(params.get("cell_size", 12))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        calendar = self._activity_calendar.generate_calendar(items, months=months)
-        result = calendar.to_dict()
-        if include_svg:
-            result["svg"] = self._activity_calendar.generate_calendar_svg(
-                items, months=months, cell_size=cell_size
-            )
-        return result
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_get_activity_calendar(params)
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
@@ -2798,15 +2747,8 @@ class BackendService:
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Анализирует тренды тональности транскрипций за последние N дней."""
-        days = int(params.get("days", 30))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        report = self._sentiment_trends.analyze_sentiment_trends(items, days=days)
-        return self._sentiment_trends.to_dict(report)
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_get_sentiment_trends(params)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
@@ -2846,24 +2788,8 @@ class BackendService:
         }
 
     def _handle_extract_terms(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает ключевые термины из текста."""
-        text = params.get("text", "")
-        language = params.get("language", "ru")
-        if not text:
-            return {"terms": []}
-        terms = self._term_extractor.extract_terms(text, language=language)
-        return {
-            "terms": [
-                {
-                    "term": t.term,
-                    "score": t.score,
-                    "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
-                }
-                for t in terms
-            ]
-        }
+        """Delegated to TextScoringService (Wave 747 wiring)."""
+        return self._text_scoring_svc.handle_extract_terms(params)
 
     def _handle_get_context_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние контекстной памяти STT.
@@ -2887,28 +2813,8 @@ class BackendService:
         }
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует данные облака ключевых слов из истории транскрипций."""
-        max_words = int(params.get("max_words", 100))
-        language = params.get("language")
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        cloud_words = self._keyword_cloud_gen.generate_cloud(
-            items, max_words=max_words, language=language
-        )
-        return {
-            "words": [
-                {
-                    "word": cw.word,
-                    "count": cw.count,
-                    "weight": cw.weight,
-                    "font_size": cw.font_size,
-                }
-                for cw in cloud_words
-            ]
-        }
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_get_keyword_cloud(params)
 
     # ── Audio fingerprinting ─────────────────────────────────────────────────
 
@@ -2965,72 +2871,12 @@ class BackendService:
     # ── Timeline view ────────────────────────────────────────────────────────
 
     def _handle_get_timeline_view(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Группирует историю транскрипций по временным блокам (timeline).
-
-        Параметры:
-          - group_by: str — гранулярность: "hour", "day", "week" (по умолчанию "day").
-          - limit: int — макс. записей для анализа (по умолчанию 500, макс. 5000).
-          - include_heatmap: bool — включить activity heatmap (по умолчанию False).
-          - heatmap_days: int — горизонт heatmap в днях (по умолчанию 30).
-        """
-        group_by = str(params.get("group_by", "day")).strip()
-        limit = max(1, min(int(params.get("limit", 500)), 5000))
-        include_heatmap = bool(params.get("include_heatmap", False))
-        heatmap_days = max(1, min(int(params.get("heatmap_days", 30)), 365))
-
-        raw_items = self.store._load_active_items_with_lock()[:limit]
-        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        result: dict[str, Any] = {
-            "blocks": [b.to_dict() for b in blocks],
-            "total_blocks": len(blocks),
-            "group_by": group_by,
-        }
-
-        if include_heatmap:
-            heatmap = self._timeline_view.generate_activity_heatmap(raw_items, days=heatmap_days)
-            result["activity_heatmap"] = heatmap
-
-        return result
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_get_timeline_view(params)
 
     def _handle_generate_auto_title(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует автоматический заголовок для транскрибации.
-
-        Параметры:
-            text (str): текст транскрибации (обязательный).
-            timestamp (str): ISO 8601 timestamp (опциональный) — включает дату в заголовок.
-            max_length (int): максимальная длина заголовка (по умолчанию 50).
-            with_date (bool): если true и timestamp указан — включает дату.
-            items (list): список записей для пакетной генерации (альтернатива text).
-
-        Ответ (одиночный):
-            {title: str}
-
-        Ответ (пакетный):
-            {titles: [{id, title, generated_at}]}
-        """
-        # Пакетный режим
-        items = params.get("items")
-        if items is not None:
-            if not isinstance(items, list):
-                raise ValueError("Параметр 'items' должен быть списком")
-            titles = self._auto_title_generator.batch_generate(items)
-            return {"titles": titles}
-
-        # Одиночный режим
-        text = str(params.get("text", "") or "")
-        timestamp = str(params.get("timestamp", "") or "")
-        max_length = int(params.get("max_length", 50))
-        with_date = bool(params.get("with_date", False))
-
-        if not text:
-            return {"title": "Запись"}
-
-        if with_date and timestamp:
-            title = self._auto_title_generator.generate_title_with_date(text, timestamp)
-        else:
-            title = self._auto_title_generator.generate_title(text, max_length=max_length)
-
-        return {"title": title}
+        """Delegated to TextScoringService (Wave 747 wiring)."""
+        return self._text_scoring_svc.handle_generate_auto_title(params)
 
     def _handle_get_learning_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_learning_stats — статистика прогресса изучения языка."""
@@ -3039,16 +2885,8 @@ class BackendService:
         return self._language_learning.handle_get_learning_stats(params_with_store)
 
     def _handle_get_analytics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_analytics_dashboard — комплексный дашборд всех метрик аналитики.
-
-        Параметры:
-            days (int): окно анализа в днях (по умолчанию 30, макс. 365)
-
-        Возвращает:
-            overview, today, trends, languages, quality, engagement, storage, performance
-        """
-        days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self.store, days=days)
+        """Delegated to AnalyticsService (Wave 747 wiring)."""
+        return self._analytics_svc.handle_get_analytics_dashboard(params)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
