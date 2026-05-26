@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     NETWORK_MODE: str = "offline_strict"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
     STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
+    STT_GATEWAY_TOKEN: str = ""  # Bearer token for remote STT gateway; empty = no auth header
     AI_MODEL: str = "google/gemini-2.0-flash"
     STT_MODEL: str = "whisper-1"
 
