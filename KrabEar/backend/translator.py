@@ -25,6 +25,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 import re
+import threading
 from typing import Any
 
 # Profiler singleton — защищаемся от ImportError чтобы translator оставался standalone.
@@ -102,6 +103,11 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
+        # W1145 F1 HIGH — lock для thread-safe доступа к _cache.
+        self._cache_lock = threading.Lock()
+        # W1145 F2 HIGH — отслеживаем предыдущее состояние privacy_mode чтобы сбрасывать кэш
+        # при переходе False→True.
+        self._last_privacy_mode: bool = False
         # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
@@ -135,6 +141,35 @@ class Translator:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
 
+    def clear_cache(self) -> None:
+        """Атомарно очищает кэш переводов. Идемпотентен — безопасно вызывать многократно."""
+        with self._cache_lock:
+            self._cache.clear()
+
+    def _check_privacy_mode_changed(self) -> None:
+        """Определяет переход privacy_mode False→True и сбрасывает кэш.
+
+        Вызывается в начале каждого translate() чтобы гарантировать, что данные,
+        накопленные до включения режима приватности, не утекают через кэш.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            # Без error_bus не можем получить runtime-настройки — пропускаем проверку.
+            return
+        try:
+            # BackendService инжектирует _settings_getter при подключении error_bus.
+            getter = getattr(self, "_settings_getter", None)
+            if getter is None:
+                return
+            current = bool(getter("privacy_mode_enabled", False))
+        except Exception:
+            return
+        if current and not self._last_privacy_mode:
+            # Переход False→True: сбрасываем накопленные переводы.
+            self.clear_cache()
+            logger.info("Translator cache cleared on privacy_mode enable")
+        self._last_privacy_mode = current
+
     def translate(
         self,
         text: str,
@@ -144,6 +179,8 @@ class Translator:
         glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         """Переводит текст согласно режиму и сетевой политике."""
+        # W1145 F2: проверяем смену privacy_mode перед каждым переводом.
+        self._check_privacy_mode_changed()
         import time as _time
         _t0 = _time.monotonic()
         # Профилируем весь translate()-pipeline по режиму. Имя span'а нормализуется
@@ -745,19 +782,21 @@ class Translator:
         )
 
     def _cache_get(self, key: tuple[str, str, str, str]) -> TranslationResult | None:
-        """Берёт результат из LRU-кэша перевода."""
-        value = self._cache.get(key)
-        if value is None:
-            return None
-        self._cache.move_to_end(key)
-        return value
+        """Берёт результат из LRU-кэша перевода. Thread-safe."""
+        with self._cache_lock:
+            value = self._cache.get(key)
+            if value is None:
+                return None
+            self._cache.move_to_end(key)
+            return value
 
     def _cache_set(self, key: tuple[str, str, str, str], value: TranslationResult) -> None:
-        """Сохраняет результат в LRU-кэш."""
-        self._cache[key] = value
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._cache_capacity:
-            self._cache.popitem(last=False)
+        """Сохраняет результат в LRU-кэш. Thread-safe."""
+        with self._cache_lock:
+            self._cache[key] = value
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_capacity:
+                self._cache.popitem(last=False)
 
     @staticmethod
     def _split_text_chunks(text: str, max_chars: int) -> list[str]:
