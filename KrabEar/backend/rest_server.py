@@ -96,11 +96,37 @@ def _rate_limit_exceeded_handler(e):
     return response
 
 
+# ---------------------------------------------------------------------------
+# M-2 (W809): rate-limit storage backing.
+#
+# Production note: "memory://" is process-local and transient — limits reset
+# on every restart and are NOT shared across workers (e.g. gunicorn multi-
+# process). For production deployments set KRAB_EAR_RATE_LIMIT_STORAGE_URI to
+# a stable backing store:
+#   redis://localhost:6379/0          — Redis (recommended)
+#   memcached://localhost:11211       — Memcached
+#   file:///var/run/krabear-ratelimit — SQLite via file: URI
+# The warning is suppressed when auth is entirely disabled (dev mode).
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT_STORAGE_URI: str = getattr(settings, "RATE_LIMIT_STORAGE_URI", "memory://")
+
+if (
+    settings.RATE_LIMIT_ENABLED
+    and _RATE_LIMIT_STORAGE_URI == "memory://"
+):
+    logger.warning(
+        "Rate-limit storage is 'memory://' (W809 M-2): limits are process-local "
+        "and reset on every restart. In production set "
+        "KRAB_EAR_RATE_LIMIT_STORAGE_URI=redis://... (or memcached/file) for "
+        "stable, cross-worker enforcement."
+    )
+
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["60 per minute"] if settings.RATE_LIMIT_ENABLED else [],
-    storage_uri="memory://",
+    storage_uri=_RATE_LIMIT_STORAGE_URI,
     enabled=settings.RATE_LIMIT_ENABLED,
     headers_enabled=True,
 )
@@ -968,11 +994,18 @@ def transcribe_audio():
 
 
 @v1_blp.route("/events", methods=["GET"])
+@require_api_key
 def events_stream():
     """Subscribe to real-time STT pipeline events via Server-Sent Events (SSE).
 
     Opens a long-lived GET connection that emits newline-delimited SSE frames.
     A keepalive comment (`: ping`) is emitted ~every 15 seconds when idle.
+
+    Authentication (W809 M-4):
+        When REST_API_AUTH_ENABLED=true or REST_API_KEY is set, a valid
+        Bearer token is required:
+          Authorization: Bearer <token>
+        When auth is disabled (local dev) the endpoint is unauthenticated.
 
     Query params:
         filter — optional comma-separated list of event types to receive.
@@ -1055,11 +1088,72 @@ def _handle_ws_connection(ws, bus, type_filter=None):
         logger.info("WS /ws/events: клиент отключился")
 
 
+def _ws_check_auth(ws) -> bool:
+    """Enforce Bearer token auth for WebSocket connections (W809 M-4).
+
+    Flask-Sock routes execute in the request context, so request.headers and
+    request.args are available.  Auth is checked before the upgrade completes —
+    if it fails we send a close frame and return False so the caller exits.
+
+    Auth lookup order (mirrors require_api_key):
+      1. Authorization: Bearer <token>  header
+      2. ?api_key=<token>               query param (SSE-browser fallback)
+
+    Returns True when auth passes or auth is disabled.
+    """
+    def _raw_token() -> str:
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            return auth_hdr[len("Bearer "):]
+        # Query-param fallback — browsers cannot set custom headers in WS
+        return request.args.get("api_key", "")
+
+    if getattr(settings, "REST_API_AUTH_ENABLED", False):
+        raw = _raw_token()
+        if not raw or _get_rest_auth().verify_token(raw) is None:
+            _log_unauthorized("/ws/events")
+            try:
+                ws.send(json.dumps({"error": "unauthorized", "code": 4401}))
+                ws.close(message=b"Unauthorized")
+            except Exception:
+                pass
+            return False
+        return True
+
+    api_key = settings.REST_API_KEY
+    if api_key:
+        raw = _raw_token()
+        try:
+            ok = hmac.compare_digest(
+                (raw or "").encode("utf-8"),
+                (api_key or "").encode("utf-8"),
+            )
+        except Exception:
+            ok = False
+        if not ok:
+            _log_unauthorized("/ws/events")
+            try:
+                ws.send(json.dumps({"error": "unauthorized", "code": 4401}))
+                ws.close(message=b"Unauthorized")
+            except Exception:
+                pass
+            return False
+
+    return True
+
+
 @sock.route("/ws/events")
 def ws_events(ws):
     """WebSocket endpoint для стриминга событий транскрибации в реальном времени.
 
     Подписывается на EventBus и пересылает все события клиенту в формате JSON.
+
+    Authentication (W809 M-4):
+        When REST_API_AUTH_ENABLED=true or REST_API_KEY is set, a valid
+        Bearer token is required.  Two accepted forms:
+          - Header:      Authorization: Bearer <token>
+          - Query param: /ws/events?api_key=<token>  (browser WebSocket fallback)
+        When auth is disabled the endpoint is open (local dev only).
 
     Query params:
         types — опциональный фильтр по типам событий через запятую.
@@ -1070,7 +1164,10 @@ def ws_events(ws):
         Server → Client: JSON-строка {type, ts, data}
         Server → Client: {"type": "ping"} каждые 30 секунд (heartbeat)
         Client → Server: любые входящие данные игнорируются
+        Server → Client: {"error": "unauthorized", "code": 4401} + close on auth failure
     """
+    if not _ws_check_auth(ws):
+        return
     raw_types = request.args.get("types", "")
     type_filter = {t.strip() for t in raw_types.split(",") if t.strip()} if raw_types else None
     _handle_ws_connection(ws, event_bus, type_filter)
