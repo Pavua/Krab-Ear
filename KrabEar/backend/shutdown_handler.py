@@ -142,7 +142,15 @@ class GracefulShutdownHandler:
             errors.append(f"compact: {exc}")
             logger.exception("Ошибка компактирования истории при завершении")
 
-        # 6. Закрываем IPC-сокет
+        # 6. Закрываем EventReplayManager (сбрасываем файл персистенции)
+        try:
+            self._close_event_replay(service)
+        except Exception as exc:
+            clean = False
+            errors.append(f"event_replay: {exc}")
+            logger.exception("Ошибка закрытия EventReplayManager при завершении")
+
+        # 7. Закрываем IPC-сокет
         try:
             self._close_socket(service)
         except Exception as exc:
@@ -153,7 +161,7 @@ class GracefulShutdownHandler:
         elapsed_ms = round((time.monotonic() - shutdown_start) * 1000, 1)
         ts_now = datetime.now(timezone.utc).isoformat()
 
-        # 7. Сохраняем метаданные завершения
+        # 8. Сохраняем метаданные завершения
         with self._lock:
             self._last_shutdown_time = ts_now
             self._last_shutdown_clean = clean
@@ -250,6 +258,16 @@ class GracefulShutdownHandler:
             compacted = maybe_compact()
             if compacted:
                 logger.info("История скомпактирована при завершении")
+
+    def _close_event_replay(self, service: Any) -> None:
+        """Закрывает файл персистенции EventReplayManager. W829 MEDIUM-1."""
+        replay = getattr(service, "_event_replay", None)
+        if replay is None:
+            return
+        close = getattr(replay, "close", None)
+        if callable(close):
+            close()
+            logger.debug("EventReplayManager закрыт")
 
     def _close_socket(self, service: Any) -> None:
         """Останавливает IPC-сервер (если зарегистрирован)."""

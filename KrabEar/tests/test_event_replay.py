@@ -331,24 +331,73 @@ class TestPersistenceReload(unittest.TestCase):
             self.assertTrue(nested.exists())
             self.assertEqual(len(nested.read_text().splitlines()), 1)
 
-    def test_append_to_existing_file(self):
-        """Если файл уже существует, события дописываются (append), а не перезаписываются."""
+    def test_session_log_truncates_on_init(self):
+        """Если файл уже существует, новая сессия усекает его (truncate), а не дописывает.
+
+        W829 CRIT-1 fix: open("a") -> open("w"). Файл ограничен событиями текущей сессии.
+        Предыдущее поведение приводило к неограниченному росту (~14 МБ/день, ~5 ГБ/год).
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "events.ndjson"
-            # Первая сессия
+            # Первая сессия — записывает "first"
             mgr1 = EventReplayManager(persist_path=path, max_buffer=100)
             mgr1.record_event("first", {})
             mgr1.close()
-            # Вторая сессия
+            self.assertEqual(len(path.read_text().splitlines()), 1)
+
+            # Вторая сессия — должна усечь файл и записать только "second"
             mgr2 = EventReplayManager(persist_path=path, max_buffer=100)
             mgr2.record_event("second", {})
             mgr2.close()
 
             lines = path.read_text().splitlines()
-            self.assertEqual(len(lines), 2)
-            types = [json.loads(line)["type"] for line in lines]
-            self.assertIn("first", types)
-            self.assertIn("second", types)
+            # Файл содержит ТОЛЬКО события текущей сессии (не накапливает прошлые)
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["type"], "second")
+
+
+class TestShutdownIntegration(unittest.TestCase):
+    """Тесты интеграции EventReplayManager с GracefulShutdownHandler (W969)."""
+
+    def test_close_event_replay_called_at_shutdown(self):
+        """GracefulShutdownHandler._close_event_replay вызывает close() на _event_replay."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "KrabEar"))
+        from backend.shutdown_handler import GracefulShutdownHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            replay = EventReplayManager(persist_path=path, max_buffer=100)
+            replay.record_event("before_shutdown", {"x": 1})
+
+            # Сервис-заглушка с атрибутом _event_replay
+            class FakeService:
+                _event_replay = replay
+
+            handler = GracefulShutdownHandler(data_dir=tmpdir)
+            handler._close_event_replay(FakeService())
+
+            # После вызова _close_event_replay файловый дескриптор закрыт
+            self.assertIsNone(replay._file_handle)
+            # Данные до закрытия были записаны
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["type"], "before_shutdown")
+
+    def test_close_event_replay_no_attr_is_noop(self):
+        """_close_event_replay не падает если у сервиса нет _event_replay."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "KrabEar"))
+        from backend.shutdown_handler import GracefulShutdownHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler = GracefulShutdownHandler(data_dir=tmpdir)
+
+            class ServiceWithoutReplay:
+                pass
+
+            # Не должно бросить исключение
+            handler._close_event_replay(ServiceWithoutReplay())
 
 
 class TestClearBuffer(unittest.TestCase):
