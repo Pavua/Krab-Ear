@@ -18,14 +18,18 @@ detect_language() (encoder + language head, без decoder).
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
 from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
+
+# Языки, для которых STTRouter знает специализированный адаптер.
+# Коды вне этого множества роутятся в STT_OTHER_PRIMARY_MODEL — это может быть
+# неверно для fr/tr/pt/etc. Если Whisper вернул неизвестный код, логируем warning.
+SUPPORTED_LANGUAGES: frozenset = frozenset({"ru", "uk", "en", "es"})
 
 
 class AudioLanguageID:
@@ -42,23 +46,16 @@ class AudioLanguageID:
 
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
-    # RLock защищает check/insert/clear операции над _model_cache от гонок
-    # (reentrant — тот же поток может войти повторно без deadlock)
-    _model_cache_lock: threading.RLock = threading.RLock()
-
-    # F1: пропускаем inference для практически беззвучного аудио (< 1e-4 пик)
-    _ZERO_PEAK_THRESHOLD: float = 1e-4
-
-    # F2: минимальный порог confidence для возврата языкового кода
-    MIN_CONFIDENCE: float = 0.35
 
     def __init__(
         self,
         model_path: Optional[str] = None,
         preview_sec: Optional[float] = None,
+        restrict_to_supported: bool = False,
     ) -> None:
         self._model_path = model_path
         self._preview_sec = preview_sec
+        self._restrict_to_supported = restrict_to_supported
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -107,14 +104,6 @@ class AudioLanguageID:
             )
             return None
 
-        # 3b. F1: пропускаем inference для беззвучного / нулевого аудио
-        if float(np.max(np.abs(audio_mono))) < self._ZERO_PEAK_THRESHOLD:
-            logger.debug(
-                "AudioLanguageID: zero-peak audio (peak < %.0e) → skip encoder",
-                self._ZERO_PEAK_THRESHOLD,
-            )
-            return None
-
         # 4. Обрезаем до preview_sec
         preview_frames = int(sample_rate * preview_sec)
         audio_preview = audio_mono[:preview_frames]
@@ -126,7 +115,20 @@ class AudioLanguageID:
         # 6. Запускаем inference под mlx_lock
         result = self._run_detect(audio_preview)
 
-        # 7. Сохраняем в кеш
+        # 7. Проверяем allowlist поддерживаемых языков
+        if result is not None and result not in SUPPORTED_LANGUAGES:
+            logger.warning(
+                "AudioLanguageID: detected unsupported language, STTRouter will use fallback",
+                extra={"detected_lang": result, "fallback": "other"},
+            )
+            if self._restrict_to_supported:
+                logger.debug(
+                    "AudioLanguageID: restrict_to_supported=True → suppressing lang=%s",
+                    result,
+                )
+                return None
+
+        # 8. Сохраняем в кеш
         if result is not None and cache is not None:
             cache["audio_lang"] = result
             logger.debug("AudioLanguageID: cached result → %s", result)
@@ -235,25 +237,23 @@ class AudioLanguageID:
         # H4: старые записи — чистый leak: объект модели удерживает MLX Metal
         # буферы, даже после mx.clear_cache() в engine.py.  Держим только
         # текущую модель; при смене профиля (balanced→max) старая вытесняется.
-        # _model_cache_lock защищает check/clear/insert от гонок (W1109 F1 HIGH).
-        with AudioLanguageID._model_cache_lock:
-            if model_path not in AudioLanguageID._model_cache:
-                logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
-                if len(AudioLanguageID._model_cache) >= 1:
-                    logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
-                    AudioLanguageID._model_cache.clear()
-                try:
-                    model = mlx_whisper.load_models.load_model(model_path)
-                    AudioLanguageID._model_cache[model_path] = model
-                except Exception as exc:
-                    logger.warning(
-                        "AudioLanguageID: не удалось загрузить модель %s: %s",
-                        model_path,
-                        exc,
-                    )
-                    return None
+        if model_path not in AudioLanguageID._model_cache:
+            logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
+            if len(AudioLanguageID._model_cache) >= 1:
+                logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
+                AudioLanguageID._model_cache.clear()
+            try:
+                model = mlx_whisper.load_models.load_model(model_path)
+                AudioLanguageID._model_cache[model_path] = model
+            except Exception as exc:
+                logger.warning(
+                    "AudioLanguageID: не удалось загрузить модель %s: %s",
+                    model_path,
+                    exc,
+                )
+                return None
 
-            model = AudioLanguageID._model_cache[model_path]
+        model = AudioLanguageID._model_cache[model_path]
 
         # Строим log-mel spectrogram
         try:
@@ -281,23 +281,14 @@ class AudioLanguageID:
             # или может возвращать (str, dict) в разных версиях — обрабатываем оба
             result = mlx_whisper.decoding.detect_language(model, mel)
 
-            confidence: float = 0.0
-
             if isinstance(result, tuple):
-                # (language_str, probs_dict) — извлекаем confidence из dict если есть
+                # (language_str, probs_dict)
                 lang_code = result[0]
-                if len(result) >= 2 and isinstance(result[1], dict):
-                    probs = result[1]
-                    lang_str = str(lang_code).strip().lower()
-                    confidence = float(probs.get(lang_str, max(probs.values()) if probs else 0.0))
             elif isinstance(result, dict):
                 # {lang: prob, ...} — берём argmax
                 lang_code = max(result, key=lambda k: result[k])
-                confidence = float(result[lang_code])
             elif isinstance(result, str):
                 lang_code = result
-                # confidence неизвестна — считаем достаточной для str-ответа
-                confidence = 1.0
             else:
                 logger.warning(
                     "AudioLanguageID: неожиданный тип результата detect_language: %s",
@@ -306,22 +297,7 @@ class AudioLanguageID:
                 return None
 
             lang_code = str(lang_code).strip().lower()
-
-            # F2: отсекаем ненадёжные результаты по порогу confidence
-            if confidence < self.MIN_CONFIDENCE:
-                logger.debug(
-                    "AudioLanguageID: confidence %.3f < %.2f → dropping %s",
-                    confidence,
-                    self.MIN_CONFIDENCE,
-                    lang_code,
-                )
-                return None
-
-            logger.info(
-                "AudioLanguageID: detected language = %s (confidence=%.3f)",
-                lang_code,
-                confidence,
-            )
+            logger.info("AudioLanguageID: detected language = %s", lang_code)
             return lang_code if lang_code else None
 
         except Exception as exc:
