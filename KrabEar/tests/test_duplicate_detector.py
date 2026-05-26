@@ -438,5 +438,75 @@ class TestWave117DuplicateDetector(unittest.TestCase):
         self.assertTrue(self.det.is_duplicate("hello world", "hello world"))
 
 
+class TransitiveGroupingTestCase(unittest.TestCase):
+    """W1004 F1 — union-find транзитивная группировка.
+
+    Если A≈B и B≈C, но A≉C, то все три должны оказаться в одной группе.
+    Наивный алгоритм пропускает C, потому что B уже назначен в группу A
+    до того как C начинает итерацию.
+    """
+
+    def setUp(self) -> None:
+        self.det = DuplicateDetector()
+        self.base_ts = 1_700_000_000.0
+
+    def test_transitive_grouping_A_B_C_all_in_one_group(self) -> None:
+        """A≈B и B≈C → {A, B, C} в одной группе (транзитивность через union-find)."""
+        # A — исходное длинное предложение
+        text_a = "Это длинная транскрипция для проверки транзитивного объединения групп"
+        # B — почти идентично A (одно слово отличается в конце)
+        text_b = "Это длинная транскрипция для проверки транзитивного объединения группы"
+        # C — почти идентично B, но немного отличается от A
+        text_c = "Это длинная транскрипция для проверки транзитивного объединения группе"
+
+        items = [
+            {"text": text_a, "ts": self.base_ts},
+            {"text": text_b, "ts": self.base_ts + 5},
+            {"text": text_c, "ts": self.base_ts + 10},
+        ]
+
+        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
+
+        # Все три элемента должны быть в одной группе
+        self.assertEqual(len(groups), 1, f"Ожидалась 1 группа, получено: {len(groups)}")
+        self.assertEqual(
+            len(groups[0].items), 3,
+            f"Группа должна содержать 3 элемента, содержит: {len(groups[0].items)}"
+        )
+
+    def test_non_transitive_items_form_separate_groups(self) -> None:
+        """Несвязанные пары образуют отдельные группы, не сливаются."""
+        text_x1 = "Первый текст для первой группы дубликатов"
+        text_x2 = "Первый текст для первой группы дубликатов!"
+        text_y1 = "Совершенно другой контент второй группы записей"
+        text_y2 = "Совершенно другой контент второй группы записей."
+
+        items = [
+            {"text": text_x1, "ts": self.base_ts},
+            {"text": text_x2, "ts": self.base_ts + 3},
+            {"text": text_y1, "ts": self.base_ts + 6},
+            {"text": text_y2, "ts": self.base_ts + 9},
+        ]
+
+        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
+        self.assertEqual(len(groups), 2, f"Ожидалось 2 группы, получено: {len(groups)}")
+        sizes = sorted(len(g.items) for g in groups)
+        self.assertEqual(sizes, [2, 2])
+
+    def test_single_chain_A_B_C_D_all_merged(self) -> None:
+        """Цепочка A≈B≈C≈D → все четыре в одной группе."""
+        base = "Транскрипция заседания совета директоров компании на тему стратегии"
+        items = [
+            {"text": base, "ts": self.base_ts},
+            {"text": base + ".", "ts": self.base_ts + 5},
+            {"text": base + "..", "ts": self.base_ts + 10},
+            {"text": base + "...", "ts": self.base_ts + 15},
+        ]
+
+        groups = self.det.find_duplicates(items, similarity_threshold=0.9)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0].items), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
