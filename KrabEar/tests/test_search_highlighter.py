@@ -265,6 +265,45 @@ class HistoryServiceSearchWithHighlightsTests(unittest.TestCase):
             self.assertIn("ts", item)
 
 
+class HistoryServiceSearchWithHighlightsPrivacyTests(unittest.TestCase):
+    """Тесты privacy_mode guard для handle_search_with_highlights (W1001 F4 MED)."""
+
+    def _make_svc_with_privacy(self, privacy_enabled: bool) -> HistoryService:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        store = StateStore(Path(self.tmp.name) / "data")
+        store.add_history_item(text="secret transcript content", paste_status="ok")
+        settings_dict = {"privacy_mode_enabled": privacy_enabled}
+        svc = HistoryService(
+            store=store,
+            cached_settings=lambda: settings_dict,
+        )
+        return svc
+
+    def test_search_with_highlights_empty_in_privacy_mode(self) -> None:
+        """W1001 F4: search_with_highlights должен возвращать пустой results в privacy mode."""
+        svc = self._make_svc_with_privacy(privacy_enabled=True)
+        result = svc.handle_search_with_highlights({"query": "secret"})
+        self.assertIn("results", result)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+    def test_search_with_highlights_returns_data_without_privacy_mode(self) -> None:
+        """W1001 F4: без privacy mode поиск должен возвращать результаты нормально."""
+        svc = self._make_svc_with_privacy(privacy_enabled=False)
+        result = svc.handle_search_with_highlights({"query": "secret"})
+        # Должен вернуть items (нормальный путь)
+        self.assertIn("items", result)
+
+    def test_is_privacy_mode_false_without_settings(self) -> None:
+        """_is_privacy_mode возвращает False если cached_settings не передан."""
+        self.tmp2 = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp2.cleanup)
+        store = StateStore(Path(self.tmp2.name) / "data")
+        svc = HistoryService(store=store)  # без cached_settings
+        self.assertFalse(svc._is_privacy_mode())
+
+
 class SearchHighlighterHelperTests(unittest.TestCase):
     """Тесты вспомогательных методов."""
 
