@@ -349,5 +349,54 @@ class TestWave108RequiredCases(unittest.TestCase):
             self.assertGreater(rms, 0.0)
 
 
+class TestNanInfJSONSafety(unittest.TestCase):
+    """W1103: _safe_float guard — NaN/Inf input must not break JSON serialisation."""
+
+    # test_nan_audio_input_returns_zero_rms
+    def test_nan_audio_input_returns_zero_rms(self):
+        """All-NaN audio array must produce rms_level=0.0 (not NaN) and JSON-safe dict."""
+        import json
+        audio = np.full(SR, float("nan"), dtype=np.float32)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertFalse(
+            math.isnan(report.rms_level),
+            msg=f"rms_level должен быть finite, получено: {report.rms_level}",
+        )
+        self.assertEqual(report.rms_level, 0.0)
+        # to_dict() must be JSON-serialisable (no ValueError: Out of range float)
+        d = report.to_dict()
+        serialised = json.dumps(d)  # must not raise
+        self.assertIsInstance(serialised, str)
+
+    # test_inf_audio_input_returns_zero_peak
+    def test_inf_audio_input_returns_zero_peak(self):
+        """All-Inf audio array must produce peak_level=0.0 (not Inf) and JSON-safe dict."""
+        import json
+        audio = np.full(SR, float("inf"), dtype=np.float32)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertFalse(
+            math.isinf(report.peak_level),
+            msg=f"peak_level должен быть finite, получено: {report.peak_level}",
+        )
+        self.assertEqual(report.peak_level, 0.0)
+        d = report.to_dict()
+        serialised = json.dumps(d)  # must not raise
+        self.assertIsInstance(serialised, str)
+
+    # test_normal_audio_unchanged
+    def test_normal_audio_unchanged(self):
+        """Normal finite audio must pass through _safe_float unchanged."""
+        import json
+        audio = _sine(amplitude=0.3)
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertGreater(report.rms_level, 0.0)
+        self.assertGreater(report.peak_level, 0.0)
+        # verify to_dict values round-trip through JSON without mutation
+        d = report.to_dict()
+        self.assertAlmostEqual(d["rms_level"], report.rms_level, places=7)
+        self.assertAlmostEqual(d["peak_level"], report.peak_level, places=7)
+        json.dumps(d)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

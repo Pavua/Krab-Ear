@@ -7,6 +7,7 @@ RMS/peak уровни, SNR, клиппинг, тишина — и возвращ
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,11 @@ _SILENCE_RMS_THRESHOLD = 0.001  # RMS фрейма ниже этого → ти�
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 
+def _safe_float(v: float) -> float:
+    """Заменяет NaN/Inf нулём — защита от JSON-serialization failure."""
+    return v if math.isfinite(v) else 0.0
+
+
 @dataclass
 class AudioQualityReport:
     """Результат анализа качества аудио."""
@@ -40,12 +46,12 @@ class AudioQualityReport:
 
     def to_dict(self) -> dict:
         return {
-            "rms_level": self.rms_level,
-            "peak_level": self.peak_level,
-            "snr_estimate_db": self.snr_estimate_db,
-            "clipping_ratio": self.clipping_ratio,
-            "silence_ratio": self.silence_ratio,
-            "duration_sec": self.duration_sec,
+            "rms_level": _safe_float(self.rms_level),
+            "peak_level": _safe_float(self.peak_level),
+            "snr_estimate_db": _safe_float(self.snr_estimate_db),
+            "clipping_ratio": _safe_float(self.clipping_ratio),
+            "silence_ratio": _safe_float(self.silence_ratio),
+            "duration_sec": _safe_float(self.duration_sec),
             "quality_score": self.quality_score,
             "warnings": self.warnings,
         }
@@ -101,8 +107,8 @@ class AudioQualityAnalyzer:
         duration_sec = n_samples / max(sample_rate, 1)
 
         # --- RMS и пик ---
-        rms_level = float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0
-        peak_level = float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0
+        rms_level = _safe_float(float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0)
+        peak_level = _safe_float(float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0)
 
         # --- Клиппинг ---
         clipping_samples = int(np.sum(np.abs(audio_data) >= _CLIPPING_THRESHOLD))
