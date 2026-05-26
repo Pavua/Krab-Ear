@@ -181,6 +181,11 @@ class RecordingInsightsGenerator:
     # Минимальное количество записей для генерации инсайтов
     _MIN_ITEMS = 3
 
+    # Максимальное количество токенов, накапливаемых в _compute_most_discussed_topic
+    # до Counter-дедупликации (W1274 F4: защита от взрывного роста all_tokens при
+    # больших корпусах — миллионы строк до Counter.update неприемлемы).
+    _MAX_TOPIC_TOKENS = 1000
+
     def generate_insights(self, items: list, days: int = 7) -> list[Insight]:
         """Генерирует список инсайтов за последние N дней.
 
@@ -504,7 +509,12 @@ class RecordingInsightsGenerator:
                 w for w in _tokenize(text)
                 if w not in _STOP_WORDS and len(w) > 3
             ]
-            all_tokens.extend(tokens)
+            # W1274 F4: ограничиваем накопление токенов до _MAX_TOPIC_TOKENS,
+            # чтобы избежать взрывного роста списка при больших корпусах.
+            remaining = self._MAX_TOPIC_TOKENS - len(all_tokens)
+            if remaining <= 0:
+                break
+            all_tokens.extend(tokens[:remaining])
 
         if not all_tokens:
             return None

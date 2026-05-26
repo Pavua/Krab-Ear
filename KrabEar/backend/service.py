@@ -1069,6 +1069,7 @@ class BackendService:
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
+            "get_daily_insight": self._handle_get_daily_insight,  # один наиболее релевантный инсайт за сегодня (W1274 F3)
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -2895,6 +2896,25 @@ class BackendService:
             "insights": [i.to_dict() for i in insights],
             "count": len(insights),
             "days": days,
+        }
+
+    def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
+
+        Privacy gate: если privacy_mode_enabled=True — возвращает пустой результат
+        без обращения к истории записей.
+        """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"insight": None, "privacy_mode": True}
+        try:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        insight = self._recording_insights.get_daily_insight(items)
+        return {
+            "insight": insight.to_dict() if insight is not None else None,
+            "privacy_mode": False,
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
