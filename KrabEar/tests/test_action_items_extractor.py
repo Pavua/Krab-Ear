@@ -394,6 +394,17 @@ class IPCHandlerTest(unittest.TestCase):
             svc.store = store
             svc._action_items_extractor = None
             svc._llm_rewriter = None
+            # Wave 757: inject SearchAndAnalysisService delegation shim
+            from backend.search_and_analysis_service import SearchAndAnalysisService
+            svc._search_analysis_svc = SearchAndAnalysisService(
+                store=store,
+                semantic_searcher=None,
+                action_items_extractor=None,
+                topic_tracker=None,
+                recording_insights=None,
+                recording_comparison=None,
+                stats_report=None,
+            )
             return svc, store
 
     def tearDown(self):
@@ -416,8 +427,11 @@ class IPCHandlerTest(unittest.TestCase):
     def test_extract_action_items_raises_for_unknown_id(self):
         svc, store = self._make_service()
         # Give it an extractor so we get past the LLM check
-        svc._action_items_extractor = MagicMock()
-        svc._action_items_extractor.extract.return_value = ActionItemsResult(ok=True)
+        mock_extractor = MagicMock()
+        mock_extractor.extract.return_value = ActionItemsResult(ok=True)
+        svc._action_items_extractor = mock_extractor
+        # Wave 757: also update the delegated service
+        svc._search_analysis_svc._action_items_extractor = mock_extractor
         with self.assertRaises(RuntimeError) as ctx:
             svc._handle_extract_action_items({"id": "nonexistent-uuid"})
         self.assertIn("не найден", str(ctx.exception))
@@ -463,6 +477,8 @@ class IPCHandlerTest(unittest.TestCase):
         svc, store = self._make_service()
         extractor = make_extractor()
         svc._action_items_extractor = extractor
+        # Wave 757: also update delegated service
+        svc._search_analysis_svc._action_items_extractor = extractor
         with patch.object(extractor._session, "post", return_value=make_mock_response(VALID_LLM_RESPONSE_EN)):
             result = svc._handle_batch_extract_action_items({
                 "ids": ["nonexistent-id"],
