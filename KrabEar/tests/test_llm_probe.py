@@ -263,5 +263,58 @@ class TestLLMHttpProbeModelEvicted(unittest.TestCase):
             self.assertNotEqual(c[0][0].code, "rewriter.model_evicted")
 
 
+class TestLLMHttpProbeEffectiveInterval(unittest.TestCase):
+    """_effective_interval() must pick up runtime settings changes (W918 fix)."""
+
+    def test_returns_base_interval_when_setting_absent(self):
+        """Falls back to base_interval_sec when settings_provider has no key."""
+        rewriter = FakeRewriter()
+        settings: dict = {"llm_rewrite_enabled": True}  # no llm_probe_interval_sec
+        probe = _make_probe(rewriter, settings=settings, base_interval_sec=0.05)
+
+        self.assertAlmostEqual(probe._effective_interval(), 0.05, places=6)
+
+    def test_returns_runtime_value_when_setting_present(self):
+        """Returns value from settings_provider when llm_probe_interval_sec is set."""
+        rewriter = FakeRewriter()
+        settings: dict = {"llm_rewrite_enabled": True, "llm_probe_interval_sec": 99.0}
+        probe = _make_probe(rewriter, settings=settings, base_interval_sec=0.05)
+
+        self.assertAlmostEqual(probe._effective_interval(), 99.0, places=6)
+
+    def test_falls_back_when_provider_raises(self):
+        """Returns base_interval_sec if settings_provider raises."""
+        rewriter = FakeRewriter()
+        error_bus = MagicMock()
+        event_bus = MagicMock()
+        probe = LLMHttpProbe(
+            rewriter=rewriter,
+            error_bus=error_bus,
+            event_bus=event_bus,
+            settings_provider=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            base_interval_sec=0.07,
+        )
+        self.assertAlmostEqual(probe._effective_interval(), 0.07, places=6)
+
+    def test_falls_back_when_setting_is_zero_or_negative(self):
+        """Returns base_interval_sec if runtime value is <= 0."""
+        rewriter = FakeRewriter()
+        settings: dict = {"llm_rewrite_enabled": True, "llm_probe_interval_sec": 0}
+        probe = _make_probe(rewriter, settings=settings, base_interval_sec=0.05)
+
+        self.assertAlmostEqual(probe._effective_interval(), 0.05, places=6)
+
+    def test_runtime_change_reflected_without_restart(self):
+        """After settings dict is mutated, _effective_interval reflects the new value."""
+        rewriter = FakeRewriter()
+        settings: dict = {"llm_rewrite_enabled": True, "llm_probe_interval_sec": 30.0}
+        probe = _make_probe(rewriter, settings=settings, base_interval_sec=0.05)
+
+        self.assertAlmostEqual(probe._effective_interval(), 30.0, places=6)
+        # Simulate set_settings call
+        settings["llm_probe_interval_sec"] = 120.0
+        self.assertAlmostEqual(probe._effective_interval(), 120.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

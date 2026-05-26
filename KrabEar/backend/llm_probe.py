@@ -134,9 +134,30 @@ class LLMHttpProbe:
     # ------------------------------------------------------------------
 
     def _loop(self) -> None:
-        """Main probe loop — waits for interval then calls _tick()."""
-        while not self._stop_event.wait(self._current_interval_sec):
+        """Main probe loop — waits for interval then calls _tick().
+
+        The sleep duration is re-read from ``settings_provider`` at the start of
+        every iteration so that a runtime ``set_settings({"llm_probe_interval_sec":
+        N})`` call takes effect on the next wake-up without a restart.
+        """
+        while not self._stop_event.wait(self._effective_interval()):
             self._tick()
+
+    def _effective_interval(self) -> float:
+        """Return the probe interval to use for the current sleep.
+
+        Re-reads ``llm_probe_interval_sec`` from the live settings dict on every
+        call.  Falls back to ``self._current_interval_sec`` (set at construction
+        time from ``base_interval_sec``) if the provider raises or returns a
+        non-positive value.
+        """
+        try:
+            val = self._settings_provider().get("llm_probe_interval_sec")
+            if val and float(val) > 0:
+                return float(val)
+        except Exception:
+            pass
+        return self._current_interval_sec
 
     def _tick(self) -> None:
         """Single probe tick. Checks settings, calls passive_health_check,
