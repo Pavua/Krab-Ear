@@ -487,5 +487,58 @@ class TestEmotionDetectorConcurrent(unittest.TestCase):
             self.assertIn(emotion, valid_emotions)
 
 
+class TestEmotionDetectorNegationParticles(unittest.TestCase):
+    """W1009 F1+F3: отрицательные и утвердительные частицы не должны влиять на sentiment."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    # ── F1: отрицательные частицы ────────────────────────────────────────
+
+    def test_ne_znayu_returns_neutral_not_negative(self) -> None:
+        """«не знаю точно» — нейтральное высказывание, не отрицательное."""
+        result = self.detector.detect("не знаю точно", language="ru")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "negative",
+            f"Expected NOT negative, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    def test_no_problem_returns_neutral_not_negative(self) -> None:
+        """«no problem, I can do that» — нейтральное согласие, не отрицательное."""
+        result = self.detector.detect("no problem, I can do that", language="en")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "negative",
+            f"Expected NOT negative, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    # ── F3: утвердительные частицы ──────────────────────────────────────
+
+    def test_da_obsudim_returns_neutral_not_positive(self) -> None:
+        """«да обсудим завтра» — нейтральное согласие, не позитивное от частицы «да»."""
+        result = self.detector.detect("да обсудим завтра", language="ru")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "positive",
+            f"Expected NOT positive, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    # ── Regression: настоящие сентиментальные слова всё ещё работают ─────
+
+    def test_actual_negative_zlost_still_detected(self) -> None:
+        """Настоящее негативное слово «злость» всё ещё детектируется."""
+        result = self.detector.detect("я чувствую злость и ненависть", language="ru")
+        self.assertEqual(
+            result.primary_emotion,
+            "negative",
+            f"Expected negative, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertGreater(result.confidence, 0.3)
+
+
 if __name__ == "__main__":
     unittest.main()
