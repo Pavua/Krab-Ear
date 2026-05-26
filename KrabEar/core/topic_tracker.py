@@ -6,11 +6,18 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import List, Dict
+
+logger = logging.getLogger(__name__)
+
+# Максимальное количество элементов, обрабатываемых за один вызов.
+# Защита от квадратичного роста сложности TF-IDF при очень больших входных данных.
+_MAX_ITEMS: int = 500
 
 # ── Стоп-слова (объединённые для всех поддерживаемых языков) ────────────────
 
@@ -62,10 +69,6 @@ _STOP_WORDS: frozenset = frozenset({
 })
 
 _WORD_RE = re.compile(r"[А-Яа-яA-Za-zÁÉÍÓÚáéíóúÑñÜü]{3,}", re.UNICODE)
-
-# Hard limit on items passed to track_topics — prevents IPC DoS (W1277 F2).
-# A caller passing 5000 items caused 103s block on the single-threaded IPC loop.
-_HARD_MAX_ITEMS: int = 500
 
 
 # ── Dataclass результата ─────────────────────────────────────────────────────
@@ -130,12 +133,8 @@ def _compute_tfidf(
     scores: Dict[str, float] = {}
     for word, count in tf.items():
         tf_val = count / total_tf
-        # Количество окон, содержащих это слово.
-        # W1277 F4: convert each window token list to set before `in` for O(1)
-        # membership vs O(n) list scan — 3.1s → 0.6s for n=500.
-        doc_freq = sum(
-            1 for w_tokens in all_windows_tokens if word in set(w_tokens)
-        )
+        # Количество окон, содержащих это слово
+        doc_freq = sum(1 for w_tokens in all_windows_tokens if word in w_tokens)
         idf_val = math.log((total_windows + 1) / (doc_freq + 1)) + 1.0
         scores[word] = tf_val * idf_val
 
@@ -205,9 +204,13 @@ class TopicTracker:
         if not items:
             return []
 
-        # Hard cap regardless of caller — prevents IPC DoS (W1277 F2).
-        if len(items) > _HARD_MAX_ITEMS:
-            items = items[-_HARD_MAX_ITEMS:]
+        if len(items) > _MAX_ITEMS:
+            logger.warning(
+                "topic_tracker: input truncated to %d items (was %d)",
+                _MAX_ITEMS,
+                len(items),
+            )
+            items = items[:_MAX_ITEMS]
 
         window_size = max(1, window_size)
         n = len(items)

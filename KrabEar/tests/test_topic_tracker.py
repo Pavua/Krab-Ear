@@ -587,5 +587,114 @@ class TestTopicTrackerConcurrent(unittest.TestCase):
             self.assertGreater(n_segs, 0)
 
 
+class TestTopicTrackerInternalCap(unittest.TestCase):
+    """Тест F3 (W992): внутренний guard _MAX_ITEMS в TopicTracker.track_topics."""
+
+    def setUp(self):
+        self.tracker = TopicTracker()
+
+    def test_internal_cap_applied_logs_warning(self):
+        """track_topics молча усекает вход до _MAX_ITEMS и логирует предупреждение."""
+        from core.topic_tracker import _MAX_ITEMS
+
+        # Создаём ровно _MAX_ITEMS + 10 элементов
+        oversized = [_item(f"тема программирование python функция {i}") for i in range(_MAX_ITEMS + 10)]
+
+        with self.assertLogs("core.topic_tracker", level="WARNING") as cm:
+            result = self.tracker.track_topics(oversized)
+
+        # Лог должен содержать ключевые слова предупреждения
+        self.assertTrue(
+            any("truncated" in msg for msg in cm.output),
+            f"Предупреждение об усечении не выдано: {cm.output}",
+        )
+
+        # Результат должен покрывать ровно _MAX_ITEMS элементов, а не oversized
+        total_covered = sum(seg.items_count for seg in result)
+        self.assertEqual(
+            total_covered, _MAX_ITEMS,
+            f"Ожидали покрытие {_MAX_ITEMS} элементов, получили {total_covered}",
+        )
+
+    def test_internal_cap_not_triggered_for_normal_input(self):
+        """Нет предупреждения при входе <= _MAX_ITEMS элементов."""
+        from core.topic_tracker import _MAX_ITEMS
+        import logging
+
+        normal = [_item("тема программирование python функция") for _ in range(min(50, _MAX_ITEMS))]
+        with self.assertNoLogs("core.topic_tracker", level="WARNING"):
+            result = self.tracker.track_topics(normal)
+
+        total_covered = sum(seg.items_count for seg in result)
+        self.assertEqual(total_covered, len(normal))
+
+
+class TestHandlerPrivacyModeGuard(unittest.TestCase):
+    """Тест F4 (W992): _handle_get_topic_timeline возвращает пустой таймлайн в privacy_mode.
+
+    Используем прямую проверку через unittest.mock, не требующую инициализации BackendService,
+    чтобы изолировать тест от зависимостей (pydantic_settings, sounddevice и т.п.).
+    """
+
+    def _make_fake_service(self, privacy_mode_enabled: bool):
+        """Возвращает минимальный stub-объект с нужными атрибутами для _handle_get_topic_timeline."""
+        from unittest.mock import MagicMock
+        from core.topic_tracker import TopicTracker
+
+        svc = MagicMock()
+        svc._get_runtime_setting.return_value = privacy_mode_enabled
+
+        # Подключаем реальный TopicTracker
+        svc._topic_tracker = TopicTracker()
+
+        # store._lock возвращает context manager, _load_active_items_unlocked — пустой список
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _fake_lock():
+            yield
+
+        store_mock = MagicMock()
+        store_mock._lock = _fake_lock
+        store_mock._load_active_items_unlocked.return_value = []
+        svc.store = store_mock
+
+        return svc
+
+    def test_get_topic_timeline_empty_in_privacy_mode(self):
+        """При privacy_mode_enabled=True handler возвращает timeline=[] и reason."""
+        from backend import service as svc_module
+
+        svc = self._make_fake_service(privacy_mode_enabled=True)
+
+        # Вызываем непривязанный метод напрямую
+        result = svc_module.BackendService._handle_get_topic_timeline(
+            svc, {"window_size": 5, "limit": 100}
+        )
+
+        self.assertIsInstance(result, dict, f"Ожидали dict, получили: {type(result)}")
+        self.assertIn("timeline", result, f"Ожидали ключ 'timeline' в ответе: {result}")
+        self.assertEqual(result["timeline"], [], f"privacy_mode: timeline должен быть пустым: {result}")
+        self.assertEqual(
+            result.get("reason"), "privacy_mode_active",
+            f"reason должен быть 'privacy_mode_active': {result}",
+        )
+
+    def test_get_topic_timeline_normal_without_privacy_mode(self):
+        """При privacy_mode_enabled=False handler работает нормально (возвращает segments)."""
+        from backend import service as svc_module
+
+        svc = self._make_fake_service(privacy_mode_enabled=False)
+
+        result = svc_module.BackendService._handle_get_topic_timeline(
+            svc, {"window_size": 5, "limit": 100}
+        )
+
+        self.assertIsInstance(result, dict)
+        # С пустой историей — segments пустой, но ключ должен присутствовать
+        self.assertIn("segments", result, f"Ожидали ключ 'segments' в ответе: {result}")
+        self.assertNotEqual(result.get("reason"), "privacy_mode_active")
+
+
 if __name__ == "__main__":
     unittest.main()
