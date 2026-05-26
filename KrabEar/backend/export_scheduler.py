@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("KrabEar.Backend.ExportScheduler")
 
@@ -33,14 +34,22 @@ class ExportScheduler:
 
     SCHEDULE_FILENAME = "export_schedule.json"
 
-    def __init__(self, data_dir: Path | str, max_exports: int = MAX_EXPORTS_DEFAULT) -> None:
+    def __init__(
+        self,
+        data_dir: Path | str,
+        max_exports: int = MAX_EXPORTS_DEFAULT,
+        settings_provider: Callable[[], dict] | None = None,
+    ) -> None:
         """
         Args:
             data_dir: директория данных (та же, что у StateStore).
             max_exports: максимальное количество файлов экспорта на диске.
+            settings_provider: опциональный callable() → dict с runtime-настройками.
+                Используется для проверки privacy_mode_enabled перед экспортом.
         """
         self.data_dir = Path(data_dir)
         self.max_exports = max_exports
+        self._settings_provider = settings_provider
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -134,7 +143,19 @@ class ExportScheduler:
         file_path = output_dir / filename
 
         content = self._generate_content(store, fmt)
-        file_path.write_text(content, encoding="utf-8")
+        # Атомарная запись: пишем во временный файл, делаем fsync, затем rename.
+        # Это предотвращает усечённый файл при падении в середине записи.
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, file_path)
+        except Exception:
+            # Убираем временный файл при ошибке, не оставляем мусор
+            tmp_path.unlink(missing_ok=True)
+            raise
         size_bytes = file_path.stat().st_size
 
         logger.info("Авто-экспорт создан: %s (%d байт)", file_path, size_bytes)
@@ -352,6 +373,21 @@ class ExportScheduler:
 
             if not schedule.get("enabled", False):
                 return None
+
+            # F4: соблюдаем режим конфиденциальности — не экспортируем историю
+            if self._settings_provider is not None:
+                try:
+                    current_settings = self._settings_provider()
+                    if current_settings.get("privacy_mode_enabled", False):
+                        logger.info(
+                            "export_scheduler: пропуск экспорта (privacy mode активен)",
+                        )
+                        return {"exported": False, "reason": "privacy_mode_active"}
+                except Exception as exc:
+                    logger.warning(
+                        "export_scheduler: не удалось получить настройки для проверки privacy mode: %s",
+                        exc,
+                    )
 
             interval_hours = int(schedule.get("interval_hours", 24))
             last_ts_str: str | None = schedule.get("last_export_ts")
