@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from core.silence_detector import SilenceDetector
+from core.silence_detector import SilenceDetector, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 
 if TYPE_CHECKING:
     from backend.recorder import AudioRecorder
@@ -27,7 +27,9 @@ logger = logging.getLogger("KrabEar.Backend.RealtimeSilenceFilter")
 _DEFAULT_CHECK_SEC: float = 5.0
 _DEFAULT_WINDOW_SEC: float = 10.0
 _DEFAULT_MAX_SILENCE_SEC: float = 8.0
-_DEFAULT_THRESHOLD_DB: float = -40.0
+# Используем порог для сохранения шёпота: real-time фильтр не должен подавлять
+# события во время шёпотной речи (типичный RMS: -45…-55 дБ).
+_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 
 
 class RealtimeSilenceFilter:
