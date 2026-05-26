@@ -1217,6 +1217,10 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- Calendar link (W947 re-wired W1030): link transcription to active Calendar event ---
+            "link_to_calendar_event": self._handle_link_to_calendar_event,  # связать запись истории с событием Calendar (auto-detect active)
+            "get_calendar_link": self._handle_get_calendar_link,  # получить сохранённую ссылку на событие Calendar для записи
+            "search_by_calendar_event": self._handle_search_by_calendar_event,  # поиск записей истории по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -3228,6 +3232,63 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    # ── Calendar link IPC handlers (W947 re-wired W1030) ────────────────────
+
+    def _handle_link_to_calendar_event(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Связать запись истории с активным событием Calendar.app.
+
+        Параметры:
+            item_id (str): ID записи истории (required)
+            event (dict | None): явный словарь события. Если не передан —
+                CalendarLinker.find_active_event() определяет текущее событие.
+
+        Возвращает:
+            {"ok": bool, "event": dict | None, "error": str | None}
+        """
+        item_id = str(params.get("item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "event": None, "error": "item_id required"}
+
+        event = params.get("event")
+        if not isinstance(event, dict) or not event.get("title"):
+            # Auto-detect current Calendar event
+            event = self._calendar_linker.find_active_event()
+            if not event:
+                return {"ok": False, "event": None, "error": "Нет активного события Calendar или Calendar не открыт"}
+
+        ok = self.store.update_history_item_calendar(item_id, event)
+        if not ok:
+            return {"ok": False, "event": None, "error": f"Запись {item_id!r} не найдена или событие пустое"}
+        return {"ok": True, "event": event, "error": None}
+
+    def _handle_get_calendar_link(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Получить сохранённую ссылку на событие Calendar для записи истории.
+
+        Параметры:
+            item_id (str): ID записи истории (required)
+
+        Возвращает:
+            {"item_id": str, "event": dict | None}
+        """
+        item_id = str(params.get("item_id", "")).strip()
+        if not item_id:
+            return {"item_id": "", "event": None}
+        event = self.store.get_history_item_calendar(item_id)
+        return {"item_id": item_id, "event": event}
+
+    def _handle_search_by_calendar_event(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Поиск записей истории по подстроке в названии события Calendar.
+
+        Параметры:
+            event_title (str): строка поиска (пустая строка = все записи с Calendar-ссылкой)
+
+        Возвращает:
+            {"results": [{"item_id": str, "calendar_event": dict}, ...]}
+        """
+        event_title = str(params.get("event_title", ""))
+        results = self.store.search_by_calendar_event(event_title)
+        return {"results": results}
 
     # ── iMessage integration (Phase D.4) ────────────────────────────────────
 

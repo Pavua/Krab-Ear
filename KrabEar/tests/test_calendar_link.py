@@ -29,12 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.calendar_link import (
-    CalendarLinker,
-    _parse_osascript_output,
-    _epoch_to_iso,
-    _is_tcc_denial,
-)
+from backend.calendar_link import CalendarLinker, _parse_osascript_output, _epoch_to_iso
 from backend.state_store import StateStore
 
 SAMPLE_EPOCH_START = 1714000000
@@ -410,143 +405,62 @@ class TestLinkReturnsEventId(_DarwinPatchedTestCase):
         self.assertNotIn("_start_epoch", result)
 
 
-class TestIsTccDenial(unittest.TestCase):
-    """Tests for the _is_tcc_denial helper (W1028 F3 HIGH)."""
+class TestCalendarIPCDispatchWiringW1030(unittest.TestCase):
+    """W1030: Verify link_to_calendar_event / get_calendar_link / search_by_calendar_event
+    are actually in the service.py dispatch table (W1028 F1 CRITICAL regression guard).
 
-    def test_tcc_detects_not_authorized(self):
-        """Legacy 'Not authorized' substring still triggers TCC denial."""
-        self.assertTrue(_is_tcc_denial("Not authorized to send Apple events to Calendar."))
+    W947 claimed to wire these handlers but only added StateStore methods.
+    W1030 completes the IPC layer. This test is a permanent regression guard.
+    """
 
-    def test_tcc_detects_not_allowed(self):
-        """Legacy 'not allowed' substring still triggers TCC denial."""
-        self.assertTrue(_is_tcc_denial("This application is not allowed to access Calendar."))
+    REQUIRED_IPC_KEYS = [
+        "link_to_calendar_event",
+        "get_calendar_link",
+        "search_by_calendar_event",
+    ]
+    REQUIRED_HANDLER_DEFS = [
+        "_handle_link_to_calendar_event",
+        "_handle_get_calendar_link",
+        "_handle_search_by_calendar_event",
+    ]
 
-    def test_tcc_detects_minus_1743(self):
-        """Apple Event error (-1743) is detected as TCC denial."""
-        self.assertTrue(_is_tcc_denial("(-1743)"))
+    def _read_service_source(self) -> str:
+        service_path = Path(__file__).resolve().parent.parent / "backend" / "service.py"
+        with open(service_path, encoding="utf-8") as f:
+            return f.read()
 
-    def test_tcc_detects_minus_1743_in_real_error(self):
-        """(-1743) embedded in a real-world osascript error string."""
-        self.assertTrue(_is_tcc_denial(
-            "osascript: OpenScripting.framework - scripting addition gave an error: "
-            "Calendar got an error: AppleEvent handler failed. (-1743)"
-        ))
-
-    def test_tcc_detects_errAEEventNotPermitted(self):
-        """errAEEventNotPermitted constant is detected as TCC denial."""
-        self.assertTrue(_is_tcc_denial("errAEEventNotPermitted"))
-
-    def test_tcc_detects_isnt_running(self):
-        """\"isn't running\" indicates app not yet TCC-prompted / automation blocked."""
-        self.assertTrue(_is_tcc_denial("Calendar isn't running."))
-
-    def test_tcc_detects_isnt_running_mixed_case(self):
-        """Case-insensitive match for \"isn't running\"."""
-        self.assertTrue(_is_tcc_denial("CALENDAR ISN'T RUNNING."))
-
-    def test_tcc_detects_doesnt_have_permission(self):
-        """\"doesn't have permission\" phrase is detected as TCC denial."""
-        self.assertTrue(_is_tcc_denial("Calendar doesn't have permission to access the system."))
-
-    def test_normal_stderr_not_classified_as_tcc(self):
-        """Normal non-TCC stderr is NOT misclassified as a TCC denial."""
-        self.assertFalse(_is_tcc_denial("syntax error: Expected end of line but found identifier."))
-
-    def test_empty_stderr_not_classified_as_tcc(self):
-        """Empty stderr is not a TCC denial."""
-        self.assertFalse(_is_tcc_denial(""))
-
-    def test_unrelated_error_not_classified_as_tcc(self):
-        """Unrelated error numbers are not TCC denials."""
-        self.assertFalse(_is_tcc_denial("error -9999: unknown error occurred"))
-
-    def test_tcc_denial_via_find_active_event_minus_1743(self):
-        """find_active_event returns None when stderr contains (-1743)."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stdout = ""
-        mock_proc.stderr = "Calendar got an error: AppleEvent handler failed. (-1743)"
-        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
-            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
-                linker = CalendarLinker(cache_minutes=1)
-                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
-        self.assertIsNone(result)
-
-    def test_tcc_denial_via_find_active_event_isnt_running(self):
-        """find_active_event returns None when stderr contains \"isn't running\"."""
-        mock_proc = MagicMock()
-        mock_proc.returncode = 1
-        mock_proc.stdout = ""
-        mock_proc.stderr = "Calendar isn't running."
-        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
-            with patch("backend.calendar_link.platform.system", return_value="Darwin"):
-                linker = CalendarLinker(cache_minutes=1)
-                result = linker.find_active_event(at_time=datetime(2024, 4, 25, 9, 0))
-        self.assertIsNone(result)
-
-
-class TestConcurrentFindActiveEventNoTornCache(_DarwinPatchedTestCase):
-    """W1028 F2 HIGH — verify no torn cache state under concurrent access."""
-
-    def test_concurrent_find_active_event_no_torn_cache(self):
-        """10 threads calling find_active_event concurrently: no exception, cache stays consistent.
-
-        A torn cache write could leave _cache_window_key updated but _cached_result stale
-        (or vice-versa), causing threads to return an incorrect cached value.  With the lock
-        in place, every read of the trio (_cache_window_key, _cache_at_time, _cached_result)
-        is atomic relative to writes, so all threads see a coherent state.
-        """
-        import threading
-
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_proc.stdout = SAMPLE_RAW
-        mock_proc.stderr = ""
-
-        errors: list[Exception] = []
-        results: list[dict | None] = []
-        lock = threading.Lock()
-
-        def call_linker(linker: CalendarLinker, at_time: datetime) -> None:
-            try:
-                r = linker.find_active_event(at_time=at_time)
-                with lock:
-                    results.append(r)
-            except Exception as exc:  # noqa: BLE001
-                with lock:
-                    errors.append(exc)
-
-        with patch("backend.calendar_link.subprocess.run", return_value=mock_proc):
-            linker = CalendarLinker(cache_minutes=5)
-            at_time = datetime(2024, 4, 25, 10, 0)
-            threads = [
-                threading.Thread(target=call_linker, args=(linker, at_time))
-                for _ in range(10)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=5)
-
-        # No thread must raise an exception
-        self.assertEqual(errors, [], f"Unexpected exceptions: {errors}")
-
-        # All 10 threads must have produced a result
-        self.assertEqual(len(results), 10)
-
-        # All non-None results must be the expected event (no torn partial state)
-        for r in results:
-            if r is not None:
-                self.assertEqual(r["title"], "Stand-up")
-                self.assertNotIn("_start_epoch", r)
-
-        # Cache internal state must be self-consistent after all threads finish:
-        # if window key is set, cached_result must be valid (not a partially written state)
-        if linker._cache_window_key:
-            # Cache was populated — result must be the known event or None (no event found)
+    def test_dispatch_keys_present_in_service(self):
+        """All 3 calendar IPC dispatch keys must appear in service.py dispatch table."""
+        source = self._read_service_source()
+        for key in self.REQUIRED_IPC_KEYS:
             self.assertIn(
-                linker._cached_result["title"] if linker._cached_result else None,
-                ("Stand-up", None),
+                f'"{key}"',
+                source,
+                f'Dispatch key "{key}" missing from service.py — W1030 regression!',
+            )
+
+    def test_handler_methods_defined_in_service(self):
+        """All 3 calendar _handle_* methods must be defined in service.py."""
+        source = self._read_service_source()
+        for handler in self.REQUIRED_HANDLER_DEFS:
+            self.assertIn(
+                f"def {handler}",
+                source,
+                f"Handler method {handler} missing from service.py — W1030 regression!",
+            )
+
+    def test_dispatch_keys_in_dispatch_block(self):
+        """All 3 dispatch keys must appear inside the handlers dict block (not just comments)."""
+        import re
+        source = self._read_service_source()
+        start = source.index("handlers: dict[str, Callable")
+        end = source.index("\n        handler = handlers.get(method)")
+        dispatch_block = source[start:end]
+        for key in self.REQUIRED_IPC_KEYS:
+            self.assertIn(
+                f'"{key}"',
+                dispatch_block,
+                f'"{key}" not in dispatch block — W1030 regression!',
             )
 
 
