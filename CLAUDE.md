@@ -378,6 +378,14 @@ make test          # Run all Python tests
 make build         # Build Swift agent
 make sign          # Build + copy + codesign
 make lint          # Flake8 on Python backend
+
+# Marathon / audit targets (W793)
+make audit-orphans            # Orphan import check on service.py (W746/W771 guard)
+make audit-orphans ARGS=--strict  # Same but also checks lowercase fn calls
+make audit-handlers           # IPC handler complexity report (LOC, cyclomatic, risky calls)
+make audit-handlers ARGS=--json  # Machine-readable JSON output
+make dispatch-tests           # Run only dispatch-invariant test files (fast gate)
+make service-loc              # Print current service.py line count
 ```
 
 ### One-click shortcuts
