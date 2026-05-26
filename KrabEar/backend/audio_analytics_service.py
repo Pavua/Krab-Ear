@@ -302,11 +302,14 @@ class AudioAnalyticsService:
 
         fp1 = self._audio_fingerprinter.fingerprint(audio1, sample_rate)
         fp2 = self._audio_fingerprinter.fingerprint(audio2, sample_rate)
-        similarity = self._audio_fingerprinter.compare(fp1, fp2)
+        # W1063: use equals() — SHA-256 Hamming distance is statistically meaningless.
+        # similarity is 1.0 for exact match, 0.0 otherwise (binary).
+        is_exact_match = self._audio_fingerprinter.equals(fp1, fp2)
+        similarity = 1.0 if is_exact_match else 0.0
 
         return {
             "fingerprint1": fp1,
             "fingerprint2": fp2,
             "similarity": round(similarity, 6),
-            "is_duplicate": similarity >= threshold,
+            "is_duplicate": is_exact_match or threshold <= 0.0,
         }
