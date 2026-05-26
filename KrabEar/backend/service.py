@@ -504,6 +504,9 @@ class BackendService:
             transcription_counter_ref=self._transcription_counter_ref,
             last_stt_engine_ref=self._last_stt_engine_ref,
         )
+        # Wire error_bus into recording_core_svc for stt.transcribe_failed push (W1177)
+        self._recording_core_svc._error_bus = self._error_bus
+
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )

@@ -84,6 +84,10 @@ class RecordingCoreService:
         self._transcription_counter_ref = transcription_counter_ref
         self._last_stt_engine_ref = last_stt_engine_ref
 
+        # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
+        # None when running in test environments that do not inject the error bus.
+        self._error_bus: Any = None
+
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
         self._preview_thread: threading.Thread | None = None
@@ -216,6 +220,8 @@ class RecordingCoreService:
 
         # Phase C: STT execution
         phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
+        if "early_return" in phase_c:
+            return phase_c["early_return"]
         transcribe_payload = phase_c["transcribe_payload"]
 
         # Phase D: post-processing
@@ -944,15 +950,81 @@ class RecordingCoreService:
             },
         )
 
-        transcribe_payload = self.transcriber.transcribe(
-            audio,
-            quality_profile=quality_profile,
-            cleanup_profile=cleanup_profile,
-            lang_hint=lang_hint,
-            extra_vocabulary=user_vocabulary if user_vocabulary else None,
-            history_context=_recent_history if _recent_history else None,
-            stt_hotwords=_combined_hotwords,
-        )
+        try:
+            transcribe_payload = self.transcriber.transcribe(
+                audio,
+                quality_profile=quality_profile,
+                cleanup_profile=cleanup_profile,
+                lang_hint=lang_hint,
+                extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                history_context=_recent_history if _recent_history else None,
+                stt_hotwords=_combined_hotwords,
+            )
+        except Exception as _stt_exc:
+            logger.exception(
+                "phase_c: STT crashed — audio buffer will be persisted for recovery",
+                extra={"quality_profile": quality_profile, "duration_sec": round(float(duration_sec), 2)},
+            )
+            # Persist the raw audio so the user can recover it later.
+            audio_recovery_path: str | None = None
+            try:
+                import uuid as _uuid
+                import soundfile as _sf
+                _rec_id = _uuid.uuid4().hex
+                _failed_dir = Path(self.store.data_dir) / "failed_recordings"
+                _failed_dir.mkdir(parents=True, exist_ok=True)
+                _wav_path = _failed_dir / f"{_rec_id}.wav"
+                _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
+                _audio_arr = np.asarray(audio, dtype=np.float32)
+                _sf.write(str(_wav_path), _audio_arr, _sample_rate, subtype="PCM_16")
+                audio_recovery_path = str(_wav_path.relative_to(self.store.data_dir))
+                logger.info(
+                    "phase_c: failed audio persisted",
+                    extra={"path": audio_recovery_path},
+                )
+            except Exception as _persist_exc:
+                logger.warning("phase_c: failed to persist recovery audio: %s", _persist_exc)
+
+            # Push to error bus (if wired).
+            if self._error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone as _tz
+                    _entry = ERROR_REGISTRY.get("stt.transcribe_failed", {})
+                    self._error_bus.push(KrabError(
+                        severity=_entry.get("severity", "error"),
+                        component="stt",
+                        code="stt.transcribe_failed",
+                        message_user=_entry.get(
+                            "user_msg_ru", "STT: ошибка транскрипции — аудио сохранено для восстановления"
+                        ),
+                        message_debug=(
+                            f"transcriber.transcribe() raised {type(_stt_exc).__name__}: {_stt_exc}"
+                            + (f" | recovery={audio_recovery_path}" if audio_recovery_path else "")
+                        ),
+                        timestamp=datetime.now(_tz.utc),
+                        context={
+                            "quality_profile": quality_profile,
+                            "duration_sec": round(float(duration_sec), 2),
+                            "audio_recovery_path": audio_recovery_path,
+                            "exc_type": type(_stt_exc).__name__,
+                        },
+                        actionable=False,
+                        action_id=None,
+                    ))
+                except Exception as _bus_exc:
+                    logger.warning("phase_c: error_bus push failed: %s", _bus_exc)
+
+            return {
+                "early_return": {
+                    "ok": False,
+                    "error": "stt_failed",
+                    "error_detail": str(_stt_exc),
+                    "audio_recovery_path": audio_recovery_path,
+                    "status": "stt_failed",
+                }
+            }
 
         return {"transcribe_payload": transcribe_payload}
 

@@ -602,6 +602,21 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # stt.transcribe_failed — transcriber.transcribe() raised an unexpected exception
+    # in _stop_recording_phase_c (MLX timeout, GPU hang, NaN input, OOM, etc.).
+    # The audio buffer is persisted to data_dir/failed_recordings/<id>.wav for manual
+    # recovery. Severity=error so it surfaces immediately in the Swift ErrorToastView.
+    # Not directly actionable from UI — user must manually re-import the saved WAV.
+    # Dedupe 10s to group rapid-fire crashes during a session.
+    "stt.transcribe_failed": {
+        "user_msg_ru": "STT: ошибка транскрипции — аудио сохранено для восстановления",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 10,
+    },
+
     # ipc.audio_device_poll_flood — list_audio_inputs / get_audio_devices called
     # more than 10 times per second. Indicates a polling loop bug in Swift UI
     # (e.g. audio device picker refreshing on every keystroke). Breadcrumb only —
