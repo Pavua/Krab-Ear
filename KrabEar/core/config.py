@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     NETWORK_MODE: str = "offline_strict"
     GATEWAY_URL: str = "http://127.0.0.1:18789/v1/chat/completions"
     STT_GATEWAY_URL: str = "http://127.0.0.1:18789/v1/audio/transcriptions"
-    STT_GATEWAY_TOKEN: str = ""  # Bearer token for remote STT gateway; empty = no auth header
+    STT_GATEWAY_TIMEOUT_SEC: int = 60
     AI_MODEL: str = "google/gemini-2.0-flash"
     STT_MODEL: str = "whisper-1"
 
@@ -196,14 +196,6 @@ class Settings(BaseSettings):
     STT_DENOISE_ENABLED: bool = True
     STT_DENOISE_SNR_THRESHOLD_DB: float = 15.0
     STT_DENOISE_STRENGTH: str = "moderate"
-
-    # --- Нормализация усиления перед STT (GainNormalizer) ---
-    # При STT_GAIN_NORMALIZE_ENABLED=True: после шумоподавления выравниваем
-    # уровень сигнала до целевого RMS (-20 дБFS) через GainNormalizer.auto_gain.
-    # Помогает при тихих записях (слабый микрофон, дальнее расстояние).
-    # Применяется только к numpy-массивам (живые записи); файловые импорты
-    # нормализуются отдельно через normalize_audio().
-    STT_GAIN_NORMALIZE_ENABLED: bool = True
 
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
@@ -885,12 +877,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
-    # --- Phase 4 deterministic pipeline (pipeline_v2) ---
-    # EXPERIMENTAL: Phase 4 pipeline stages (audio norm, STT, text cleanup,
-    # diarization, translation, LLM rewrite) run as an explicit stage chain.
-    # Default False — dormant since Phase 4 implementation; activating could
-    # affect STT quality. Enable via set_settings or KRAB_EAR_PIPELINE_V2_ENABLED=true.
-    "pipeline_v2_enabled": False,
     # --- Audio-level Language ID (AudioLanguageID) ---
     # Encoder-only mlx-whisper forward pass для автодетекции языка аудио (~50ms).
     # Включено по умолчанию; используется router'ом когда hint_language=None.

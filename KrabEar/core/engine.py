@@ -3334,7 +3334,7 @@ class AudioEngine:
                     headers=req_headers,
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=60,
+                    timeout=settings.STT_GATEWAY_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
                 data = resp.json()

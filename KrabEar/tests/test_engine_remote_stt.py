@@ -118,6 +118,41 @@ class TranscribeRemoteTestCase(unittest.TestCase):
         self.assertIn("unsupported audio_data type", str(ctx.exception))
         self.assertIn("int", str(ctx.exception))
 
+    @patch("core.engine.requests.post")
+    def test_remote_stt_uses_configurable_timeout(self, mock_post):
+        """_transcribe_remote передаёт settings.STT_GATEWAY_TIMEOUT_SEC в requests.post."""
+        import tempfile
+        from core import config as _cfg
+
+        mock_post.return_value = self._mock_ok_response("ok")
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+            tmp_path = tmp.name
+
+        try:
+            # Patch the setting to a non-default value to verify it is read at call time
+            original = _cfg.settings.STT_GATEWAY_TIMEOUT_SEC
+            _cfg.settings.__dict__["STT_GATEWAY_TIMEOUT_SEC"] = 999
+            try:
+                self.engine._transcribe_remote(tmp_path, "prompt")
+            finally:
+                _cfg.settings.__dict__["STT_GATEWAY_TIMEOUT_SEC"] = original
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["timeout"], 999)
+
+    def test_remote_stt_default_60(self):
+        """STT_GATEWAY_TIMEOUT_SEC default is 60."""
+        from core.config import Settings
+        s = Settings()
+        self.assertEqual(s.STT_GATEWAY_TIMEOUT_SEC, 60)
+
 
 if __name__ == "__main__":
     unittest.main()
