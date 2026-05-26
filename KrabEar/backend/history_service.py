@@ -45,6 +45,8 @@ class HistoryService:
         self._llm_rewriter = llm_rewriter
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
+        # SemanticSearcher для чистки индекса при удалении записей (опционально).
+        self._semantic_searcher = None
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
@@ -245,6 +247,14 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        # W1148 F1: clean up semantic search index on delete to prevent unbounded growth
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(item_id)
+            except Exception as _exc:
+                logger.warning(
+                    "semantic_search: не удалось удалить запись из индекса: %s", _exc
+                )
         add_breadcrumb(
             category="history",
             message="delete_history_item",
