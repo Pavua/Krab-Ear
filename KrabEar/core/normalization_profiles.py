@@ -247,7 +247,15 @@ class NormalizationProfileRegistry:
         custom = [p.to_dict() for p in self._profiles.values() if not p.builtin]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(custom, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path = path.with_suffix(".tmp")
+            data = json.dumps(custom, ensure_ascii=False, indent=2)
+            tmp_path.write_text(data, encoding="utf-8")
+            # fsync — гарантируем сброс данных на диск перед атомарным rename
+            with tmp_path.open("r+b") as fh:
+                fh.flush()
+                import os
+                os.fsync(fh.fileno())
+            tmp_path.replace(path)
         except Exception as exc:
             logger.warning("Не удалось сохранить кастомные профили: %s", exc)
 

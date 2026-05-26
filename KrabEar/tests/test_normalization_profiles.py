@@ -314,5 +314,47 @@ class TestWave130RequiredCases(unittest.TestCase):
             self.assertIsInstance(r, str)
 
 
+class TestAtomicSave(unittest.TestCase):
+    """Проверяем атомарность записи пользовательских профилей на диск."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.registry = NormalizationProfileRegistry(data_dir=self.data_dir)
+
+    def test_atomic_save_no_partial_file(self):
+        """После add_profile финальный файл должен существовать, tmp не должен остаться."""
+        self.registry.add_profile("my_profile", ["cleanup_soft"], "тест")
+        custom_path = self.data_dir / "normalization_profiles.json"
+        tmp_path = self.data_dir / "normalization_profiles.tmp"
+        # Финальный файл должен быть записан
+        self.assertTrue(custom_path.exists(), "Файл профилей не создан")
+        # Временный файл не должен остаться
+        self.assertFalse(tmp_path.exists(), "Временный .tmp файл не удалён после rename")
+
+    def test_atomic_save_valid_json_after_write(self):
+        """Сохранённый файл должен быть валидным JSON."""
+        import json
+        self.registry.add_profile("p1", ["cleanup_soft"])
+        self.registry.add_profile("p2", ["strip_hallucinations"])
+        custom_path = self.data_dir / "normalization_profiles.json"
+        data = json.loads(custom_path.read_text(encoding="utf-8"))
+        self.assertIsInstance(data, list)
+        names = [p["name"] for p in data]
+        self.assertIn("p1", names)
+        self.assertIn("p2", names)
+
+    def test_remove_profile_updates_file_atomically(self):
+        """remove_profile тоже должен обновить файл через атомарную запись."""
+        import json
+        self.registry.add_profile("removeme", ["cleanup_soft"])
+        self.registry.remove_profile("removeme")
+        custom_path = self.data_dir / "normalization_profiles.json"
+        data = json.loads(custom_path.read_text(encoding="utf-8"))
+        names = [p["name"] for p in data]
+        self.assertNotIn("removeme", names)
+
+
 if __name__ == "__main__":
     unittest.main()
