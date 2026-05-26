@@ -3546,6 +3546,8 @@ end tell'''
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "suggestions": [], "reason": "privacy_mode_active"}
         scan_limit = max(10, min(int(params.get("scan_limit", 100) or 100), 500))
         min_frequency = max(1, int(params.get("min_frequency", 2) or 2))
         top_k = max(5, min(int(params.get("top_k", 30) or 30), 100))
