@@ -115,6 +115,9 @@ def build_initial_prompt(
     Returns:
         Строка initial_prompt (может быть пустой).
     """
+    if max_words <= 0:
+        return ""
+
     now = time.time()
 
     recent = list(history_items[:history_limit])
