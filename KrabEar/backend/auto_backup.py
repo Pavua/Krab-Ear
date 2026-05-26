@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS
+
 logger = logging.getLogger("KrabEar.Backend.AutoBackup")
 
 # Настройки по умолчанию
@@ -113,21 +115,38 @@ class AutoBackupManager:
         backup_dir = self.backups_dir / f"auto_backup_{ts}"
         backup_dir.mkdir(parents=True, exist_ok=True)
 
-        files_to_backup = [
+        # Файлы истории/статуса копируются verbatim; settings.json — только после редакции.
+        plain_files = [
             self.store.history_path,
             self.store.tombstones_path,
             self.store.status_path,
-            self.store.settings_path,
         ]
 
         total_bytes = 0
         copied_files = []
-        for src in files_to_backup:
+        for src in plain_files:
             if Path(src).exists():
                 dst = backup_dir / Path(src).name
                 shutil.copy2(src, dst)
                 total_bytes += dst.stat().st_size
                 copied_files.append(Path(src).name)
+
+        # settings.json — редактируем чувствительные поля перед записью (W897 AB-2).
+        settings_src = Path(self.store.settings_path)
+        if settings_src.exists():
+            try:
+                raw = json.loads(settings_src.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    safe = {k: v for k, v in raw.items() if k not in _SENSITIVE_FIELDS}
+                else:
+                    safe = raw  # неожиданный формат — копируем как есть
+            except Exception as exc:
+                logger.warning("auto_backup: не удалось прочитать settings.json для редакции: %s", exc)
+                safe = {}
+            dst = backup_dir / settings_src.name
+            dst.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+            total_bytes += dst.stat().st_size
+            copied_files.append(settings_src.name)
 
         entries = 0
         try:
