@@ -426,5 +426,69 @@ class TestConcurrentProcess(unittest.TestCase):
             self.assertEqual(actual, expected_result)
 
 
+class TestLookaroundBoundary(unittest.TestCase):
+    """W989 F1: lookaround (?<!\w)/(?!\w) vs \b boundary regression tests.
+
+    \b fails when a word-char command is immediately preceded/followed by a
+    non-word char that is itself non-word (e.g. «(точка)» — ')' is non-word,
+    'а' is word → no \b at end; (?!\w) only checks the char after, not before).
+    """
+
+    def setUp(self):
+        self.proc = _make_proc()
+
+    def test_command_recognized_inside_parens_ru(self):
+        """«(точка)» — команда «точка» внутри скобок распознаётся.
+
+        F1 regression: trailing \\b не создавалась перед ')' (non-word),
+        т.к. предыдущий символ 'а' — word-char; \\b ожидает W→NW границу.
+        (?!\\w) работает корректно — просто проверяет, что следующий символ
+        не является word-char.
+
+        Процессор вставляет пробел после символа если есть продолжение текста,
+        поэтому результат «(. )» (пробел перед «)»), а не «(.)».
+        Главное — команда «точка» распознана (заменена на «.»), а не пропущена.
+        """
+        # «(точка)» — скобки не являются словом, команда внутри скобок
+        result = self.proc.process("(точка)", language="ru")
+        # Команда должна сработать — «точка» → «.»
+        self.assertIn(".", result)
+        self.assertNotIn("точка", result)
+        # Структура: «(» + «.» (+ опциональный пробел) + «)»
+        self.assertTrue(result.startswith("("), msg=f"Ожидали '(' в начале, получили: {result!r}")
+        self.assertTrue(result.endswith(")"), msg=f"Ожидали ')' в конце, получили: {result!r}")
+
+    def test_command_followed_by_dash(self):
+        """«точка—» — команда «точка» перед тире распознаётся.
+
+        Тире (—, U+2014) — non-word char. (?!\\w) корректно матчит.
+        """
+        result = self.proc.process("точка—продолжение", language="ru")
+        # «точка» в начале строки перед «—»: (?<!\w) OK (начало строки),
+        # (?!\w) OK (следующий — '—', non-word). Команда срабатывает.
+        self.assertIn(".", result)
+        self.assertNotIn("точка", result)
+
+    def test_es_commands_no_duplicate(self):
+        """W989 F2: _ES_COMMANDS не содержит дубликатов «nueva línea»."""
+        from core.voice_commands import _ES_COMMANDS  # noqa: PLC0415
+
+        # Считаем уникальные паттерны
+        patterns = [p for p, _, _ in _ES_COMMANDS]
+        duplicates = [p for p in set(patterns) if patterns.count(p) > 1]
+        self.assertEqual(
+            duplicates,
+            [],
+            msg=f"Дублирующиеся паттерны в _ES_COMMANDS: {duplicates}",
+        )
+
+    def test_es_nueva_linea_unique_count(self):
+        """«nueva línea» встречается в _ES_COMMANDS ровно 1 раз (F2 dedup)."""
+        from core.voice_commands import _ES_COMMANDS  # noqa: PLC0415
+
+        count = sum(1 for p, _, _ in _ES_COMMANDS if p == r"nueva línea")
+        self.assertEqual(count, 1, msg=f"Ожидалось 1 вхождение «nueva línea», нашли {count}")
+
+
 if __name__ == "__main__":
     unittest.main()
