@@ -132,6 +132,11 @@ POSITIVE_CASES: list[tuple[str, str, str]] = [
     # WAV
     ("wav_vav_fail", "записать вав файл", "WAV файл"),
 
+    # SSL — W1059 regression: [ЭэЕе]ль must match both Э (correct) and Е (Whisper mishear)
+    ("ssl_es_es_el_correct", "Эс Эс Эль сертификат", "SSL"),
+    ("ssl_es_es_el_whisper", "эс эс ель подключение", "SSL"),
+    ("ssl_uppercase_start", "Эс Эс Эль соединение", "SSL"),
+
     # subagent
     ("subagent_sab_agent", "саб агент выполнил", "subagent"),
     ("subagent_sub_agent_mixed", "sub агент запущен", "subagent"),
