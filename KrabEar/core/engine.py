@@ -187,11 +187,11 @@ _VOXTRAL_MAX_TOKENS = 2048
 # whisper-large-v3-mlx занимает ~3GB, pyannote ~1.5GB. Оставляем запас.
 _HEAVY_MODEL_MIN_FREE_GB = 4.0
 
-# W1137 F2: TTL для временно недоступных моделей (секунды).
-# После этого времени модель снова пробуется в fallback chain.
-# 1800 s = 30 min — достаточно для освобождения памяти после OOM,
-# но не так долго, чтобы постоянно деградировать под launchd KeepAlive.
-_UNAVAILABLE_TTL_SEC: float = 1800.0
+# TTL (секунд) для записей в _unavailable_models.
+# Transient failures (timeout, ImportError at cold start) blacklist adapters only
+# for this duration; after expiry the adapter gets one retry automatically.
+# Uses time.monotonic() — immune to wall-clock skew / NTP jumps.
+_UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
 
 
 def _get_available_memory_gb() -> float:
@@ -339,10 +339,6 @@ class AudioEngine:
         """
         self.current_model = settings.MODEL_BALANCED
         self.quality_profile = "balanced"
-        # W1137 F2: TTL-based unavailable models dict (model → eviction_time).
-        # После _UNAVAILABLE_TTL_SEC секунд модель снова допускается в chain.
-        # Ранее set[str] рос бесконечно: transient OOM/timeout → постоянное
-        # исключение до перезапуска процесса (под launchd KeepAlive опасно).
         self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
@@ -464,45 +460,21 @@ class AudioEngine:
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
-    # ------------------------------------------------------------------
-    # W1137 F2: TTL-based unavailable-model helpers
-    # ------------------------------------------------------------------
+    def _is_model_unavailable(self, model_id: str) -> bool:
+        """Проверяет, заблокирован ли адаптер/модель в _unavailable_models с учётом TTL.
 
-    def _mark_model_unavailable(self, model: str) -> None:
-        """Помечает модель недоступной с временной меткой истечения TTL.
-
-        После _UNAVAILABLE_TTL_SEC секунд _is_model_unavailable вернёт False
-        и модель снова войдёт в fallback chain.
+        Если запись есть, но TTL истёк (now - timestamp >= _UNAVAILABLE_MODEL_TTL_SEC),
+        запись вычищается и возвращается False — адаптер получает шанс на retry.
+        Использует time.monotonic() — устойчив к NTP-коррекциям и скачкам системных часов.
         """
-        self._unavailable_models[model] = time.time() + _UNAVAILABLE_TTL_SEC
-
-    def _is_model_unavailable(self, model: str) -> bool:
-        """Проверяет, считается ли модель всё ещё недоступной (TTL не истёк).
-
-        Если TTL истёк — запись удаляется из dict (lazy cleanup).
-        """
-        expiry = self._unavailable_models.get(model)
-        if expiry is None:
+        ts = self._unavailable_models.get(model_id)
+        if ts is None:
             return False
-        if time.time() >= expiry:
-            del self._unavailable_models[model]
+        if time.monotonic() - ts >= _UNAVAILABLE_MODEL_TTL_SEC:
+            # TTL истёк — убираем запись, адаптер снова доступен
+            del self._unavailable_models[model_id]
             return False
         return True
-
-    def reset_unavailable_models(self) -> dict[str, Any]:
-        """Очищает список недоступных моделей принудительно.
-
-        IPC-handler ``reset_unavailable_models`` вызывает этот метод
-        напрямую. Полезно для ручного восстановления после OOM без
-        перезапуска backend-процесса.
-        """
-        cleared = list(self._unavailable_models.keys())
-        self._unavailable_models.clear()
-        logger.info(
-            "reset_unavailable_models: очищено %d записей: %s",
-            len(cleared), cleared,
-        )
-        return {"cleared": cleared, "count": len(cleared)}
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute.
@@ -1353,7 +1325,7 @@ class AudioEngine:
                     "latency_ms": latency_ms,
                     "error": str(exc),
                 })
-                self._mark_model_unavailable(model_label)
+                self._unavailable_models[model_label] = time.monotonic()
 
             retries_done += 1
 
@@ -1822,7 +1794,7 @@ class AudioEngine:
                     return adapter_result
                 except Exception as exc:
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
-                    self._mark_model_unavailable(model_name)
+                    self._unavailable_models[model_name] = time.monotonic()
                     continue
 
             if self._is_model_unavailable(model_name):
@@ -1852,7 +1824,7 @@ class AudioEngine:
                     "Таймаут %ds при транскрибации моделью %s — пропускаю",
                     settings.TRANSCRIBE_TIMEOUT_SEC, model_name,
                 )
-                self._mark_model_unavailable(model_name)
+                self._unavailable_models[model_name] = time.monotonic()
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.
@@ -1860,10 +1832,10 @@ class AudioEngine:
                     "MLX watchdog timeout %.1fs для модели %s — Metal GPU stuck? Переключаюсь на следующий адаптер.",
                     e.timeout_sec, model_name,
                 )
-                self._mark_model_unavailable(model_name)
+                self._unavailable_models[model_name] = time.monotonic()
             except MemoryError:
                 logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
-                self._mark_model_unavailable(model_name)
+                self._unavailable_models[model_name] = time.monotonic()
                 # Phase B.2: stt.load_fail — model failed to init due to OOM
                 self._push_error(
                     "stt.load_fail",
@@ -1879,7 +1851,7 @@ class AudioEngine:
                 # errno 12 = Cannot allocate memory — ядро отказало в mmap
                 if e.errno == 12 or "Cannot allocate memory" in str(e):
                     logger.error("OOM (OSError) при модели %s: %s — помечаю как недоступную", model_name, e)
-                    self._mark_model_unavailable(model_name)
+                    self._unavailable_models[model_name] = time.monotonic()
                     # Phase B.2: stt.load_fail — OOM at OS level
                     self._push_error(
                         "stt.load_fail",
@@ -1893,10 +1865,10 @@ class AudioEngine:
                     )
                 else:
                     logger.warning("Модель %s не сработала (OSError): %s", model_name, e)
-                    self._mark_model_unavailable(model_name)
+                    self._unavailable_models[model_name] = time.monotonic()
             except Exception as e:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
-                self._mark_model_unavailable(model_name)
+                self._unavailable_models[model_name] = time.monotonic()
 
         # Если локально ничего не вышло — пробуем облако (если разрешено)
         if settings.NETWORK_MODE != "offline_strict":

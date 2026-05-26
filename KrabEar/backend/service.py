@@ -1021,6 +1021,7 @@ class BackendService:
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
+            "clear_unavailable_models": self._handle_clear_unavailable_models,  # W1304: сбросить blacklist недоступных STT-моделей (TTL override)
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
@@ -1750,6 +1751,28 @@ class BackendService:
         """Очищает ring-буфер и dedupe-состояние ErrorBus. Возвращает количество удалённых записей."""
         n = self._error_bus.clear()
         return {"cleared": n}
+
+    def _handle_clear_unavailable_models(self, params: dict) -> dict:
+        """W1304: Сбрасывает blacklist недоступных STT-моделей немедленно (TTL override).
+
+        Полезно после ручного устранения ошибки (например, OOM, timeout) — позволяет
+        вернуть адаптеры в chain без перезапуска backend. Возвращает список сброшенных
+        model_id и их возраст в секундах на момент сброса.
+        """
+        import time as _time
+        engine = getattr(self.transcriber, "engine", None)
+        if engine is None:
+            return {"cleared": [], "error": "engine_not_available"}
+        unavail = getattr(engine, "_unavailable_models", None)
+        if unavail is None:
+            return {"cleared": [], "error": "unavailable_models_not_found"}
+        now = _time.monotonic()
+        cleared = [
+            {"model_id": mid, "age_sec": round(now - ts, 1)}
+            for mid, ts in list(unavail.items())
+        ]
+        unavail.clear()
+        return {"cleared": cleared, "count": len(cleared)}
 
     def _handle_send_diagnostics_to_sentry(self, params: dict) -> dict:
         """Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.
