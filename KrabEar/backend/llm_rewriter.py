@@ -1233,6 +1233,27 @@ class LLMRewriter:
         )
         logger.info("LLMRewriter: API key updated, circuit breaker reset")
 
+    def set_base_url(self, base_url: str) -> None:
+        """Обновляет base URL LM Studio без перезапуска backend.
+
+        Сбрасывает circuit breaker и кэш ошибок — новый endpoint начинает
+        с чистого листа. После сброса запускает warmup в фоне.
+        """
+        normalized = base_url.rstrip("/")
+        if self._base_url == normalized:
+            return
+        self._base_url = normalized
+        self._last_error = None
+        self._circuit = CircuitBreaker(
+            fail_threshold=self._circuit._fail_threshold,
+            initial_reset_sec=self._circuit._initial_reset_sec,
+            max_reset_sec=self._circuit._max_reset_sec,
+        )
+        logger.info(
+            "LLMRewriter: base URL updated to %s, circuit breaker reset", normalized
+        )
+        threading.Thread(target=self.warmup, daemon=True).start()
+
     def ping(self) -> bool:
         """Проверка доступности LM Studio через GET /models.
 
