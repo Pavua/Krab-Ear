@@ -1123,7 +1123,8 @@ class BackendService:
             "enrich_recording": self._metadata_enricher.handle_enrich_recording,
             "get_shutdown_status": self._handle_get_shutdown_status,  # статус последнего graceful shutdown: clean, last_shutdown_time
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
-            "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
+            "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты (фоновый поток, возвращает job_id)
+            "dedup_progress": self._handle_dedup_progress,  # опрос статуса фоновой задачи run_deduplication по job_id
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
             "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
@@ -3580,16 +3581,30 @@ end tell'''
         return self._auto_deduplicator.handle_check_duplicate(params)
 
     def _handle_run_deduplication(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сканирует всю историю и возвращает отчёт о дублирующихся транскрипциях.
+        """Запускает сканирование истории на дубликаты в фоновом потоке.
+
+        W1243 F2: возвращает немедленно {"ok": True, "job_id": "..."}.
+        Прогресс и результат доступны через dedup_progress.
 
         Params:
             threshold (float, optional): порог сходства [0..1], по умолчанию 0.9.
 
         Returns:
-            dict: total_scanned, duplicate_groups, duplicates.
+            dict: ok=True, job_id (str).
         """
         params["_store"] = self.store
         return self._auto_deduplicator.handle_run_deduplication(params)
+
+    def _handle_dedup_progress(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Опрос статуса фоновой задачи run_deduplication.
+
+        Params:
+            job_id (str): идентификатор задачи, полученный из run_deduplication.
+
+        Returns:
+            dict: found, job_id, status, elapsed_sec, result, error.
+        """
+        return self._auto_deduplicator.handle_dedup_progress(params)
 
     def _handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику дедупликатора за текущую сессию.
