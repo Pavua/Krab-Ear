@@ -478,5 +478,112 @@ class TestSearchIndexWave111(unittest.TestCase):
         self.assertNotIn("nohit2", ids)
 
 
+class TestSearchIndexW1041(unittest.TestCase):
+    """W1041 HIGH regression tests: source_text in signature + RLock thread-safety."""
+
+    # ------------------------------------------------------------------
+    # F1: _compute_signature must include source_text
+    # ------------------------------------------------------------------
+    def test_signature_includes_source_text_changes(self):
+        """source_text-only change must produce a different signature (F1 fix)."""
+        base_item = {"id": "1", "text": "hello", "source_text": "original", "translated_text": ""}
+        changed_item = {"id": "1", "text": "hello", "source_text": "modified", "translated_text": ""}
+
+        sig_before = SearchIndex._compute_signature([base_item])
+        sig_after = SearchIndex._compute_signature([changed_item])
+
+        self.assertNotEqual(
+            sig_before,
+            sig_after,
+            "Signature must differ when source_text changes (F1 fix)",
+        )
+
+    def test_index_rebuilt_on_source_text_change(self):
+        """build_index must rebuild when only source_text changes (F1 integration)."""
+        idx = SearchIndex()
+        item_v1 = {"id": "1", "text": "hello", "source_text": "исходный текст", "translated_text": ""}
+        idx.build_index([item_v1])
+        sig_v1 = idx._signature
+
+        # Change only source_text
+        item_v2 = {"id": "1", "text": "hello", "source_text": "изменённый текст", "translated_text": ""}
+        idx.build_index([item_v2])
+        sig_v2 = idx._signature
+
+        self.assertNotEqual(sig_v1, sig_v2, "build_index must detect source_text-only change")
+
+    def test_source_text_only_item_searchable_after_rebuild(self):
+        """source_text content must be findable after a source_text-triggered rebuild."""
+        idx = SearchIndex()
+        item_v1 = {"id": "1", "text": "", "source_text": "old_unique_word", "translated_text": ""}
+        idx.build_index([item_v1])
+
+        item_v2 = {"id": "1", "text": "", "source_text": "new_unique_word", "translated_text": ""}
+        idx.build_index([item_v2])
+
+        self.assertEqual(idx.search("old_unique_word"), [], "old source_text must not be found after rebuild")
+        results = idx.search("new_unique_word")
+        self.assertEqual(len(results), 1, "new source_text must be indexed after rebuild")
+
+    # ------------------------------------------------------------------
+    # F2: build_index + search must be safe under concurrent access
+    # ------------------------------------------------------------------
+    def test_concurrent_build_and_search_no_race(self):
+        """10 threads mix build_index + search with no exception (F2 RLock fix)."""
+        idx = SearchIndex()
+        base_items = [
+            {"id": str(i), "text": f"слово{i} тест данные", "source_text": "", "translated_text": ""}
+            for i in range(30)
+        ]
+        idx.build_index(base_items)
+
+        errors: list[Exception] = []
+
+        def builder():
+            try:
+                for j in range(5):
+                    items = [
+                        {
+                            "id": str(i),
+                            "text": f"слово{i} тест данные вариант{j}",
+                            "source_text": f"src{j}",
+                            "translated_text": "",
+                        }
+                        for i in range(30)
+                    ]
+                    idx.build_index(items)
+            except Exception as exc:
+                errors.append(exc)
+
+        def searcher():
+            try:
+                for _ in range(20):
+                    results = idx.search("тест")
+                    assert isinstance(results, list)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = (
+            [threading.Thread(target=builder) for _ in range(5)]
+            + [threading.Thread(target=searcher) for _ in range(5)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent build+search raised: {errors}")
+
+    def test_has_rlock_attribute(self):
+        """SearchIndex must expose _lock as threading.RLock (F2 structural check)."""
+        idx = SearchIndex()
+        self.assertTrue(
+            hasattr(idx, "_lock"),
+            "SearchIndex must have a _lock attribute",
+        )
+        # RLock type check — CPython exposes it as _RLock
+        self.assertIsInstance(idx._lock, type(threading.RLock()))
+
+
 if __name__ == "__main__":
     unittest.main()
