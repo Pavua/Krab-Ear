@@ -469,4 +469,9 @@ class VoiceCommandProcessor:
                 output.append(char)
                 pos += 1
 
+        if capitalize_next:
+            logger.info(
+                "voice_commands: capitalize_next at end-of-text — no following token"
+            )
+
         return "".join(output)
