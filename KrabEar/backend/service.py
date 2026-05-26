@@ -1022,8 +1022,7 @@ class BackendService:
             "get_paste_profile_for_app": self._paste_app_memory.handle_get_paste_profile_for_app,  # VERIFIED: called from Swift (PasteService)
             "record_paste_app_profile": self._paste_app_memory.handle_record_paste_app_profile,  # VERIFIED: called from Swift (PasteService)
             "list_app_profiles": self._paste_app_memory.handle_list_app_profiles,  # список сохранённых профилей по приложениям
-            "delete_app_profile": self._paste_app_memory.handle_delete_app_profile,  # удалить профиль приложения
-            "cleanup_stale_app_profiles": self._paste_app_memory.handle_cleanup_stale_app_profiles,  # удалить устаревшие записи
+
             "get_audio_devices": self._handle_get_audio_devices,  # список доступных аудиовходов для GUI
             "test_microphone": self._handle_test_microphone,  # тест микрофона: RMS/peak уровни
             "auto_summarize_batch": self._history.handle_auto_summarize_batch,  # авто-резюме пакета транскрипций через LLM
@@ -1157,15 +1156,8 @@ class BackendService:
             "get_archive_stats": self._archive_manager.handle_get_archive_stats,  # статистика архива: количество, размер, oldest/newest
             "generate_stats_report": self._handle_generate_stats_report,  # полный Markdown-отчёт статистики за период
             "generate_mini_stats_report": self._handle_generate_mini_stats_report,  # краткий 5-строчный отчёт состояния
-            # --- call_assist template management ---
-            "call_assist_list_templates": self._call_assist.handle_list_templates,  # список шаблонов быстрых реплик call assist
-            "call_assist_add_template": self._call_assist.handle_add_template,  # добавить шаблон быстрой реплики
-            "call_assist_remove_template": self._call_assist.handle_remove_template,  # удалить шаблон быстрой реплики
-            "call_assist_template": self._call_assist.handle_template,  # отправить шаблонную реплику в Gateway
-            "call_assist_cost_report": self._call_assist.handle_cost_report,  # подробный cost report текущей звонковой сессии
             # --- Phase 3 safeguards ---
             "call_estimate_cost": self._call_cost_estimator.handle_estimate_cost,  # оценить стоимость звонка по провайдеру и стране
-            "call_check_auto_end": self._call_auto_end.handle_check_auto_end,  # проверить правила автоматического завершения
             # --- text templates ---
             "get_templates": self._template_manager.handle_get_templates,  # список шаблонов быстрой вставки текста
             "add_template": self._template_manager.handle_add_template,  # добавить шаблон текста
