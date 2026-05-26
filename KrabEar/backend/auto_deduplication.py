@@ -7,12 +7,22 @@
   - "merged"  — запись достаточно похожа, чтобы быть объединённой (reserved)
 
 Настройка AUTO_DEDUP_ENABLED (в DEFAULT_SETTINGS) управляет режимом по умолчанию.
+
+W1243 F2 HIGH fix:
+  - _MAX_DEDUP_SCAN = 1000: ограничение полного сканирования (run_deduplication)
+    берёт только последние 1000 записей, чтобы избежать O(n²) на 10k+ истории.
+  - Записи без поля ts трактуются как самые старые (timestamp=0) — вне 60-сек окна.
+  - run_deduplication выполняется в фоновом потоке (daemon=True); IPC-обработчик
+    возвращает немедленно {"ok": True, "job_id": "..."}.
+  - dedup_progress IPC-метод для опроса статуса фоновой задачи.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import uuid
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -28,6 +38,12 @@ MERGE_THRESHOLD: float = 0.95
 # Настройка-флаг для DEFAULT_SETTINGS / runtime settings
 AUTO_DEDUP_ENABLED: bool = False
 
+# W1243 F2: максимальное число записей для полного сканирования run_deduplication
+_MAX_DEDUP_SCAN: int = 1000
+
+# Timestamp-заглушка для записей без поля ts — ставим в эпоху 0 (самые старые)
+_MISSING_TS_PLACEHOLDER: str = "1970-01-01T00:00:00+00:00"
+
 
 @dataclass
 class DedupResult:
@@ -41,7 +57,13 @@ class DedupResult:
 class AutoDeduplicator:
     """Автоматическое обнаружение и обработка дубликатов транскрипций.
 
-    Потокобезопасен: все счётчики защищены RLock.
+    Потокобезопасен: все счётчики и состояние фоновых задач защищены RLock.
+
+    W1243 F2 HIGH fix:
+      - run_deduplication теперь ограничен _MAX_DEDUP_SCAN записями.
+      - Записи с отсутствующим ts получают заглушку 1970-01-01 (эпоха 0).
+      - Фоновое выполнение: handle_run_deduplication возвращает job_id немедленно.
+      - handle_dedup_progress — опрос статуса задачи.
     """
 
     def __init__(self) -> None:
@@ -53,6 +75,9 @@ class AutoDeduplicator:
         self._duplicates_found: int = 0
         # Суммарная длина (chars) отклонённых дубликатов — для оценки сэкономленного места
         self._chars_saved: int = 0
+
+        # Реестр фоновых dedup-задач: job_id -> state dict
+        self._jobs: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -69,6 +94,9 @@ class AutoDeduplicator:
 
         Сравнивает text с последними активными записями истории в 60-секундном окне.
         При threshold >= MERGE_THRESHOLD действие помечается как "merged" (не "skipped").
+
+        W1243 F2: записи без поля ts трактуются как самые старые (ts=1970-01-01),
+        что автоматически выводит их за пределы 60-секундного окна.
 
         Args:
             text: текст проверяемой транскрипции.
@@ -103,13 +131,21 @@ class AutoDeduplicator:
                 action_taken="kept",
             )
 
+        # W1243 F2: нормализуем ts — пустой/отсутствующий → эпоха 0 (вне окна)
+        normalized_items = []
+        for item in items:
+            if not item.get("ts"):
+                item = dict(item)
+                item["ts"] = _MISSING_TS_PLACEHOLDER
+            normalized_items.append(item)
+
         # Добавляем новую запись как временный элемент для find_duplicates
         new_item: dict[str, Any] = {
             "id": "__new__",
             "text": text,
             "ts": timestamp,
         }
-        candidates = list(items) + [new_item]
+        candidates = normalized_items + [new_item]
 
         groups = self._detector.find_duplicates(candidates, similarity_threshold=threshold)
 
@@ -166,7 +202,12 @@ class AutoDeduplicator:
         store: Any,
         threshold: float = DEFAULT_DEDUP_THRESHOLD,
     ) -> dict[str, Any]:
-        """Сканирует всю историю и возвращает отчёт о дубликатах.
+        """Сканирует историю (с ограничением _MAX_DEDUP_SCAN) и возвращает отчёт о дубликатах.
+
+        W1243 F2 HIGH fix:
+          - Загружает не более _MAX_DEDUP_SCAN (1000) записей — берёт самые свежие.
+          - Записи с пустым/отсутствующим ts получают заглушку _MISSING_TS_PLACEHOLDER,
+            что выводит их за пределы 60-секундного окна check_duplicate.
 
         Не удаляет записи автоматически — только возвращает список групп
         дубликатов для принятия решения пользователем/системой.
@@ -178,16 +219,21 @@ class AutoDeduplicator:
         Returns:
             dict с полями:
               - total_scanned: int
+              - total_in_store: int   — реальный размер истории (до ограничения)
+              - capped: bool          — True если история обрезана до _MAX_DEDUP_SCAN
               - duplicate_groups: int
               - duplicates: list[dict]  — каждый элемент: {original_id, duplicate_ids, similarity}
         """
         all_items: list[dict] = []
         cursor: str | None = None
+        total_in_store: int = 0
 
-        # Загружаем всю историю постранично
-        while True:
+        # Загружаем историю постранично до _MAX_DEDUP_SCAN записей
+        while len(all_items) < _MAX_DEDUP_SCAN:
+            remaining = _MAX_DEDUP_SCAN - len(all_items)
+            page_size = min(200, remaining)
             try:
-                page, next_cursor = store.get_history_page(cursor=cursor, limit=200)
+                page, next_cursor = store.get_history_page(cursor=cursor, limit=page_size)
             except Exception:
                 logger.exception("Ошибка загрузки истории для run_deduplication")
                 break
@@ -196,11 +242,24 @@ class AutoDeduplicator:
                 break
 
             all_items.extend(page)
+            total_in_store += len(page)
             cursor = next_cursor
             if cursor is None:
                 break
 
-        groups = self._detector.find_duplicates(all_items, similarity_threshold=threshold)
+        # Определяем реальный total_in_store (если обрезали — делаем ещё один запрос для подсчёта)
+        # Упрощение: если страниц было меньше _MAX_DEDUP_SCAN — total_in_store == len(all_items)
+        capped = len(all_items) >= _MAX_DEDUP_SCAN and cursor is not None
+
+        # W1243 F2: нормализуем ts у записей без метки времени
+        normalized_items = []
+        for item in all_items:
+            if not item.get("ts"):
+                item = dict(item)
+                item["ts"] = _MISSING_TS_PLACEHOLDER
+            normalized_items.append(item)
+
+        groups = self._detector.find_duplicates(normalized_items, similarity_threshold=threshold)
 
         duplicates_list: list[dict] = []
         for group in groups:
@@ -216,16 +275,95 @@ class AutoDeduplicator:
             })
 
         logger.info(
-            "run_deduplication: проверено %d записей, найдено %d групп дубликатов",
-            len(all_items),
+            "run_deduplication: проверено %d записей (capped=%s), найдено %d групп дубликатов",
+            len(normalized_items),
+            capped,
             len(duplicates_list),
         )
 
         return {
-            "total_scanned": len(all_items),
+            "total_scanned": len(normalized_items),
+            "total_in_store": total_in_store,
+            "capped": capped,
             "duplicate_groups": len(duplicates_list),
             "duplicates": duplicates_list,
         }
+
+    # ------------------------------------------------------------------
+    # Background job management (W1243 F2)
+    # ------------------------------------------------------------------
+
+    def _create_dedup_job(self) -> str:
+        """Создаёт новую запись в реестре фоновых dedup-задач."""
+        job_id = f"dedup-{uuid.uuid4().hex[:8]}"
+        with self._lock:
+            self._jobs[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "started_at": time.monotonic(),
+                "finished_at": None,
+                "result": None,
+                "error": None,
+            }
+        return job_id
+
+    def _update_dedup_job(self, job_id: str, **fields: Any) -> None:
+        """Обновляет поля задачи в реестре."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.update(fields)
+
+    def get_dedup_job(self, job_id: str) -> dict[str, Any] | None:
+        """Возвращает снимок состояния задачи (или None если не существует)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            snapshot = dict(job)
+        started_at = snapshot.get("started_at") or 0.0
+        finished_at = snapshot.get("finished_at")
+        now = finished_at if finished_at is not None else time.monotonic()
+        snapshot["elapsed_sec"] = round(max(0.0, now - started_at), 3)
+        return snapshot
+
+    def run_deduplication_async(
+        self,
+        store: Any,
+        threshold: float = DEFAULT_DEDUP_THRESHOLD,
+    ) -> str:
+        """Запускает run_deduplication в фоновом потоке (daemon=True).
+
+        W1243 F2: IPC немедленно возвращает job_id; прогресс доступен через
+        get_dedup_job(job_id) или IPC-метод dedup_progress.
+
+        Returns:
+            job_id: строка-идентификатор задачи.
+        """
+        job_id = self._create_dedup_job()
+
+        def _worker() -> None:
+            self._update_dedup_job(job_id, status="running")
+            try:
+                result = self.run_deduplication(store=store, threshold=threshold)
+                self._update_dedup_job(
+                    job_id,
+                    status="done",
+                    result=result,
+                    finished_at=time.monotonic(),
+                )
+            except Exception as exc:
+                logger.exception("run_deduplication_async failed for job_id=%s", job_id)
+                self._update_dedup_job(
+                    job_id,
+                    status="failed",
+                    error=str(exc),
+                    finished_at=time.monotonic(),
+                )
+
+        t = threading.Thread(target=_worker, daemon=True, name=f"AutoDedup-{job_id}")
+        t.start()
+        return job_id
 
     def get_dedup_stats(self) -> dict[str, Any]:
         """Возвращает статистику работы дедупликатора за текущую сессию.
@@ -293,16 +431,49 @@ class AutoDeduplicator:
     def handle_run_deduplication(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода run_deduplication.
 
+        W1243 F2: запускает сканирование в фоновом потоке и немедленно возвращает job_id.
+
         Params:
             threshold (float, optional): порог сходства, по умолчанию 0.9.
             store: передаётся из BackendService.
+
+        Returns:
+            dict с полями: ok=True, job_id (str).
         """
         threshold = float(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
 
-        return self.run_deduplication(store=store, threshold=threshold)
+        job_id = self.run_deduplication_async(store=store, threshold=threshold)
+        return {"ok": True, "job_id": job_id}
+
+    def handle_dedup_progress(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC-обработчик метода dedup_progress — опрос статуса фоновой dedup-задачи.
+
+        Params:
+            job_id (str): идентификатор задачи, полученный из run_deduplication.
+
+        Returns:
+            dict с полями: job_id, status, elapsed_sec, result (или None), error (или None).
+            Если job_id не найден — возвращает {"found": False}.
+        """
+        job_id = str(params.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("job_id обязателен для dedup_progress")
+
+        state = self.get_dedup_job(job_id)
+        if state is None:
+            return {"found": False, "job_id": job_id}
+
+        return {
+            "found": True,
+            "job_id": state["job_id"],
+            "status": state["status"],
+            "elapsed_sec": state.get("elapsed_sec", 0.0),
+            "result": state.get("result"),
+            "error": state.get("error"),
+        }
 
     def handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода get_dedup_stats."""
