@@ -453,6 +453,14 @@ class LLMRewriter:
             },
         )
 
+        # Sentry tag — позволяет группировать ошибки rewriter'а по модели LM Studio.
+        #    Lazy import: sentry_sdk опциональная зависимость; no-op если не инициализирован.
+        try:
+            import sentry_sdk as _sentry_sdk  # noqa: PLC0415
+            _sentry_sdk.set_tag("model_name", self._model)
+        except Exception:  # noqa: BLE001
+            pass  # telemetry никогда не должна ломать rewriter
+
         # 2. Circuit breaker check
         if not self._circuit.allow_request():
             _add_bc(
