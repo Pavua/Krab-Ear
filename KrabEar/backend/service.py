@@ -2561,51 +2561,7 @@ def default_socket_path(data_dir: Path) -> Path:
     return data_dir / "krabear.sock"
 
 
-def configure_logging(data_dir: Path) -> None:
-    """Настраивает логирование backend в файл и stdout."""
-    import json as _json
-    data_dir.mkdir(parents=True, exist_ok=True)
-    log_path = data_dir / "backend.log"
-
-    if settings.LOG_FORMAT == "json":
-        _STANDARD_LOG_ATTRS = frozenset({
-            "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-            "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-            "created", "msecs", "relativeCreated", "thread", "threadName",
-            "processName", "process", "message", "asctime", "taskName",
-        })
-
-        class JsonFormatter(logging.Formatter):
-            def format(self, record: logging.LogRecord) -> str:
-                log_entry: dict = {
-                    "ts": self.formatTime(record),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "msg": record.getMessage(),
-                }
-                # Merge extra= fields — any attribute not in the standard set
-                extra = {
-                    k: v for k, v in record.__dict__.items()
-                    if k not in _STANDARD_LOG_ATTRS
-                }
-                if extra:
-                    log_entry.update(extra)
-                # Append exception info if present
-                if record.exc_info:
-                    log_entry["exc"] = self.formatException(record.exc_info)
-                return _json.dumps(log_entry, default=str)
-        formatter: logging.Formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-
-    handlers: list[logging.Handler] = [
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path, encoding="utf-8"),
-    ]
-    for h in handlers:
-        h.setFormatter(formatter)
-
-    logging.basicConfig(level=logging.INFO, handlers=handlers)
+from backend.service_logging import configure_logging, JsonFormatter, _STANDARD_LOG_ATTRS  # noqa: F401, E402
 
 
 def build_service(data_dir: Path) -> BackendService:
