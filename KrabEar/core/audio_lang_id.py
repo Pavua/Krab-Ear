@@ -18,13 +18,18 @@ detect_language() (encoder + language head, без decoder).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
 from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
+
+# Языки, для которых STTRouter знает специализированный адаптер.
+# Коды вне этого множества роутятся в STT_OTHER_PRIMARY_MODEL — это может быть
+# неверно для fr/tr/pt/etc. Если Whisper вернул неизвестный код, логируем warning.
+SUPPORTED_LANGUAGES: frozenset = frozenset({"ru", "uk", "en", "es"})
 
 
 class AudioLanguageID:
@@ -46,9 +51,11 @@ class AudioLanguageID:
         self,
         model_path: Optional[str] = None,
         preview_sec: Optional[float] = None,
+        restrict_to_supported: bool = False,
     ) -> None:
         self._model_path = model_path
         self._preview_sec = preview_sec
+        self._restrict_to_supported = restrict_to_supported
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -108,7 +115,20 @@ class AudioLanguageID:
         # 6. Запускаем inference под mlx_lock
         result = self._run_detect(audio_preview)
 
-        # 7. Сохраняем в кеш
+        # 7. Проверяем allowlist поддерживаемых языков
+        if result is not None and result not in SUPPORTED_LANGUAGES:
+            logger.warning(
+                "AudioLanguageID: detected unsupported language, STTRouter will use fallback",
+                extra={"detected_lang": result, "fallback": "other"},
+            )
+            if self._restrict_to_supported:
+                logger.debug(
+                    "AudioLanguageID: restrict_to_supported=True → suppressing lang=%s",
+                    result,
+                )
+                return None
+
+        # 8. Сохраняем в кеш
         if result is not None and cache is not None:
             cache["audio_lang"] = result
             logger.debug("AudioLanguageID: cached result → %s", result)
