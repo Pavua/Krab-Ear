@@ -395,7 +395,10 @@ class BackendService:
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
-        self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
+        self._config_presets = ConfigPresetsLibrary(
+            data_dir=self.store.data_dir,
+            settings_svc=self._settings_svc,
+        )
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
@@ -1086,8 +1089,11 @@ class BackendService:
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
-            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
+            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # атомарно применить пресет: merge + save + after_save_hooks
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
+            "delete_config_preset": self._config_presets.handle_delete_config_preset,  # удалить кастомный конфигурационный пресет по имени
+            "export_config_preset": self._config_presets.handle_export_config_preset,  # экспортировать пресет в JSON-строку для передачи/сохранения
+            "import_config_preset": self._config_presets.handle_import_config_preset,  # импортировать пресет из JSON-строки (envelope или прямой объект)
             "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
             "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
             "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
