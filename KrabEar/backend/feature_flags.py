@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,14 +110,25 @@ class FeatureFlags:
                 logger.warning("FeatureFlags: нестандартное значение флага %s=%r, игнорируется", name, value)
 
     def _save(self) -> None:
-        """Сохраняет текущие значения флагов в файл."""
+        """Сохраняет текущие значения флагов в файл атомарно (tmp + fsync + rename).
+
+        Использует запись во временный файл рядом с целевым, fsync и атомарное
+        переименование (os.replace) — гарантирует что читатель видит либо старое,
+        либо полное новое состояние, никогда частичную запись.
+        """
+        tmp_path = self._flags_path.with_suffix(self._flags_path.suffix + ".tmp")
         try:
-            self._flags_path.write_text(
-                json.dumps(self._flags, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(self._flags, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._flags_path)
         except Exception as exc:
             logger.error("FeatureFlags: не удалось сохранить %s: %s", self._flags_path, exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Публичный API
