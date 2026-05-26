@@ -248,6 +248,7 @@ def build_dispatch_table(
         # статистика воспроизведения одной записи: play_count, total_listened_sec, last_played
         "get_playback_stats": svc._playback_tracker.handle_get_playback_stats,
         "get_most_replayed": svc._playback_tracker.handle_get_most_replayed,  # топ N наиболее часто воспроизводимых записей
+        "get_never_played": svc._handle_get_never_played,  # записи истории, ни разу не воспроизводившиеся (privacy-gated)
         # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
         "post_process_text": svc._text_processing_svc.handle_post_process_text,
         "list_post_process_steps": svc._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
