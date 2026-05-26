@@ -9,6 +9,7 @@ from backend.data_migrator import (
     _read_ndjson,
 )
 
+import fcntl
 import json
 import sys
 import tempfile
@@ -600,6 +601,72 @@ class TestUnicodeDataPreserved(unittest.TestCase):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         self.assertIn("files", meta)
         self.assertIn("migration_backup_ts", meta)
+
+
+class TestMigrationAcquiresHistoryLock(unittest.TestCase):
+    """W1026 F5 — _migrate_v1_to_v2 должен удерживать POSIX flock на history.lock."""
+
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._migrator = DataMigrator()
+        history_path = self._tmpdir / "history.ndjson"
+        _write_ndjson(history_path, [_make_v1_item(f"id{i}") for i in range(5)])
+
+    def test_migration_acquires_history_lock(self) -> None:
+        """Пока идёт миграция, main-поток не может получить LOCK_EX на history.lock.
+
+        Алгоритм:
+        1. Запускаем миграцию в фоновом потоке (with _patch чтобы она "зависла" внутри
+           _do_migrate_v1_to_v2 ровно столько, сколько нужно для проверки).
+        2. Ждём пока фоновый поток захватит flock.
+        3. Пытаемся захватить LOCK_EX | LOCK_NB из main-потока — ожидаем BlockingIOError.
+        4. Даём миграции завершиться, после чего main-поток должен захватить lock свободно.
+        """
+        lock_path = self._tmpdir / "history.lock"
+        lock_acquired = threading.Event()   # сигнал: migration взяла flock
+        release_migration = threading.Event()  # сигнал: migration может продолжить
+
+        original_do_migrate = self._migrator._do_migrate_v1_to_v2
+
+        def slow_do_migrate(data_dir: Path, backup_path: str) -> MigrationResult:
+            lock_acquired.set()           # flock уже взят (мы внутри try-блока)
+            release_migration.wait(timeout=5.0)  # ждём сигнала от main-потока
+            return original_do_migrate(data_dir, backup_path)
+
+        self._migrator._do_migrate_v1_to_v2 = slow_do_migrate  # type: ignore[method-assign]
+
+        migration_thread = threading.Thread(
+            target=self._migrator.migrate,
+            args=(self._tmpdir,),
+            daemon=True,
+        )
+        migration_thread.start()
+
+        # Ждём пока миграция захватит flock
+        self.assertTrue(lock_acquired.wait(timeout=5.0), "Migration did not acquire lock in time")
+
+        # Пытаемся захватить LOCK_EX из main-потока — должны получить BlockingIOError
+        with open(lock_path, "a+") as lf:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Если мы сюда попали — flock НЕ был взят миграцией (баг)
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+                self.fail("Expected BlockingIOError: migration did not hold history.lock")
+            except BlockingIOError:
+                pass  # ожидаемо — flock занят миграцией
+
+        # Разрешаем миграции завершиться
+        release_migration.set()
+        migration_thread.join(timeout=10.0)
+        self.assertFalse(migration_thread.is_alive(), "Migration thread did not finish")
+
+        # После завершения миграции flock должен быть свободен
+        with open(lock_path, "a+") as lf:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except BlockingIOError:
+                self.fail("Lock should be released after migration completes")
 
 
 if __name__ == "__main__":
