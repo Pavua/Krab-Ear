@@ -28,7 +28,12 @@ from backend.playback_tracker import PlaybackTracker
 from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
 from backend.sentiment_trends import SentimentTrendAnalyzer
-from backend.transcription_queue import TranscriptionQueue
+# W924/W949: TranscriptionQueue import removed — module is DEAD CODE in production.
+# process_next() was never called; jobs enqueued via IPC accumulated in `pending` forever.
+# The 4 IPC handlers (enqueue_transcription, cancel_transcription, get_queue_status,
+# list_transcription_queue) have been removed from the dispatch table below.
+# Unit tests in test_transcription_queue.py remain for future resurrection.
+# Actual batch transcription uses transcribe_paths_async / JobTracker instead.
 from core.emotion_detector import EmotionDetector
 from core.transcription_scorer import TranscriptionScorer
 from core.topic_tracker import TopicTracker
@@ -411,7 +416,8 @@ class BackendService:
         )
         self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
-        self._transcription_queue = TranscriptionQueue()
+        # W924/W949: self._transcription_queue removed — TranscriptionQueue was dead code.
+        # process_next() was never called; see comment near import for full rationale.
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
@@ -1088,10 +1094,11 @@ class BackendService:
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
-            "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
-            "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
-            "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
-            "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
+            # W924/W949: enqueue_transcription / cancel_transcription / get_queue_status /
+            # list_transcription_queue removed — TranscriptionQueue.process_next() was never
+            # called in production; enqueued jobs accumulated silently. Handlers removed to
+            # prevent the misleading illusion of a working batch queue. JobTracker +
+            # transcribe_paths_async remains the real async-transcription path.
             "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
