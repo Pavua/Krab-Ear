@@ -136,8 +136,7 @@ class TestTokenBucketRefillRate(unittest.TestCase):
         # Опустошить
         for _ in range(5):
             bucket.consume()
-        time.sleep(2.5)  # 5 * (1/60 sec-per-token)? — нет, rate=5/60=0.0833 t/s; 2.5s = ~0.2 токена
-        # Вместо этого просто проверяем cap
+        # Simulate a long elapsed time without sleeping — manipulate _last_refill directly.
         bucket._last_refill -= 1000.0  # симулируем давнее время
         bucket._refill()
         self.assertEqual(bucket._tokens, bucket.capacity)

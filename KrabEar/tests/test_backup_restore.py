@@ -7,7 +7,9 @@ import json
 import sys
 import unittest
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 # Добавляем корень проекта в sys.path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -100,10 +102,13 @@ class BackupHistoryTest(unittest.TestCase):
         self.assertIn("size_mb", entry)
 
     def test_list_backups_multiple(self):
-        import time
-        self.svc.handle_backup_history({})
-        time.sleep(1.1)  # ensure distinct timestamps in backup dir names
-        self.svc.handle_backup_history({})
+        # Inject distinct timestamps so backup dir names don't collide — no sleep needed.
+        ts1 = datetime(2026, 1, 1, 10, 0, 0)
+        ts2 = datetime(2026, 1, 1, 10, 0, 2)
+        with patch("backend.history_service.datetime") as mock_dt:
+            mock_dt.now.side_effect = [ts1, ts2]
+            self.svc.handle_backup_history({})
+            self.svc.handle_backup_history({})
         result = self.svc.handle_list_backups({})
         self.assertEqual(len(result["backups"]), 2)
 

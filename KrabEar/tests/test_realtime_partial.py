@@ -201,8 +201,19 @@ class TestRealtimePartialEmission(unittest.TestCase):
         """If transcribe_preview returns empty text, no event should be emitted."""
         bus = _make_bus()
         recorder = _make_recorder(duration_sec=3.0)
+        # Signal after enough ticks so we know the worker had a fair chance.
+        ticked = threading.Event()
+        call_count = [0]
+        original_preview = MagicMock(return_value={"text": ""})
+
+        def _preview_and_count(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                ticked.set()
+            return {"text": ""}
+
         transcriber = MagicMock()
-        transcriber.transcribe_preview.return_value = {"text": ""}
+        transcriber.transcribe_preview.side_effect = _preview_and_count
 
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
@@ -212,7 +223,7 @@ class TestRealtimePartialEmission(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id="sess-empty")
-        time.sleep(0.5)
+        ticked.wait(timeout=3.0)
         rpt.stop(timeout_sec=2.0)
 
         partial_calls = [
@@ -226,8 +237,19 @@ class TestRealtimePartialEmission(unittest.TestCase):
         bus = _make_bus()
         # Always return the same duration — after first emit, no new progress.
         audio = _make_audio(2.0)
+
+        # Signal after enough snapshot calls so the worker had multiple chances to emit.
+        snapped = threading.Event()
+        snap_count = [0]
+
+        def _snap(*args, **kwargs):
+            snap_count[0] += 1
+            if snap_count[0] >= 4:
+                snapped.set()
+            return (audio, 2.0)
+
         recorder = MagicMock()
-        recorder.snapshot_audio.return_value = (audio, 2.0)
+        recorder.snapshot_audio.side_effect = _snap
         transcriber = _make_transcriber(text="Дублирующий текст")
 
         rpt = RealtimePartialTranscriber(
@@ -238,7 +260,7 @@ class TestRealtimePartialEmission(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id="sess-nodelta")
-        time.sleep(0.6)
+        snapped.wait(timeout=3.0)
         rpt.stop(timeout_sec=2.0)
 
         partial_calls = [
@@ -258,8 +280,18 @@ class TestRealtimePartialErrorHandling(unittest.TestCase):
     def test_snapshot_error_does_not_crash_worker(self):
         """If snapshot_audio raises, the worker continues and does not crash."""
         bus = _make_bus()
+        # Signal after a few errors so we know the worker survived multiple cycles.
+        errored = threading.Event()
+        error_count = [0]
+
+        def _snapshot_raises(*args, **kwargs):
+            error_count[0] += 1
+            if error_count[0] >= 3:
+                errored.set()
+            raise RuntimeError("disk full")
+
         recorder = MagicMock()
-        recorder.snapshot_audio.side_effect = RuntimeError("disk full")
+        recorder.snapshot_audio.side_effect = _snapshot_raises
 
         transcriber = _make_transcriber()
 
@@ -271,7 +303,7 @@ class TestRealtimePartialErrorHandling(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id="sess-err1")
-        time.sleep(0.5)
+        errored.wait(timeout=3.0)
         # Worker must still be alive despite errors
         self.assertTrue(rpt.is_running)
         rpt.stop(timeout_sec=2.0)
@@ -282,8 +314,17 @@ class TestRealtimePartialErrorHandling(unittest.TestCase):
         """If transcribe_preview raises, the worker continues."""
         bus = _make_bus()
         recorder = _make_recorder(duration_sec=4.0)
+        errored = threading.Event()
+        transcribe_errors = [0]
+
+        def _transcribe_raises(*args, **kwargs):
+            transcribe_errors[0] += 1
+            if transcribe_errors[0] >= 3:
+                errored.set()
+            raise Exception("GPU OOM")
+
         transcriber = MagicMock()
-        transcriber.transcribe_preview.side_effect = Exception("GPU OOM")
+        transcriber.transcribe_preview.side_effect = _transcribe_raises
 
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
@@ -293,7 +334,7 @@ class TestRealtimePartialErrorHandling(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id="sess-err2")
-        time.sleep(0.5)
+        errored.wait(timeout=3.0)
         self.assertTrue(rpt.is_running)
         rpt.stop(timeout_sec=2.0)
 
@@ -320,7 +361,14 @@ class TestRealtimePartialSessionIsolation(unittest.TestCase):
 
     def test_session_id_in_payload(self):
         """Each session must carry its own session_id in emitted payloads."""
+        emitted = threading.Event()
         bus = _make_bus()
+
+        def _emit_and_signal(*args, **kwargs):
+            emitted.set()
+
+        bus.emit.side_effect = _emit_and_signal
+
         recorder = _make_recorder(duration_sec=3.0)
         transcriber = _make_transcriber(text="Текст 1")
 
@@ -331,7 +379,7 @@ class TestRealtimePartialSessionIsolation(unittest.TestCase):
             interval_sec=0.1,
         )
         rpt.start(session_id="unique-session-xyz")
-        time.sleep(0.5)
+        emitted.wait(timeout=3.0)
         rpt.stop(timeout_sec=2.0)
 
         partial_calls = [
@@ -385,12 +433,22 @@ class TestRealtimePartialSilenceFilter(unittest.TestCase):
         bus = _make_bus()
         # Zero-energy buffer => silence
         silent_audio = np.zeros(16000 * 3, dtype=np.float32)
+        # Signal after enough ticks so we know the worker had fair chances to emit.
+        ticked = threading.Event()
+        tick_count = [0]
+
+        def _preview_empty_and_count(*args, **kwargs):
+            tick_count[0] += 1
+            if tick_count[0] >= 3:
+                ticked.set()
+            return {"text": ""}
+
         recorder = MagicMock()
         recorder.snapshot_audio.return_value = (silent_audio, 3.0)
 
         transcriber = MagicMock()
         # Silence filter effect: transcriber returns empty text for silent audio
-        transcriber.transcribe_preview.return_value = {"text": ""}
+        transcriber.transcribe_preview.side_effect = _preview_empty_and_count
 
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
@@ -400,7 +458,7 @@ class TestRealtimePartialSilenceFilter(unittest.TestCase):
             buffer_sec=8.0,
         )
         rpt.start(session_id="silence-test")
-        time.sleep(0.5)
+        ticked.wait(timeout=3.0)
         rpt.stop(timeout_sec=2.0)
 
         partial_calls = [
@@ -482,8 +540,18 @@ class TestRealtimePartialThreadSafety(unittest.TestCase):
 
         recorder.snapshot_audio.side_effect = _snapshot
 
+        # Signal after enough exceptions so we know the worker survived multiple cycles.
+        multi_exception = threading.Event()
+        exception_count = [0]
+
+        def _transcribe_raises(*args, **kwargs):
+            exception_count[0] += 1
+            if exception_count[0] >= 3:
+                multi_exception.set()
+            raise RuntimeError("GPU exploded")
+
         transcriber = MagicMock()
-        transcriber.transcribe_preview.side_effect = RuntimeError("GPU exploded")
+        transcriber.transcribe_preview.side_effect = _transcribe_raises
 
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
@@ -492,7 +560,7 @@ class TestRealtimePartialThreadSafety(unittest.TestCase):
             interval_sec=0.1,
         )
         rpt.start(session_id="exception-test")
-        time.sleep(0.5)
+        multi_exception.wait(timeout=3.0)
         self.assertTrue(rpt.is_running, "Worker should still run despite exceptions")
         rpt.stop(timeout_sec=2.0)
         # Transcriber must have been called multiple times (engine kept retrying)
