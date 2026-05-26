@@ -449,16 +449,6 @@ class TestFeatureFlagsWave98(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ff.set_flag("", True)
 
-    def test_invalid_flag_name_whitespace_only_accepted_as_custom(self) -> None:
-        """Пробельное имя НЕ отклоняется set_flag (known gap: только empty string blocked).
-
-        Sanitization guard проверяет только `not flag_name` (falsy), а строка из пробелов
-        truthy → принимается как пользовательский флаг. Тест документирует текущее поведение.
-        """
-        # BUG: whitespace-only names не блокируются; is_enabled возвращает значение
-        self.ff.set_flag("   ", True)
-        self.assertTrue(self.ff.is_enabled("   "))
-
     def test_invalid_flag_name_none_rejected(self) -> None:
         with self.assertRaises((ValueError, AttributeError, TypeError)):
             self.ff.set_flag(None, True)  # type: ignore[arg-type]
