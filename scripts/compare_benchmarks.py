@@ -5,7 +5,7 @@ Reads .benchmarks/history.jsonl, computes per-benchmark stats (last 10 runs,
 mean, p50, p90), compares last run vs previous, exits 1 on >20% regression.
 
 Usage:
-    python scripts/compare_benchmarks.py [--history PATH] [--threshold 0.20]
+    python scripts/compare_benchmarks.py [--history PATH] [--threshold 0.20] [--json]
 """
 from __future__ import annotations
 
@@ -128,6 +128,30 @@ def _check_regressions(
     ]
 
 
+def _format_json(stats_list: list[BenchStats], regressions: list[BenchStats], threshold: float) -> str:
+    """Return JSON representation of the comparison result."""
+    benchmarks = [
+        {
+            "name": s.name,
+            "last_elapsed": s.last_elapsed,
+            "prev_elapsed": s.prev_elapsed,
+            "mean": s.mean,
+            "p50": s.p50,
+            "p90": s.p90,
+            "count": s.count,
+            "regression_pct": s.regression_pct,
+        }
+        for s in sorted(stats_list, key=lambda x: x.name)
+    ]
+    regression_names = [s.name for s in regressions]
+    result = {
+        "threshold": threshold,
+        "regressions": regression_names,
+        "benchmarks": benchmarks,
+    }
+    return json.dumps(result, indent=2)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -142,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         default=_DEFAULT_THRESHOLD,
         help="Regression threshold fraction (default: 0.20 = 20%%)",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit JSON instead of human-readable table (useful for CI dashboards)",
+    )
     args = parser.parse_args(argv)
 
     groups = _load_history(args.history)
@@ -150,16 +180,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     stats_list = [_compute_stats(name, entries) for name, entries in groups.items()]
-
-    print("\n## Benchmark Comparison Report\n")
-    print(_format_table(stats_list))
-
     regressions = _check_regressions(stats_list, args.threshold)
+
+    if args.json_output:
+        print(_format_json(stats_list, regressions, args.threshold))
+    else:
+        print("\n## Benchmark Comparison Report\n")
+        print(_format_table(stats_list))
+
     if regressions:
-        print(
-            f"## REGRESSION DETECTED (threshold: {args.threshold:.0%})\n",
-            file=sys.stderr,
-        )
+        if not args.json_output:
+            print(
+                f"## REGRESSION DETECTED (threshold: {args.threshold:.0%})\n",
+                file=sys.stderr,
+            )
         for s in regressions:
             delta = s.regression_pct or 0.0
             msg = (
@@ -170,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
             print(msg, file=sys.stderr)
         return 1
 
-    print("No regressions detected.")
+    if not args.json_output:
+        print("No regressions detected.")
     return 0
 
 
