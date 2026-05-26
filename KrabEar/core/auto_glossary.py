@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
 
 from core.term_extractor import TermExtractor, _is_stop_word
 
@@ -62,7 +64,7 @@ _HALLUCINATION_PATTERNS = frozenset({
     "субтитры от",
     "субтитры подготовил",
     "редактор субтитров",
-    "корректор субтитров",
+    "корректор",
     "thanks for watching",
     "subscribe",
     "like and subscribe",
@@ -85,34 +87,6 @@ _INSTRUCTION_VERBS = frozenset({
     "проверь", "проверьте",
     "переведи", "переведите",
 })
-
-
-# Слова-заполнители, с которых часто начинаются биграммы на рубеже предложений
-# (sentence-start fillers). Биграмм, начинающийся с любого из этих токенов,
-# не является реальным термином и не должен попадать в Whisper prompt.
-# Примеры: "Хорошо давайте", "Okay well", "Entonces bueno".
-_FILLER_STARTERS: frozenset = frozenset({
-    # RU
-    "хорошо", "давайте", "давай", "ладно", "итак", "значит",
-    "слушайте", "слушай", "понятно", "понял",
-    # ES
-    "entonces", "bueno", "vale", "oye", "mira", "veamos",
-    # EN
-    "okay", "ok", "well", "right", "so", "anyway", "alright",
-})
-
-
-def _starts_with_filler(term: str) -> bool:
-    """True если первый токен термина — слово-заполнитель (sentence-start filler).
-
-    Защищает Whisper prompt от биграммов типа "Хорошо давайте" или "Okay well",
-    которые проходят `_is_capitalized_or_multiword` только потому что первое
-    слово написано с заглавной буквы на рубеже предложения (F3, W1288).
-    """
-    if not term:
-        return False
-    first_token = term.split()[0].lower()
-    return first_token in _FILLER_STARTERS
 
 
 def _looks_like_hallucination(term: str) -> bool:
@@ -223,14 +197,14 @@ class AutoGlossaryBuilder:
         term_extractor: Optional[TermExtractor] = None,
         data_dir: Optional[Path] = None,
         refresh_hours: float = 6.0,
-        settings_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        settings_provider: Optional[Callable[[], dict]] = None,
     ) -> None:
         self._store = store
         self._extractor = term_extractor or TermExtractor()
         self._data_dir = data_dir
         self._refresh_hours = refresh_hours
-        # Callable that returns the current runtime settings dict.
-        # Used to honour privacy_mode_enabled at build-time (F4, W1288).
+        # Callable returning current settings dict; used to check privacy_mode.
+        # None means privacy_mode is assumed off (backward-compatible).
         self._settings_provider = settings_provider
 
         # In-memory cache
@@ -261,17 +235,6 @@ class AutoGlossaryBuilder:
         Returns:
             Список строк-терминов (не более top_n), отсортированных по частоте.
         """
-        # Privacy guard (F4, W1288): when privacy_mode_enabled is True, skip
-        # disk persist and return empty list — no user data leaves local scope.
-        if self._settings_provider is not None:
-            try:
-                current_settings = self._settings_provider()
-                if current_settings.get("privacy_mode_enabled", False):
-                    logger.debug("auto_glossary: privacy mode enabled — returning empty")
-                    return []
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("auto_glossary: settings_provider error: %s", exc)
-
         if not force and self._is_cache_valid():
             logger.debug("auto_glossary: cache hit (%d terms)", len(self._cache))
             return list(self._cache[:top_n])
@@ -286,19 +249,12 @@ class AutoGlossaryBuilder:
         self._cache = terms
         self._cache_built_at = time.time()
 
-        # Skip disk persist when privacy mode is active (checked again in case
-        # settings changed between the top check and here — belt-and-suspenders).
-        _privacy_active = False
-        if self._settings_provider is not None:
-            try:
-                _privacy_active = bool(
-                    self._settings_provider().get("privacy_mode_enabled", False)
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
-        if self._data_dir and not _privacy_active:
+        if self._data_dir and not self._is_privacy_mode_active():
             self._save_cache_to_disk()
+        elif self._is_privacy_mode_active():
+            logger.debug(
+                "auto_glossary: privacy_mode активен — пропускаем сохранение на диск"
+            )
 
         return list(terms)
 
@@ -321,6 +277,19 @@ class AutoGlossaryBuilder:
             return False
         age_hours = (time.time() - self._cache_built_at) / 3600.0
         return age_hours < self._refresh_hours
+
+    def _is_privacy_mode_active(self) -> bool:
+        """Возвращает True если privacy_mode включён в текущих настройках."""
+        if self._settings_provider is None:
+            return False
+        try:
+            settings = self._settings_provider()
+            return bool(settings.get("privacy_mode", False))
+        except Exception as exc:
+            logger.warning(
+                "auto_glossary: не удалось получить настройки для privacy_mode: %s", exc
+            )
+            return False
 
     def _build_from_history(self, window_days: int, top_n: int) -> List[str]:
         """Основная логика построения глоссария из истории."""
@@ -370,11 +339,6 @@ class AutoGlossaryBuilder:
                     continue
                 if not _is_capitalized_or_multiword(et.term):
                     continue
-                # F3 (W1288): skip bigrams whose first token is a sentence-start
-                # filler — e.g. "Хорошо давайте" passes _is_capitalized_or_multiword
-                # only because the word is capitalised at sentence start.
-                if _starts_with_filler(et.term):
-                    continue
                 if _looks_like_hallucination(et.term):
                     # Защита от self-poisoning loop: не подбираем Whisper
                     # hallucinations и instruction-style фрагменты.
@@ -402,36 +366,13 @@ class AutoGlossaryBuilder:
         return self._data_dir / AUTO_GLOSSARY_CACHE_FILE
 
     def _load_cache_from_disk(self) -> None:
-        """Загружает кэш с диска (при старте сервиса).
-
-        W1450 F1 HIGH: strict validation of the ``terms`` field prevents
-        ``KeyError: slice(None, 30, None)`` when a corrupted or migrated cache
-        file stores ``terms`` as a dict instead of a list.
-        """
+        """Загружает кэш с диска (при старте сервиса)."""
         path = self._cache_path()
         if not path or not path.exists():
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            terms = data.get("terms", [])
-            if not isinstance(terms, list):
-                logger.warning(
-                    "auto_glossary: invalid terms type %s in cache, resetting",
-                    type(terms).__name__,
-                )
-                self._cache = []
-                self._cache_built_at = 0.0
-                return
-            # Accept plain strings and dicts with a "term" string key;
-            # silently drop anything else (garbage entries).
-            validated: List[str] = []
-            for entry in terms:
-                if isinstance(entry, str) and entry:
-                    validated.append(entry)
-                elif isinstance(entry, dict) and isinstance(entry.get("term"), str):
-                    validated.append(entry["term"])
-                # else: skip malformed entry silently
-            self._cache = validated
+            self._cache = data.get("terms", [])
             self._cache_built_at = float(data.get("built_at", 0.0))
             logger.debug(
                 "auto_glossary: loaded %d terms from disk (age=%.1fh)",
@@ -444,18 +385,40 @@ class AutoGlossaryBuilder:
             self._cache_built_at = 0.0
 
     def _save_cache_to_disk(self) -> None:
-        """Сохраняет кэш на диск."""
+        """Атомарно сохраняет кэш на диск через tmp-файл + fsync + os.replace.
+
+        Запись во временный файл в той же директории гарантирует, что
+        os.replace() выполняется в рамках одной файловой системы (атомарно
+        на POSIX). Это исключает частично-записанный auto_glossary.json при
+        crash или SIGKILL в момент записи.
+        """
         path = self._cache_path()
         if not path:
             return
         try:
-            path.write_text(
-                json.dumps(
-                    {"terms": self._cache, "built_at": self._cache_built_at},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            payload = json.dumps(
+                {"terms": self._cache, "built_at": self._cache_built_at},
+                ensure_ascii=False,
+                indent=2,
             )
+            dir_path = path.parent
+            dir_path.mkdir(parents=True, exist_ok=True)
+            # Пишем во временный файл в той же директории (важно для os.replace)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(dir_path), prefix=".auto_glossary_", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, str(path))
+            except Exception:
+                # Убираем tmp-файл при любой ошибке, не прячем исключение
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as exc:
             logger.warning("auto_glossary: ошибка сохранения кэша на диск: %s", exc)
