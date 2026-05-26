@@ -27,6 +27,7 @@ _CATEGORIES: dict[str, list[str]] = {
         "GPT",
         "OpenAI",
         "Llama",
+        "Gemma",
         "Mistral",
         "DeepSeek",
         "Qwen",
@@ -42,6 +43,8 @@ _CATEGORIES: dict[str, list[str]] = {
         "GitHub",
         "GitLab",
         "Bitbucket",
+        "Telegram",
+        "Obsidian",
         "Slack",
         "Notion",
         "Linear",
@@ -61,7 +64,6 @@ _CATEGORIES: dict[str, list[str]] = {
         "JavaScript",
         "Kotlin",
         "Go",
-        "Haskell",
     ],
     "formats": [
         "Markdown",
@@ -77,9 +79,13 @@ _CATEGORIES: dict[str, list[str]] = {
         "Terraform",
         "NGINX",
         "PostgreSQL",
+        "SQLite",
         "Redis",
         "Cloudflare",
         "Vercel",
+        "Telnyx",
+        "Twilio",
+        "Sentry",
     ],
     "apple": [
         "AppleScript",
@@ -105,6 +111,8 @@ _CATEGORIES: dict[str, list[str]] = {
         "JSON-RPC",
         "WebSocket",
         "hotkey",
+        "diarization",
+        "transcription",
     ],
 }
 
