@@ -3,19 +3,21 @@
 Extracted from BackendService Wave 392.
 Pattern: sister to CallSessionService PR #420, RecordingCoreService PR #589.
 
-Handlers (6):
+Handlers (7):
   - handle_get_analytics_dashboard  — комплексный дашборд всех метрик
   - handle_get_sentiment_trends     — тренды тональности за N дней
   - handle_compare_periods          — сравнение двух временных периодов
   - handle_get_keyword_cloud        — данные облака ключевых слов
   - handle_get_timeline_view        — группировка истории по временным блокам
   - handle_get_activity_calendar    — GitHub-style activity calendar данные
+  - handle_get_recording_stats      — кумулятивная статистика записей (W773)
 """
 
 from __future__ import annotations
 
 import logging
 import time as _time
+from datetime import datetime, timedelta
 from typing import Any
 
 from backend.observability import add_breadcrumb
@@ -211,3 +213,67 @@ class AnalyticsService:
                 items, months=months, cell_size=cell_size
             )
         return result
+
+    def handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Кумулятивная статистика записей: длительность, языки, LLM, диаризация.
+
+        Сканирует всю активную историю и агрегирует метаданные.
+        Extracted from BackendService W773.
+        """
+        active = self._store._load_active_items_with_lock()
+
+        now = datetime.now()
+        today_iso = now.date().isoformat()
+        week_start = (now - timedelta(days=now.weekday())).date().isoformat()
+
+        total_count = 0
+        total_dur = 0.0
+        today_count = 0
+        today_dur = 0.0
+        week_count = 0
+        week_dur = 0.0
+        llm_count = 0
+        diar_count = 0
+        lang_counts: dict[str, int] = {}
+
+        for item in active:
+            total_count += 1
+            dur = item.audio_duration_sec or 0.0
+            total_dur += dur
+
+            day_str = item.ts[:10]
+            if day_str == today_iso:
+                today_count += 1
+                today_dur += dur
+            if day_str >= week_start:
+                week_count += 1
+                week_dur += dur
+
+            if item.llm_applied:
+                llm_count += 1
+            if isinstance(item.diarization, dict) and item.diarization.get("enabled"):
+                diar_count += 1
+
+            lang = item.source_lang.strip()
+            if lang:
+                lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+        n = total_count or 1  # avoid division by zero
+        return {
+            "total_count": total_count,
+            "total_duration_sec": round(total_dur, 2),
+            "today_count": today_count,
+            "today_duration_sec": round(today_dur, 2),
+            "week_count": week_count,
+            "week_duration_sec": round(week_dur, 2),
+            "avg_duration_sec": round(total_dur / n, 2) if total_count else 0.0,
+            "most_used_lang": max(lang_counts, key=lambda k: lang_counts[k]) if lang_counts else "",
+            "lang_distribution": [
+                {"lang": lang, "count": cnt}
+                for lang, cnt in sorted(lang_counts.items(), key=lambda p: p[1], reverse=True)[:10]
+            ],
+            "llm_applied_count": llm_count,
+            "llm_correction_rate": round(llm_count / n, 4) if total_count else 0.0,
+            "diarization_used_count": diar_count,
+            "diarization_usage_rate": round(diar_count / n, 4) if total_count else 0.0,
+        }
