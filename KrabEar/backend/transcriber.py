@@ -10,7 +10,6 @@ import logging
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from core.engine import AudioEngine
-from core.mlx_lock import mlx_lock
 
 if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
@@ -58,7 +57,6 @@ class Transcriber:
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
         silence_ranges: list[tuple[float, float]] | None = None,
-        progress_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -71,10 +69,6 @@ class Transcriber:
             diarize: Явное управление диаризацией для текущего вызова. None = использовать
                      глобальный settings.DIARIZATION_ENABLED. Если settings передан и
                      diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
-            silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
-                     Семплы в этих диапазонах обнуляются перед STT (таймстемпы Whisper сохраняются).
-            progress_callback: Опциональный колбэк для отчёта о прогрессе (имя этапа).
-                     Пробрасывается в engine. Исключения внутри колбэка подавляются.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
@@ -99,23 +93,13 @@ class Transcriber:
             diarize=diarize,
             skip_vad_prefilter=skip_vad_prefilter,
             silence_ranges=silence_ranges,
-            progress_callback=progress_callback,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
-        """Быстрая транскрибация для realtime-превью (всегда в balanced режиме).
-
-        W1364 fix: set_quality_profile + engine.transcribe выполняются атомарно
-        внутри mlx_lock(), чтобы конкурентный вызов transcribe() не мог поменять
-        профиль между переключением и выводом (TOCTOU race, W1359 F1 HIGH).
-        """
-        # Preview всегда идёт в balanced для минимальной задержки.
-        # Оборачиваем profile switch + MLX inference в единый lock-регион:
-        # конкурентный transcribe() (с профилем "max") не сможет сменить
-        # self.engine.quality_profile до завершения нашего MLX-вызова.
-        with mlx_lock():
-            self.engine.set_quality_profile("balanced")
-            return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
+        """Быстрая транскрибация для realtime-превью (всегда в balanced режиме)."""
+        # Preview всегда идёт в balanced для минимальной задержки
+        self.engine.set_quality_profile("balanced")
+        return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
 
     # ------------------------------------------------------------------
     # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)
