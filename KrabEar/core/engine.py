@@ -179,6 +179,14 @@ _BYTES_PER_MB = 1024 * 1024
 # Достаточно для ~30 секунд аудио (~300 токенов STT) + краткого резюме.
 _VOXTRAL_MAX_TOKENS = 2048
 
+# Allowlist of accepted Voxtral HuggingFace repo IDs (W1219 F3 security fix).
+# snapshot_download is called with raw settings.VOXTRAL_MODEL — validate before use
+# to prevent SSRF / arbitrary model loading from user-supplied strings.
+_VOXTRAL_REPO_ALLOWLIST: frozenset[str] = frozenset({
+    "mistralai/Voxtral-Mini-3B-2507",
+    "mistralai/Voxtral-Small-24B-2507",
+})
+
 # ---------------------------------------------------------------------------
 # Утилита: проверка доступной памяти macOS через vm_stat
 # ---------------------------------------------------------------------------
@@ -1766,8 +1774,19 @@ class AudioEngine:
                 span_pfx, adapter_model, adapter_fn = _adapter_map[model_name]
                 try:
                     span_name = f"{span_pfx}_{_short_model_name(adapter_model)}"
+                    # W1219 F2: guard adapter calls with same timeout used for Whisper
+                    # branches — prevents GPU stall from blocking IPC indefinitely.
+                    _adapter_timeout = getattr(settings, "TRANSCRIBE_TIMEOUT_SEC", 120)
                     with _profiler.start_span(span_name):
-                        adapter_result = adapter_fn()
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                            _fut = _pool.submit(adapter_fn)
+                            try:
+                                adapter_result = _fut.result(timeout=_adapter_timeout)
+                            except concurrent.futures.TimeoutError:
+                                _fut.cancel()
+                                raise TimeoutError(
+                                    f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
+                                )
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
@@ -2378,10 +2397,19 @@ class AudioEngine:
             )
             raise RuntimeError(self._voxtral_load_error)
 
+        # W1219 F3: validate repo ID against allowlist before download.
+        _voxtral_repo = settings.VOXTRAL_MODEL
+        if _voxtral_repo not in _VOXTRAL_REPO_ALLOWLIST:
+            self._voxtral_load_error = (
+                f"Voxtral: неизвестный repo_id '{_voxtral_repo}' — "
+                f"допустимы только: {sorted(_VOXTRAL_REPO_ALLOWLIST)}"
+            )
+            raise RuntimeError(self._voxtral_load_error)
+
         with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
             try:
                 from huggingface_hub import snapshot_download  # type: ignore
-                model_path = snapshot_download(repo_id=settings.VOXTRAL_MODEL)
+                model_path = snapshot_download(repo_id=_voxtral_repo)
                 tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
                 model = _VoxtralTransformer.from_folder(model_path)
                 self._voxtral_model = (model, tokenizer)
@@ -2638,13 +2666,16 @@ class AudioEngine:
             tokens, _ = tokenizer.encode_chat_completion(completion_request)
             input_ids = tokens.tokens
 
-            out_tokens, _ = _voxtral_generate(
-                input_ids,
-                model,
-                max_tokens=_VOXTRAL_MAX_TOKENS,
-                temperature=0.0,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
+            # W1219 F1: serialize Voxtral MLX inference through mlx_lock to prevent
+            # concurrent GPU access SIGSEGV (same requirement as mlx_whisper calls).
+            with mlx_lock():
+                out_tokens, _ = _voxtral_generate(
+                    input_ids,
+                    model,
+                    max_tokens=_VOXTRAL_MAX_TOKENS,
+                    temperature=0.0,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
 
             raw_output = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens)
 
