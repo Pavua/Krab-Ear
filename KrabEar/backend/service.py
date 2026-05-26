@@ -618,6 +618,9 @@ class BackendService:
             event_bus=event_bus,
             data_dir=self.store.data_dir,
         )
+        # W860 F2: wire error_bus so disk.low_space / disk.critical errors
+        # are pushed to the error bus (docstring promise from Wave 60).
+        self._disk_monitor._error_bus = self._error_bus
         self._disk_monitor.start()
 
         # Обработчик корректного завершения (регистрация сигналов — через register())

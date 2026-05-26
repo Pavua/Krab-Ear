@@ -103,5 +103,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # 12 production hits 2026-05-18, misclassified as rewriter.timeout.
             # Now retried once (2s sleep) before circuit failure; dedicated code.
             "rewriter.lm_studio_stream_gpu_lost",
+            # Added W860 F1 — dedicated disk.critical code (previously missing from
+            # registry; _push_disk_critical_error fell back to empty user_msg_ru).
+            "disk.critical",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

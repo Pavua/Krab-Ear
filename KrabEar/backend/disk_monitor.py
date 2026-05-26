@@ -159,6 +159,10 @@ class DiskSpaceMonitor:
             free_gb = usage.free / (1024 ** 3)
             total_gb = usage.total / (1024 ** 3)
         except Exception:
+            logger.exception(
+                "DiskSpaceMonitor: не удалось получить disk_usage для %s",
+                self._data_dir,
+            )
             free_gb = -1.0
             total_gb = -1.0
 

@@ -353,6 +353,23 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 300,
     },
 
+    # disk.critical — DiskSpaceMonitor detected free space below DISK_CRITICAL_GB.
+    # Separate from disk.low_space (warn): this fires only on critical threshold,
+    # always at severity=critical. Dedupe 600s to avoid alert storm on slow crawl.
+    # Wave 490 / W860 F1: wired in _push_disk_critical_error(); was missing from
+    # registry causing KrabError fallback to empty user_msg_ru string.
+    "disk.critical": {
+        "user_msg_ru": (
+            "КРИТИЧНО: меньше 1 GB на диске — срочно освободите место "
+            "или удалите старые записи."
+        ),
+        "actionable": True,
+        "action_id": "open_logs",
+        "action_label": "Открыть папку логов",
+        "severity": "critical",
+        "dedupe_seconds": 600,
+    },
+
     # audio.buffer_overflow — recorder.py detected sounddevice buffer overflow
     # (overflowed=True from stream.read). Indicates system load causing audio
     # chunks to be dropped. No action possible; dedupe 5s to avoid spam.
