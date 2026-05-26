@@ -791,6 +791,7 @@ class LLMRewriter:
                     "LLM chatbot detected (starts with '%s'), falling back to original",
                     marker,
                 )
+                self._circuit.record_failure()
                 self._last_error = "chatbot_response"
                 _add_bc(
                     category="rewriter",
@@ -818,6 +819,7 @@ class LLMRewriter:
                     "LLM output too short (%.0f%% of input), falling back to original",
                     ratio * 100,
                 )
+                self._circuit.record_failure()
                 self._last_error = "output_too_short"
                 self._push_error(
                     "rewriter.output_ratio_fallback",
@@ -832,6 +834,7 @@ class LLMRewriter:
                     "LLM output too long (%.0f%% of input), falling back to original",
                     ratio * 100,
                 )
+                self._circuit.record_failure()
                 self._last_error = "output_too_long"
                 self._push_error(
                     "rewriter.output_ratio_fallback",
@@ -1262,14 +1265,16 @@ class LLMRewriter:
         logger.info("LLMRewriter: API key updated, circuit breaker reset")
 
     def ping(self) -> bool:
-        """Проверка доступности LM Studio через GET /models.
+        """Проверка доступности LM Studio через GET /api/v1/models.
 
         Не трогает circuit breaker — это отдельный health check, используется
         только на старте backend'а. Возвращает False на любую ошибку.
         """
         try:
+            import re as _re
+            _host = _re.sub(r"/v\d+$", "", self._base_url.rstrip("/"))
             response = self._session.get(
-                f"{self._base_url}/models",
+                f"{_host}/api/v1/models",
                 headers=self._lm_studio_get_headers(),
                 timeout=self._timeout,
             )
