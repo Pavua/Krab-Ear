@@ -12,6 +12,21 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ── DNI/NIE checksum helper ──────────────────────────────────────────────────
+
+_DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
+
+
+def _dni_letter_valid(digits: str, letter: str) -> bool:
+    """Verify Spanish DNI/NIE mod-23 checksum letter."""
+    try:
+        num = int(digits)
+    except ValueError:
+        return False
+    expected = _DNI_LETTERS[num % 23]
+    return letter.upper() == expected
+
+
 # ── Luhn checksum helper ─────────────────────────────────────────────────────
 
 def _passes_luhn(digits: str) -> bool:
@@ -85,11 +100,26 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{16}\b",  # 0000000000000000
         "[КАРТА]",
     ),
-    # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр)
+    # Паспортные номера РФ: серия 0000 № 000000 (с пробелом/дефисом) или
+    # 10-цифровое число ТОЛЬКО при наличии ключевых слов (паспорт/passport).
+    # Bare \d{10} убран — слишком много ложных срабатываний (zip-коды, ID и т.д.)
     (
         "passport",
-        r"\b(?:\d{4}[\s\-]\d{6}|\d{10})\b",
+        r"(?:пас(?:порт)?|passport)[:\s№.]*(\d{4}[\s\-]?\d{6})"
+        r"|\b\d{4}[\s\-]\d{6}\b",
         "[ПАСПОРТ]",
+    ),
+    # Испанский DNI: 8 цифр + контрольная буква (мод-23, буква I и O исключены)
+    (
+        "es_dni",
+        r"\b(\d{8})([A-HJ-NP-TV-Z])\b",
+        "[ИД_ИСПАНИЯ]",
+    ),
+    # Испанский NIE: X/Y/Z + 7 цифр + контрольная буква (мод-23)
+    (
+        "es_nie",
+        r"\b([XYZ])(\d{7})([A-HJ-NP-TV-Z])\b",
+        "[ИД_ИСПАНИЯ]",
     ),
     # Дата рождения: ДД.ММ.ГГГГ  /  ДД/ММ/ГГГГ  /  ДД-ММ-ГГГГ
     (
@@ -168,6 +198,19 @@ class TextAnonymizer:
                     # Validate via Luhn checksum — skip non-card 16-digit sequences
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
+                        continue
+                elif name == "es_dni":
+                    # Validate DNI mod-23 checksum — skip false positives
+                    digits_part, letter_part = m.group(1), m.group(2)
+                    if not _dni_letter_valid(digits_part, letter_part):
+                        continue
+                elif name == "es_nie":
+                    # NIE: replace leading X→0, Y→1, Z→2 then apply mod-23
+                    prefix_map = {"X": "0", "Y": "1", "Z": "2"}
+                    prefix_digit = prefix_map[m.group(1).upper()]
+                    digits_part = prefix_digit + m.group(2)
+                    letter_part = m.group(3)
+                    if not _dni_letter_valid(digits_part, letter_part):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 

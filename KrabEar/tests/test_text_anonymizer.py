@@ -559,6 +559,111 @@ class TestTextAnonymizerNoFalsePositives(unittest.TestCase):
         self.assertEqual(result.redaction_count, 0)
 
 
+class TestTextAnonymizerPassportW1021(unittest.TestCase):
+    """W1021 F5 — RU passport context-anchored fix regression tests."""
+
+    def setUp(self) -> None:
+        self.a = TextAnonymizer()
+
+    def test_passport_with_context_keyword_redacted(self) -> None:
+        """Паспорт с ключевым словом 'паспорт' — должен быть скрыт."""
+        text = "паспорт 1234 567890"
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_passport_keyword_no_space_redacted(self) -> None:
+        """Паспорт с форматом 'паспорт:1234567890' — должен быть скрыт."""
+        text = "паспорт:1234567890"
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_passport_english_keyword_redacted(self) -> None:
+        """Паспорт с 'passport' (EN) — должен быть скрыт."""
+        text = "passport 4507 339063"
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_passport_space_format_redacted(self) -> None:
+        """Формат серия+пробел+номер без ключевого слова — должен быть скрыт."""
+        text = "серия 4507 339063"
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_bare_10_digits_no_longer_redacted(self) -> None:
+        """Regression: голые 10 цифр без контекста НЕ должны редактироваться."""
+        text = "Заказ №1234567890 готов."
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertNotIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_zip_code_not_redacted(self) -> None:
+        """Индекс/zip-код из 10 цифр НЕ должен редактироваться."""
+        text = "ZIP-код 1234567890 не является паспортом."
+        result = self.a.anonymize(text, rules=["passport"])
+        self.assertNotIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+
+class TestTextAnonymizerSpanishDniNieW1021(unittest.TestCase):
+    """W1021 F2 — Spanish DNI/NIE detection tests."""
+
+    def setUp(self) -> None:
+        self.a = TextAnonymizer()
+
+    def test_es_dni_valid_checksum_redacted(self) -> None:
+        """DNI с корректной контрольной буквой — должен быть скрыт."""
+        # 12345678 % 23 = 14 → letter 'Z'
+        text = "Mi DNI es 12345678Z."
+        result = self.a.anonymize(text, rules=["es_dni"])
+        self.assertIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_es_dni_invalid_checksum_not_redacted(self) -> None:
+        """DNI с некорректной контрольной буквой — НЕ должен редактироваться."""
+        # 12345678 % 23 = 14 → expected 'Z', but 'A' is wrong
+        text = "Número inválido 12345678A."
+        result = self.a.anonymize(text, rules=["es_dni"])
+        self.assertNotIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_es_dni_case_insensitive_redacted(self) -> None:
+        """DNI с буквой в нижнем регистре — должен быть скрыт."""
+        # 12345678Z — valid
+        text = "dni: 12345678z"
+        result = self.a.anonymize(text, rules=["es_dni"])
+        self.assertIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_es_nie_x_prefix_redacted(self) -> None:
+        """NIE с префиксом X — должен быть скрыт при корректной букве."""
+        # NIE: X + 1234567 → numeric 0_1234567 = 1234567, 1234567 % 23 = 16 → 'L'
+        text = "NIE: X1234567L"
+        result = self.a.anonymize(text, rules=["es_nie"])
+        self.assertIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_es_nie_y_prefix_redacted(self) -> None:
+        """NIE с префиксом Y — должен быть скрыт при корректной букве."""
+        # Y + 1234567 → numeric = 11234567, 11234567 % 23 = 10 → 'D' — let's find a valid one
+        # Y0000000: 10000000 % 23 = 10000000 - 434782*23 = 10000000 - 9999986 = 14 → 'Z'
+        text = "Número NIE: Y0000000Z"
+        result = self.a.anonymize(text, rules=["es_nie"])
+        self.assertIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    def test_es_nie_invalid_checksum_not_redacted(self) -> None:
+        """NIE с некорректной контрольной буквой — НЕ должен редактироваться."""
+        # X + 1234567 → 01234567 = 1234567, 1234567 % 23 = 16 → 'L', but 'A' is wrong
+        text = "Número inválido X1234567A"
+        result = self.a.anonymize(text, rules=["es_nie"])
+        self.assertNotIn("[ИД_ИСПАНИЯ]", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
+
+
 class TestTextAnonymizerConcurrent(unittest.TestCase):
     """Тест параллельного выполнения anonymize()."""
 
