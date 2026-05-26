@@ -324,6 +324,7 @@ class BackendService:
         self._live_subs = LiveSubsService(
             transcriber=self.transcriber,
             translator=self.translator,
+            settings_get=self._get_runtime_setting,
         )
         self._translation = TranslationService(
             translator=self.translator,

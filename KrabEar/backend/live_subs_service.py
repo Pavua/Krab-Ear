@@ -11,12 +11,11 @@ import base64
 import logging
 import threading
 import time
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 import numpy as np
 
 from backend.event_bus import bus as event_bus
-from backend.observability import add_breadcrumb
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
 
@@ -37,16 +36,15 @@ class LiveSubsService:
         self,
         transcriber: "Transcriber",
         translator: "Translator",
-        settings: dict[str, Any] | None = None,
+        settings_get: Callable[[str, Any], Any] | None = None,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
-        self._settings: dict[str, Any] = settings if settings is not None else {}
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._lock = threading.RLock()
         self._buffer: list[np.ndarray] = []
         self._buffer_samples: int = 0
         self._session_start: float = time.monotonic()
-        # W1147 F2: lock protects all _buffer/_buffer_samples/_session_start mutations
-        self._buffer_lock = threading.Lock()
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -62,41 +60,33 @@ class LiveSubsService:
         Returns:
             None если flush не произошёл, иначе dict с результатами.
         """
-        # W1147 F5: skip all processing when privacy mode is enabled
-        if self._settings.get("privacy_mode_enabled"):
-            return None
-
         audio_array = self._decode_audio(audio_bytes, sample_rate)
-        with self._buffer_lock:
+        with self._lock:
             self._buffer.append(audio_array)
             self._buffer_samples += len(audio_array)
             buffer_sec = self._buffer_samples / max(sample_rate, 1)
-            should_flush = is_final or buffer_sec >= _FLUSH_THRESHOLD_SEC
-
-        if should_flush:
-            return self._flush(sample_rate=sample_rate, target_lang=target_lang)
+            if is_final or buffer_sec >= _FLUSH_THRESHOLD_SEC:
+                return self._flush(sample_rate=sample_rate, target_lang=target_lang)
         return None
 
     def stop(self) -> dict[str, Any]:
         """Flush оставшегося буфера и сброс состояния."""
-        with self._buffer_lock:
-            has_data = bool(self._buffer)
-        result = self._flush(sample_rate=16000, target_lang="off") if has_data else None
-        self._reset()
+        with self._lock:
+            result = self._flush(sample_rate=16000, target_lang="off") if self._buffer else None
+            self._reset()
         return {"status": "stopped", "flushed": result is not None}
 
     def buffer_duration_sec(self, sample_rate: int = 16000) -> float:
         """Текущая длительность буфера в секундах."""
-        with self._buffer_lock:
+        with self._lock:
             return self._buffer_samples / max(sample_rate, 1)
 
     # ── IPC handlers ──────────────────────────────────────────────────────────
 
     def handle_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_ingest."""
-        # W1147 F5: top-level privacy guard for IPC entry point
-        if self._settings.get("privacy_mode_enabled"):
-            return {"ok": True, "skipped": "privacy_mode"}
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
 
         audio_b64 = params.get("audio_chunk", "")
         target_lang = str(params.get("target_lang", "off"))
@@ -117,15 +107,6 @@ class LiveSubsService:
 
         buf_sec = self.buffer_duration_sec(sample_rate)
         if result is not None:
-            add_breadcrumb(
-                category="live_subs",
-                message="live_subs_ingest",
-                data={
-                    "status": "flushed",
-                    "buffer_duration_sec": round(buf_sec, 2),
-                    "has_translation": result.get("translation") is not None,
-                },
-            )
             return {
                 "status": "flushed",
                 "buffer_duration_sec": buf_sec,
@@ -136,30 +117,19 @@ class LiveSubsService:
 
     def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
         """IPC handler: live_subs_stop."""
-        result = self.stop()
-        add_breadcrumb(
-            category="live_subs",
-            message="live_subs_stop",
-            data={"ok": True},
-        )
-        return result
+        return self.stop()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
     def _flush(self, sample_rate: int, target_lang: str) -> dict[str, Any]:
         """Выполняет STT + translate по накопленному буферу и сбрасывает его."""
-        # W1147 F5: guard emission even when called from stop() after privacy mode change
-        if self._settings.get("privacy_mode_enabled"):
-            self._reset()
+        if not self._buffer:
             return {"text": "", "translation": None}
 
-        with self._buffer_lock:
-            if not self._buffer:
-                return {"text": "", "translation": None}
-            start_ts = self._session_start
-            end_ts = time.monotonic()
-            audio = np.concatenate(self._buffer).astype(np.float32)
+        start_ts = self._session_start
+        end_ts = time.monotonic()
 
+        audio = np.concatenate(self._buffer).astype(np.float32)
         self._reset()
 
         # Ресемплинг: Swift/SCStream отдаёт нативную частоту (обычно 48 kHz),
@@ -235,10 +205,9 @@ class LiveSubsService:
 
     def _reset(self) -> None:
         """Сбрасывает буфер и метки времени."""
-        with self._buffer_lock:
-            self._buffer = []
-            self._buffer_samples = 0
-            self._session_start = time.monotonic()
+        self._buffer = []
+        self._buffer_samples = 0
+        self._session_start = time.monotonic()
 
     @staticmethod
     def _decode_audio(audio_bytes: bytes, sample_rate: int) -> np.ndarray:
