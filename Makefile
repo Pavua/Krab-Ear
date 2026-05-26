@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -76,3 +76,27 @@ clean-worktree-builds:
 release:
 	@chmod +x scripts/build_and_deploy.command
 	scripts/build_and_deploy.command $(ARGS)
+
+# Audit orphan imports in service.py (W746/W771 regression guard).
+# Detects names instantiated/decorated but never imported.
+# Pass ARGS=--strict to also check lowercase function calls.
+audit-orphans:
+	python3 scripts/audit_orphan_imports.py $(ARGS)
+
+# Audit IPC handler complexity in service.py.
+# Reports LOC, cyclomatic complexity, risky calls, and delegation type per handler.
+# Pass ARGS=--json for machine-readable output.
+audit-handlers:
+	python3 scripts/audit_ipc_handler_complexity.py $(ARGS)
+
+# Run only dispatch-invariant test files (fast regression gate, no pytest needed).
+dispatch-tests:
+	PYTHONPATH=$$(pwd)/KrabEar $(PYTHON) -m unittest \
+		KrabEar/tests/test_ipc_dispatch_invariants.py \
+		KrabEar/tests/test_dispatch_invariants_wave654.py \
+		KrabEar/tests/test_dispatch_invariants_wave693.py \
+		-v
+
+# Print current service.py line count (quick monolith size gauge).
+service-loc:
+	@wc -l KrabEar/backend/service.py | awk '{print $$1}'
