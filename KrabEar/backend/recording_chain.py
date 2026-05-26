@@ -145,7 +145,13 @@ class RecordingChainManager:
             chain = self._data["chains"].get(chain_id)
             if chain is None:
                 raise KeyError(f"Цепочка не найдена: {chain_id}")
+            # Snapshot all chain fields while holding the lock to prevent
+            # TOCTOU divergence (RC-1 W883): another thread could mutate or
+            # delete the chain between releasing the lock and reading metadata.
             item_ids = list(chain["item_ids"])
+            chain_name = chain["name"]
+            chain_created_at = chain["created_at"]
+            chain_ended_at = chain.get("ended_at")
 
         total_duration = 0.0
         total_words = 0
@@ -168,9 +174,9 @@ class RecordingChainManager:
 
         return {
             "chain_id": chain_id,
-            "name": chain["name"],
-            "created_at": chain["created_at"],
-            "ended_at": chain.get("ended_at"),
+            "name": chain_name,
+            "created_at": chain_created_at,
+            "ended_at": chain_ended_at,
             "item_ids": item_ids,
             "items": items_detail,
             "total_duration_sec": round(total_duration, 2),
