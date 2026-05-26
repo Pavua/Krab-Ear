@@ -586,5 +586,49 @@ class TestPrivacyAuditLogRotation(unittest.TestCase):
         self.assertEqual(self.logger.total_count(), 0)
 
 
+class TestPrivacyAuditSingletonConcurrency(unittest.TestCase):
+    """W958: проверка thread-safety get_instance() (double-checked locking)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.log_path = Path(self.tmpdir) / "audit_concurrent.log"
+        PrivacyAuditLogger.reset_instance()
+
+    def tearDown(self):
+        PrivacyAuditLogger.reset_instance()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_concurrent_get_instance_returns_same_singleton(self):
+        """50 потоков одновременно вызывают get_instance() — все получают один объект."""
+        n_threads = 50
+        instances: list[PrivacyAuditLogger] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(n_threads)
+
+        def worker() -> None:
+            # Все потоки стартуют одновременно через барьер — максимум гонки.
+            barrier.wait()
+            inst = PrivacyAuditLogger.get_instance(log_path=self.log_path)
+            with lock:
+                instances.append(inst)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(instances), n_threads)
+        # Все ссылки должны указывать на один и тот же объект Python.
+        first = instances[0]
+        for inst in instances[1:]:
+            self.assertIs(
+                inst,
+                first,
+                "get_instance() вернул разные объекты — нарушение singleton invariant",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ import fcntl
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ class PrivacyAuditLogger:
     """Singleton для записи событий режима конфиденциальности в NDJSON-лог."""
 
     _instance: "PrivacyAuditLogger | None" = None
+    _instance_lock: threading.Lock = threading.Lock()
 
     def __init__(self, log_path: Path | None = None) -> None:
         self._log_path: Path = log_path if log_path is not None else _DEFAULT_LOG_PATH
@@ -32,15 +34,26 @@ class PrivacyAuditLogger:
 
     @classmethod
     def get_instance(cls, log_path: Path | None = None) -> "PrivacyAuditLogger":
-        """Возвращает singleton-экземпляр (создаёт при первом вызове)."""
-        if cls._instance is None:
-            cls._instance = cls(log_path=log_path)
-        return cls._instance
+        """Возвращает singleton-экземпляр (создаёт при первом вызове).
+
+        Использует double-checked locking для thread-safety: быстрый путь
+        (без lock) для уже инициализированного экземпляра, медленный путь
+        (под lock с повторной проверкой) для первого создания.
+        """
+        # Быстрый путь: экземпляр уже создан — не берём lock.
+        if cls._instance is not None:
+            return cls._instance
+        # Медленный путь: берём lock и повторно проверяем перед созданием.
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls(log_path=log_path)
+            return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         """Сбрасывает singleton — используется только в тестах."""
-        cls._instance = None
+        with cls._instance_lock:
+            cls._instance = None
 
     def _ensure_parent(self) -> None:
         """Создаёт родительскую директорию если она отсутствует."""
