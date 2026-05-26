@@ -5,65 +5,68 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import List, Dict
 
+from core.stop_words import StopWords
 
-# ── Стоп-слова ──────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
-_STOP_WORDS_RU: frozenset = frozenset([
-    "быть", "было", "была", "были", "буду", "будет", "будут",
-    "этот", "этой", "этом", "этих", "этого", "этому", "эту",
-    "который", "которая", "которое", "которые", "которого", "которой",
-    "может", "можно", "могут", "можем",
-    "если", "когда", "потом", "потому", "после", "перед",
-    "очень", "более", "менее", "также", "тоже",
-    "через", "между", "около", "вокруг",
-    "нужно", "нужна", "надо", "просто",
-    "здесь", "сейчас", "тогда", "всегда", "никогда",
-    "ничего", "некоторые", "каждый", "другой", "другие",
-    "такой", "такая", "такие", "такое",
-    "свой", "свою", "свои", "своей", "своего",
-    "весь", "вся", "всё", "все", "всех", "всем",
-    "один", "одна", "одно", "одни",
-    "наш", "наша", "наши", "ваш", "ваша", "ваши",
-    "есть", "нет", "там", "тут", "еще", "ещё", "уже",
-    "только", "самый", "самая", "самое",
-    "хорошо", "ладно", "давай", "давайте",
-    "это", "при", "или", "для", "как", "что", "так", "его", "её", "их",
-    "они", "она", "оно", "мне", "мы", "вы", "он", "но", "от", "до",
-    "по", "из", "на", "в", "с", "к", "о", "у", "за", "не", "и", "а",
-    "то", "да", "же", "бы", "был",
-])
+# ── Слова специфичные для TermExtractor, отсутствующие в stop_words.py ───────
+# TODO(W1095): влить эти слова в core/stop_words.py в рамках следующего
+# планового обновления стоп-списков (RU: формы который/один/другой/мочь/мне/свой
+# ES: puede/cada/solo/bueno/vale/mismos и др.)
+#
+# RU-специфичные (не покрыты stop_words._RU):
+_EXTRA_STOP_RU: frozenset = frozenset({
+    "ваша", "ваши", "всем", "всех",
+    "давай", "давайте",
+    "другие", "другой",
+    "которая", "которого", "которое", "которой", "которые", "который",
+    "мне",
+    "могут", "можем", "может",
+    "наша", "наши",
+    "некоторые", "ничего",
+    "нужна",
+    "один", "одна", "одни", "одно",
+    "самая", "самое", "самый",
+    "своего", "своей", "свои", "свою",
+    "такое",
+    "у",
+    "этом", "этому", "эту",
+})
 
-_STOP_WORDS_ES: frozenset = frozenset([
-    "pero", "para", "como", "desde", "este", "esta", "esto",
-    "estos", "estas", "donde", "cuando", "porque", "aunque",
-    "puede", "pueden", "podemos", "tiene", "tienen",
-    "hace", "hacen", "está", "están", "sido", "haber",
-    "también", "mucho", "mucha", "muchos", "muchas",
-    "otro", "otra", "otros", "otras",
-    "todo", "toda", "todos", "todas",
-    "cada", "mismo", "misma", "mismos",
-    "algo", "nada", "siempre", "nunca",
-    "aquí", "ahora", "entonces", "después", "antes",
-    "entre", "sobre", "contra", "hacia",
-    "solo", "bueno", "bien", "vale",
-    "que", "del", "los", "las", "por", "con", "una", "uno",
-    "muy", "más", "sin", "nos", "fue", "ser", "hay",
-])
+# ES-специфичные (не покрыты stop_words._ES):
+_EXTRA_STOP_ES: frozenset = frozenset({
+    "bueno", "cada", "entonces",
+    "hace", "hacen",
+    "misma", "mismo", "mismos",
+    "mucha", "muchas", "muchos",
+    "otra", "otras", "otro", "otros",
+    "podemos", "puede", "pueden",
+    "sido", "solo",
+    "tienen", "toda", "uno", "vale",
+})
 
-_STOP_WORDS_EN: frozenset = frozenset([
-    "the", "and", "that", "this", "with", "from", "have", "been",
-    "will", "would", "could", "should", "which", "their", "there",
-    "they", "them", "then", "than", "when", "what", "where", "who",
-    "how", "but", "for", "not", "are", "was", "were", "has", "had",
-    "its", "our", "your", "his", "her", "its", "can", "may",
-])
+# Предупреждение логируется один раз при загрузке модуля
+logger.warning(
+    "term_extractor: using %d RU + %d ES extra stop-words not yet in "
+    "core/stop_words.py — TODO(W1095): merge into stop_words.py",
+    len(_EXTRA_STOP_RU),
+    len(_EXTRA_STOP_ES),
+)
 
-_ALL_STOP_WORDS = _STOP_WORDS_RU | _STOP_WORDS_ES | _STOP_WORDS_EN
+# Объединённые стоп-слова из unified StopWords + специфичные для TermExtractor
+_ALL_STOP_WORDS: frozenset = (
+    StopWords.get_stop_words("ru")
+    | StopWords.get_stop_words("es")
+    | StopWords.get_stop_words("en")
+    | _EXTRA_STOP_RU
+    | _EXTRA_STOP_ES
+)
 
 
 @dataclass
