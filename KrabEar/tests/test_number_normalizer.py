@@ -307,6 +307,136 @@ class TestNumberNormalizerUnaffectedText(unittest.TestCase):
         self.assertEqual(self.n.normalize(text, "en"), text)
 
 
+class TestNumberNormalizerEsOrdinal(unittest.TestCase):
+    """W997 — Spanish ordinal numerals → digit+suffix form (W991 F2 fix)."""
+
+    def setUp(self):
+        self.n = NumberNormalizer()
+
+    def _es(self, text):
+        return self.n.normalize(text, "es")
+
+    # --- test_es_ordinal_primero_replaced ---
+
+    def test_es_ordinal_primero_replaced(self):
+        """«primero» → «1.º»."""
+        result = self._es("primero")
+        self.assertEqual(result, "1.º")
+
+    def test_es_ordinal_primer_replaced(self):
+        """«primer» (apocope) → «1.º»."""
+        result = self._es("primer")
+        self.assertEqual(result, "1.º")
+
+    def test_es_ordinal_primera_replaced(self):
+        """«primera» (fem) → «1.ª»."""
+        result = self._es("primera")
+        self.assertEqual(result, "1.ª")
+
+    def test_es_ordinal_segundo_replaced(self):
+        """«segundo» → «2.º»."""
+        result = self._es("segundo")
+        self.assertEqual(result, "2.º")
+
+    def test_es_ordinal_segunda_replaced(self):
+        """«segunda» (fem) → «2.ª»."""
+        result = self._es("segunda")
+        self.assertEqual(result, "2.ª")
+
+    def test_es_ordinal_tercero_replaced(self):
+        """«tercero» → «3.º»."""
+        result = self._es("tercero")
+        self.assertEqual(result, "3.º")
+
+    def test_es_ordinal_tercer_replaced(self):
+        """«tercer» (apocope) → «3.º»."""
+        result = self._es("tercer")
+        self.assertEqual(result, "3.º")
+
+    def test_es_ordinal_cuarto_replaced(self):
+        """«cuarto» → «4.º»."""
+        result = self._es("cuarto")
+        self.assertEqual(result, "4.º")
+
+    def test_es_ordinal_quinto_replaced(self):
+        """«quinto» → «5.º»."""
+        result = self._es("quinto")
+        self.assertEqual(result, "5.º")
+
+    def test_es_ordinal_sexto_replaced(self):
+        """«sexto» → «6.º»."""
+        result = self._es("sexto")
+        self.assertEqual(result, "6.º")
+
+    def test_es_ordinal_septimo_replaced(self):
+        """«séptimo» (with accent) → «7.º»."""
+        result = self._es("séptimo")
+        self.assertEqual(result, "7.º")
+
+    def test_es_ordinal_septimo_no_accent_replaced(self):
+        """«septimo» (no accent) → «7.º»."""
+        result = self._es("septimo")
+        self.assertEqual(result, "7.º")
+
+    def test_es_ordinal_octavo_replaced(self):
+        """«octavo» → «8.º»."""
+        result = self._es("octavo")
+        self.assertEqual(result, "8.º")
+
+    def test_es_ordinal_noveno_replaced(self):
+        """«noveno» → «9.º»."""
+        result = self._es("noveno")
+        self.assertEqual(result, "9.º")
+
+    # --- test_es_ordinal_decimo_replaced ---
+
+    def test_es_ordinal_decimo_replaced(self):
+        """«décimo» (with accent) → «10.º»."""
+        result = self._es("décimo")
+        self.assertEqual(result, "10.º")
+
+    def test_es_ordinal_decimo_no_accent_replaced(self):
+        """«decimo» (no accent) → «10.º»."""
+        result = self._es("decimo")
+        self.assertEqual(result, "10.º")
+
+    def test_es_ordinal_decima_replaced(self):
+        """«décima» (fem) → «10.ª»."""
+        result = self._es("décima")
+        self.assertEqual(result, "10.ª")
+
+    def test_es_ordinal_in_sentence(self):
+        """Ordinal inside a sentence is normalised."""
+        result = self._es("Es el primer intento")
+        self.assertIn("1.º", result)
+
+    # --- test_es_ordinal_does_not_corrupt_compound ---
+
+    def test_es_ordinal_does_not_corrupt_compound_cuartito(self):
+        """«cuartito» must NOT be matched as «cuarto» + suffix (W993 lesson: (?!\\w) boundary)."""
+        result = self._es("cuartito")
+        # Must not contain «4.º» — cuartito is a diminutive, not an ordinal
+        self.assertNotIn("4.º", result)
+        self.assertEqual(result, "cuartito")
+
+    def test_es_ordinal_does_not_corrupt_compound_primero_embedded(self):
+        """«primeros» (plural) must NOT be matched as «primero» + «s»."""
+        result = self._es("primeros")
+        self.assertNotIn("1.º", result)
+        self.assertEqual(result, "primeros")
+
+    def test_es_ordinal_does_not_corrupt_compound_segunda_embedded(self):
+        """«segundario» must NOT be matched as «segunda» + suffix."""
+        result = self._es("segundario")
+        self.assertNotIn("2.ª", result)
+        self.assertNotIn("2.º", result)
+
+    def test_es_ordinal_boundary_standalone_word(self):
+        """Standalone ordinal within punctuation is still matched."""
+        result = self._es("¡primero!")
+        self.assertIn("1.º", result)
+
+
 class TestNumberNormalizerConcurrent(unittest.TestCase):
     """Thread-safety smoke test for normalize()."""
 
