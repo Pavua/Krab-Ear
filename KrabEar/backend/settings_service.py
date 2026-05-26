@@ -82,6 +82,18 @@ class SettingsService:
         """Register a callable(old_settings, new_settings) fired after each set_settings save."""
         self._after_save_hooks.append(hook)
 
+    def _fire_after_save_hooks(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> None:
+        """Fire all registered after-save hooks with (old_settings, new_settings).
+
+        Called from every save path so hooks are always notified on any settings change.
+        Swallows exceptions from individual hooks to keep the save path non-fatal.
+        """
+        for hook in self._after_save_hooks:
+            try:
+                hook(old_settings, new_settings)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("_fire_after_save_hooks: hook failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Кэш
     # ------------------------------------------------------------------
@@ -302,11 +314,7 @@ class SettingsService:
         except Exception as exc:  # noqa: BLE001
             _log.warning("set_settings: hot-reload failed: %s", exc)
         # Notify registered hooks (e.g. propagate api_key to live LLMRewriter).
-        for hook in self._after_save_hooks:
-            try:
-                hook(old_settings, settings)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("set_settings: after_save_hook failed: %s", exc)
+        self._fire_after_save_hooks(old_settings, settings)
         return result
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -320,11 +328,13 @@ class SettingsService:
             available = ", ".join(self._PROFILE_PRESETS.keys())
             raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
 
-        settings = self.cached_settings()
+        old_settings = self.cached_settings()
+        settings = dict(old_settings)
         settings.update(preset)
         settings["active_preset"] = profile
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        self._fire_after_save_hooks(old_settings, settings)
         add_breadcrumb(
             category="settings",
             message="apply_profile_preset",
@@ -357,7 +367,8 @@ class SettingsService:
 
     def handle_set_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Обновляет настройки уведомлений. Принимает любое подмножество полей."""
-        settings = self.cached_settings()
+        old_settings = self.cached_settings()
+        settings = dict(old_settings)
 
         _BOOL_FIELDS = (
             "notifications_enabled",
@@ -380,6 +391,7 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        self._fire_after_save_hooks(old_settings, settings)
         return result
 
     # Sensitive fields — никогда не экспортируются
@@ -444,7 +456,8 @@ class SettingsService:
 
         errors: list[str] = []
         skipped = 0
-        merged = self.cached_settings()
+        old_settings = self.cached_settings()
+        merged = dict(old_settings)
 
         for key, value in incoming.items():
             if key in self._SENSITIVE_FIELDS:
@@ -466,6 +479,7 @@ class SettingsService:
         imported = len(incoming) - skipped
         self.store.save_settings(merged)
         self.invalidate_cache()
+        self._fire_after_save_hooks(old_settings, merged)
         add_breadcrumb(
             category="settings",
             message="import_settings",
@@ -527,9 +541,11 @@ class SettingsService:
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
 
+        old_settings = self.cached_settings()
         restored = self._backup.restore_backup(backup_id)
         self.store.save_settings(restored)
         self.invalidate_cache()
+        self._fire_after_save_hooks(old_settings, restored)
 
         _log.info("handle_restore_settings_backup: restored from %s", backup_id)
         return {"restored_settings": restored, "backup_id": backup_id}
