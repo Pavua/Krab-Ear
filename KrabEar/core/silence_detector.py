@@ -18,13 +18,10 @@ logger = logging.getLogger("KrabEar.SilenceDetector")
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
-# Пороги тишины в дБ
-# Строгий порог используется для аналитики (доля речи, метрики качества).
-SILENCE_THRESHOLD_DB_STRICT: float = -40.0
-# Порог для STT-путей (SmartSilenceSkipper, RealtimeSilenceFilter):
-# шёпот даёт типичные -45…-55 дБ RMS, поэтому используем -55 дБ, чтобы
-# не выбрасывать нешёпотные фрагменты как тишину и не терять транскрипт.
-SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
+# Единый порог тишины по амплитуде (RMS) — -40 dB.
+# Экспортируется как публичная константа для использования в других модулях
+# (например, audio_quality.py) во избежание расхождения значений.
+SILENCE_THRESHOLD_AMP: float = 0.01
 
 
 def _db_to_amplitude(db: float) -> float:
@@ -133,6 +130,7 @@ class SilenceDetector:
         Returns:
             Аудио с обрезанной ведущей/завершающей тишиной.
         """
+        audio.shape
         mono = self._to_mono(audio)
 
         if len(mono) == 0 or sample_rate <= 0:
