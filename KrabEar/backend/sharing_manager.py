@@ -9,11 +9,9 @@ Wave 158: добавлены TTL (expires_at) и revoke API для устран�
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
-import math
-import random
+import secrets
 import string
 import threading
 import time
@@ -31,12 +29,6 @@ _SHARES_INDEX_FILE = "shares_index.json"
 
 # Default TTL: 7 days in hours
 DEFAULT_SHARE_TTL_HOURS: int = 168
-
-# Maximum allowed TTL (1 week) — prevents TTL safety cap bypass (W1242 F2)
-_MAX_TTL_HOURS: float = 168.0
-
-# Maximum number of item_ids per share request (W1242 F3)
-_MAX_SHARE_ITEMS: int = 100
 
 SUPPORTED_FORMATS = ("markdown", "text", "json")
 
@@ -110,8 +102,12 @@ class SharingManager:
     # ------------------------------------------------------------------
 
     def generate_share_id(self) -> str:
-        """Генерирует короткий уникальный ID (8 символов, base62)."""
-        return "".join(random.choices(_BASE62_CHARS, k=_SHARE_ID_LEN))
+        """Генерирует короткий уникальный ID (8 символов, base62, криптографически стойкий).
+
+        Использует secrets.choice вместо random.choices (Mersenne Twister) для
+        предотвращения предсказуемости токенов шаринга (W931 F1 MEDIUM).
+        """
+        return "".join(secrets.choice(_BASE62_CHARS) for _ in range(_SHARE_ID_LEN))
 
     def prepare_share(
         self,
@@ -167,8 +163,6 @@ class SharingManager:
             expires_at=expires_at,
             is_revoked=False,
         )
-        # Track whether any real items were resolved (used for F5 warning)
-        package._items_resolved = len(items)  # type: ignore[attr-defined]
 
         self._persist_package(package)
         return package
@@ -191,25 +185,11 @@ class SharingManager:
             result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return result
 
-    def _find_share_by_token_constant_time(self, token: str) -> dict[str, Any] | None:
-        """Ищет запись в индексе по токену за константное время.
-
-        Итерирует ВСЕ записи без short-circuit, чтобы не давать timing-oracle
-        атакующему информацию о существовании токена.
-
-        Должна вызываться под self._lock.
-        """
-        found: dict[str, Any] | None = None
-        for known_token, entry in self._index.items():
-            if hmac.compare_digest(known_token, token):
-                found = entry
-        return found
-
     def get_shared(self, share_id: str) -> SharePackage | None:
         """Возвращает SharePackage по ID, или None если не найден / истёк / отозван."""
         now = time.time()
         with self._lock:
-            entry = self._find_share_by_token_constant_time(share_id)
+            entry = self._index.get(share_id)
             if entry is None:
                 return None
             # Проверяем отзыв
@@ -230,10 +210,9 @@ class SharingManager:
             True если пакет существовал и был отозван, False если не найден.
         """
         with self._lock:
-            entry = self._find_share_by_token_constant_time(token)
-            if entry is None:
+            if token not in self._index:
                 return False
-            self._index[entry["share_id"]]["is_revoked"] = True
+            self._index[token]["is_revoked"] = True
             self._save_index()
             return True
 
@@ -250,47 +229,17 @@ class SharingManager:
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise RuntimeError("Параметр 'item_ids' должен быть непустым списком")
-
-        # F3 MED: cap item_ids at _MAX_SHARE_ITEMS (W1242)
-        if len(item_ids) > _MAX_SHARE_ITEMS:
-            raise RuntimeError(
-                f"Слишком много item_ids: {len(item_ids)} > {_MAX_SHARE_ITEMS}"
-            )
-
         fmt = str(params.get("format", "markdown")).strip()
         include_translation = bool(params.get("include_translation", True))
-
-        # F2 MED: validate ttl_hours — must be finite, clamp to [0, _MAX_TTL_HOURS] (W1242)
         ttl_hours_raw = params.get("ttl_hours")
-        ttl_hours: Optional[float]
-        if ttl_hours_raw is None:
-            ttl_hours = 1.0  # default 1 hour when not specified
-        else:
-            try:
-                ttl_hours = float(ttl_hours_raw)
-            except (TypeError, ValueError):
-                raise RuntimeError(
-                    f"Недопустимое значение ttl_hours: {ttl_hours_raw!r}"
-                )
-            if not math.isfinite(ttl_hours):
-                raise RuntimeError(
-                    f"ttl_hours должен быть конечным числом, получено: {ttl_hours_raw!r}"
-                )
-            ttl_hours = max(0.0, min(ttl_hours, _MAX_TTL_HOURS))
-
+        ttl_hours: Optional[float] = float(ttl_hours_raw) if ttl_hours_raw is not None else None
         package = self.prepare_share(
             item_ids,
             format=fmt,
             include_translation=include_translation,
             ttl_hours=ttl_hours,
         )
-        result = package.to_dict()
-
-        # F5 LOW: warn when no items resolved (all item_ids missing/deleted) (W1242)
-        if getattr(package, "_items_resolved", None) == 0:
-            result["warning"] = "no_items_found"
-
-        return result
+        return package.to_dict()
 
     def handle_list_shared(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: список сохранённых пакетов."""

@@ -90,6 +90,25 @@ class GenerateShareIdTestCase(unittest.TestCase):
         # С 62^8 возможными комбинациями коллизия за 50 попыток крайне маловероятна
         self.assertGreater(len(ids), 40)
 
+    def test_share_id_uses_secrets_module(self) -> None:
+        """W931 F1: generate_share_id должен использовать secrets.choice, не random.choices."""
+        from unittest.mock import patch, call
+        import backend.sharing_manager as sm_module
+
+        call_count: list[int] = []
+
+        def fake_secrets_choice(seq: str) -> str:
+            call_count.append(1)
+            return seq[0]  # детерминированный выбор для теста
+
+        with patch.object(sm_module.secrets, "choice", side_effect=fake_secrets_choice):
+            sid = self._mgr.generate_share_id()
+
+        # secrets.choice должен был вызываться ровно _SHARE_ID_LEN раз
+        self.assertEqual(len(call_count), sm_module._SHARE_ID_LEN,
+                         "generate_share_id не использует secrets.choice")
+        self.assertEqual(len(sid), sm_module._SHARE_ID_LEN)
+
 
 # ---------------------------------------------------------------------------
 # Тесты prepare_share
