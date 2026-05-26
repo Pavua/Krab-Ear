@@ -1,7 +1,7 @@
 """Умная коррекция пунктуации для вывода STT.
 
 PunctuationFixer применяется как опциональный этап конвейера после TextUtils.cleanup_transcript.
-Поддерживает русский (ru) и испанский (es) языки.
+Поддерживает русский (ru), испанский (es) и английский (en) языки.
 """
 
 import re
@@ -15,48 +15,9 @@ logger = logging.getLogger("KrabEar.PunctuationFixer")
 # Пробел перед знаками препинания (,.:;!?)
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 
-# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби, не «, не URL)
-# ':' включён, но (?!/) исключает URL-схемы (http:/, https:/, file:/ и т.п.)
-_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»]|:(?!/))([^\s\d»\"')\]])")
-
-# Находим все точки перед заглавной буквой — фактическую вставку пробела
-# определяет _insert_period_space() с учётом контекста.
-_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"\.([А-ЯA-ZЁ])")
-
-
-def _insert_period_space(m: re.Match) -> str:
-    """Callback для _NO_SPACE_AFTER_PERIOD_RE.
-
-    Вставляет пробел после точки только если это граница предложения, а не:
-    - точечное сокращение (т.е., т.д., i.e., etc.) — когда перед точкой стоит
-      символ, которому предшествовала другая точка (X.X. паттерн);
-    - версионная строка (v1.0.Beta, 2.3.5) — перед точкой стоит цифра.
-    """
-    start = m.start()
-    text = m.string
-    # Символ непосредственно перед точкой
-    char_before = text[start - 1] if start > 0 else ""
-    # Является ли символ перед точкой цифрой? → версионная строка
-    if char_before.isdigit():
-        return m.group(0)
-    # Является ли символ перед точкой буквой, которой предшествует другая точка?
-    # Т.е. паттерн «...X.Y.» где Y — текущий символ перед нашей точкой
-    if char_before and re.match(r"[а-яёА-ЯЁa-zA-Z]", char_before):
-        pos_before_char = start - 2
-        if pos_before_char >= 0 and text[pos_before_char] == ".":
-            return m.group(0)  # аббревиатура типа т.е., v.s.
-        # Дополнительно: если перед символом стоит начало строки или пробел,
-        # то это первый компонент аббревиатуры (например, «т.» в «т.е.»)
-        if pos_before_char < 0 or text[pos_before_char] in (" ", "\t", "\n", "(", "["):
-            return m.group(0)  # одиночный символ + точка в начале слова = аббревиатура
-    # Граница предложения — вставляем пробел
-    return ". " + m.group(1)
-
-# STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
-# common Whisper output like "dime.como".  Only applied in ES mode.
-# Excludes abbreviation-style runs (e.g. "e.g.", "U.S.A") by requiring the
-# character BEFORE the period to be a word character (not already a digit).
-_NO_SPACE_AFTER_SENT_LOWER_ES_RE = re.compile(r"([.!?])([a-záéíóúüñ¿¡])", re.IGNORECASE)
+# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
+_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
+_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
 
 # Множественные пробелы
 _MULTI_SPACE_RE = re.compile(r"  +")
@@ -80,6 +41,13 @@ _ES_QUESTION_MISSING_IQUEST_RE = re.compile(r"^(?!¿)(.+\?)$")
 # Испанский: восклицательное без ¡
 _ES_EXCL_MISSING_IEXCL_RE = re.compile(r"^(?!¡)(.+!)$")
 
+# Английский: одиночные прямые кавычки вокруг слов → типографские
+_EN_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
+
+# Английский: двойные ASCII-кавычки вокруг текста → "…"
+_EN_DOUBLE_QUOTE_OPEN_RE = re.compile(r'(?<!\w)"(?=\S)')
+_EN_DOUBLE_QUOTE_CLOSE_RE = re.compile(r'(?<=\S)"(?!\w)')
+
 
 class PunctuationFixer:
     """Детерминированная коррекция пунктуации для вывода STT.
@@ -95,7 +63,7 @@ class PunctuationFixer:
 
         Args:
             text: Исходный текст.
-            language: Код языка: "ru" (русский) или "es" (испанский).
+            language: Код языка: "ru" (русский), "es" (испанский) или "en" (английский).
 
         Returns:
             Откорректированный текст.
@@ -106,19 +74,18 @@ class PunctuationFixer:
         result = text
 
         # Общие правила (применяются для всех языков)
-        # Порядок важен: сначала добавить пробелы после знаков (шаг A),
-        # затем убрать пробелы перед знаками (шаг B) — иначе пробелы,
-        # введённые шагом A, не попадут под очистку шага B (W1348 R1).
         result = _MULTI_SPACE_RE.sub(" ", result)
-        result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
-        result = _NO_SPACE_AFTER_PERIOD_RE.sub(_insert_period_space, result)
         result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
+        result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
+        result = _NO_SPACE_AFTER_PERIOD_RE.sub(r"\1 \2", result)
         result = _CAPITALIZE_AFTER_SENT_RE.sub(lambda m: m.group(1) + m.group(2).upper(), result)
 
         if language == "ru":
             result = self._fix_russian(result)
         elif language == "es":
             result = self._fix_spanish(result)
+        elif language == "en":
+            result = self._fix_english(result)
 
         # Добавить точку в конце если её нет (для всех языков)
         result = _MISSING_PERIOD_RE.sub(r"\1.", result)
@@ -145,70 +112,43 @@ class PunctuationFixer:
         """Правила, специфичные для испанского языка."""
         result = text
 
-        # Нормализация STT «без пробела после знака»: Whisper иногда выводит
-        # "dime.como te llamas?" (без пробела после точки перед строчной буквой).
-        # Вставляем пробел, чтобы сплиттер предложений мог корректно разбить текст.
-        # Применяется только для ES, до marker-insertion.
-        result = _NO_SPACE_AFTER_SENT_LOWER_ES_RE.sub(r"\1 \2", result)
-
         # Капитализировать первое слово
         if result and result[0].islower():
             result = result[0].upper() + result[1:]
 
-        # Добавить ¿/¡ к каждому предложению отдельно, а не ко всему тексту.
-        # Разбиваем на токены: разделители (.!?) сохраняются в выводе.
-        result = self._apply_inverted_markers_per_sentence(result)
+        # Добавить ¿ к вопросам
+        if result.rstrip().endswith("?") and not result.lstrip().startswith("¿"):
+            result = "¿" + result.lstrip()
+
+        # Добавить ¡ к восклицаниям
+        if result.rstrip().endswith("!") and not result.lstrip().startswith("¡"):
+            result = "¡" + result.lstrip()
 
         return result
 
-    # Pattern splits on sentence-ending punctuation, keeping the delimiter in
-    # the list via a capturing group.  E.g. "Hola. cómo estás?" →
-    # ["Hola", ".", " cómo estás", "?", ""]
-    _SENT_SPLIT_RE = re.compile(r"([.!?…]+)")
+    def _fix_english(self, text: str) -> str:
+        """Rules specific to English."""
+        result = text
 
-    def _apply_inverted_markers_per_sentence(self, text: str) -> str:
-        """Prepend ¿/¡ to each individual sentence that ends with ?/! only."""
-        parts = self._SENT_SPLIT_RE.split(text)
-        # parts alternates: [sentence_body, delimiter, sentence_body, delimiter, …, tail]
-        # Reconstruct, adding markers to each (body, delimiter) pair.
-        out: List[str] = []
-        i = 0
-        while i < len(parts):
-            body = parts[i]
-            # Try to get the following delimiter (if any).
-            if i + 1 < len(parts):
-                delim = parts[i + 1]
-                i += 2
-            else:
-                # Last tail with no trailing delimiter.
-                out.append(body)
-                break
+        # Capitalize first letter of the text
+        if result and result[0].islower():
+            result = result[0].upper() + result[1:]
 
-            stripped_body = body.strip()
-            # Determine the effective end character for this sentence.
-            last_char = delim[-1] if delim else ""
+        # Typographic apostrophes in contractions (it's, don't, I'm, …)
+        result = _EN_APOSTROPHE_RE.sub("’", result)
 
-            if last_char == "?" and stripped_body and not stripped_body.startswith("¿"):
-                # Prepend ¿ right before the first non-whitespace character in body.
-                leading_ws = len(body) - len(body.lstrip())
-                body = body[:leading_ws] + "¿" + body[leading_ws:]
-            elif last_char == "!" and stripped_body and not stripped_body.startswith("¡"):
-                leading_ws = len(body) - len(body.lstrip())
-                body = body[:leading_ws] + "¡" + body[leading_ws:]
+        # Straight double-quotes → curly open/close
+        result = _EN_DOUBLE_QUOTE_OPEN_RE.sub("“", result)
+        result = _EN_DOUBLE_QUOTE_CLOSE_RE.sub("”", result)
 
-            out.append(body)
-            out.append(delim)
+        return result
 
-        return "".join(out)
-
-    def get_fixes_applied(self, original: str, fixed: str, language: str = "ru") -> List[str]:
+    def get_fixes_applied(self, original: str, fixed: str) -> List[str]:
         """Возвращает список описаний применённых изменений.
 
         Args:
             original: Исходный текст до коррекции.
             fixed: Текст после коррекции.
-            language: Код языка ("ru" / "es"), нужен для language-specific проверок
-                      (например, я-капитализация — только для RU).
 
         Returns:
             Список строк-описаний изменений (пустой, если изменений нет).
@@ -232,21 +172,26 @@ class PunctuationFixer:
         if original and original[0].islower() and fixed and fixed[0].isupper():
             fixes.append("capitalized first letter")
 
-        # Я-капитализация специфична для русского языка (W1348 R2 gate)
-        if language == "ru" and _STANDALONE_YA_RE.search(original) and "Я" not in original:
+        if _STANDALONE_YA_RE.search(original) and "Я" not in original:
             fixes.append("capitalized standalone 'я'")
 
         if '"' in original and "«" in fixed:
             fixes.append("fixed quotation marks to «»")
 
+        if '"' in original and "“" in fixed:
+            fixes.append("fixed quotation marks to “”")
+
+        if "'" in original and "’" in fixed:
+            fixes.append("fixed apostrophes to curly form")
+
         if _CAPITALIZE_AFTER_SENT_RE.search(original):
             fixes.append("capitalized after sentence ending")
 
-        # Испанский: добавление ¿/¡ (per-sentence — достаточно найти хоть один маркер в fixed)
-        if "?" in original and "¿" in fixed and "¿" not in original:
+        # Испанский: добавление ¿/¡
+        if original.rstrip().endswith("?") and not original.lstrip().startswith("¿") and fixed.startswith("¿"):
             fixes.append("added ¿ before question")
 
-        if "!" in original and "¡" in fixed and "¡" not in original:
+        if original.rstrip().endswith("!") and not original.lstrip().startswith("¡") and fixed.startswith("¡"):
             fixes.append("added ¡ before exclamation")
 
         if not fixes:
