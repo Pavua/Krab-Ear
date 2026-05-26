@@ -562,5 +562,82 @@ class TestCursorAdvanceBugW1325F2(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# TestW1136Fixes — W1136 F1 + F2 HIGH
+# ---------------------------------------------------------------------------
+class TestW1136Fixes(unittest.TestCase):
+    """W1136 F1+F2 HIGH — settings-driven threshold + _checked_up_to_sec activation."""
+
+    # ------------------------------------------------------------------
+    # F2: threshold_from_settings
+    # ------------------------------------------------------------------
+    def test_threshold_from_settings(self):
+        """_threshold_db должен браться из settings, а не быть захардкожен."""
+        recorder = FakeRecorder(_make_silence(5.0))
+        custom_threshold = -30.0
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "realtime_silence_threshold_db": custom_threshold,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        self.assertAlmostEqual(
+            rsf._threshold_db, custom_threshold,
+            msg="_threshold_db должен читаться из settings['realtime_silence_threshold_db']",
+        )
+
+    def test_threshold_default_when_not_in_settings(self):
+        """Без ключа в settings используется _DEFAULT_THRESHOLD_DB = -40.0."""
+        recorder = FakeRecorder(_make_silence(5.0))
+        rsf = RealtimeSilenceFilter(recorder, {})
+        self.assertAlmostEqual(rsf._threshold_db, -40.0)
+
+    # ------------------------------------------------------------------
+    # F1: _checked_up_to_sec skips already-analyzed prefix
+    # ------------------------------------------------------------------
+    def test_checked_up_to_sec_skips_prefix(self):
+        """После первого _check_once _checked_up_to_sec == total_duration,
+        и второй вызов пропускает уже проанализированный префикс (skip_samples > 0).
+        """
+        # 10s silence — длиннее window_sec чтобы total_duration > window
+        audio = _make_silence(15.0)
+        recorder = FakeRecorder(audio)
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 60.0,   # prevent auto-tick
+            "rt_silence_window_sec": 10.0,
+            "rt_silence_max_sec": 1.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+
+        # Manually call _check_once to simulate first tick
+        rsf._check_once()
+
+        first_checked = rsf._checked_up_to_sec
+        total_dur = len(audio) / SAMPLE_RATE  # 15.0
+        self.assertAlmostEqual(
+            first_checked, total_dur, places=1,
+            msg="_checked_up_to_sec должен быть обновлён до total_duration после первого тика",
+        )
+
+        # On second call with same recorder state (total_duration unchanged),
+        # skip_samples should equal or exceed the audio_window size → no new work.
+        # Capture call count via a counter on detect_silence.
+        call_count = [0]
+        original_detect = rsf._detector.detect_silence
+
+        def counting_detect(audio_arr, sr, **kw):
+            call_count[0] += 1
+            return original_detect(audio_arr, sr, **kw)
+
+        rsf._detector.detect_silence = counting_detect
+        rsf._check_once()
+
+        self.assertEqual(
+            call_count[0], 0,
+            "Второй тик с теми же данными не должен вызывать detect_silence — "
+            "весь префикс уже проанализирован.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

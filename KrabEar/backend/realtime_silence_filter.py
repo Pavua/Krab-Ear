@@ -147,6 +147,11 @@ class RealtimeSilenceFilter:
 
         total_silence = sum(r.duration_sec for r in silence_regions)
 
+        # Update _checked_up_to_sec to the end of the current window so the
+        # next tick skips all audio we just processed.
+        with self._lock:
+            self._checked_up_to_sec = total_duration
+
         if total_silence < self._max_silence_sec:
             return
 
