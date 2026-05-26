@@ -37,6 +37,20 @@ _STRENGTH_PARAMS: dict[str, dict] = {
     "strong":   {"prop_decrease": 0.95, "n_std_thresh_stationary": 2.0},
 }
 
+# Параметры noisereduce backend по уровням силы.
+# prop_decrease ограничен speech-band floor (W1311 F3):
+#   strong   = 0.75  → минимум 25% оригинального речевого сигнала сохраняется
+#   moderate = 0.85  → минимум 15% оригинального речевого сигнала сохраняется
+#   light    = 0.50  → минимум 50% оригинального речевого сигнала сохраняется
+# В отличие от spectral gating (prop_decrease применяется к маске бинов),
+# noisereduce применяет prop_decrease глобально ко всему спектру — более агрессивно,
+# поэтому значения для strong/moderate здесь ниже, чем у spectral gating.
+_NOISEREDUCE_PARAMS: dict[str, dict] = {
+    "light":    {"prop_decrease": 0.50, "n_std_thresh_stationary": 1.0},
+    "moderate": {"prop_decrease": 0.85, "n_std_thresh_stationary": 1.5},
+    "strong":   {"prop_decrease": 0.75, "n_std_thresh_stationary": 2.0},
+}
+
 # Количество семплов для оценки noise floor (первые ~200 мс @ 16 кГц).
 # Используется только как fallback когда в аудио нет тихих фреймов.
 _NOISE_FLOOR_SAMPLES = 3200
@@ -185,9 +199,12 @@ class AudioDenoiser:
             logger.debug("[Denoiser] аудио слишком короткое, пропускаем")
             return audio
 
-        params = _STRENGTH_PARAMS.get(strength, _STRENGTH_PARAMS["moderate"])
-
+        # Используем разные таблицы параметров: noisereduce применяет prop_decrease
+        # глобально (более агрессивно), spectral gating — только к маске бинов.
+        # W1311 F3: noisereduce backend должен уважать speech-band floor через
+        # собственную таблицу _NOISEREDUCE_PARAMS с более низкими значениями.
         if self._has_noisereduce:
+            params = _NOISEREDUCE_PARAMS.get(strength, _NOISEREDUCE_PARAMS["moderate"])
             denoised = self._denoise_noisereduce(mono, sample_rate, params)
         else:
             denoised = self._denoise_spectral_gating(mono, sample_rate, params, strength)
