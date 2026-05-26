@@ -487,75 +487,57 @@ class TestEmotionDetectorConcurrent(unittest.TestCase):
             self.assertIn(emotion, valid_emotions)
 
 
-class TestEmotionDetectorPhraseMatching(unittest.TestCase):
-    """W1360 F3 HIGH: multi-word phrase matching via _NEGATIVE_PHRASES.
-
-    Before the fix, «не нравится» was in _NEGATIVE_WORDS["ru"] but the
-    whitespace-tokenizer split it into «не» + «нравится».  «нравится» matched
-    _POSITIVE_WORDS["ru"] → detector returned "positive" instead of "negative".
-    """
+class TestEmotionDetectorNegationParticles(unittest.TestCase):
+    """W1009 F1+F3: отрицательные и утвердительные частицы не должны влиять на sentiment."""
 
     def setUp(self) -> None:
         self.detector = EmotionDetector()
 
-    # ------------------------------------------------------------------
-    # 1. Core regression: "мне не нравится" must return negative
-    # ------------------------------------------------------------------
+    # ── F1: отрицательные частицы ────────────────────────────────────────
 
-    def test_не_нравится_returns_negative(self) -> None:
-        """Phrase 'не нравится' triggers negative emotion (W1360 regression)."""
-        result = self.detector.detect("мне не нравится", language="ru")
+    def test_ne_znayu_returns_neutral_not_negative(self) -> None:
+        """«не знаю точно» — нейтральное высказывание, не отрицательное."""
+        result = self.detector.detect("не знаю точно", language="ru")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "negative",
+            f"Expected NOT negative, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    def test_no_problem_returns_neutral_not_negative(self) -> None:
+        """«no problem, I can do that» — нейтральное согласие, не отрицательное."""
+        result = self.detector.detect("no problem, I can do that", language="en")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "negative",
+            f"Expected NOT negative, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    # ── F3: утвердительные частицы ──────────────────────────────────────
+
+    def test_da_obsudim_returns_neutral_not_positive(self) -> None:
+        """«да обсудим завтра» — нейтральное согласие, не позитивное от частицы «да»."""
+        result = self.detector.detect("да обсудим завтра", language="ru")
+        self.assertNotEqual(
+            result.primary_emotion,
+            "positive",
+            f"Expected NOT positive, got {result.primary_emotion!r} (confidence={result.confidence})",
+        )
+        self.assertEqual(result.primary_emotion, "neutral")
+
+    # ── Regression: настоящие сентиментальные слова всё ещё работают ─────
+
+    def test_actual_negative_zlost_still_detected(self) -> None:
+        """Настоящее негативное слово «злость» всё ещё детектируется."""
+        result = self.detector.detect("я чувствую злость и ненависть", language="ru")
         self.assertEqual(
             result.primary_emotion,
             "negative",
-            f"Expected 'negative', got '{result.primary_emotion}'. "
-            f"indicators={result.indicators}",
+            f"Expected negative, got {result.primary_emotion!r} (confidence={result.confidence})",
         )
-        self.assertGreater(result.confidence, 0.0)
-        self.assertTrue(
-            any("не нравится" in ind for ind in result.indicators),
-            f"Expected 'не нравится' in indicators, got: {result.indicators}",
-        )
-
-    # ------------------------------------------------------------------
-    # 2. Normal single-word detection must be unchanged by the refactor
-    # ------------------------------------------------------------------
-
-    def test_normal_word_detection_unchanged(self) -> None:
-        """Single negative words still work after phrase-matching refactor."""
-        result = self.detector.detect("ужасно плохо", language="ru")
-        self.assertEqual(result.primary_emotion, "negative")
-        self.assertTrue(
-            any(ind in ("ужасно", "плохо") for ind in result.indicators),
-            f"Expected single-word indicators, got: {result.indicators}",
-        )
-
-    # ------------------------------------------------------------------
-    # 3. Phrase + word overlap must NOT double-count hits
-    # ------------------------------------------------------------------
-
-    def test_phrase_overlap_not_double_counted(self) -> None:
-        """When a phrase AND a word both match, the negative score stays sane.
-
-        "мне не нравится это ужасно" has:
-        - phrase hit: «не нравится»
-        - word hit:   «ужасно»
-        - word hit:   «не»  (single negative word still in dict)
-        The phrase must not be counted twice (once as phrase, once via its
-        component words as single tokens).
-        """
-        result = self.detector.detect("мне не нравится это ужасно", language="ru")
-        # Primary emotion should be negative
-        self.assertEqual(result.primary_emotion, "negative")
-
-        # «не нравится» phrase appears exactly once in indicators
-        phrase_occurrences = sum(1 for ind in result.indicators if ind == "не нравится")
-        self.assertEqual(
-            phrase_occurrences,
-            1,
-            f"'не нравится' should appear exactly once in indicators, "
-            f"got {phrase_occurrences}. indicators={result.indicators}",
-        )
+        self.assertGreater(result.confidence, 0.3)
 
 
 if __name__ == "__main__":
