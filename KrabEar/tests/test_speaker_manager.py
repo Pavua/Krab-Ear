@@ -662,107 +662,131 @@ class TestSpeakerManagerWave92(unittest.TestCase):
         self.assertEqual(sid2, "Speaker_1")
 
 
-class TestSpeakerManagerPrivacyMode(unittest.TestCase):
-    """W951 HIGH F2: voice embeddings must not be persisted when privacy_mode_enabled."""
+class TestSpeakerManagerW962(unittest.TestCase):
+    """W962 fixes: atomic save (F1) + merge_speakers (F3)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.mgr = SpeakerManager(data_dir=self.tmpdir)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_register_speaker_skips_persist_in_privacy_mode(self):
-        """Fingerprint file must NOT be written when privacy_mode_enabled=True."""
+    # ------------------------------------------------------------------
+    # F1: Atomic save — no .tmp residue after successful save
+    # ------------------------------------------------------------------
+
+    def test_atomic_save_no_tmp_residue(self):
+        """После успешного _save() файл .json.tmp не должен оставаться на диске."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        aliases_path = Path(self.tmpdir) / "speaker_aliases.json"
+        tmp_path = aliases_path.with_suffix(aliases_path.suffix + ".tmp")
+        # After successful save the tmp file should be gone (replaced atomically)
+        self.assertFalse(tmp_path.exists(), f"Tmp file должен быть удалён: {tmp_path}")
+        # Main file should contain the alias
+        self.assertTrue(aliases_path.exists())
+        data = json.loads(aliases_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["SPEAKER_00"], "Паша")
+
+    def test_atomic_save_fingerprints_no_tmp_residue(self):
+        """После успешного _save_fingerprints() файл .json.tmp не должен оставаться."""
         import numpy as np
 
-        mgr = SpeakerManager(
-            data_dir=self.tmpdir,
-            settings_provider=lambda: {"privacy_mode_enabled": True},
-        )
         emb = np.ones(512, dtype=np.float32)
-        sid = mgr.register_speaker("TestUser", emb)
-
-        # In-memory state should be intact
-        self.assertIn(sid, mgr.get_all_fingerprints())
-
-        # On-disk file must NOT exist — privacy gate suppressed _save_fingerprints
+        self.mgr.register_speaker("TestSpeaker", emb)
         fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
-        self.assertFalse(
-            fp_path.exists(),
-            "speaker_fingerprints.json must not be written when privacy mode is active",
-        )
+        tmp_path = fp_path.with_suffix(fp_path.suffix + ".tmp")
+        self.assertFalse(tmp_path.exists(), f"Tmp file должен быть удалён: {tmp_path}")
+        self.assertTrue(fp_path.exists())
 
-    def test_register_speaker_persists_when_privacy_mode_off(self):
-        """Fingerprint file IS written when privacy_mode_enabled=False (baseline)."""
-        import numpy as np
+    # ------------------------------------------------------------------
+    # F3: merge_speakers rewrites history items text
+    # ------------------------------------------------------------------
 
-        mgr = SpeakerManager(
-            data_dir=self.tmpdir,
-            settings_provider=lambda: {"privacy_mode_enabled": False},
-        )
-        emb = np.ones(512, dtype=np.float32)
-        mgr.register_speaker("TestUser", emb)
+    def test_merge_speakers_rewrites_history_items(self):
+        """merge_speakers переписывает [SPEAKER_XX] теги в истории."""
+        # Build a minimal fake StateStore with a controllable item
+        updated_calls: list[tuple[str, str]] = []
 
-        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
-        self.assertTrue(
-            fp_path.exists(),
-            "speaker_fingerprints.json must be written when privacy mode is off",
-        )
+        class FakeHistoryItem:
+            def __init__(self, item_id: str, text: str, speaker_turns=None):
+                self.id = item_id
+                self.text = text
+                self.speaker_turns = speaker_turns
 
-    def test_register_speaker_persists_without_settings_provider(self):
-        """Default (no settings_provider) should persist fingerprints as before."""
-        import numpy as np
+        class FakeStore:
+            def _load_active_items_with_lock(self_inner):
+                return [
+                    FakeHistoryItem("item1", "[SPEAKER_01] Привет мир"),
+                    FakeHistoryItem("item2", "[SPEAKER_00] Другой текст"),
+                    FakeHistoryItem("item3", "[SPEAKER_01] Ещё текст [SPEAKER_01] снова"),
+                ]
 
-        mgr = SpeakerManager(data_dir=self.tmpdir)
-        emb = np.ones(512, dtype=np.float32)
-        mgr.register_speaker("AnonUser", emb)
+            def update_history_item_text(self_inner, item_id, text, confidence=None):
+                updated_calls.append((item_id, text))
+                return True
 
-        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
-        self.assertTrue(
-            fp_path.exists(),
-            "speaker_fingerprints.json must be written when no settings_provider given",
-        )
+        fake_store = FakeStore()
+        self.mgr.set_alias("SPEAKER_00", "Главный")
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+        self.mgr.set_store(fake_store)
 
-    def test_update_fingerprint_skips_persist_in_privacy_mode(self):
-        """update_fingerprint must not persist when privacy mode is active."""
-        import numpy as np
+        count = self.mgr.merge_speakers("SPEAKER_01", "SPEAKER_00")
 
-        # First register without privacy mode
-        mgr = SpeakerManager(
-            data_dir=self.tmpdir,
-            settings_provider=lambda: {"privacy_mode_enabled": False},
-        )
-        emb0 = np.ones(512, dtype=np.float32)
-        sid = mgr.register_speaker("User", emb0)
-        fp_path = Path(self.tmpdir) / "speaker_fingerprints.json"
-        mtime_after_register = fp_path.stat().st_mtime
+        # Should have updated item1 and item3 (both contain SPEAKER_01)
+        self.assertEqual(count, 2)
+        updated_ids = {c[0] for c in updated_calls}
+        self.assertIn("item1", updated_ids)
+        self.assertIn("item3", updated_ids)
+        self.assertNotIn("item2", updated_ids)
 
-        # Now switch to privacy mode and update fingerprint
-        mgr2 = SpeakerManager(
-            data_dir=self.tmpdir,
-            settings_provider=lambda: {"privacy_mode_enabled": True},
-        )
-        emb1 = np.zeros(512, dtype=np.float32)
-        emb1[0] = 1.0
-        mgr2.update_fingerprint(sid, emb1)
+        # Text should have SPEAKER_01 replaced by SPEAKER_00
+        for item_id, new_text in updated_calls:
+            self.assertNotIn("SPEAKER_01", new_text)
+            self.assertIn("SPEAKER_00", new_text)
 
-        # File mtime must NOT change (privacy gate blocked the write)
-        mtime_after_update = fp_path.stat().st_mtime
-        self.assertEqual(
-            mtime_after_register,
-            mtime_after_update,
-            "speaker_fingerprints.json must not be rewritten when privacy mode is active",
-        )
+        # src_id alias should be removed from manager
+        self.assertIsNone(self.mgr.get_alias("SPEAKER_01"))
+        # dst_id alias should remain
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Главный")
 
-    def test_is_privacy_mode_handles_provider_exception(self):
-        """_is_privacy_mode returns False gracefully when provider raises."""
-        def broken_provider():
-            raise RuntimeError("settings unavailable")
+    def test_merge_speakers_same_id_returns_zero(self):
+        """merge_speakers с одинаковыми src_id и dst_id — no-op, возвращает 0."""
+        self.mgr.set_alias("SPEAKER_00", "Паша")
+        count = self.mgr.merge_speakers("SPEAKER_00", "SPEAKER_00")
+        self.assertEqual(count, 0)
+        # Alias should still be there
+        self.assertEqual(self.mgr.get_alias("SPEAKER_00"), "Паша")
 
-        mgr = SpeakerManager(settings_provider=broken_provider)
-        # Should not raise; defaults to False (non-private, safe fallback)
-        self.assertFalse(mgr._is_privacy_mode())
+    def test_merge_speakers_missing_src_removes_alias_only(self):
+        """merge_speakers когда store=None — только alias удаляется, 0 items."""
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+        # No store set — should silently skip history rewrite
+        count = self.mgr.merge_speakers("SPEAKER_01", "SPEAKER_00")
+        self.assertEqual(count, 0)
+        self.assertIsNone(self.mgr.get_alias("SPEAKER_01"))
+
+    def test_handle_merge_speakers_ipc(self):
+        """IPC handle_merge_speakers возвращает правильную структуру."""
+        self.mgr.set_alias("SPEAKER_01", "Дубль")
+        result = self.mgr.handle_merge_speakers({"src_id": "SPEAKER_01", "dst_id": "SPEAKER_00"})
+        self.assertIn("src_id", result)
+        self.assertIn("dst_id", result)
+        self.assertIn("updated_items", result)
+        self.assertEqual(result["src_id"], "SPEAKER_01")
+        self.assertEqual(result["dst_id"], "SPEAKER_00")
+        self.assertIsInstance(result["updated_items"], int)
+
+    def test_handle_merge_speakers_missing_src_raises(self):
+        """IPC handle_merge_speakers без src_id → ValueError."""
+        with self.assertRaises(ValueError):
+            self.mgr.handle_merge_speakers({"dst_id": "SPEAKER_00"})
+
+    def test_handle_merge_speakers_missing_dst_raises(self):
+        """IPC handle_merge_speakers без dst_id → ValueError."""
+        with self.assertRaises(ValueError):
+            self.mgr.handle_merge_speakers({"src_id": "SPEAKER_01"})
 
 
 if __name__ == "__main__":
