@@ -466,5 +466,101 @@ class TestRealtimeSilenceFilterWave145(unittest.TestCase):
         self.assertEqual(errors, [], f"Ошибки в потоках: {errors}")
 
 
+# ---------------------------------------------------------------------------
+# TestCursorAdvanceBugW1325F2  (W1330 regression tests)
+# ---------------------------------------------------------------------------
+class TestCursorAdvanceBugW1325F2(unittest.TestCase):
+    """W1330 — verify the cursor is NOT advanced on early-return (W1325 F2 HIGH).
+
+    The W1140 bug advanced _checked_up_to_sec to total_duration BEFORE the
+    ``total_silence < _max_silence_sec`` early-return check.  On the common
+    path (no silence) the cursor jumped forward and the next tick found
+    ``skip_samples >= audio_window.size`` → returned immediately → filter
+    effectively stopped scanning after the first non-silence tick.
+
+    These three tests verify the corrected behaviour.
+    """
+
+    # ------------------------------------------------------------------
+    # test_cursor_not_advanced_on_early_return
+    # ------------------------------------------------------------------
+    def test_cursor_not_advanced_on_early_return(self):
+        """_checked_up_to_sec stays at 0 when total_silence < _max_silence_sec."""
+        recorder = FakeRecorder(_make_speech(10.0))  # speech → no silence detected
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 10.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf._check_once()  # invoke directly — speech path should early-return
+
+        # Cursor must NOT have advanced; the window will be re-examined next tick.
+        self.assertEqual(
+            rsf._checked_up_to_sec,
+            0.0,
+            "_checked_up_to_sec must stay at 0 when early-return fires (no silence)",
+        )
+
+    # ------------------------------------------------------------------
+    # test_cursor_advanced_on_silence_detection
+    # ------------------------------------------------------------------
+    def test_cursor_advanced_on_silence_detection(self):
+        """_checked_up_to_sec is advanced to total_duration when long silence found."""
+        audio = _make_silence(10.0)
+        recorder = FakeRecorder(audio)
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 10.0,
+            "rt_silence_max_sec": 8.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf._check_once()
+
+        total_duration = len(audio) / SAMPLE_RATE
+        self.assertAlmostEqual(
+            rsf._checked_up_to_sec,
+            total_duration,
+            places=2,
+            msg="_checked_up_to_sec must advance to total_duration after silence detected",
+        )
+
+    # ------------------------------------------------------------------
+    # test_subsequent_ticks_continue_scanning
+    # ------------------------------------------------------------------
+    def test_subsequent_ticks_continue_scanning(self):
+        """After a no-silence tick, the next tick can still detect new silence.
+
+        This is the core regression guard: with the W1140 bug, the second
+        _check_once call would see skip_samples >= audio_window.size and return
+        immediately even after new silence was appended.
+        """
+        # First tick: speech-only buffer → no silence, cursor stays at 0.
+        speech = _make_speech(5.0)
+        recorder = FakeRecorder(speech)
+        settings = {
+            "realtime_silence_filter_enabled": True,
+            "rt_silence_check_sec": 0.05,
+            "rt_silence_window_sec": 20.0,
+            "rt_silence_max_sec": 4.0,
+        }
+        rsf = RealtimeSilenceFilter(recorder, settings)
+        rsf._check_once()
+        self.assertEqual(rsf._checked_up_to_sec, 0.0, "Cursor must stay 0 after speech tick")
+
+        # Second tick: recorder now returns silence-heavy audio.
+        recorder._audio = _make_silence(10.0)
+        rsf._check_once()
+
+        ranges = rsf.get_silence_ranges()
+        self.assertGreater(
+            len(ranges),
+            0,
+            "Filter must detect silence on second tick after a no-silence first tick",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
