@@ -8,6 +8,7 @@
     mark_done(job_id, items, errors)          # status -> "done"
     mark_failed(job_id, error)                # status -> "failed"
     cancel(job_id)                            # ставит флаг; worker читает get(...)['cancel_requested']
+                                              # И устанавливает cancel_event (threading.Event)
 
 Потокобезопасность:
     Все мутации под self._lock. Сохраняем время под блокировкой минимальным (<< 1ms) —
@@ -19,13 +20,10 @@
 """
 from __future__ import annotations
 
-import logging
 import threading
 import time
 import uuid
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 
 class JobTracker:
@@ -33,12 +31,15 @@ class JobTracker:
 
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
     def create_job(self, total_files: int) -> str:
         """Создаёт новую задачу в статусе 'queued'.
 
         Попутно выполняет prune() для удаления устаревших завершённых задач.
+        Каждая задача получает свой threading.Event для немедленной отмены
+        (доступен через get_cancel_event).
         """
         self.prune()
         job_id = f"j-{uuid.uuid4().hex[:8]}"
@@ -57,8 +58,10 @@ class JobTracker:
             "finished_at": None,
             "cancel_requested": False,
         }
+        cancel_event = threading.Event()
         with self._lock:
             self._jobs[job_id] = state
+            self._cancel_events[job_id] = cancel_event
         return job_id
 
     def update(self, job_id: str, **fields: Any) -> None:
@@ -126,6 +129,8 @@ class JobTracker:
 
         Возвращает True, если флаг установлен (задача существует и активна).
         Реальная смена статуса на 'cancelled' произойдёт в воркере между файлами.
+        Устанавливает cancel_event (threading.Event) для немедленного пробуждения
+        воркеров, ожидающих на event.wait().
         """
         with self._lock:
             job = self._jobs.get(job_id)
@@ -135,48 +140,38 @@ class JobTracker:
             if job.get("status") in ("done", "failed", "cancelled"):
                 return False
             job["cancel_requested"] = True
-            return True
+            event = self._cancel_events.get(job_id)
+        # Устанавливаем event вне блокировки — Event.set() потокобезопасен.
+        if event is not None:
+            event.set()
+        return True
 
-    def prune(
-        self,
-        max_age_sec: float = 3600.0,
-        max_running_age_sec: float = 7200.0,
-    ) -> int:
-        """Удаляет давно завершённые задачи и зависшие running-задачи.
+    def get_cancel_event(self, job_id: str) -> threading.Event | None:
+        """Возвращает threading.Event для задачи job_id, или None если задача не найдена.
 
-        Args:
-            max_age_sec: максимальный возраст (с) для terminal-задач
-                         (done/failed/cancelled) по finished_at.
-            max_running_age_sec: максимальный возраст (с) для задач в статусе
-                         «running» по started_at. Защита от утечки памяти,
-                         если worker-поток упал с BaseException и не вызвал
-                         mark_done/mark_failed. По умолчанию 7200 с (2 ч) —
-                         достаточно для самых длинных реальных транскрибаций.
+        Event устанавливается при вызове cancel(job_id). Воркеры могут использовать
+        event.is_set() для быстрой проверки без блокировки словаря.
+        Если задача была вытеснена из памяти (prune), возвращает None —
+        вызывающий код должен упасть обратно на dict-полинг через job_tracker.get().
+        """
+        with self._lock:
+            return self._cancel_events.get(job_id)
 
-        Returns:
-            Количество удалённых задач.
+    def prune(self, max_age_sec: int = 3600) -> None:
+        """Удаляет давно завершённые задачи (done/failed/cancelled старше max_age_sec).
 
         Вызывается автоматически из create_job(). Не требует фонового GC-потока.
+        Также очищает соответствующие cancel_events.
         """
-        now = time.monotonic()
+        threshold = time.monotonic() - max_age_sec
         terminal = {"done", "failed", "cancelled"}
         with self._lock:
-            to_remove = []
-            for job_id, job in self._jobs.items():
-                status = job.get("status")
-                if status in terminal:
-                    finished_at = job.get("finished_at") or 0.0
-                    if (now - finished_at) > max_age_sec:
-                        to_remove.append(job_id)
-                elif status == "running":
-                    age = now - (job.get("started_at") or now)
-                    if age > max_running_age_sec:
-                        logger.warning(
-                            "job_tracker: evicting stale running job %s (age=%.0fs)",
-                            job_id,
-                            age,
-                        )
-                        to_remove.append(job_id)
-            for jid in to_remove:
-                del self._jobs[jid]
-            return len(to_remove)
+            stale = [
+                jid
+                for jid, job in self._jobs.items()
+                if job.get("status") in terminal
+                and (job.get("finished_at") or 0.0) < threshold
+            ]
+            for jid in stale:
+                self._jobs.pop(jid, None)
+                self._cancel_events.pop(jid, None)

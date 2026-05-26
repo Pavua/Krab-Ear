@@ -331,6 +331,10 @@ class RecordingCoreService:
 
         job_id = self._job_tracker.create_job(total_files=total_files)
         job_params = dict(params)
+        # W1342: получаем Event сразу после создания задачи — пока он точно существует.
+        # Если впоследствии задача будет вытеснена prune(), get_cancel_event() вернёт None
+        # и _cancel_check упадёт обратно на dict-полинг.
+        cancel_event = self._job_tracker.get_cancel_event(job_id)
 
         def _emit_status(
             op: str,
@@ -406,6 +410,10 @@ class RecordingCoreService:
             )
 
         def _cancel_check() -> bool:
+            # W1342: используем threading.Event для мгновенной проверки без lock.
+            # Если Event недоступен (задача вытеснена prune) — fallback на dict-полинг.
+            if cancel_event is not None:
+                return cancel_event.is_set()
             state = self._job_tracker.get(job_id)
             return bool(state and state.get("cancel_requested"))
 
