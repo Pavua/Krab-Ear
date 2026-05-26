@@ -15,7 +15,10 @@ Handlers (6):
 from __future__ import annotations
 
 import logging
+import time as _time
 from typing import Any
+
+from backend.observability import add_breadcrumb
 
 logger = logging.getLogger("KrabEar.Backend.Analytics")
 
@@ -66,7 +69,14 @@ class AnalyticsService:
             overview, today, trends, languages, quality, engagement, storage, performance
         """
         days = max(1, min(int(params.get("days", 30) or 30), 365))
-        return self._analytics_dashboard.get_full_dashboard(store=self._store, days=days)
+        _t0 = _time.monotonic()
+        result = self._analytics_dashboard.get_full_dashboard(store=self._store, days=days)
+        add_breadcrumb(
+            category="analytics",
+            message="get_analytics_dashboard",
+            data={"days": days, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+        )
+        return result
 
     def handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
@@ -95,6 +105,14 @@ class AnalyticsService:
             period1_end=p1_end,
             period2_start=p2_start,
             period2_end=p2_end,
+        )
+        add_breadcrumb(
+            category="analytics",
+            message="compare_periods",
+            data={
+                "recordings_change_pct": report.recordings_change_pct,
+                "duration_change_pct": report.duration_change_pct,
+            },
         )
         return {
             "period1": {
@@ -129,6 +147,11 @@ class AnalyticsService:
             items = []
         cloud_words = self._keyword_cloud_gen.generate_cloud(
             items, max_words=max_words, language=language
+        )
+        add_breadcrumb(
+            category="analytics",
+            message="get_keyword_cloud",
+            data={"word_count": len(cloud_words), "max_words": max_words},
         )
         return {
             "words": [
