@@ -1312,6 +1312,24 @@ class BackendService:
 
     _BATCH_MAX_REQUESTS = 50
 
+    def _dispatch_batch_item(self, index: int, sub_req: Any) -> dict[str, Any]:
+        """Выполнить один sub-запрос из пакета; возвращает entry {method, ok, result|error}."""
+        if not isinstance(sub_req, dict):
+            return {
+                "method": None,
+                "ok": False,
+                "error": {"code": "invalid_request", "message": f"Элемент #{index} не является объектом"},
+            }
+        method = sub_req.get("method")
+        sub_params = sub_req.get("params") if isinstance(sub_req.get("params"), dict) else {}
+        response = self.handle_request({"id": f"batch_{index}", "method": method, "params": sub_params})
+        entry: dict[str, Any] = {"method": method, "ok": bool(response.get("ok"))}
+        if response.get("ok"):
+            entry["result"] = response.get("result")
+        else:
+            entry["error"] = response.get("error", {"code": "unknown", "message": "Неизвестная ошибка"})
+        return entry
+
     def _handle_batch(self, params: dict[str, Any]) -> dict[str, Any]:
         """Пакетное выполнение нескольких IPC-методов за один вызов.
 
@@ -1331,41 +1349,9 @@ class BackendService:
             raise ValueError(
                 f"Превышен лимит пакетного запроса: {len(requests)} > {self._BATCH_MAX_REQUESTS}"
             )
-
-        results = []
-        succeeded = 0
-        failed = 0
-        for i, sub_req in enumerate(requests):
-            if not isinstance(sub_req, dict):
-                results.append({
-                    "method": None,
-                    "ok": False,
-                    "error": {"code": "invalid_request", "message": f"Элемент #{i} не является объектом"},
-                })
-                failed += 1
-                continue
-
-            method = sub_req.get("method")
-            sub_params = sub_req.get("params", {})
-            if not isinstance(sub_params, dict):
-                sub_params = {}
-
-            response = self.handle_request({"id": f"batch_{i}", "method": method, "params": sub_params})
-            entry: dict[str, Any] = {"method": method, "ok": response.get("ok", False)}
-            if response.get("ok"):
-                entry["result"] = response.get("result")
-                succeeded += 1
-            else:
-                entry["error"] = response.get("error", {"code": "unknown", "message": "Неизвестная ошибка"})
-                failed += 1
-            results.append(entry)
-
-        return {
-            "results": results,
-            "total": len(requests),
-            "succeeded": succeeded,
-            "failed": failed,
-        }
+        results = [self._dispatch_batch_item(i, r) for i, r in enumerate(requests)]
+        succeeded = sum(1 for r in results if r["ok"])
+        return {"results": results, "total": len(requests), "succeeded": succeeded, "failed": len(results) - succeeded}
 
     def _handle_configure_auto_export(self, params: dict[str, Any]) -> dict[str, Any]:
         """Настраивает расписание авто-экспорта.
