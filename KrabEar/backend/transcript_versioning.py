@@ -19,8 +19,6 @@ logger = logging.getLogger("KrabEar.Backend.TranscriptVersioning")
 # Допустимые источники версии
 VALID_SOURCES = frozenset({"stt_raw", "stt_cleaned", "llm_rewrite", "manual", "import"})
 _VERSIONS_FILE = "transcript_versions.ndjson"
-# W1410 F1: максимальный размер текста версии (1 МБ в байтах UTF-8)
-_MAX_TEXT_BYTES = 1_000_000
 
 
 class TranscriptVersionManager:
@@ -96,16 +94,9 @@ class TranscriptVersionManager:
             raise ValueError("item_id не может быть пустым")
         if not isinstance(text, str):
             raise ValueError("text должен быть строкой")
-        # W1410 F1: пропускаем пустые строки
-        if not text or not text.strip():
-            return None  # type: ignore[return-value]
         source = str(source).strip()
         if source not in VALID_SOURCES:
             raise ValueError(f"Недопустимый source {source!r}. Допустимые: {sorted(VALID_SOURCES)}")
-
-        # W1410 F1: ограничиваем размер текста до _MAX_TEXT_BYTES
-        if len(text.encode("utf-8")) > _MAX_TEXT_BYTES:
-            text = text[:50000] + "...[TRUNCATED]"
 
         with self._lock:
             all_records = self._read_all()
@@ -175,33 +166,13 @@ class TranscriptVersionManager:
             KeyError: если указанная версия не найдена.
         """
         target = self.get_version(item_id, version_num)
-        revert_text = target["text"]
-        item_id = str(item_id).strip()
-        source = "manual"
-
-        # W1410 F2: persist reverted_from into the NDJSON record (not just the return dict)
-        if not isinstance(revert_text, str):
-            raise ValueError("text должен быть строкой")
-        if not revert_text or not revert_text.strip():
-            raise ValueError("Текст целевой версии пустой — откат невозможен")
-
-        # Truncate if needed (same guard as save_version)
-        if len(revert_text.encode("utf-8")) > _MAX_TEXT_BYTES:
-            revert_text = revert_text[:50000] + "...[TRUNCATED]"
-
-        with self._lock:
-            all_records = self._read_all()
-            next_num = self._next_version_num(item_id, all_records)
-            record: dict[str, Any] = {
-                "item_id": item_id,
-                "version_num": next_num,
-                "text": revert_text,
-                "source": source,
-                "reverted_from": version_num,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self._append(record)
-            return dict(record)
+        new_version = self.save_version(
+            item_id=item_id,
+            text=target["text"],
+            source="manual",
+        )
+        new_version["reverted_from"] = version_num
+        return new_version
 
     def diff_versions(self, item_id: str, v1: int, v2: int) -> dict[str, Any]:
         """Возвращает текстовый diff между двумя версиями.
@@ -297,33 +268,37 @@ class TranscriptVersionManager:
         version_num = int(version_num)
         return self.revert_to_version(item_id=item_id, version_num=version_num)
 
-    def purge_versions_for_item(self, item_id: str) -> int:
-        """Удаляет все версии транскрипции для указанного item_id.
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
 
-        Используется при удалении, архивировании или слиянии записей, чтобы
-        избежать «висячих» версий в хранилище.
+    def purge_orphaned_versions(self, active_item_ids: set[str]) -> int:
+        """Удаляет версии для item_id-ов, которых больше нет в активной истории.
+
+        Вызывается после компактирования StateStore, когда tombstone-записи
+        окончательно вычеркнуты и соответствующие item_id исчезли из хранилища.
 
         Args:
-            item_id: ID записи истории.
+            active_item_ids: Множество item_id-ов, которые остаются активными
+                             после компактирования.
 
         Returns:
-            Количество удалённых версий.
+            Количество удалённых версий (строк).
         """
-        clean_id = str(item_id).strip()
-        if not clean_id:
-            return 0
         with self._lock:
             all_records = self._read_all()
-            remaining = [r for r in all_records if r.get("item_id") != clean_id]
-            purged = len(all_records) - len(remaining)
+            kept = [r for r in all_records if r.get("item_id") in active_item_ids]
+            purged = len(all_records) - len(kept)
             if purged > 0:
-                tmp = self._versions_path.with_suffix(".ndjson.tmp")
                 try:
-                    with tmp.open("w", encoding="utf-8") as fh:
-                        for record in remaining:
-                            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    tmp.replace(self._versions_path)
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
-            return purged
+                    with self._versions_path.open("w", encoding="utf-8") as fh:
+                        for r in kept:
+                            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    logger.info(
+                        "purge_orphaned_versions: удалено %d версий для tombstone-записей",
+                        purged,
+                    )
+                except Exception as exc:
+                    logger.error("purge_orphaned_versions: ошибка записи: %s", exc)
+                    return 0
+        return purged

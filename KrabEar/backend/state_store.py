@@ -185,7 +185,6 @@ class StateStore:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
-        privacy_mode: bool = False,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -209,7 +208,6 @@ class StateStore:
             emotion=emotion,
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
-            privacy_mode=privacy_mode,
         )
         try:
             with self._lock():
@@ -846,10 +844,13 @@ class StateStore:
             return len(self._load_active_items_unlocked())
 
     def _compact_unlocked(self) -> None:
-        """Собирает активные записи в новый основной журнал и очищает дельты."""
-        # W1254 F1: capture deleted IDs before clearing tombstones
-        deleted_ids = self._load_deleted_ids_unlocked()
+        """Собирает активные записи в новый основной журнал и очищает дельты.
 
+        После компактирования вызывает опциональный хук ``_on_compact_hook``
+        (если задан через late-injection) с множеством активных item_id-ов,
+        что позволяет внешним сервисам (напр. TranscriptVersionManager) удалить
+        orphaned-данные для tombstone-записей.
+        """
         active = self._load_active_items_unlocked()
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
@@ -866,16 +867,14 @@ class StateStore:
         self.text_updates_path.write_text("", encoding="utf-8")
         self.action_items_path.write_text("", encoding="utf-8")
 
-        # W1254 F1: purge version cascade for all compacted-away (tombstoned) items
-        _versioner = getattr(self, "_transcript_versioner", None)
-        if _versioner is not None and deleted_ids:
-            for _item_id in deleted_ids:
-                try:
-                    _versioner.purge_versions_for_item(_item_id)
-                except Exception:
-                    logger.exception(
-                        "_compact_unlocked: не удалось удалить версии для id=%s", _item_id
-                    )
+        # Вызываем хук постобработки, если он подключён (напр. TranscriptVersionManager).
+        on_compact = getattr(self, "_on_compact_hook", None)
+        if on_compact is not None:
+            try:
+                active_ids = {item.id for item in active}
+                on_compact(active_ids)
+            except Exception:
+                logger.exception("_compact_unlocked: ошибка в _on_compact_hook")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
