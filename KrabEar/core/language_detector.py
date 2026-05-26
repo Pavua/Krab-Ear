@@ -33,6 +33,26 @@ _UK_ONLY_CHARS = frozenset("іїєґІЇЄҐ")
 # Символы, характерные для испанского (не встречаются в базовом ASCII-EN)
 _ES_MARKERS = frozenset("ñáéíóúüÑÁÉÍÓÚÜ¿¡")
 
+# Символы-маркеры французского — ç и œ уникальны; «»  типичны
+_FR_MARKERS = frozenset("çœÇŒ«»")
+# Слова-маркеры французского (нижний регистр)
+_FR_WORD_MARKERS = frozenset({"c'est", "très", "être", "mais", "avec", "dans",
+                               "pour", "sur", "les", "des", "une", "est"})
+
+# Символы-маркеры турецкого — ş, ğ, İ, ı уникальны для TR
+_TR_MARKERS = frozenset("şŞğĞıİ")
+
+# Символы-маркеры португальского — ã, õ уникальны; ç общий с FR/TR
+_PT_MARKERS = frozenset("ãõÃÕ")
+# Слова-маркеры португальского (нижний регистр)
+_PT_WORD_MARKERS = frozenset({"não", "você", "então", "também", "isso",
+                               "para", "com", "uma", "que", "são"})
+
+# Минимальная доля маркерных букв от общего числа букв для классификации «es»
+_ES_DENSITY_THRESHOLD = 0.02  # 2 %
+# Минимальная длина текста (символов) для применения порога плотности
+_ES_MIN_LEN_FOR_DENSITY = 10
+
 # Базовые латинские диапазоны (ASCII a-z / A-Z)
 _LATIN_RANGE = (0x0041, 0x005A, 0x0061, 0x007A)
 # Дополнительные латинские блоки (Latin-1 Supplement, Latin Extended-A/B …)
@@ -150,10 +170,53 @@ class LanguageDetector:
 
     @staticmethod
     def _detect_latin(text: str) -> str:
-        """Различает испанский и английский по характерным символам."""
+        """Различает испанский и английский по характерным символам.
+
+        Алгоритм (W1008 F1 fix):
+        1. Проверяем маркеры FR/TR/PT → возвращаем «und» при обнаружении.
+        2. Считаем испанские маркеры и применяем порог плотности (≥2% букв
+           при длине ≥10 символов), чтобы единственный акцентированный символ
+           не давал ложного срабатывания.
+        3. Если маркеры есть и порог пройден → «es»; иначе → «en».
+        """
+        text_lower = text.lower()
+
+        # --- Guard 1: исключение FR ---
         for ch in text:
-            if ch in _ES_MARKERS:
-                return "es"
+            if ch in _FR_MARKERS:
+                return "und"
+        words = set(text_lower.split())
+        if words & _FR_WORD_MARKERS:
+            return "und"
+
+        # --- Guard 2: исключение TR ---
+        for ch in text:
+            if ch in _TR_MARKERS:
+                return "und"
+
+        # --- Guard 3: исключение PT ---
+        for ch in text:
+            if ch in _PT_MARKERS:
+                return "und"
+        if words & _PT_WORD_MARKERS:
+            return "und"
+
+        # --- Классификация ES с порогом плотности ---
+        marker_count = sum(1 for ch in text if ch in _ES_MARKERS)
+        if marker_count == 0:
+            return "en"
+
+        # Подсчитываем буквы для порога
+        letter_count = sum(1 for ch in text if unicodedata.category(ch).startswith("L"))
+
+        # Для коротких текстов порог не применяем — достаточно одного маркера
+        if len(text) < _ES_MIN_LEN_FOR_DENSITY:
+            return "es"
+
+        # Для длинных текстов требуем минимальную плотность маркеров
+        if letter_count > 0 and (marker_count / letter_count) >= _ES_DENSITY_THRESHOLD:
+            return "es"
+
         return "en"
 
     def detect_batch(self, texts: list[str]) -> list[LanguageResult]:
