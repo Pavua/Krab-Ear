@@ -39,49 +39,59 @@ if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
 SERVICE_PY = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
+# W828: dispatch table moved to ipc_dispatch.py
+IPC_DISPATCH_PY = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
 
 # The exact dispatch-table RHS values expected for each critical method.
-# Format: either "self._handle_X" (local) or "self._svc.handle_X" (delegated).
+# Format: either "svc._handle_X" (local) or "svc._svc.handle_X" (delegated).
 _EXPECTED: Dict[str, str] = {
     # Core recording lifecycle — Swift BackendSupervisor + main.swift + HistoryPanel
-    "ping": "self._handle_ping",
-    "start_recording": "self._handle_start_recording",
-    "stop_recording": "self._handle_stop_recording",
-    "get_recording_state": "self._handle_get_recording_state",
+    "ping": "svc._handle_ping",
+    "start_recording": "svc._handle_start_recording",
+    "stop_recording": "svc._handle_stop_recording",
+    "get_recording_state": "svc._handle_get_recording_state",
     # History — Swift HistoryPanelController+History.swift
-    "get_history_page": "self._history.handle_get_history_page",
-    "search_history": "self._history.handle_search_history",
-    "delete_history_item": "self._history.handle_delete_history_item",
-    "export_history_srt": "self._history.handle_export_history_srt",
+    "get_history_page": "svc._history.handle_get_history_page",
+    "search_history": "svc._history.handle_search_history",
+    "delete_history_item": "svc._history.handle_delete_history_item",
+    "export_history_srt": "svc._history.handle_export_history_srt",
     # Settings — Swift main.swift + HistoryPanelController+Settings.swift
-    "get_settings": "self._settings_svc.handle_get_settings",
-    "set_settings": "self._settings_svc.handle_set_settings",
-    "apply_profile_preset": "self._settings_svc.handle_apply_profile_preset",
+    "get_settings": "svc._settings_svc.handle_get_settings",
+    "set_settings": "svc._settings_svc.handle_set_settings",
+    "apply_profile_preset": "svc._settings_svc.handle_apply_profile_preset",
     # Translation — Phase 2A SelectionTranslator.swift + HistoryPanel+LiveTranslation.swift
-    "translate_text": "self._translation.handle_translate_text",
-    "translate_selection": "self._translation.handle_translate_selection",
+    "translate_text": "svc._translation.handle_translate_text",
+    "translate_selection": "svc._translation.handle_translate_selection",
     # STT hotwords — Swift HistoryPanelController+Settings.swift
-    "add_stt_hotword": "self._stt_mgmt_svc.handle_add_stt_hotword",
-    "remove_stt_hotword": "self._stt_mgmt_svc.handle_remove_stt_hotword",
-    "list_stt_hotwords": "self._stt_mgmt_svc.handle_list_stt_hotwords",
+    "add_stt_hotword": "svc._stt_mgmt_svc.handle_add_stt_hotword",
+    "remove_stt_hotword": "svc._stt_mgmt_svc.handle_remove_stt_hotword",
+    "list_stt_hotwords": "svc._stt_mgmt_svc.handle_list_stt_hotwords",
     # System / diagnostics — various Swift callers
-    "handshake": "self._handle_handshake",
-    "get_diagnostics": "self._handle_get_diagnostics",
-    "get_metrics_dashboard": "self._handle_get_metrics_dashboard",
-    "list_audio_inputs": "self._handle_list_audio_inputs",
+    "handshake": "svc._handle_handshake",
+    "get_diagnostics": "svc._handle_get_diagnostics",
+    "get_metrics_dashboard": "svc._handle_get_metrics_dashboard",
+    "list_audio_inputs": "svc._handle_list_audio_inputs",
 }
 
 
 def _read_source() -> str:
+    """Read service.py source (for implementation method checks)."""
     with open(SERVICE_PY, encoding="utf-8") as f:
         return f.read()
 
 
+def _read_dispatch_source() -> str:
+    """Read ipc_dispatch.py source (W828: dispatch table moved here)."""
+    with open(IPC_DISPATCH_PY, encoding="utf-8") as f:
+        return f.read()
+
+
 def _dispatch_block(src: str) -> str:
-    """Return the text of the ``handlers`` dict literal in ``handle_request``."""
-    start = src.index("handlers: dict[str, Callable")
-    end = src.index("\n        handler = handlers.get(method)")
-    return src[start:end]
+    """Return the dispatch table source.
+
+    W828: dispatch table moved to ipc_dispatch.py; src IS the dispatch table.
+    """
+    return src
 
 
 def _all_dispatch_keys(block: str) -> set:
@@ -89,8 +99,11 @@ def _all_dispatch_keys(block: str) -> set:
 
 
 def _dispatch_rhs(block: str, key: str) -> Optional[str]:
-    """Return the RHS (``self.…``) for *key* in the dispatch block, or None."""
-    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(self\.[^\s,#\n]+)', block)
+    """Return the RHS (``svc.…``) for *key* in the dispatch block, or None.
+
+    W828: dispatch table uses ``svc.`` prefix (was ``self.`` in service.py).
+    """
+    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*(svc\.[^\s,#\n]+)', block)
     return m.group(1) if m else None
 
 
@@ -100,7 +113,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.src = _read_source()
-        cls.block = _dispatch_block(cls.src)
+        cls.block = _dispatch_block(_read_dispatch_source())
         cls.keys = _all_dispatch_keys(cls.block)
 
     # ------------------------------------------------------------------
@@ -121,14 +134,14 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
     def test_ping_present_and_correct(self):
         """ping → self._handle_ping (HealthMonitor 3 s heartbeat)."""
         self.assertIn("ping", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "ping"), "self._handle_ping")
+        self.assertEqual(_dispatch_rhs(self.block, "ping"), "svc._handle_ping")
 
     def test_start_recording_present_and_correct(self):
         """start_recording → self._handle_start_recording."""
         self.assertIn("start_recording", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "start_recording"),
-            "self._handle_start_recording",
+            "svc._handle_start_recording",
         )
 
     def test_stop_recording_present_and_correct(self):
@@ -136,7 +149,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("stop_recording", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "stop_recording"),
-            "self._handle_stop_recording",
+            "svc._handle_stop_recording",
         )
 
     def test_get_recording_state_present_and_correct(self):
@@ -144,7 +157,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("get_recording_state", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "get_recording_state"),
-            "self._handle_get_recording_state",
+            "svc._handle_get_recording_state",
         )
 
     # ------------------------------------------------------------------
@@ -155,7 +168,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("get_history_page", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "get_history_page"),
-            "self._history.handle_get_history_page",
+            "svc._history.handle_get_history_page",
         )
 
     def test_search_history_present_and_correct(self):
@@ -163,7 +176,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("search_history", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "search_history"),
-            "self._history.handle_search_history",
+            "svc._history.handle_search_history",
         )
 
     def test_delete_history_item_present_and_correct(self):
@@ -171,7 +184,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("delete_history_item", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "delete_history_item"),
-            "self._history.handle_delete_history_item",
+            "svc._history.handle_delete_history_item",
         )
 
     def test_export_history_srt_present_and_correct(self):
@@ -179,7 +192,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("export_history_srt", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "export_history_srt"),
-            "self._history.handle_export_history_srt",
+            "svc._history.handle_export_history_srt",
         )
 
     # ------------------------------------------------------------------
@@ -190,7 +203,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("get_settings", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "get_settings"),
-            "self._settings_svc.handle_get_settings",
+            "svc._settings_svc.handle_get_settings",
         )
 
     def test_set_settings_present_and_correct(self):
@@ -198,7 +211,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("set_settings", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "set_settings"),
-            "self._settings_svc.handle_set_settings",
+            "svc._settings_svc.handle_set_settings",
         )
 
     def test_apply_profile_preset_present_and_correct(self):
@@ -206,7 +219,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("apply_profile_preset", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "apply_profile_preset"),
-            "self._settings_svc.handle_apply_profile_preset",
+            "svc._settings_svc.handle_apply_profile_preset",
         )
 
     # ------------------------------------------------------------------
@@ -217,7 +230,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("translate_text", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "translate_text"),
-            "self._translation.handle_translate_text",
+            "svc._translation.handle_translate_text",
         )
 
     def test_translate_selection_present_and_correct(self):
@@ -225,7 +238,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("translate_selection", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "translate_selection"),
-            "self._translation.handle_translate_selection",
+            "svc._translation.handle_translate_selection",
         )
 
     # ------------------------------------------------------------------
@@ -236,7 +249,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("add_stt_hotword", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "add_stt_hotword"),
-            "self._stt_mgmt_svc.handle_add_stt_hotword",
+            "svc._stt_mgmt_svc.handle_add_stt_hotword",
         )
 
     def test_remove_stt_hotword_present_and_correct(self):
@@ -244,7 +257,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("remove_stt_hotword", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "remove_stt_hotword"),
-            "self._stt_mgmt_svc.handle_remove_stt_hotword",
+            "svc._stt_mgmt_svc.handle_remove_stt_hotword",
         )
 
     def test_list_stt_hotwords_present_and_correct(self):
@@ -252,7 +265,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("list_stt_hotwords", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "list_stt_hotwords"),
-            "self._stt_mgmt_svc.handle_list_stt_hotwords",
+            "svc._stt_mgmt_svc.handle_list_stt_hotwords",
         )
 
     # ------------------------------------------------------------------
@@ -262,7 +275,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         """handshake → self._handle_handshake (Swift connect negotiation)."""
         self.assertIn("handshake", self.keys)
         self.assertEqual(
-            _dispatch_rhs(self.block, "handshake"), "self._handle_handshake"
+            _dispatch_rhs(self.block, "handshake"), "svc._handle_handshake"
         )
 
     def test_get_diagnostics_present_and_correct(self):
@@ -270,7 +283,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("get_diagnostics", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "get_diagnostics"),
-            "self._handle_get_diagnostics",
+            "svc._handle_get_diagnostics",
         )
 
     def test_get_metrics_dashboard_present_and_correct(self):
@@ -278,7 +291,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("get_metrics_dashboard", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "get_metrics_dashboard"),
-            "self._handle_get_metrics_dashboard",
+            "svc._handle_get_metrics_dashboard",
         )
 
     def test_list_audio_inputs_present_and_correct(self):
@@ -286,7 +299,7 @@ class TestWave768CriticalDispatchInvariants(unittest.TestCase):
         self.assertIn("list_audio_inputs", self.keys)
         self.assertEqual(
             _dispatch_rhs(self.block, "list_audio_inputs"),
-            "self._handle_list_audio_inputs",
+            "svc._handle_list_audio_inputs",
         )
 
 
