@@ -61,6 +61,8 @@ class FakeStore:
         self._items: dict[str, FakeHistoryItem] = {}
         self._deleted: set[str] = set()
         self._added: list[dict[str, Any]] = []
+        # Tracks raw dicts written via restore_history_item_raw
+        self._raw_restored: list[dict[str, Any]] = []
 
     def add_fake_item(self, item_id: str, text: str, ts: str = "2026-01-01T10:00:00") -> FakeHistoryItem:
         item = FakeHistoryItem(item_id, text, ts=ts)
@@ -94,6 +96,23 @@ class FakeStore:
         self._items[item.id] = item
         self._added.append({"text": text, "paste_status": paste_status})
         return item
+
+    def restore_history_item_raw(self, raw_dict: dict[str, Any]) -> str:
+        """Фейк restore_history_item_raw: сохраняет полный словарь, обрабатывает коллизии id."""
+        item_id = str(raw_dict.get("id", "")).strip()
+        if not item_id:
+            import uuid as _uuid
+            item_id = str(_uuid.uuid4())
+        payload = dict(raw_dict)
+        # Коллизия: id уже существует в активной истории (не удалён)
+        active_ids = {k for k in self._items if k not in self._deleted}
+        if item_id in active_ids:
+            item_id = item_id + "-restored"
+        payload["id"] = item_id
+        item = FakeHistoryItem(item_id=item_id, text=payload.get("text", ""))
+        self._items[item_id] = item
+        self._raw_restored.append(payload)
+        return item_id
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +467,8 @@ class ArchiveManagerWave138TestCase(unittest.TestCase):
         archived_after = self._mgr.list_archived()
         self.assertFalse(any(item["id"] == "restore-me" for item in archived_after))
 
-        # store.add_history_item был вызван
-        self.assertEqual(len(self._store._added), 1)
+        # store.restore_history_item_raw (или add_history_item как фоллбэк) был вызван
+        self.assertEqual(len(self._store._raw_restored) + len(self._store._added), 1)
 
     def test_unicode_text_preserved(self) -> None:
         """Юникод (кириллица, CJK, emoji) корректно сохраняется и читается из архива."""
@@ -520,6 +539,99 @@ class ArchiveManagerWave138TestCase(unittest.TestCase):
         # Статистика тоже работает корректно
         stats = self._mgr.get_archive_stats()
         self.assertEqual(stats["total_archived"], 2)
+
+
+class ArchiveManagerW1047MetadataTestCase(unittest.TestCase):
+    """W1038 F2 — unarchive preserves full metadata + original id."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = ArchiveManager(store=self._store)
+
+    # Helper: create a rich fake item with all 18 known fields
+    def _rich_item_dict(self, item_id: str) -> dict[str, Any]:
+        return {
+            "id": item_id,
+            "ts": "2026-05-26T12:00:00",
+            "text": "Оригинальный текст записи",
+            "paste_status": "ok",
+            "source_text": "source",
+            "translated_text": "translated",
+            "translation_mode": "ru_es",
+            "source_lang": "ru",
+            "target_lang": "es",
+            "translation_status": "done",
+            "translation_engine": "opus-mt",
+            "chat_id": "chat123",
+            "message_id": "msg456",
+            "cleaned_text": "cleaned",
+            "llm_applied": True,
+            "llm_latency_ms": 150,
+            "diarization": {"speaker_0": [0.0, 2.5]},
+            "audio_duration_sec": 5.0,
+            "confidence": 0.95,
+            "tags": ["важный", "встреча"],
+            "favorite": True,
+            "emotion": "neutral",
+            "audio_path": "/tmp/recording.wav",
+            "is_protected": True,
+        }
+
+    def test_unarchive_preserves_all_metadata_fields(self) -> None:
+        """unarchive_items сохраняет все поля оригинальной записи."""
+        rich = self._rich_item_dict("meta-all-1")
+        # Записать напрямую в архив (минуя archive_items, которое зовёт to_dict на FakeHistoryItem)
+        self._mgr._append_ndjson(
+            self._mgr._archive_path,
+            {**rich, "archived_at": "2026-05-26T11:00:00"},
+        )
+        self._mgr.unarchive_items(item_ids=["meta-all-1"])
+
+        # restore_history_item_raw должен был быть вызван с полным словарём
+        self.assertEqual(len(self._store._raw_restored), 1)
+        restored = self._store._raw_restored[0]
+        for field in (
+            "ts", "text", "paste_status", "source_text", "translated_text",
+            "translation_mode", "source_lang", "target_lang", "translation_status",
+            "translation_engine", "chat_id", "message_id", "cleaned_text",
+            "llm_applied", "llm_latency_ms", "diarization", "audio_duration_sec",
+            "confidence", "tags", "favorite", "emotion", "audio_path", "is_protected",
+        ):
+            self.assertIn(field, restored, f"Поле '{field}' отсутствует в восстановленной записи")
+        # archived_at должно быть убрано
+        self.assertNotIn("archived_at", restored)
+
+    def test_unarchive_preserves_original_id(self) -> None:
+        """unarchive_items сохраняет оригинальный id записи."""
+        rich = self._rich_item_dict("orig-id-7")
+        self._mgr._append_ndjson(
+            self._mgr._archive_path,
+            {**rich, "archived_at": "2026-05-26T11:00:00"},
+        )
+        self._mgr.unarchive_items(item_ids=["orig-id-7"])
+
+        self.assertEqual(len(self._store._raw_restored), 1)
+        self.assertEqual(self._store._raw_restored[0]["id"], "orig-id-7")
+
+    def test_unarchive_suffixes_id_on_collision(self) -> None:
+        """При коллизии id добавляется суффикс -restored, а не генерируется новый UUID."""
+        rich = self._rich_item_dict("collide-id-1")
+        # Добавить запись с таким же id в активную историю (коллизия)
+        self._store.add_fake_item("collide-id-1", "Уже активная запись")
+
+        self._mgr._append_ndjson(
+            self._mgr._archive_path,
+            {**rich, "archived_at": "2026-05-26T11:00:00"},
+        )
+        self._mgr.unarchive_items(item_ids=["collide-id-1"])
+
+        self.assertEqual(len(self._store._raw_restored), 1)
+        restored_id = self._store._raw_restored[0]["id"]
+        # Должен быть -restored суффикс, не случайный UUID
+        self.assertEqual(restored_id, "collide-id-1-restored")
+        # Оригинальный текст и прочие поля должны быть сохранены
+        self.assertEqual(self._store._raw_restored[0]["text"], rich["text"])
 
 
 if __name__ == "__main__":

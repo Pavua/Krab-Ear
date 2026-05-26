@@ -158,20 +158,26 @@ class ArchiveManager:
                 item_id = item.get("id", "")
                 if item_id in ids_set:
                     found_ids.add(item_id)
-                    # Восстанавливаем без поля archived_at
+                    # Восстанавливаем полный словарь без поля archived_at,
+                    # сохраняя все оригинальные поля (id, ts, теги, эмоции и т.д.)
                     restore_dict = {k: v for k, v in item.items() if k != "archived_at"}
                     try:
-                        _store.add_history_item(
-                            text=restore_dict.get("text", ""),
-                            paste_status=restore_dict.get("paste_status", "failed"),
-                            source_text=restore_dict.get("source_text", ""),
-                            translated_text=restore_dict.get("translated_text", ""),
-                            translation_mode=restore_dict.get("translation_mode", "off"),
-                            source_lang=restore_dict.get("source_lang", ""),
-                            target_lang=restore_dict.get("target_lang", ""),
-                            translation_status=restore_dict.get("translation_status", "not_requested"),
-                            translation_engine=restore_dict.get("translation_engine", ""),
-                        )
+                        if hasattr(_store, "restore_history_item_raw"):
+                            # Предпочтительный путь: сохранить все поля + оригинальный id
+                            _store.restore_history_item_raw(restore_dict)
+                        else:
+                            # Фоллбэк для фейковых store в тестах без restore_history_item_raw
+                            _store.add_history_item(
+                                text=restore_dict.get("text", ""),
+                                paste_status=restore_dict.get("paste_status", "failed"),
+                                source_text=restore_dict.get("source_text", ""),
+                                translated_text=restore_dict.get("translated_text", ""),
+                                translation_mode=restore_dict.get("translation_mode", "off"),
+                                source_lang=restore_dict.get("source_lang", ""),
+                                target_lang=restore_dict.get("target_lang", ""),
+                                translation_status=restore_dict.get("translation_status", "not_requested"),
+                                translation_engine=restore_dict.get("translation_engine", ""),
+                            )
                         unarchived_count += 1
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
