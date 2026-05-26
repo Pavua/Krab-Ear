@@ -24,6 +24,7 @@ from backend.summary_profiles import SummaryProfileManager
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
+    from backend.transcript_versioning import TranscriptVersionManager
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
@@ -36,7 +37,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
-        semantic_searcher: Any | None = None,
+        transcript_versions: "TranscriptVersionManager | None" = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -44,10 +45,11 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
-        # SemanticSearcher для синхронизации удаления эмбеддингов (W1426 F2).
-        self._semantic_searcher = semantic_searcher
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
+        # F2: TranscriptVersionManager для каскадного удаления версий при удалении записей.
+        # Опционально — None безопасен (cascade skip), для обратной совместимости с тестами.
+        self._transcript_versions = transcript_versions
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
@@ -248,13 +250,14 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
-        # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
-        if self._semantic_searcher is not None:
+        # F2: каскадное удаление версий транскрипций (privacy — не оставляем следов)
+        if self._transcript_versions is not None:
             try:
-                self._semantic_searcher.remove_item(item_id)
+                self._transcript_versions.delete_versions_for(item_id)
             except Exception:
                 logger.warning(
-                    "semantic_search remove failed for %s", item_id, exc_info=True
+                    "Не удалось каскадно удалить версии для item_id=%r",
+                    item_id, exc_info=True,
                 )
         add_breadcrumb(
             category="history",
@@ -1299,6 +1302,17 @@ class HistoryService:
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
+
+        # F2: каскадное удаление версий транскрипций для всех удалённых записей
+        if to_delete and self._transcript_versions is not None:
+            deleted_ids = [item.id for item in to_delete]
+            try:
+                self._transcript_versions.cleanup_for_ids(deleted_ids)
+            except Exception:
+                logger.warning(
+                    "Не удалось каскадно удалить версии для %d записей",
+                    len(deleted_ids), exc_info=True,
+                )
 
         add_breadcrumb(
             category="history",

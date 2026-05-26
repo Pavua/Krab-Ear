@@ -20,6 +20,10 @@ logger = logging.getLogger("KrabEar.Backend.TranscriptVersioning")
 VALID_SOURCES = frozenset({"stt_raw", "stt_cleaned", "llm_rewrite", "manual", "import"})
 _VERSIONS_FILE = "transcript_versions.ndjson"
 
+# F1: максимальное количество версий на одну запись истории.
+# При превышении — oldest versions (с наименьшим version_num) удаляются.
+MAX_VERSIONS_PER_ITEM = 50
+
 
 class TranscriptVersionManager:
     """Версионирование текста транскрипций.
@@ -66,6 +70,33 @@ class TranscriptVersionManager:
         with self._versions_path.open("a", encoding="utf-8") as fh:
             fh.write(line)
 
+    def _rewrite_all(self, records: list[dict[str, Any]]) -> None:
+        """Перезаписывает весь файл NDJSON (используется для применения cap/удаления)."""
+        content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        self._versions_path.write_text(content, encoding="utf-8")
+
+    def _enforce_version_cap(self, item_id: str, all_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """F1: если количество версий для item_id превышает MAX_VERSIONS_PER_ITEM,
+        удаляет старейшие (с наименьшим version_num) до достижения лимита.
+
+        Возвращает обновлённый список всех записей (уже перезаписанный на диск
+        только если был превышен лимит).
+        """
+        item_versions = [r for r in all_records if r.get("item_id") == item_id]
+        excess = len(item_versions) - MAX_VERSIONS_PER_ITEM
+        if excess <= 0:
+            return all_records
+        # Сортируем по version_num (ASC) и берём excess старейших для удаления
+        item_versions.sort(key=lambda r: r.get("version_num", 0))
+        to_drop = set(id(r) for r in item_versions[:excess])
+        trimmed = [r for r in all_records if id(r) not in to_drop]
+        self._rewrite_all(trimmed)
+        logger.debug(
+            "Версии для item_id=%r обрезаны до %d (удалено %d старейших)",
+            item_id, MAX_VERSIONS_PER_ITEM, excess,
+        )
+        return trimmed
+
     def _next_version_num(self, item_id: str, all_records: list[dict[str, Any]]) -> int:
         """Возвращает следующий номер версии для item_id."""
         existing = [r["version_num"] for r in all_records if r.get("item_id") == item_id]
@@ -109,6 +140,9 @@ class TranscriptVersionManager:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             self._append(record)
+            # F1: применяем лимит после добавления (cap = MAX_VERSIONS_PER_ITEM)
+            all_records.append(record)
+            self._enforce_version_cap(item_id, all_records)
             return dict(record)
 
     def get_versions(self, item_id: str) -> list[dict[str, Any]]:
@@ -222,6 +256,62 @@ class TranscriptVersionManager:
             "added_lines": added,
             "removed_lines": removed,
         }
+
+    # ------------------------------------------------------------------
+    # F2: Каскадное удаление (privacy)
+    # ------------------------------------------------------------------
+
+    def delete_versions_for(self, item_id: str) -> int:
+        """Удаляет все версии для указанного item_id из персистентного хранилища.
+
+        Вызывается при удалении записи истории через delete_history_item,
+        чтобы не допустить privacy bypass (версии иначе остаются в файле навсегда).
+
+        Args:
+            item_id: ID записи истории.
+
+        Returns:
+            Количество удалённых версий.
+        """
+        item_id = str(item_id).strip()
+        if not item_id:
+            return 0
+        with self._lock:
+            all_records = self._read_all()
+            kept = [r for r in all_records if r.get("item_id") != item_id]
+            deleted = len(all_records) - len(kept)
+            if deleted > 0:
+                self._rewrite_all(kept)
+                logger.debug("Удалено %d версий для item_id=%r", deleted, item_id)
+        return deleted
+
+    def cleanup_for_ids(self, item_ids: list[str]) -> int:
+        """Каскадно удаляет версии для набора item_ids (bulk cleanup).
+
+        Используется в cleanup_old_history после пакетного удаления записей.
+
+        Args:
+            item_ids: Список ID записей, версии которых нужно удалить.
+
+        Returns:
+            Общее количество удалённых версий.
+        """
+        if not item_ids:
+            return 0
+        id_set = {str(i).strip() for i in item_ids if str(i).strip()}
+        if not id_set:
+            return 0
+        with self._lock:
+            all_records = self._read_all()
+            kept = [r for r in all_records if r.get("item_id") not in id_set]
+            deleted = len(all_records) - len(kept)
+            if deleted > 0:
+                self._rewrite_all(kept)
+                logger.debug(
+                    "Bulk cleanup: удалено %d версий для %d item_ids",
+                    deleted, len(id_set),
+                )
+        return deleted
 
     # ------------------------------------------------------------------
     # IPC-обработчики
