@@ -50,6 +50,21 @@ class HistoryService:
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
 
     # ------------------------------------------------------------------
+    # Privacy helpers
+    # ------------------------------------------------------------------
+
+    def _is_privacy_mode(self) -> bool:
+        """Возвращает True, если включён режим конфиденциальности (privacy_mode_enabled).
+
+        Читает актуальные настройки из store для корректной работы в runtime.
+        """
+        try:
+            settings = self.store.load_settings()
+            return bool(settings.get("privacy_mode_enabled", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ------------------------------------------------------------------
     # История
     # ------------------------------------------------------------------
 
@@ -134,6 +149,9 @@ class HistoryService:
         Returns:
             {"matches": [{"id": ..., "text": ..., "score": ...}, ...]}
         """
+        if self._is_privacy_mode():
+            return {"ok": True, "results": [], "reason": "privacy_mode_active"}
+
         query = str(params.get("query", "")).strip()
         threshold = float(params.get("threshold", 0.6))
         limit = int(params.get("limit", 50))

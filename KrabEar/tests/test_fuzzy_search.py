@@ -310,6 +310,21 @@ class HistoryServiceFuzzySearchTests(unittest.TestCase):
         # Опечатка, порог 1.0 — должно вернуть пустой список
         self.assertEqual(result["matches"], [])
 
+    # ------------------------------------------------------------------
+    # W1007: privacy_mode guard — fuzzy_search returns empty in privacy mode
+    # ------------------------------------------------------------------
+    def test_fuzzy_search_empty_in_privacy_mode(self) -> None:
+        """handle_fuzzy_search возвращает пустой results при privacy_mode_enabled=True (W1003 F3)."""
+        # Включаем режим конфиденциальности через store settings
+        self.store.save_settings({"privacy_mode_enabled": True})
+        result = self.svc.handle_fuzzy_search({"query": "Hello world", "threshold": 0.5})
+        # Должен вернуть пустой results и reason без передачи текстов в searcher
+        self.assertIn("results", result)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        # ok=True — не ошибка, просто заблокировано privacy mode
+        self.assertTrue(result.get("ok", True))
+
 
 class FuzzySearcherWave111Tests(unittest.TestCase):
     """Wave 111 required tests по спецификации задачи."""
