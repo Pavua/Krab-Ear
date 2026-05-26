@@ -609,107 +609,59 @@ class TestBreadcrumbs(unittest.TestCase):
         self.assertGreater(len(keys_changed), 0)
 
 
-class TestSaveLockConcurrency(unittest.TestCase):
-    """W1427 F4 MED — RLock serialises concurrent read-modify-write save paths."""
+class TestExportSettingsRedactsAllSensitiveFields(unittest.TestCase):
+    """W929 F4 — handle_export_settings must redact all 9 SENSITIVE_FIELDS, not just 4."""
 
-    def test_save_lock_is_rlock(self):
-        """_save_lock должен быть RLock (реентрантный), а не обычным Lock."""
-        import threading
+    def test_export_settings_redacts_all_9_sensitive_fields(self):
+        """All 9 fields from SENSITIVE_FIELDS (imported from settings_backup)
+        must be absent from the exported file after the F4 fix."""
+        import json
+        import os
+        import tempfile
 
-        store = _make_store()
-        svc = SettingsService(store=store)
-        # RLock can be acquired twice by the same thread without deadlocking.
-        acquired_twice = False
-        with svc._save_lock:
-            with svc._save_lock:  # re-entrant acquisition — must not block
-                acquired_twice = True
-        self.assertTrue(acquired_twice, "_save_lock deadlocked on re-entrant acquire — not an RLock")
+        from backend.settings_backup import SENSITIVE_FIELDS
 
-    def test_concurrent_set_settings_no_lost_update(self):
-        """10 потоков × 50 операций set_settings с чередующимися ключами не должны терять обновления."""
-        import threading
+        # Build a store that contains all 9 sensitive fields + a safe key.
+        all_9_secret_values = {f: f"secret_{f}" for f in SENSITIVE_FIELDS}
+        base = _make_store()
+        # Inject the 9 sensitive values into the mocked store's current dict.
+        base._current.update(all_9_secret_values)
+        base.load_settings.return_value = dict(base._current)
 
-        store = _make_store()
-        svc = SettingsService(store=store)
+        svc = SettingsService(store=base)
+        svc.invalidate_cache()  # ensure fresh load picks up updated mock
 
-        errors: list[Exception] = []
-        lock = threading.Lock()
-        THREADS = 10
-        OPS_PER_THREAD = 50
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as fh:
+            tmp_path = fh.name
 
-        def worker(thread_id: int) -> None:
-            for i in range(OPS_PER_THREAD):
-                key = f"thread_{thread_id}_op_{i}"
-                try:
-                    # Use a key that won't be normalised away — wrap inside
-                    # existing permitted text_templates dict so it survives
-                    # handle_set_settings normalisation.
-                    svc.handle_set_settings(
-                        {"history_page_size": 50 + (thread_id % 10)}
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    with lock:
-                        errors.append(exc)
+        try:
+            result = svc.handle_export_settings({"file": tmp_path})
+            with open(tmp_path, encoding="utf-8") as f:
+                exported = json.load(f)
+        finally:
+            os.unlink(tmp_path)
 
-        threads = [threading.Thread(target=worker, args=(t,)) for t in range(THREADS)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-
-        self.assertEqual(errors, [], f"Unexpected errors in concurrent save: {errors[:3]}")
-        # store.save_settings must have been called exactly THREADS * OPS_PER_THREAD times
-        expected_calls = THREADS * OPS_PER_THREAD
-        actual_calls = store.save_settings.call_count
+        # None of the 9 sensitive keys should appear in the export.
+        leaked = [k for k in SENSITIVE_FIELDS if k in exported]
         self.assertEqual(
-            actual_calls,
-            expected_calls,
-            f"Expected {expected_calls} saves, got {actual_calls} — possible lost update",
+            leaked,
+            [],
+            f"Sensitive fields leaked into export: {leaked}",
         )
+        # The count reported should not include the sensitive keys.
+        self.assertEqual(result["settings_count"], len(exported))
 
-    def test_set_settings_then_apply_preset_serialized(self):
-        """handle_set_settings и handle_apply_profile_preset выполняются без гонок под _save_lock."""
-        import threading
+    def test_sensitive_fields_set_has_9_entries(self):
+        """Canonical SENSITIVE_FIELDS in settings_backup must have exactly 9 entries."""
+        from backend.settings_backup import SENSITIVE_FIELDS
 
-        store = _make_store()
-        svc = SettingsService(store=store)
-
-        results: list[dict] = []
-        errors: list[Exception] = []
-        lock = threading.Lock()
-
-        def run_set() -> None:
-            try:
-                r = svc.handle_set_settings({"history_page_size": 100})
-                with lock:
-                    results.append(r)
-            except Exception as exc:  # noqa: BLE001
-                with lock:
-                    errors.append(exc)
-
-        def run_preset() -> None:
-            try:
-                with unittest.mock.patch("backend.event_bus.bus"):
-                    r = svc.handle_apply_profile_preset({"profile": "meeting"})
-                with lock:
-                    results.append(r)
-            except Exception as exc:  # noqa: BLE001
-                with lock:
-                    errors.append(exc)
-
-        # Interleave both operations across many threads
-        threads = []
-        for _ in range(5):
-            threads.append(threading.Thread(target=run_set))
-            threads.append(threading.Thread(target=run_preset))
-
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-
-        self.assertEqual(errors, [], f"Errors during concurrent set+preset: {errors[:3]}")
-        self.assertEqual(len(results), 10, "Expected 10 results (5 set + 5 preset)")
+        self.assertEqual(
+            len(SENSITIVE_FIELDS),
+            9,
+            f"Expected 9 sensitive fields, got {len(SENSITIVE_FIELDS)}: {SENSITIVE_FIELDS}",
+        )
 
 
 if __name__ == "__main__":

@@ -23,10 +23,9 @@ _log = logging.getLogger(__name__)
 
 MAX_BACKUPS: int = 10
 
-# Чувствительные поля — никогда не пишутся в бэкап и не экспортируются.
-# W1173: публичный псевдоним SENSITIVE_FIELDS используется в settings_service
-# для единой точки истины (W1168 F1 CRIT — ранее settings_service имел
-# собственную копию без 5 полей, которые утекали в plaintext через export).
+# Чувствительные поля — никогда не пишутся в бэкап.
+# Публичное имя SENSITIVE_FIELDS позволяет settings_service.py
+# импортировать этот набор вместо дублирования (W929 F4).
 SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "voice_gateway_api_key",
     "hf_token",
@@ -42,9 +41,8 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "sentry_dsn",
     "stt_gigaam_hf_token",
 })
-
-# Внутренний псевдоним для обратной совместимости с кодом внутри модуля.
-_SENSITIVE: frozenset[str] = SENSITIVE_FIELDS
+# Legacy alias kept for any internal references within this module.
+_SENSITIVE = SENSITIVE_FIELDS
 
 
 def _default_backup_dir() -> Path:
@@ -140,7 +138,14 @@ class SettingsBackup:
         if not backup_id:
             raise ValueError("backup_id не может быть пустым")
 
-        backup_path = self._dir / f"{backup_id}.json"
+        # W929 F1: path-traversal guard — reject any backup_id that escapes
+        # the backup directory (e.g. "../../etc/passwd").
+        resolved = (self._dir / f"{backup_id}.json").resolve()
+        root = self._dir.resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"Недопустимый backup_id: {backup_id!r}")
+
+        backup_path = resolved
         if not backup_path.exists():
             raise FileNotFoundError(
                 f"Бэкап настроек не найден: {backup_path}"
