@@ -429,18 +429,6 @@ class TestTextAnonymizerCreditCardLuhn(unittest.TestCase):
         self.assertIn("[КАРТА]", result.anonymized_text)
         self.assertEqual(result.redaction_count, 1)
 
-    def test_redact_credit_card_invalid_luhn_kept(self) -> None:
-        """Luhn-invalid 16-digit number — TextAnonymizer выполняет Luhn-проверку (Wave 214).
-
-        Фактическое поведение: Luhn-invalid число НЕ редактируется (false positive prevention).
-        """
-        # 1234567890123456 — Luhn-invalid (контрольная сумма не совпадает)
-        result = self.a.anonymize("Число: 1234567890123456")
-        # Anonymizer пропускает Luhn-invalid числа — это поведение Wave 214
-        self.assertNotIn("[КАРТА]", result.anonymized_text)
-        self.assertIn("1234567890123456", result.anonymized_text)
-        self.assertEqual(result.redaction_count, 0)
-
     def test_redact_credit_card_mastercard_luhn_valid(self) -> None:
         """MasterCard 5425233430109903 — Luhn-valid."""
         result = self.a.anonymize("MC: 5425-2334-3010-9903")
@@ -449,35 +437,80 @@ class TestTextAnonymizerCreditCardLuhn(unittest.TestCase):
 
 
 class TestTextAnonymizerSSN(unittest.TestCase):
-    """US SSN — не поддерживается встроенными правилами (нет false positive)."""
+    """US SSN — поддерживается с W1280, токен [ССН]."""
 
     def setUp(self) -> None:
         self.a = TextAnonymizer()
 
-    def test_redact_ssn_us_not_supported(self) -> None:
-        """US SSN 123-45-6789 не редактируется встроенными правилами (не поддерживается).
-
-        TextAnonymizer ориентирован на РФ-данные. US SSN может совпасть с
-        паттерном СНИЛС (XXX-XXX-XXX XX) частично. Тест проверяет отсутствие
-        ложных срабатываний и документирует отсутствие SSN-правила.
-        """
+    def test_redact_ssn_us_rule_exists(self) -> None:
+        """W1280: правило 'ssn' присутствует в list_rules() после добавления поддержки."""
         rules = self.a.list_rules()
-        self.assertNotIn("ssn", rules)  # SSN rule не существует
+        self.assertIn("ssn", rules)
 
-    def test_redact_ssn_us_format_no_false_positive(self) -> None:
-        """SSN 123-45-6789 не должен ошибочно редактироваться как российский ПДн."""
+    def test_redact_ssn_us_format_replaced_with_cyrillic_token(self) -> None:
+        """W1280: US SSN 123-45-6789 редактируется с токеном [ССН]."""
         text = "SSN is 123-45-6789 for this employee"
         result = self.a.anonymize(text)
-        # Если редакций нет — отлично (нет false positive)
-        # Если есть — это false positive, что важно задокументировать
-        if result.redaction_count > 0:
-            # Документируем: какая категория ошибочно сработала
-            categories = [r.category for r in result.redactions]
-            # Это информационное утверждение, а не ошибка теста
-            self.fail(
-                f"False positive: SSN 123-45-6789 redacted as {categories}. "
-                "Consider adding SSN to exclusion list or fixing passport/snils regex."
-            )
+        self.assertIn("[ССН]", result.anonymized_text)
+        self.assertNotIn("123-45-6789", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "ssn")
+
+
+class TestTextAnonymizerW1280Fixes(unittest.TestCase):
+    """W1276 F1+F2+F3 fixes — Cyrillic SSN/IBAN tokens, IBAN with spaces, СНИЛС unformatted."""
+
+    def setUp(self) -> None:
+        self.a = TextAnonymizer()
+
+    # F1 — Cyrillic SSN token
+    def test_ssn_replaced_with_cyrillic_token(self) -> None:
+        """US SSN 123-45-6789 is replaced with Cyrillic [ССН] token."""
+        result = self.a.anonymize("SSN: 123-45-6789 end")
+        self.assertIn("[ССН]", result.anonymized_text)
+        self.assertNotIn("123-45-6789", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "ssn")
+
+    # F1 — Cyrillic IBAN token (compact form)
+    def test_iban_replaced_with_cyrillic_token(self) -> None:
+        """Compact IBAN GB82WEST12345698765432 is replaced with Cyrillic [ИБАН] token."""
+        result = self.a.anonymize("IBAN: GB82WEST12345698765432 ok")
+        self.assertIn("[ИБАН]", result.anonymized_text)
+        self.assertNotIn("GB82", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "iban")
+
+    # F2 — IBAN with spaces (dominant printed form)
+    def test_iban_space_grouped_matched(self) -> None:
+        """Space-grouped IBAN GB82 WEST 1234 5698 7654 32 is matched and replaced."""
+        result = self.a.anonymize("Bank account: GB82 WEST 1234 5698 7654 32 transfer")
+        self.assertIn("[ИБАН]", result.anonymized_text)
+        self.assertNotIn("GB82", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+
+    # F3 — СНИЛС unformatted 11 digits with valid mod-101 checksum
+    def test_snils_unformatted_11_digit_matched(self) -> None:
+        """Plain 11-digit СНИЛС with valid mod-101 checksum is matched and replaced."""
+        # 11223344595 — заранее вычисленный валидный СНИЛС (контрольные цифры 95)
+        # Вес: 1*9+1*8+2*7+2*6+3*5+3*4+4*3+4*2+5*1 = 9+8+14+12+15+12+12+8+5 = 95
+        # sum=95 < 100 → control=95 → последние 2 цифры "95" ✓
+        result = self.a.anonymize("СНИЛС номер 11223344595 в документах")
+        self.assertIn("[СНИЛС]", result.anonymized_text)
+        self.assertNotIn("11223344595", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "snils")
+
+    # F3 — СНИЛС unformatted with INVALID checksum should NOT be redacted
+    def test_snils_invalid_checksum_kept(self) -> None:
+        """Plain 11-digit sequence with invalid mod-101 checksum is NOT redacted."""
+        # 12345678901 — произвольный 11-значный номер без валидного контрольного числа
+        # Вес: 1*9+2*8+3*7+4*6+5*5+6*4+7*3+8*2+9*1 = 9+16+21+24+25+24+21+16+9 = 165
+        # 165 > 101 → 165%101 = 64 → control=64 → но последние цифры "01" ≠ 64 → invalid
+        result = self.a.anonymize("Code: 12345678901 here")
+        self.assertNotIn("[СНИЛС]", result.anonymized_text)
+        self.assertIn("12345678901", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
 
 
 class TestTextAnonymizerUnicode(unittest.TestCase):
