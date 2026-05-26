@@ -3451,15 +3451,17 @@ end tell'''
             current_topic (dict) — текущая тема (last_n=window_size).
         """
         window_size = max(1, int(params.get("window_size", 5) or 5))
-        limit = int(params.get("limit", 100) or 100)
+        # W1277 F2: treat limit <= 0 as default (50) — "unlimited" caused 103s
+        # block when history had 5000+ items (single-threaded IPC dispatch).
+        _raw_limit = int(params.get("limit", 50) or 50)
+        limit = _raw_limit if _raw_limit > 0 else 50
         try:
             with self.store._lock():
                 items = self.store._load_active_items_unlocked()
         except Exception:
             items = []
 
-        if limit > 0:
-            items = items[-limit:]
+        items = items[-limit:]
 
         timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
         current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)

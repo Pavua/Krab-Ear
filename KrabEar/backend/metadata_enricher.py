@@ -77,7 +77,11 @@ class MetadataEnricher:
 
     # ── Основной API ──────────────────────────────────────────────────────────
 
-    def enrich(self, item: dict[str, Any]) -> dict[str, Any]:
+    def enrich(
+        self,
+        item: dict[str, Any],
+        privacy_mode: bool = False,
+    ) -> dict[str, Any]:
         """Обогащает одну запись истории вычисляемыми метаданными.
 
         Добавляет ключ ``metadata`` в копию *item* (исходный словарь
@@ -91,6 +95,7 @@ class MetadataEnricher:
                   - ``has_diarization`` (bool, опционально).
                   - ``has_llm_enhancement`` (bool, опционально).
                   - ``timestamp`` (str, опционально) — ISO 8601.
+            privacy_mode: если True — поле ``topics`` не заполняется (W1277 F5).
 
         Returns:
             Новый словарь с добавленным ключом ``metadata``.
@@ -141,7 +146,9 @@ class MetadataEnricher:
         # ── Темы (извлекаем ключевые слова текущей записи) ───────────────────
         # TopicTracker работает со списком элементов; передаём одну запись
         # и получаем её ключевые слова как topics.
-        topics = self._extract_topics_for_item(item)
+        # W1277 F5: skip topic extraction in privacy_mode — transcript content
+        # must not be processed beyond the minimum required for STT output.
+        topics = [] if privacy_mode else self._extract_topics_for_item(item)
 
         elapsed = time.monotonic() - t0
         self._enriched_count += 1
@@ -222,7 +229,8 @@ class MetadataEnricher:
         if not isinstance(item, dict):
             raise RuntimeError("Параметр item должен быть объектом")
 
-        enriched = self.enrich(item)
+        privacy_mode = bool(params.get("privacy_mode", False))
+        enriched = self.enrich(item, privacy_mode=privacy_mode)
         return {
             "enriched_item": enriched,
             "stats": self.get_enrichment_stats(),
