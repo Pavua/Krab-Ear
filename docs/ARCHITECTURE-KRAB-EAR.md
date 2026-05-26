@@ -1,7 +1,7 @@
 <!--
 Технический source of truth для Krab Ear Native.
 Последний аудит: 2026-05-26 (Wave 764).
-Метрики: service.py 3873 LOC, 304 handler-а, 11 wired-сервисов (15 *_service.py файлов).
+Метрики: service.py 3224 LOC, 304 handler-а, 14 wired-сервисов (15 *_service.py файлов).
 -->
 
 # Архитектура: Krab Ear Native
@@ -52,9 +52,9 @@
 `KrabEar/backend/service.py` — центральный хаб IPC. Содержит `BackendService` (бизнес-логика) + `IPCServer` (Unix socket).
 
 **Метрики на 2026-05-26:**
-- **3873 LOC** (было 5821 до марафона экстракций; −33%)
+- **3224 LOC** (было 5821 до марафона экстракций; −33%)
 - **304 активных handler-а** (live: `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`)
-- **11 wired-сервисов** — инстанцируются и делегируют в `service.py`
+- **14 wired-сервисов** — инстанцируются и делегируют в `service.py`
 
 | # | Класс | Файл | Delegated handlers |
 |---|-------|------|-------------------|
