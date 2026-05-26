@@ -208,6 +208,14 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
+    def remove(self, history_item_id: str) -> bool:
+        """Remove item from index by history_item_id.
+
+        Alias for remove_item(), provided for the W1148 F1 spec interface.
+        Returns True if removed, False if not found.
+        """
+        return self.remove_item(history_item_id)
+
     def remove_item(self, item_id: str) -> bool:
         """Remove item from index. Returns True if removed, False if not found.
 

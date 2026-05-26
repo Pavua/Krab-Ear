@@ -294,10 +294,18 @@ class BackendService:
         self._chains = RecordingChainManager(store=self.store)
         self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
+        # Семантический поиск (opt-in, lazy model load).
+        # Initialized here so HistoryService can use it on delete_history_item (W1148 F1).
+        self._semantic_searcher = SemanticSearcher(
+            data_dir=self.store.data_dir,
+            model_name=settings.SEMANTIC_SEARCH_MODEL,
+            enabled=settings.SEMANTIC_SEARCH_ENABLED,
+        )
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
+            semantic_searcher=self._semantic_searcher,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -466,12 +474,6 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
-        )
-        # Семантический поиск (opt-in, lazy model load)
-        self._semantic_searcher = SemanticSearcher(
-            data_dir=self.store.data_dir,
-            model_name=settings.SEMANTIC_SEARCH_MODEL,
-            enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
