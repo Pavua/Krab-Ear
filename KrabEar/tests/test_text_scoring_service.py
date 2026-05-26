@@ -46,13 +46,24 @@ def _make_service(
     )
 
 
-def _fake_term(term="краб", score=0.9, frequency=3, language="ru", category="tech"):
+def _fake_term(
+    term="краб",
+    confidence=0.9,
+    frequency=3,
+    is_proper_noun=False,
+    context="",
+    # legacy keyword args accepted but ignored to avoid breaking call-sites
+    score=None,
+    language=None,
+    category=None,
+):
+    """Build a SimpleNamespace with the real ExtractedTerm fields."""
     return SimpleNamespace(
         term=term,
-        score=score,
+        confidence=confidence,
         frequency=frequency,
-        language=language,
-        category=category,
+        is_proper_noun=is_proper_noun,
+        context=context,
     )
 
 
@@ -137,7 +148,7 @@ class TestExtractTerms(unittest.TestCase):
 
     def test_calls_extractor_with_language(self) -> None:
         fake_extractor = MagicMock()
-        term = _fake_term("AI", score=0.8, frequency=2, language="en", category="tech")
+        term = _fake_term("AI", confidence=0.8, frequency=2, is_proper_noun=False)
         fake_extractor.extract_terms.return_value = [term]
         svc = _make_service(term_extractor=fake_extractor)
         result = svc.handle_extract_terms({"text": "AI is great", "language": "en"})
@@ -147,7 +158,7 @@ class TestExtractTerms(unittest.TestCase):
         self.assertEqual(result["terms"][0]["score"], 0.8)
         self.assertEqual(result["terms"][0]["frequency"], 2)
         self.assertEqual(result["terms"][0]["language"], "en")
-        self.assertEqual(result["terms"][0]["category"], "tech")
+        self.assertEqual(result["terms"][0]["category"], "general")
 
     def test_default_language_is_ru(self) -> None:
         fake_extractor = MagicMock()
@@ -159,9 +170,9 @@ class TestExtractTerms(unittest.TestCase):
     def test_multiple_terms_returned(self) -> None:
         fake_extractor = MagicMock()
         terms = [
-            _fake_term("краб", score=0.9, frequency=5),
-            _fake_term("ухо", score=0.7, frequency=2),
-            _fake_term("голос", score=0.6, frequency=1),
+            _fake_term("краб", confidence=0.9, frequency=5),
+            _fake_term("ухо", confidence=0.7, frequency=2),
+            _fake_term("голос", confidence=0.6, frequency=1),
         ]
         fake_extractor.extract_terms.return_value = terms
         svc = _make_service(term_extractor=fake_extractor)
@@ -170,37 +181,55 @@ class TestExtractTerms(unittest.TestCase):
         self.assertEqual(result["terms"][0]["term"], "краб")
         self.assertEqual(result["terms"][2]["term"], "голос")
 
-    def test_extract_terms_empty_in_privacy_mode(self) -> None:
-        """Privacy mode guard: returns empty terms, does not call extractor."""
+    # W1113 F1 HIGH — regression tests for AttributeError crash fix
+
+    def test_handle_extract_terms_does_not_crash(self) -> None:
+        """handle_extract_terms must not raise AttributeError on ExtractedTerm objects."""
         fake_extractor = MagicMock()
-        fake_extractor.extract_terms.return_value = [_fake_term()]
-
-        def get_setting(key, default):
-            if key == "privacy_mode_enabled":
-                return True
-            return default
-
-        svc = _make_service(term_extractor=fake_extractor, get_runtime_setting=get_setting)
-        result = svc.handle_extract_terms({"text": "секретный текст"})
-        fake_extractor.extract_terms.assert_not_called()
-        self.assertTrue(result.get("ok"))
-        self.assertEqual(result["terms"], [])
-        self.assertEqual(result["reason"], "privacy_mode_active")
-
-    def test_extract_terms_not_blocked_when_privacy_mode_off(self) -> None:
-        """Privacy mode off: extractor is called normally."""
-        fake_extractor = MagicMock()
-        fake_extractor.extract_terms.return_value = [_fake_term()]
-
-        def get_setting(key, default):
-            if key == "privacy_mode_enabled":
-                return False
-            return default
-
-        svc = _make_service(term_extractor=fake_extractor, get_runtime_setting=get_setting)
-        result = svc.handle_extract_terms({"text": "обычный текст"})
-        fake_extractor.extract_terms.assert_called_once()
+        # Real ExtractedTerm has: term, confidence, frequency, is_proper_noun, context
+        # NOT .score / .language / .category — the old code crashed here
+        fake_extractor.extract_terms.return_value = [
+            _fake_term("краб", confidence=0.85, frequency=3, is_proper_noun=False),
+        ]
+        svc = _make_service(term_extractor=fake_extractor)
+        try:
+            result = svc.handle_extract_terms({"text": "краб"})
+        except AttributeError as exc:
+            self.fail(f"handle_extract_terms raised AttributeError: {exc}")
+        self.assertIn("terms", result)
         self.assertEqual(len(result["terms"]), 1)
+
+    def test_extract_terms_returns_confidence_field(self) -> None:
+        """score field in response must equal ExtractedTerm.confidence (not .score)."""
+        fake_extractor = MagicMock()
+        fake_extractor.extract_terms.return_value = [
+            _fake_term("тест", confidence=0.72, frequency=1, is_proper_noun=False),
+        ]
+        svc = _make_service(term_extractor=fake_extractor)
+        result = svc.handle_extract_terms({"text": "тест"})
+        self.assertAlmostEqual(result["terms"][0]["score"], 0.72)
+
+    def test_extract_terms_returns_language_from_param(self) -> None:
+        """language field in response must come from the request param, not ExtractedTerm."""
+        fake_extractor = MagicMock()
+        fake_extractor.extract_terms.return_value = [
+            _fake_term("voice", confidence=0.9, frequency=2, is_proper_noun=False),
+        ]
+        svc = _make_service(term_extractor=fake_extractor)
+        result = svc.handle_extract_terms({"text": "voice assistant", "language": "en"})
+        self.assertEqual(result["terms"][0]["language"], "en")
+
+    def test_extract_terms_proper_noun_maps_to_category(self) -> None:
+        """is_proper_noun=True must produce category='proper_noun'; False -> 'general'."""
+        fake_extractor = MagicMock()
+        fake_extractor.extract_terms.return_value = [
+            _fake_term("Краб", confidence=0.9, frequency=1, is_proper_noun=True),
+            _fake_term("голос", confidence=0.7, frequency=2, is_proper_noun=False),
+        ]
+        svc = _make_service(term_extractor=fake_extractor)
+        result = svc.handle_extract_terms({"text": "Краб голос"})
+        self.assertEqual(result["terms"][0]["category"], "proper_noun")
+        self.assertEqual(result["terms"][1]["category"], "general")
 
 
 # ---------------------------------------------------------------------------

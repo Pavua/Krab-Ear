@@ -101,10 +101,10 @@ class TextScoringService:
             "terms": [
                 {
                     "term": t.term,
-                    "score": t.score,
+                    "score": t.confidence,
                     "frequency": t.frequency,
-                    "language": t.language,
-                    "category": t.category,
+                    "language": language,
+                    "category": "proper_noun" if t.is_proper_noun else "general",
                 }
                 for t in terms
             ]
