@@ -191,8 +191,11 @@ class TemplateManager:
 
         text: str = target["text"]
         if variables:
-            for key, value in variables.items():
-                text = text.replace(f"{{{key}}}", str(value))
+            text = re.sub(
+                r'\{(\w+)\}',
+                lambda m: str(variables[m.group(1)]) if m.group(1) in variables else m.group(0),
+                text,
+            )
         return text
 
     # ------------------------------------------------------------------

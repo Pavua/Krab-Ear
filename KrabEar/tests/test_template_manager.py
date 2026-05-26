@@ -577,6 +577,17 @@ class TestTemplatePlaceholderExtraction(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.tm.apply_template("no_such_template_xyz", {"x": "y"})
 
+    def test_apply_template_no_double_substitution(self):
+        """W1085 F1: variable value containing {other_key} must NOT be resolved again.
+
+        Audit example: vars={"a": "{b}", "b": "INJECTED"} on template "A={a} B={b}"
+        must yield "A={b} B=INJECTED", not "A=INJECTED B=INJECTED".
+        """
+        self.tm.add_template("double_sub_guard", "A={a} B={b}")
+        result = self.tm.apply_template("double_sub_guard", {"a": "{b}", "b": "INJECTED"})
+        # {a} expands to literal string "{b}" — that value must NOT be re-resolved.
+        self.assertEqual(result, "A={b} B=INJECTED")
+
     def test_builtin_template_has_placeholders(self):
         """Встроенные шаблоны содержат плейсхолдеры в тексте."""
         templates = self.tm.get_templates()
