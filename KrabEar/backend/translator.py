@@ -103,6 +103,46 @@ class Translator:
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
         # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
+        # W1190 — _translation_cache late-injection (set by BackendService after init)
+        # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
+
+    def clear_cache(self) -> None:
+        """Очищает оба слоя кэша: in-memory LRU и персистентный диск-кэш (W1313 F2).
+
+        Вызывается при переходе в privacy_mode и при явных IPC-запросах очистки.
+        Если `_translation_cache` (W1190 disk-layer) не привязан — пропускаем его
+        без ошибки (late-injection pattern, аналогично `_error_bus`).
+        """
+        # 1. Очистить in-memory LRU.
+        self._cache.clear()
+        logger.debug("Translator: in-memory translation cache cleared")
+        # 2. Очистить disk-persistent layer (late-injected, may be absent).
+        translation_cache = getattr(self, "_translation_cache", None)
+        if translation_cache is not None:
+            try:
+                translation_cache.clear()
+                logger.debug("Translator: disk translation_cache cleared")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
+
+    def _check_privacy_mode_changed(self, privacy_mode_enabled: bool) -> None:
+        """Обнаруживает переход privacy_mode и сбрасывает оба слоя кэша (W1313 F2).
+
+        Паттерн: вызывать перед каждым переводом передавая текущее значение флага.
+        При первом вызове просто сохраняет состояние (нет «прошлого» для сравнения).
+        """
+        last = getattr(self, "_last_privacy_mode", None)
+        self._last_privacy_mode = privacy_mode_enabled  # type: ignore[attr-defined]
+        if last is None:
+            # Первый вызов — только инициализация трекинга, не триггерим очистку.
+            return
+        if last != privacy_mode_enabled:
+            logger.info(
+                "Translator: privacy_mode transition %s→%s — wiping both cache layers",
+                last,
+                privacy_mode_enabled,
+            )
+            self.clear_cache()
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
