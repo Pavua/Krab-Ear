@@ -7,6 +7,7 @@ confidence_calibrator.py — Калибровка сырых оценок уве
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass, field
 from typing import List
@@ -17,11 +18,11 @@ PRIMARY_LANGUAGES = {"ru", "es", "russian", "spanish"}
 
 # Пороговые значения длительности записи (секунды)
 _SHORT_DURATION_THRESHOLD = 2.0   # < 2s — завышенная уверенность
-_LONG_DURATION_THRESHOLD = 60.0   # > 60s — ухудшение качества
+_LONG_DURATION_THRESHOLD = 60.0   # > 60s — ухудшение качества (накопление галлюцинаций)
 
 # Коэффициенты коррекции
-_SHORT_PENALTY = -0.10   # -10% для коротких записей
-_LONG_BOOST = +0.05      # +5% для длинных записей
+_SHORT_PENALTY = -0.10    # -10% для коротких записей
+_LONG_PENALTY = -0.05     # -5% для длинных записей (деградация из-за галлюцинаций)
 _NON_PRIMARY_PENALTY = -0.05  # -5% для нецелевых языков
 _BALANCED_PENALTY = -0.03     # -3% для balanced-модели
 
@@ -84,6 +85,16 @@ class ConfidenceCalibrator:
         """
         Возвращает полный объект :class:`CalibratedScore` со всеми поправками.
         """
+        # F1: NaN/Inf/None вход → 0.0 (неизвестная уверенность, не 1.0)
+        if raw_confidence is None or not (
+            isinstance(raw_confidence, (int, float)) and math.isfinite(raw_confidence)
+        ):
+            return CalibratedScore(
+                raw=raw_confidence,  # type: ignore[arg-type]
+                calibrated=0.0,
+                adjustments=["invalid_raw(nan_or_inf): forced_to_0.0"],
+            )
+
         adjustments: list[str] = []
         delta = 0.0
 
@@ -94,9 +105,10 @@ class ConfidenceCalibrator:
                 f"short_recording({duration_sec:.1f}s): {_SHORT_PENALTY:+.0%}"
             )
         elif duration_sec > _LONG_DURATION_THRESHOLD:
-            delta += _LONG_BOOST
+            # F2: длинные записи ухудшают качество (накопление галлюцинаций) — штраф
+            delta += _LONG_PENALTY
             adjustments.append(
-                f"long_recording({duration_sec:.1f}s): {_LONG_BOOST:+.0%}"
+                f"long_recording({duration_sec:.1f}s): {_LONG_PENALTY:+.0%}"
             )
 
         # --- Поправка по языку ---

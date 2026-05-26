@@ -35,14 +35,15 @@ class TestCalibratorShortRecording(unittest.TestCase):
 
 
 class TestCalibratorLongRecording(unittest.TestCase):
-    """Длинная запись (>60s) → +5%"""
+    """Длинная запись (>60s) → -5% (штраф за деградацию/галлюцинации)"""
 
     def setUp(self):
         self.cal = ConfidenceCalibrator()
 
-    def test_long_recording_boosts_confidence(self):
+    def test_long_recording_lowers_confidence(self):
+        # W1010 F2: длинные записи деградируют, не буст а штраф
         result = self.cal.calibrate(0.70, duration_sec=90.0, language="ru", model="mlx-whisper-max")
-        self.assertAlmostEqual(result, 0.75, places=4)
+        self.assertAlmostEqual(result, 0.65, places=4)
 
     def test_exactly_60s_is_not_long(self):
         # Граница: 60.0s НЕ считается длинным
@@ -105,8 +106,8 @@ class TestCalibratorCombined(unittest.TestCase):
         self.assertGreaterEqual(result, 0.0)
 
     def test_result_clamped_below_one(self):
-        # long(+0.05) starting from 0.98 → 1.03 → clamp to 1.0
-        result = self.cal.calibrate(0.98, duration_sec=120.0, language="ru", model="mlx-max")
+        # long(-0.05) starting from 1.0 → 0.95 → no clamp needed; but raw=5.0 → still clamped
+        result = self.cal.calibrate(5.0, duration_sec=120.0, language="ru", model="mlx-max")
         self.assertLessEqual(result, 1.0)
 
     def test_adjustments_list_populated(self):
@@ -207,7 +208,7 @@ class TestCalibratorOutOfRangeRaw(unittest.TestCase):
         self.cal = ConfidenceCalibrator()
 
     def test_raw_above_1_clamped_to_1(self):
-        # raw=1.5, long(+0.05) → 1.55 → clamp 1.0
+        # raw=1.5, long(-0.05) → 1.45 → still clamp to 1.0
         result = self.cal.calibrate(1.5, duration_sec=90.0, language="ru",
                                     model="mlx-max")
         self.assertLessEqual(result, 1.0)
@@ -322,7 +323,7 @@ class TestCalibratorWave116Required(unittest.TestCase):
         # well below zero after penalties
         low = self.cal.calibrate(-5.0, duration_sec=0.5, language="en", model="balanced")
         self.assertGreaterEqual(low, 0.0)
-        # well above 1 after boost
+        # large raw clamped to 1.0 even after long penalty
         high = self.cal.calibrate(5.0, duration_sec=120.0, language="ru", model="max")
         self.assertLessEqual(high, 1.0)
 
@@ -332,8 +333,8 @@ class TestCalibratorWave116Required(unittest.TestCase):
         self.assertEqual(result, 0.0)
 
     def test_value_above_one_clamped_to_one(self):
-        """raw_confidence > 1.0 с длинным бустом → calibrated == 1.0."""
-        result = self.cal.calibrate(1.2, duration_sec=120.0, language="ru", model="max")
+        """raw_confidence > 1.0 → calibrated == 1.0 (long penalty still within clamp)."""
+        result = self.cal.calibrate(1.2, duration_sec=10.0, language="ru", model="max")
         self.assertEqual(result, 1.0)
 
     def test_linear_mapping(self):
@@ -380,6 +381,78 @@ class TestCalibratorWave116Required(unittest.TestCase):
         self.assertEqual(len(results), 500)
         stats = self.cal.get_calibration_stats()
         self.assertEqual(stats["total_calibrations"], 500)
+
+
+class TestCalibratorW1025NaNGuard(unittest.TestCase):
+    """W1010 F1: NaN/Inf/None raw_confidence → 0.0, not 1.0 or TypeError."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_nan_raw_returns_zero_not_one(self):
+        """F1: float('nan') silently became 1.0 via min(1.0, nan); now → 0.0."""
+        import math
+        result = self.cal.calibrate(float("nan"), duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(result, 0.0)
+        self.assertFalse(math.isnan(result))
+
+    def test_inf_raw_returns_zero(self):
+        """F1: +Inf input → 0.0, not exception."""
+        result = self.cal.calibrate(float("inf"), duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(result, 0.0)
+
+    def test_neg_inf_raw_returns_zero(self):
+        """-Inf input → 0.0."""
+        result = self.cal.calibrate(float("-inf"), duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(result, 0.0)
+
+    def test_none_raw_returns_zero(self):
+        """F1: None input → 0.0, no TypeError."""
+        result = self.cal.calibrate(None, duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(result, 0.0)
+
+    def test_nan_detailed_returns_invalid_adjustment(self):
+        """calibrate_detailed reports invalid_raw adjustment for NaN input."""
+        score = self.cal.calibrate_detailed(float("nan"), duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(score.calibrated, 0.0)
+        self.assertTrue(any("invalid_raw" in a for a in score.adjustments))
+
+    def test_none_detailed_returns_invalid_adjustment(self):
+        """calibrate_detailed reports invalid_raw adjustment for None input."""
+        score = self.cal.calibrate_detailed(None, duration_sec=10.0, language="ru", model="max")
+        self.assertEqual(score.calibrated, 0.0)
+        self.assertTrue(any("invalid_raw" in a for a in score.adjustments))
+
+
+class TestCalibratorW1025LongPenalty(unittest.TestCase):
+    """W1010 F2: long recordings should LOWER confidence (hallucination), not boost it."""
+
+    def setUp(self):
+        self.cal = ConfidenceCalibrator()
+
+    def test_long_recording_lowers_confidence(self):
+        """F2: >60s recording applies -5% penalty (was incorrectly +5%)."""
+        result = self.cal.calibrate(0.80, duration_sec=90.0, language="ru", model="mlx-max")
+        self.assertAlmostEqual(result, 0.75, places=4)  # 0.80 - 0.05
+
+    def test_long_recording_adjustment_label(self):
+        """F2: adjustment label says 'long_recording' and shows negative value."""
+        score = self.cal.calibrate_detailed(0.80, duration_sec=120.0, language="ru", model="mlx-max")
+        long_adj = [a for a in score.adjustments if "long_recording" in a]
+        self.assertTrue(long_adj, "Expected long_recording adjustment")
+        # The label should contain '-5%' not '+5%'
+        self.assertIn("-5%", long_adj[0])
+
+    def test_long_recording_strictly_lower_than_normal(self):
+        """Long recording calibrated < same recording at normal duration (10s)."""
+        normal = self.cal.calibrate(0.80, duration_sec=10.0, language="ru", model="mlx-max")
+        long_ = self.cal.calibrate(0.80, duration_sec=90.0, language="ru", model="mlx-max")
+        self.assertLess(long_, normal)
+
+    def test_long_penalty_combined_with_language(self):
+        """long(-0.05) + non_primary(-0.05) = -0.10 total."""
+        result = self.cal.calibrate(0.80, duration_sec=90.0, language="en", model="mlx-max")
+        self.assertAlmostEqual(result, 0.70, places=4)  # 0.80 - 0.05 - 0.05
 
 
 if __name__ == "__main__":
