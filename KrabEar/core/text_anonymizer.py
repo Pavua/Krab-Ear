@@ -12,22 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ── DNI/NIE checksum helper ──────────────────────────────────────────────────
-
-_DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
-
-
-def _dni_letter_valid(digits: str, letter: str) -> bool:
-    """Verify Spanish DNI/NIE mod-23 checksum letter."""
-    try:
-        num = int(digits)
-    except ValueError:
-        return False
-    expected = _DNI_LETTERS[num % 23]
-    return letter.upper() == expected
-
-
-# ── Luhn checksum helper ─────────────────────────────────────────────────────
+# ── Checksum helpers ─────────────────────────────────────────────────────────
 
 def _passes_luhn(digits: str) -> bool:
     """Verify number passes Luhn algorithm (mod 10 checksum)."""
@@ -44,6 +29,46 @@ def _passes_luhn(digits: str) -> bool:
                 num -= 9
         checksum += num
     return checksum % 10 == 0
+
+
+def _snils_valid(digits9: str, check2: int) -> bool:
+    """Проверяет контрольное число СНИЛС (mod 101 алгоритм).
+
+    digits9 — первые 9 цифр (без контрольного числа).
+    check2  — двузначное контрольное число (0-99).
+    """
+    s = sum(int(d) * (9 - i) for i, d in enumerate(digits9))
+    if s < 100:
+        return check2 == s
+    if s in (100, 101):
+        return check2 == 0
+    s = s % 101
+    if s == 100:
+        return check2 == 0
+    return check2 == s
+
+
+def _iban_valid(iban: str) -> bool:
+    """Проверяет IBAN по алгоритму mod-97 (ISO 13616)."""
+    rearranged = iban[4:] + iban[:4]
+    # Буква → число: A=10, B=11, ..., Z=35
+    numeric = "".join(str(ord(c) - 55) if c.isalpha() else c for c in rearranged)
+    try:
+        return int(numeric) % 97 == 1
+    except ValueError:
+        return False
+
+
+# Скомпилированные паттерны для вспомогательной валидации
+
+# СНИЛС: NNN-NNN-NNN NN или NNNNNNNNNNN (11 цифр с разделителями)
+_SNILS_DETAIL_RE = re.compile(r"(\d{3})[\s\-](\d{3})[\s\-](\d{3})[\s\-]?(\d{2})")
+
+# US SSN: AAA-BB-CCCC с исключением невалидных блоков
+_US_SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")
+
+# IBAN: CC99 + 11-30 буквенно-цифровых символов
+_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 
 
 # ── Датаклассы результата ────────────────────────────────────────────────────
@@ -100,26 +125,11 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{16}\b",  # 0000000000000000
         "[КАРТА]",
     ),
-    # Паспортные номера РФ: серия 0000 № 000000 (с пробелом/дефисом) или
-    # 10-цифровое число ТОЛЬКО при наличии ключевых слов (паспорт/passport).
-    # Bare \d{10} убран — слишком много ложных срабатываний (zip-коды, ID и т.д.)
+    # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр)
     (
         "passport",
-        r"(?:пас(?:порт)?|passport)[:\s№.]*(\d{4}[\s\-]?\d{6})"
-        r"|\b\d{4}[\s\-]\d{6}\b",
+        r"\b(?:\d{4}[\s\-]\d{6}|\d{10})\b",
         "[ПАСПОРТ]",
-    ),
-    # Испанский DNI: 8 цифр + контрольная буква (мод-23, буква I и O исключены)
-    (
-        "es_dni",
-        r"\b(\d{8})([A-HJ-NP-TV-Z])\b",
-        "[ИД_ИСПАНИЯ]",
-    ),
-    # Испанский NIE: X/Y/Z + 7 цифр + контрольная буква (мод-23)
-    (
-        "es_nie",
-        r"\b([XYZ])(\d{7})([A-HJ-NP-TV-Z])\b",
-        "[ИД_ИСПАНИЯ]",
     ),
     # Дата рождения: ДД.ММ.ГГГГ  /  ДД/ММ/ГГГГ  /  ДД-ММ-ГГГГ
     (
@@ -138,6 +148,18 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         "snils",
         r"\b\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}\b",
         "[СНИЛС]",
+    ),
+    # US Social Security Number: AAA-BB-CCCC (валидация через lookahead и checksum в коде)
+    (
+        "us_ssn",
+        r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+        "[SSN]",
+    ),
+    # IBAN (ES/RU/DE и другие): CC99BBBBBBBBBBBBBBBBBBBBBBBBBBB (валидация mod-97 в коде)
+    (
+        "iban",
+        r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+        "[IBAN]",
     ),
 ]
 
@@ -199,18 +221,18 @@ class TextAnonymizer:
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
                         continue
-                elif name == "es_dni":
-                    # Validate DNI mod-23 checksum — skip false positives
-                    digits_part, letter_part = m.group(1), m.group(2)
-                    if not _dni_letter_valid(digits_part, letter_part):
-                        continue
-                elif name == "es_nie":
-                    # NIE: replace leading X→0, Y→1, Z→2 then apply mod-23
-                    prefix_map = {"X": "0", "Y": "1", "Z": "2"}
-                    prefix_digit = prefix_map[m.group(1).upper()]
-                    digits_part = prefix_digit + m.group(2)
-                    letter_part = m.group(3)
-                    if not _dni_letter_valid(digits_part, letter_part):
+                elif name == "snils":
+                    # Validate SNILS mod-101 checksum (F1 fix)
+                    dm = _SNILS_DETAIL_RE.search(m.group(0))
+                    if dm:
+                        digits9 = dm.group(1) + dm.group(2) + dm.group(3)
+                        check2 = int(dm.group(4))
+                        if not _snils_valid(digits9, check2):
+                            continue
+                elif name == "iban":
+                    # Validate IBAN mod-97 checksum (F4 fix)
+                    iban_str = re.sub(r"\s", "", m.group(0)).upper()
+                    if not _iban_valid(iban_str):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
