@@ -100,15 +100,30 @@ class TestWave693DispatchInvariants(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Test 4 — get_last_llm_diff maps to _handle_get_last_llm_diff
+    # Test 4 — get_last_llm_diff is delegated to LLMOpsService (W783)
     # ------------------------------------------------------------------
     def test_get_last_llm_diff_maps_to_correct_impl(self):
-        """'get_last_llm_diff' must resolve to _handle_get_last_llm_diff."""
-        impl = self.impl_map.get("get_last_llm_diff")
-        self.assertEqual(
-            impl,
-            "_handle_get_last_llm_diff",
-            f"'get_last_llm_diff' maps to {impl!r}; expected '_handle_get_last_llm_diff'",
+        """'get_last_llm_diff' must resolve to LLMOpsService.handle_get_last_llm_diff (W783).
+
+        W783 extracted this handler out of BackendService into LLMOpsService.
+        The dispatch entry now points to self._llm_ops_svc.handle_get_last_llm_diff.
+        """
+        with open(SERVICE_PY, encoding="utf-8") as f:
+            src = f.read()
+        start = src.index("handlers: dict[str, Callable")
+        end = src.index("\n        handler = handlers.get(method)")
+        block = src[start:end]
+        # Verify the method appears in the dispatch block (key present)
+        self.assertIn(
+            '"get_last_llm_diff"',
+            block,
+            "'get_last_llm_diff' key missing from dispatch table",
+        )
+        # Verify it delegates to LLMOpsService (not a local _handle_ stub)
+        self.assertIn(
+            "_llm_ops_svc.handle_get_last_llm_diff",
+            block,
+            "'get_last_llm_diff' should delegate to _llm_ops_svc.handle_get_last_llm_diff (W783)",
         )
 
     # ------------------------------------------------------------------

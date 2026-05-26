@@ -131,6 +131,7 @@ from backend.calendar_link import CalendarLinker
 from backend.text_scoring_service import TextScoringService
 from backend.privacy_audit import get_privacy_audit_logger
 from backend.glossary_service import GlossaryService
+from backend.llm_ops_service import LLMOpsService
 
 import argparse
 import collections
@@ -220,6 +221,12 @@ class BackendService:
         self._settings_svc = SettingsService(store=self.store)
         # Wave 772: GlossaryService — IPC handlers for glossary CSV export/import.
         self._glossary_svc = GlossaryService(settings_svc=self._settings_svc)
+        # Wave 783: LLMOpsService — list_llm_models, get_last_llm_diff, replace_word_in_last_transcript.
+        self._llm_ops_svc = LLMOpsService(
+            store=self.store,
+            settings_svc=self._settings_svc,
+            transcriber=self.transcriber,
+        )
         # Wave 734: STTManagementService — IPC handlers for STT hotwords, warmup, routing, model select.
         self._stt_mgmt_svc = STTManagementService(
             settings_svc=self._settings_svc,
@@ -973,7 +980,7 @@ class BackendService:
             "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
             "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
             "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
-            "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
+            "get_last_llm_diff": self._llm_ops_svc.handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а (W783: LLMOpsService)
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
             "toggle_favorite": self._history.handle_toggle_favorite,
@@ -1232,9 +1239,9 @@ class BackendService:
             "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
             "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
             # --- LM Studio model discovery ---
-            "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
+            "list_llm_models": self._llm_ops_svc.handle_list_llm_models,  # список моделей из LM Studio /v1/models (W783: LLMOpsService)
             # --- Quick word replacement (Cmd+Shift+R) ---
-            "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
+            "replace_word_in_last_transcript": self._llm_ops_svc.handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции (W783: LLMOpsService)
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
@@ -1959,107 +1966,6 @@ class BackendService:
             },
         }
 
-    def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список моделей доступных в LM Studio через /api/v1/models.
-
-        Используется GUI для динамического заполнения dropdown'а выбора LLM-модели.
-        При недоступности LM Studio возвращает пустой список с описанием ошибки.
-        Таймаут 3 секунды — не блокирует UI.
-        """
-        try:
-            import re as _re
-            import requests as _requests
-            cached = self._settings_svc.cached_settings()
-            base_url = str(cached.get("llm_base_url", "http://127.0.0.1:1234/v1")).rstrip("/")
-            api_key = str(cached.get("llm_api_key", ""))
-            headers: dict[str, str] = {}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            # Wave 68 (LM Studio probe fix): /v1/models возвращает 200 но логирует ERROR
-            # в LM Studio. /api/v1/models — корректный endpoint. Same pattern as PR #396
-            # для llm_rewriter.py:1064 (passive_health_check).
-            _host = _re.sub(r"/v\d+$", "", base_url)
-            resp = _requests.get(
-                f"{_host}/api/v1/models",
-                headers=headers,
-                timeout=3,
-            )
-            if resp.status_code != 200:
-                return {"models": [], "error": f"http_{resp.status_code}"}
-            data = resp.json()
-            ids = [
-                item.get("id")
-                for item in data.get("data", [])
-                if item.get("id")
-            ]
-            recommended_models = [
-                "qwen3-4b-abliterated",
-                "huihui-qwen3-4b-instruct-2507-abliterated-hi-mlx",
-                "qwen3-8b-abliterated",
-            ]
-            return {
-                "models": sorted(ids),
-                "recommended_models": recommended_models,
-                "error": None,
-            }
-        except Exception as exc:
-            return {"models": [], "recommended_models": [], "error": str(exc)}
-
-    def _handle_replace_word_in_last_transcript(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Заменяет слово в последней (или указанной) записи истории без перезаписи.
-
-        Параметры:
-          - old_word: str — слово для замены (не пустое).
-          - new_word: str — новое слово (не пустое).
-          - history_id: str | None — ID записи; если не указан, берётся последняя запись.
-
-        Возвращает:
-          {"ok": bool, "replaced_count": int, "history_id": str | None, "new_text": str | None}
-
-        Ошибки (ok=False):
-          - "missing_words"    — old_word или new_word пусты.
-          - "no_recent_history" — история пуста и history_id не указан.
-          - "item_not_found"   — запись с history_id не найдена.
-          - "word_not_found"   — слово не найдено в тексте (с учётом границ слова).
-        """
-        import re
-
-        old = str(params.get("old_word", "")).strip()
-        new = str(params.get("new_word", "")).strip()
-        if not old or not new:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "missing_words"}
-
-        history_id = str(params.get("history_id", "")).strip() or None
-
-        if history_id is None:
-            # Берём самую последнюю запись
-            with self.store._lock():
-                active = self.store._load_active_items_unlocked()
-            history_id = active[-1].id if active else None
-
-        if history_id is None:
-            return {"ok": False, "replaced_count": 0, "history_id": None, "error": "no_recent_history"}
-
-        item = self.store.get_history_item_by_id(history_id)
-        if item is None:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
-
-        # Замена с учётом границ слова и без учёта регистра
-        pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
-        new_text, replaced_count = pattern.subn(new, item.text)
-
-        if replaced_count == 0:
-            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
-
-        self.store.update_history_item_text(history_id, new_text)
-        logger.info(
-            "replace_word_in_last_transcript: history_id=%s old=%r new=%r count=%d",
-            history_id,
-            old,
-            new,
-            replaced_count,
-        )
-        return {"ok": True, "replaced_count": replaced_count, "history_id": history_id, "new_text": new_text}
     # --- Privacy audit log handlers ---
 
     def _handle_get_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2097,45 +2003,6 @@ class BackendService:
         """Delegated to STTManagementService (Wave 734 wiring)."""
         return self._stt_mgmt_svc.handle_get_stt_routing_decision(params)
 
-    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует LLM-summary для элемента истории по ID."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        # Найти элемент в истории
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = None
-        for item in items:
-            if item.id == item_id:
-                target = item
-                break
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        if len(text) < 50:
-            raise RuntimeError("Текст слишком короткий для summary")
-
-        summary = self._generate_summary(text)
-        if summary is None:
-            # Fallback на локальный summary
-            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
-            return {
-                "id": item_id,
-                "summary": local["summary"],
-                "llm": False,
-                "source_chars": len(text),
-            }
-
-        return {
-            "id": item_id,
-            "summary": summary,
-            "llm": True,
-            "source_chars": len(text),
-        }
-
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to SearchAndAnalysisService (Wave 757)."""
         return self._search_analysis_svc.handle_extract_action_items(params)
@@ -2147,27 +2014,6 @@ class BackendService:
     def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to SearchAndAnalysisService (Wave 757)."""
         return self._search_analysis_svc.handle_get_pending_action_items(params)
-
-    def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последний word-level diff от LLM rewriter'а."""
-        engine = self.transcriber.engine
-        diff = getattr(engine, '_last_llm_diff', None)
-        if diff is None:
-            return {"available": False, "diff": None}
-        return {
-            "available": True,
-            "diff": {
-                "similarity_ratio": diff.similarity_ratio,
-                "words_added": diff.words_added,
-                "words_removed": diff.words_removed,
-                "words_unchanged": diff.words_unchanged,
-                "summary": diff.summary,
-                "changes": [
-                    {"type": c.type, "text": c.text, "position": c.position}
-                    for c in diff.changes
-                ],
-            },
-        }
 
     def _check_audio_poll_flood(self) -> None:
         """Push ipc.audio_device_poll_flood if called >5 times in 60 s (W774)."""
