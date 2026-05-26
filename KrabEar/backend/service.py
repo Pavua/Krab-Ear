@@ -412,6 +412,23 @@ class BackendService:
         self._text_anonymizer = TextAnonymizer()
         self._text_postprocessor = TextPostProcessor()
         self._transcription_queue = TranscriptionQueue()
+        # W1182 F3 HIGH fix: wire a background dequeue worker so enqueued jobs
+        # are actually processed.  Previously process_next() had NO caller.
+        self._tq_shutdown_event = threading.Event()
+        _tq_poll_interval = float(
+            self._get_runtime_setting("transcription_queue_poll_interval_sec", 2.0)
+        )
+        self._tq_worker_thread = threading.Thread(
+            target=self._run_transcription_queue_worker,
+            kwargs={"poll_interval_sec": _tq_poll_interval},
+            daemon=True,
+            name="tq-dequeue-worker",
+        )
+        self._tq_worker_thread.start()
+        logger.info(
+            "TranscriptionQueue dequeue worker started (poll_interval=%.1fs)",
+            _tq_poll_interval,
+        )
         self._emotion_detector = EmotionDetector()
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
@@ -562,6 +579,56 @@ class BackendService:
                     )
             except Exception:
                 logger.exception("STT hotwords: ошибка авто-сида")
+
+    # ------------------------------------------------------------------
+    # TranscriptionQueue dequeue worker (W1182 F3 HIGH fix)
+    # ------------------------------------------------------------------
+
+    def _run_transcription_queue_worker(self, poll_interval_sec: float = 2.0) -> None:
+        """Background worker thread: dequeues and processes pending TranscriptionQueue jobs.
+
+        Polls process_next() every *poll_interval_sec* seconds.  When a job is
+        available it transcribes the file using self.transcriber.transcribe()
+        while holding mlx_lock (W63 rule), then marks it completed or failed.
+        Exits cleanly when _tq_shutdown_event is set.
+        """
+        from core.mlx_lock import mlx_lock  # local import avoids circular at module level
+
+        logger.info("TranscriptionQueue dequeue worker running")
+        while not self._tq_shutdown_event.wait(timeout=poll_interval_sec):
+            try:
+                job_dict = self._transcription_queue.process_next()
+            except Exception:
+                logger.exception("TranscriptionQueue: unexpected error in process_next()")
+                continue
+
+            if job_dict is None:
+                # Queue empty — sleep already handled by wait() above
+                continue
+
+            job_id = job_dict.get("job_id", "")
+            file_path = job_dict.get("file_path", "")
+            logger.info(
+                "TranscriptionQueue: processing job %s file=%r",
+                job_id,
+                file_path,
+            )
+            try:
+                with mlx_lock():
+                    result = self.transcriber.transcribe(file_path)
+                self._transcription_queue.mark_completed(job_id, result)
+                logger.info("TranscriptionQueue: job %s completed", job_id)
+            except Exception as exc:  # noqa: BLE001
+                error_msg = str(exc)
+                logger.error(
+                    "TranscriptionQueue: job %s failed: %s",
+                    job_id,
+                    error_msg,
+                    exc_info=True,
+                )
+                self._transcription_queue.mark_failed(job_id, error_msg)
+
+        logger.info("TranscriptionQueue dequeue worker stopped")
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -733,6 +800,14 @@ class BackendService:
                 probe.stop()
             except Exception:
                 logger.exception("LLMHttpProbe.stop() raised during close()")
+
+        # Stop TranscriptionQueue dequeue worker (W1184)
+        tq_event = getattr(self, "_tq_shutdown_event", None)
+        if tq_event is not None:
+            tq_event.set()
+        tq_thread = getattr(self, "_tq_worker_thread", None)
+        if tq_thread is not None and tq_thread.is_alive():
+            tq_thread.join(timeout=3.0)
 
     # ------------------------------------------------------------------ #
     # Backwards-compatible proxy properties for Wave 172 migration         #
