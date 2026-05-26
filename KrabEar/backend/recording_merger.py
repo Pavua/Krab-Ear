@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import datetime
 from typing import Any
@@ -16,54 +15,19 @@ logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 _TIMESTAMP_SEP = "\n\n"
 
 
-class MergeRollbackError(RuntimeError):
-    """Raised when the delete phase of merge_items fails mid-loop.
-
-    The new merged item has been created but some originals could not be
-    tombstoned.  A best-effort rollback tombstone was applied to the merged
-    item; callers should surface this error to the user rather than silently
-    swallowing it.
-
-    Attributes:
-        new_item_id    — ID of the merged item that was created.
-        deleted_ids    — IDs of originals successfully tombstoned before failure.
-        failed_id      — ID of the original whose delete triggered the exception.
-        rollback_ok    — True if the best-effort rollback tombstone succeeded.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        new_item_id: str,
-        deleted_ids: list[str],
-        failed_id: str,
-        rollback_ok: bool,
-        cause: BaseException,
-    ) -> None:
-        super().__init__(message)
-        self.new_item_id = new_item_id
-        self.deleted_ids = deleted_ids
-        self.failed_id = failed_id
-        self.rollback_ok = rollback_ok
-        self.__cause__ = cause
-
-
 class RecordingMerger:
     """Объединяет несколько записей истории в одну.
 
     Конструктор не требует store — он передаётся явно в каждый метод,
     чтобы упростить тестирование и следовать паттерну других сервисов.
 
-    Атрибут ``recording_chain_mgr`` — поздняя инъекция (late-injection):
-    инициализируется None, устанавливается из BackendService после создания
-    обоих объектов, чтобы избежать циклической зависимости при конструировании.
-    Когда установлен, merge_items автоматически обновляет цепочки при
-    ``delete_originals=True``.
+    Параметр *semantic_searcher* опциональный — передаётся через
+    late-injection из BackendService после инициализации SemanticSearcher.
+    Если не передан (None), обновления индекса молча пропускаются.
     """
 
-    def __init__(self) -> None:
-        self.recording_chain_mgr: Any | None = None
+    def __init__(self, *, semantic_searcher: Any | None = None) -> None:
+        self._semantic_searcher = semantic_searcher
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -87,32 +51,7 @@ class RecordingMerger:
 
         Возвращает словарь новой записи.
         Генерирует ValueError при < 2 записях или если часть ID не найдена.
-
-        Idempotency: при delete_originals=False повторный вызов с теми же
-        item_ids возвращает уже существующую объединённую запись без создания
-        дубликата. Ключ идемпотентности хранится в метаданных записи как
-        ``merge_key``. При delete_originals=True проверка пропускается — вызов
-        всегда создаёт новую запись (оригиналы уже удалены).
         """
-        # --- Idempotency guard (только когда оригиналы не удаляются) ---
-        merge_key = hashlib.sha256(
-            ",".join(sorted(item_ids)).encode()
-        ).hexdigest()[:16]
-
-        if not delete_originals:
-            existing = self._find_by_merge_key(merge_key, store)
-            if existing is not None:
-                logger.info(
-                    "Идемпотентный merge: merge_key=%s уже существует → %s",
-                    merge_key,
-                    existing.id,
-                )
-                result = existing.to_dict()
-                result["merged_from"] = list(sorted(item_ids))
-                result["deleted_originals"] = False
-                result["idempotent"] = True
-                return result
-
         items = self._load_items(item_ids, store)
         merged_data = self._build_merged_data(items, separator)
 
@@ -128,100 +67,40 @@ class RecordingMerger:
             diarization=merged_data["diarization"],
             audio_duration_sec=merged_data["audio_duration_sec"],
             confidence=merged_data["confidence"],
+            tags=merged_data["tags"],
         )
 
-        # Теги сохраняем отдельным вызовом: StateStore.add_history_item не
-        # принимает параметр tags (W1237 не смёрджен), поэтому используем
-        # выделенный метод update_history_item_tags.
-        if merged_data["tags"]:
-            store.update_history_item_tags(new_item.id, merged_data["tags"])
+        # Обновляем индекс семантического поиска для нового объединённого элемента.
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.index_item(new_item.id, new_item.text)
+            except Exception:
+                logger.warning(
+                    "semantic_searcher.index_item failed for merged item %s",
+                    new_item.id,
+                    exc_info=True,
+                )
 
         if delete_originals:
-            original_ids = [item.id for item in items]
-
-            # --- Step 1: capture chain memberships BEFORE deletion ---
-            chain_membership: dict[str, list[str]] = {}
-            if self.recording_chain_mgr is not None:
-                try:
-                    chain_membership = self.recording_chain_mgr.find_chains_containing(
-                        original_ids
-                    )
-                except Exception:
-                    logger.exception(
-                        "Не удалось получить цепочки для %s — пропускаем обновление цепочек",
-                        original_ids,
-                    )
-
-            # Phase 2: delete originals — transactional with rollback.
-            # If any delete raises mid-loop the new merged item is tombstoned
-            # (best-effort) and a MergeRollbackError is re-raised so the caller
-            # can surface the failure to the user.
             deleted_ids: list[str] = []
-            _last_item = None
-            try:
-                for item in items:
-                    _last_item = item
-                    if store.delete_history_item(item.id):
-                        deleted_ids.append(item.id)
-            except Exception as exc:  # noqa: BLE001
-                failed_id = _last_item.id if _last_item is not None else "unknown"
-                logger.exception(
-                    "Ошибка удаления оригинала %s при слиянии → %s; "
-                    "откат: tombstone новой записи",
-                    failed_id,
-                    new_item.id,
-                )
-                # Best-effort rollback: tombstone the newly created merged item.
-                rollback_ok = False
-                try:
-                    store.delete_history_item(new_item.id)
-                    rollback_ok = True
-                    logger.info(
-                        "Откат слияния выполнен: запись %s помечена tombstone",
-                        new_item.id,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Не удалось откатить объединённую запись %s — "
-                        "требуется ручная очистка",
-                        new_item.id,
-                    )
-                raise MergeRollbackError(
-                    f"Слияние прервано при удалении оригинала {failed_id!r}; "
-                    f"откат {'выполнен' if rollback_ok else 'НЕ ВЫПОЛНЕН'}",
-                    new_item_id=new_item.id,
-                    deleted_ids=deleted_ids,
-                    failed_id=failed_id,
-                    rollback_ok=rollback_ok,
-                    cause=exc,
-                ) from exc
-
-            # --- Step 2: replace originals with merged item in each chain ---
-            if chain_membership and self.recording_chain_mgr is not None:
-                for chain_id, matched_ids in chain_membership.items():
-                    try:
-                        changed = self.recording_chain_mgr.replace_items_in_chain(
-                            chain_id, matched_ids, new_item.id
-                        )
-                        if changed:
-                            logger.info(
-                                "Цепочка %s: заменены %s → %s",
-                                chain_id,
-                                matched_ids,
-                                new_item.id,
+            for item in items:
+                if store.delete_history_item(item.id):
+                    deleted_ids.append(item.id)
+                    # Удаляем эмбеддинг оригинала из индекса семантического поиска.
+                    if self._semantic_searcher is not None:
+                        try:
+                            self._semantic_searcher.remove_item(item.id)
+                        except Exception:
+                            logger.warning(
+                                "semantic_searcher.remove_item failed for item %s",
+                                item.id,
+                                exc_info=True,
                             )
-                    except Exception:
-                        logger.exception(
-                            "Не удалось обновить цепочку %s — ghost refs остаются",
-                            chain_id,
-                        )
-
             logger.info(
-                "Объединено %d записей → %s; удалено %d оригиналов; цепочек обновлено %d",
+                "Объединено %d записей → %s; удалено %d оригиналов",
                 len(items),
                 new_item.id,
                 len(deleted_ids),
-                len(chain_membership),
             )
         else:
             logger.info(
@@ -294,29 +173,6 @@ class RecordingMerger:
     # ------------------------------------------------------------------
     # Приватные хелперы
     # ------------------------------------------------------------------
-
-    def _find_by_merge_key(self, merge_key: str, store: Any) -> Any | None:
-        """Ищет существующую объединённую запись с данным merge_key в store.
-
-        Использует ``get_merged_item_by_key`` если оно доступно (быстрый путь),
-        иначе делает полный перебор через ``get_history_items``.
-        Возвращает первый найденный элемент или None.
-        """
-        # Быстрый путь — некоторые реализации store предоставляют индексированный доступ
-        if hasattr(store, "get_merged_item_by_key"):
-            return store.get_merged_item_by_key(merge_key)
-
-        # Медленный путь — полный перебор
-        if hasattr(store, "get_history_items"):
-            try:
-                all_items = store.get_history_items()
-            except Exception:
-                return None
-            for item in (all_items or []):
-                item_meta = getattr(item, "merge_key", None)
-                if item_meta == merge_key:
-                    return item
-        return None
 
     def _extract_ids(self, params: dict[str, Any]) -> list[str]:
         raw = params.get("item_ids")

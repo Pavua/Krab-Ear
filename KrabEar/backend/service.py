@@ -495,6 +495,8 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
+        # Поздняя инжекция — RecordingMerger создаётся раньше SemanticSearcher.
+        self._merger._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,

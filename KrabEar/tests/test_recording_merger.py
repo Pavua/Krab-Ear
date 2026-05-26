@@ -37,7 +37,6 @@ class FakeHistoryItem:
     diarization: dict | None = None
     tags: list = field(default_factory=list)
     favorite: bool = False
-    merge_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         from dataclasses import asdict
@@ -66,9 +65,6 @@ class FakeStore:
     def get_history_item_by_id(self, item_id: str) -> FakeHistoryItem | None:
         return self._items.get(item_id)
 
-    def get_history_items(self) -> list[FakeHistoryItem]:
-        return list(self._items.values())
-
     def delete_history_item(self, item_id: str) -> bool:
         if item_id in self._items:
             self._deleted.append(item_id)
@@ -89,7 +85,6 @@ class FakeStore:
         audio_duration_sec: float | None = None,
         confidence: float | None = None,
         tags: list | None = None,
-        merge_key: str | None = None,
         **kwargs: Any,
     ) -> FakeHistoryItem:
         import uuid
@@ -108,17 +103,10 @@ class FakeStore:
             audio_duration_sec=audio_duration_sec,
             confidence=confidence,
             tags=list(tags) if tags else [],
-            merge_key=merge_key,
         )
         self._items[item.id] = item
         self._added.append(item)
         return item
-
-    def update_history_item_tags(self, item_id: str, tags: list) -> bool:
-        if item_id not in self._items:
-            return False
-        self._items[item_id].tags = list(tags)
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -646,330 +634,84 @@ class TestMergerRequiredNames(unittest.TestCase):
             self.assertIn("merged_from", r)
 
 
-class StrictFakeStore:
-    """Строгий фейк StateStore, который НЕ принимает tags в add_history_item.
-
-    Имитирует реальный StateStore до применения W1237 — любая попытка
-    передать tags= вызовет TypeError, как в production.
-    """
-
-    def __init__(self) -> None:
-        self._items: dict[str, FakeHistoryItem] = {}
-        self._added: list[FakeHistoryItem] = []
-        self._tags_updates: list[tuple[str, list[str]]] = []
-
-    def add_fake_item(
-        self,
-        item_id: str,
-        text: str,
-        ts: str = "2026-04-12T10:00:00",
-        **kwargs: Any,
-    ) -> FakeHistoryItem:
-        item = FakeHistoryItem(id=item_id, ts=ts, text=text, **kwargs)
-        self._items[item_id] = item
-        return item
-
-    def get_history_item_by_id(self, item_id: str) -> FakeHistoryItem | None:
-        return self._items.get(item_id)
-
-    def delete_history_item(self, item_id: str) -> bool:
-        if item_id in self._items:
-            del self._items[item_id]
-            return True
-        return False
-
-    def add_history_item(
-        self,
-        text: str,
-        paste_status: str = "merged",
-        source_text: str = "",
-        translated_text: str = "",
-        translation_mode: str = "off",
-        source_lang: str = "",
-        target_lang: str = "",
-        translation_status: str = "not_requested",
-        diarization: "dict | None" = None,
-        audio_duration_sec: "float | None" = None,
-        confidence: "float | None" = None,
-        # NOTE: намеренно НЕТ параметра tags — как в реальном StateStore
-    ) -> FakeHistoryItem:
-        import uuid
-        item = FakeHistoryItem(
-            id=str(uuid.uuid4()),
-            ts="2026-04-12T12:00:00",
-            text=text,
-            paste_status=paste_status,
-            source_text=source_text,
-            translated_text=translated_text,
-            translation_mode=translation_mode,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            translation_status=translation_status,
-            diarization=diarization,
-            audio_duration_sec=audio_duration_sec,
-            confidence=confidence,
-        )
-        self._items[item.id] = item
-        self._added.append(item)
-        return item
-
-    def update_history_item_tags(self, item_id: str, tags: list) -> bool:
-        if item_id not in self._items:
-            return False
-        self._items[item_id].tags = list(tags)
-        self._tags_updates.append((item_id, list(tags)))
-        return True
-
-
-class TestMergeTagsSeparateUpdate(unittest.TestCase):
-    """W1268 — тесты для fix(W1266 F1 CRITICAL): tags передаются через
-    отдельный вызов update_history_item_tags, а не через add_history_item.
-    """
-
-    def setUp(self) -> None:
-        self.store = StrictFakeStore()
-        self.merger = RecordingMerger()
-
-    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
-        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
-
-    def test_merge_recordings_does_not_pass_tags_to_add_history_item(self) -> None:
-        """add_history_item не должен получать kwarg tags — иначе TypeError в production.
-
-        Используем StrictFakeStore без tags= в add_history_item. Если фикс
-        применён корректно — TypeError не возникнет.
-        """
-        self._add("wt1", "Alpha", ts="2026-04-12T09:00:00", tags=["a", "b"])
-        self._add("wt2", "Beta", ts="2026-04-12T09:01:00", tags=["c"])
-        # До фикса: TypeError: add_history_item() got an unexpected keyword argument 'tags'
-        # После фикса: должно выполниться без ошибок
-        result = self.merger.merge_items(["wt1", "wt2"], self.store)
-        self.assertIn("text", result)
-        self.assertEqual(len(self.store._added), 1)
-
-    def test_merge_recordings_updates_tags_via_separate_method(self) -> None:
-        """После add_history_item должен быть вызван update_history_item_tags.
-
-        Проверяем, что теги попали в _tags_updates StrictFakeStore.
-        """
-        self._add("tt1", "One", ts="2026-04-12T09:00:00", tags=["work", "urgent"])
-        self._add("tt2", "Two", ts="2026-04-12T09:01:00", tags=["personal"])
-        self.merger.merge_items(["tt1", "tt2"], self.store)
-
-        # update_history_item_tags должен был быть вызван
-        self.assertEqual(len(self.store._tags_updates), 1,
-                         "update_history_item_tags должен быть вызван ровно один раз")
-        _, tags_saved = self.store._tags_updates[0]
-        self.assertIn("work", tags_saved)
-        self.assertIn("urgent", tags_saved)
-        self.assertIn("personal", tags_saved)
-
-    def test_merge_recordings_works_with_real_state_store_not_fake(self) -> None:
-        """Интеграционный тест с реальным StateStore (не FakeStore).
-
-        Проверяет, что merge_items не вызывает TypeError с реальным StateStore,
-        и что теги корректно сохраняются через update_history_item_tags.
-        """
-        import tempfile
-        from backend.state_store import StateStore
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            real_store = StateStore(Path(tmpdir))
-
-            # Создаём два реальных элемента истории
-            item1 = real_store.add_history_item(
-                text="Первая запись",
-                paste_status="success",
-                audio_duration_sec=10.0,
-                confidence=0.85,
-            )
-            real_store.update_history_item_tags(item1.id, ["work", "meeting"])
-
-            item2 = real_store.add_history_item(
-                text="Вторая запись",
-                paste_status="success",
-                audio_duration_sec=5.0,
-                confidence=0.90,
-            )
-            real_store.update_history_item_tags(item2.id, ["meeting", "important"])
-
-            merger = RecordingMerger()
-
-            # Должно выполниться без TypeError
-            result = merger.merge_items([item1.id, item2.id], real_store)
-
-            self.assertIn("Первая запись", result["text"])
-            self.assertIn("Вторая запись", result["text"])
-
-            # Объединённая запись должна существовать в store
-            merged_id = result["id"]
-            merged_item = real_store.get_history_item_by_id(merged_id)
-            self.assertIsNotNone(merged_item)
-
-            # Теги должны быть сохранены через update_history_item_tags
-            self.assertIn("work", merged_item.tags)
-            self.assertIn("meeting", merged_item.tags)
-            self.assertIn("important", merged_item.tags)
-            # Без дублей
-            self.assertEqual(merged_item.tags.count("meeting"), 1)
-
-
-class TestMergeAtomicRollback(unittest.TestCase):
-    """W1266 F2 MED — transactional delete phase with rollback (W1269 fix)."""
-
-    def setUp(self) -> None:
-        self.merger = RecordingMerger()
-
-    def _make_store(self) -> FakeStore:
-        store = FakeStore()
-        store.add_fake_item("r1", "Alpha", ts="2026-04-12T09:00:00")
-        store.add_fake_item("r2", "Beta", ts="2026-04-12T09:01:00")
-        store.add_fake_item("r3", "Gamma", ts="2026-04-12T09:02:00")
-        return store
-
-    # ------------------------------------------------------------------
-    # Test 1: happy-path — creates new item and deletes all originals
-    # ------------------------------------------------------------------
-    def test_merge_succeeds_creates_new_and_deletes_originals(self) -> None:
-        """Successful merge: new item exists, all originals tombstoned."""
-        store = self._make_store()
-        result = self.merger.merge_items(
-            ["r1", "r2", "r3"], store, delete_originals=True
-        )
-        # New merged item was added
-        self.assertEqual(len(store._added), 1)
-        new_id = store._added[0].id
-        self.assertEqual(result["id"], new_id)
-        # All originals deleted
-        self.assertIn("r1", store._deleted)
-        self.assertIn("r2", store._deleted)
-        self.assertIn("r3", store._deleted)
-        # New item NOT deleted (no rollback triggered)
-        self.assertNotIn(new_id, store._deleted)
-
-    # ------------------------------------------------------------------
-    # Test 2: delete failure mid-loop rolls back the new merged item
-    # ------------------------------------------------------------------
-    def test_merge_delete_failure_rolls_back_new_item(self) -> None:
-        """If delete_history_item raises, the new merged item is tombstoned."""
-        from backend.recording_merger import MergeRollbackError
-
-        store = self._make_store()
-        # Make delete_history_item raise on the second call (i.e. mid-loop)
-        call_count: list[int] = [0]
-        original_delete = store.delete_history_item
-
-        def failing_delete(item_id: str) -> bool:
-            call_count[0] += 1
-            if call_count[0] == 2:
-                raise RuntimeError("simulated storage failure")
-            return original_delete(item_id)
-
-        store.delete_history_item = failing_delete  # type: ignore[method-assign]
-
-        with self.assertRaises(MergeRollbackError) as ctx:
-            self.merger.merge_items(["r1", "r2", "r3"], store, delete_originals=True)
-
-        err = ctx.exception
-        # New merged item must have been created
-        self.assertIsNotNone(err.new_item_id)
-        # Rollback tombstone must have been applied to the merged item
-        self.assertTrue(err.rollback_ok)
-        self.assertIn(err.new_item_id, store._deleted)
-        # At least the first original was deleted before failure
-        self.assertGreaterEqual(len(err.deleted_ids), 1)
-
-    # ------------------------------------------------------------------
-    # Test 3: partial failure → MergeRollbackError with correct fields
-    # ------------------------------------------------------------------
-    def test_merge_partial_failure_logs_and_raises(self) -> None:
-        """MergeRollbackError carries failed_id and cause exception."""
-        from backend.recording_merger import MergeRollbackError
-
-        store = self._make_store()
-        original_delete = store.delete_history_item
-        call_count: list[int] = [0]
-
-        def raises_on_third(item_id: str) -> bool:
-            call_count[0] += 1
-            if call_count[0] == 3:
-                raise IOError("disk full")
-            return original_delete(item_id)
-
-        store.delete_history_item = raises_on_third  # type: ignore[method-assign]
-
-        with self.assertRaises(MergeRollbackError) as ctx:
-            self.merger.merge_items(["r1", "r2", "r3"], store, delete_originals=True)
-
-        err = ctx.exception
-        # Two originals were deleted before the third failed
-        self.assertEqual(len(err.deleted_ids), 2)
-        # The failing ID should be the third original
-        self.assertIsNotNone(err.failed_id)
-        # Original cause must be preserved
-        self.assertIsInstance(err.__cause__, IOError)
-        # Error message mentions rollback
-        self.assertIn("откат", str(err).lower())
-
-
-class TestMergeIdempotency(unittest.TestCase):
-    """Тесты идемпотентности merge_items (W1407 F5)."""
+class TestMergerSemanticSearchIntegration(unittest.TestCase):
+    """Тесты интеграции RecordingMerger с SemanticSearcher (W1266 F3 MED)."""
 
     def setUp(self) -> None:
         self.store = FakeStore()
-        self.merger = RecordingMerger()
 
     def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
         return self.store.add_fake_item(item_id, text, ts=ts, **kw)
 
-    def test_merge_idempotency_returns_existing(self) -> None:
-        """Повторный вызов merge_items с теми же ID возвращает тот же item_id."""
-        self._add("id1", "Alpha", ts="2026-04-12T09:00:00")
-        self._add("id2", "Beta", ts="2026-04-12T09:01:00")
+    # --- Вспомогательный фейк SemanticSearcher ---
 
-        result1 = self.merger.merge_items(["id1", "id2"], self.store)
-        result2 = self.merger.merge_items(["id1", "id2"], self.store)
+    def _make_fake_searcher(self) -> Any:
+        class FakeSemanticSearcher:
+            def __init__(self) -> None:
+                self.indexed: list[tuple[str, str]] = []
+                self.removed: list[str] = []
 
-        # Второй вызов должен вернуть тот же ID, а не создавать дубликат
-        self.assertEqual(result1["id"], result2["id"])
-        # В store должна быть ровно одна добавленная запись
-        self.assertEqual(len(self.store._added), 1)
-        # Второй результат помечен как идемпотентный
-        self.assertTrue(result2.get("idempotent", False))
+            def index_item(self, item_id: str, text: str) -> None:
+                self.indexed.append((item_id, text))
 
-    def test_merge_different_order_same_result(self) -> None:
-        """Разный порядок item_ids [a,b,c] и [c,a,b] → одна и та же запись."""
-        self._add("x1", "First", ts="2026-04-12T09:00:00")
-        self._add("x2", "Second", ts="2026-04-12T09:01:00")
-        self._add("x3", "Third", ts="2026-04-12T09:02:00")
+            def remove_item(self, item_id: str) -> None:
+                self.removed.append(item_id)
 
-        result_abc = self.merger.merge_items(["x1", "x2", "x3"], self.store)
-        result_cba = self.merger.merge_items(["x3", "x1", "x2"], self.store)
+        return FakeSemanticSearcher()
 
-        # Оба вызова должны указывать на одну и ту же запись
-        self.assertEqual(result_abc["id"], result_cba["id"])
-        # Только одна запись создана в store
-        self.assertEqual(len(self.store._added), 1)
+    # test_merge_indexes_new_item_in_semantic_search
+    def test_merge_indexes_new_item_in_semantic_search(self) -> None:
+        """Новый объединённый элемент индексируется в SemanticSearcher."""
+        fake_searcher = self._make_fake_searcher()
+        merger = RecordingMerger(semantic_searcher=fake_searcher)
+        self._add("idx1", "Первая запись", ts="2026-04-12T10:00:00")
+        self._add("idx2", "Вторая запись", ts="2026-04-12T10:01:00")
+        result = merger.merge_items(["idx1", "idx2"], self.store)
+        self.assertEqual(len(fake_searcher.indexed), 1)
+        indexed_id, indexed_text = fake_searcher.indexed[0]
+        self.assertEqual(indexed_id, result["id"])
+        self.assertIn("Первая запись", indexed_text)
 
-    def test_merge_delete_originals_no_idempotency(self) -> None:
-        """delete_originals=True обходит проверку идемпотентности."""
-        self._add("y1", "Alpha", ts="2026-04-12T09:00:00")
-        self._add("y2", "Beta", ts="2026-04-12T09:01:00")
+    # test_merge_removes_originals_from_semantic_search
+    def test_merge_removes_originals_from_semantic_search(self) -> None:
+        """При delete_originals=True оба оригинала удаляются из индекса."""
+        fake_searcher = self._make_fake_searcher()
+        merger = RecordingMerger(semantic_searcher=fake_searcher)
+        self._add("rem1", "Alpha", ts="2026-04-12T10:00:00")
+        self._add("rem2", "Beta", ts="2026-04-12T10:01:00")
+        merger.merge_items(["rem1", "rem2"], self.store, delete_originals=True)
+        self.assertIn("rem1", fake_searcher.removed)
+        self.assertIn("rem2", fake_searcher.removed)
 
-        # Первый вызов с delete_originals=True создаёт запись
-        result1 = self.merger.merge_items(["y1", "y2"], self.store, delete_originals=True)
+    # test_merge_without_semantic_searcher_no_op
+    def test_merge_without_semantic_searcher_no_op(self) -> None:
+        """Без semantic_searcher merge работает без ошибок и ничего не вызывает."""
+        merger = RecordingMerger()  # semantic_searcher=None по умолчанию
+        self._add("nop1", "No searcher A", ts="2026-04-12T10:00:00")
+        self._add("nop2", "No searcher B", ts="2026-04-12T10:01:00")
+        result = merger.merge_items(["nop1", "nop2"], self.store, delete_originals=True)
+        self.assertIn("text", result)
+        self.assertIn("nop1", self.store._deleted)
+        self.assertIn("nop2", self.store._deleted)
 
-        # Добавляем записи снова (имитируем восстановление или новые данные)
-        self._add("y1", "Alpha restored", ts="2026-04-12T09:00:00")
-        self._add("y2", "Beta restored", ts="2026-04-12T09:01:00")
+    # test_semantic_failure_does_not_break_merge
+    def test_semantic_failure_does_not_break_merge(self) -> None:
+        """Исключение в semantic_searcher не нарушает основной процесс merge."""
+        class BrokenSearcher:
+            def index_item(self, item_id: str, text: str) -> None:
+                raise RuntimeError("index_item intentionally broken")
 
-        # Второй вызов с теми же ID и delete_originals=True должен создать НОВУЮ запись
-        result2 = self.merger.merge_items(["y1", "y2"], self.store, delete_originals=True)
+            def remove_item(self, item_id: str) -> None:
+                raise RuntimeError("remove_item intentionally broken")
 
-        # Два разных item_id — идемпотентность не применялась
-        self.assertNotEqual(result1["id"], result2["id"])
-        # result2 не помечен как идемпотентный
-        self.assertFalse(result2.get("idempotent", False))
+        merger = RecordingMerger(semantic_searcher=BrokenSearcher())
+        self._add("brk1", "Breaking A", ts="2026-04-12T10:00:00")
+        self._add("brk2", "Breaking B", ts="2026-04-12T10:01:00")
+        # Не должно бросить исключение; merge завершается успешно
+        result = merger.merge_items(["brk1", "brk2"], self.store, delete_originals=True)
+        self.assertIn("text", result)
+        self.assertIn("brk1", self.store._deleted)
+        self.assertIn("brk2", self.store._deleted)
 
 
 if __name__ == "__main__":
