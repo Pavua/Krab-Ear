@@ -337,32 +337,19 @@ class TestTelegramBridgeConcurrentSend(unittest.TestCase):
 
 
 class TestTelegramBridgeDisabledViaSetting(unittest.TestCase):
-    """test_disabled_via_setting — когда base_url пустой/None bridge не делает HTTP-вызовов.
+    """test_disabled_via_setting — non-localhost base_url raises ValueError (W945 allowlist).
 
     Архитектурное примечание: TelegramBridge не имеет явного 'enabled' флага.
-    Заглушаем requests.post и проверяем что при явном enabled=False субкласс не шлёт.
+    Любой non-localhost base_url теперь отклоняется при конструировании (SSRF guard).
     """
 
-    @patch("backend.telegram_bridge.requests.post")
-    def test_disabled_via_setting(self, mock_post: MagicMock) -> None:
-        """Проверяем что при пустом base_url URL формируется как '/api/notify' и запрос бросает
-        ConnectionError (не дойдёт до реального хоста), mock не вызывается при CB-open."""
-        # Имитируем «выключенный» bridge: отключаем через override base_url
-        # и перехватываем на уровне mock.
-        mock_post.side_effect = requests.ConnectionError("disabled")
-        bridge = TelegramBridge(
-            base_url="http://disabled-host:0",
-            circuit_fail_threshold=1,
-        )
-        # Первый вызов → ConnectionError → CB открывается
-        with self.assertRaises(requests.ConnectionError):
-            bridge.send_message(text="test", chat_id=1)
-
-        # Второй вызов → CircuitBreakerOpen, mock НЕ вызывается второй раз
-        with self.assertRaises(CircuitBreakerOpen):
-            bridge.send_message(text="test2", chat_id=1)
-
-        mock_post.assert_called_once()
+    def test_disabled_via_setting(self) -> None:
+        """Non-localhost base_url → ValueError при конструировании (W945 hostname allowlist)."""
+        with self.assertRaises(ValueError, msg="non-localhost host should be rejected"):
+            TelegramBridge(
+                base_url="http://disabled-host:0",
+                circuit_fail_threshold=1,
+            )
 
 
 class TestTelegramBridgeIncludesPriorityField(unittest.TestCase):
@@ -379,14 +366,12 @@ class TestTelegramBridgeIncludesPriorityField(unittest.TestCase):
 
 
 class TestTelegramBridgeHandlesInvalidUrlSetting(unittest.TestCase):
-    """test_handles_invalid_url_setting — невалидный URL → ConnectionError или similar."""
+    """test_handles_invalid_url_setting — non-localhost URL → ValueError at construction."""
 
-    @patch("backend.telegram_bridge.requests.post",
-           side_effect=requests.ConnectionError("invalid host"))
-    def test_handles_invalid_url_setting(self, _mock: MagicMock) -> None:
-        bridge = TelegramBridge(base_url="http://INVALID_HOST_@@@:99999")
-        with self.assertRaises(requests.ConnectionError):
-            bridge.send_message(text="test", chat_id=1)
+    def test_handles_invalid_url_setting(self) -> None:
+        # Since W945 hostname allowlist, non-localhost hosts raise ValueError at __init__
+        with self.assertRaises(ValueError):
+            TelegramBridge(base_url="http://INVALID_HOST_@@@:99999")
 
 
 class TestTelegramBridgeDoesNotRetry4xx(unittest.TestCase):
@@ -446,6 +431,60 @@ class TestTelegramBridgeGetChats(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             bridge.get_chats()
         self.assertIn("krab_unavailable", str(ctx.exception))
+
+
+class TestTelegramBridgeHostnameAllowlist(unittest.TestCase):
+    """W945 / W943 HIGH-1: hostname allowlist rejects non-localhost base_url at construction.
+
+    Ensures that KRAB_EAR_TELEGRAM_BRIDGE_URL cannot be used to redirect bridge
+    traffic to SSRF targets such as 0.0.0.0, link-local (169.254.x.x), or
+    arbitrary LAN IPs.
+    """
+
+    def test_init_rejects_non_localhost_zero_addr(self) -> None:
+        """0.0.0.0 должен быть отклонён с ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            TelegramBridge(base_url="http://0.0.0.0:5000")
+        self.assertIn("refusing non-localhost", str(ctx.exception))
+
+    def test_init_rejects_link_local(self) -> None:
+        """169.254.169.254 (AWS IMDS / link-local) должен быть отклонён с ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            TelegramBridge(base_url="http://169.254.169.254")
+        self.assertIn("refusing non-localhost", str(ctx.exception))
+
+    def test_init_rejects_private_lan(self) -> None:
+        """Приватный IP (10.0.0.1) должен быть отклонён с ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            TelegramBridge(base_url="http://10.0.0.1:8080")
+        self.assertIn("refusing non-localhost", str(ctx.exception))
+
+    def test_init_rejects_external_host(self) -> None:
+        """Внешний хост должен быть отклонён с ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            TelegramBridge(base_url="http://evil.example.com:8080")
+        self.assertIn("refusing non-localhost", str(ctx.exception))
+
+    @patch("requests.post")
+    def test_init_allows_localhost(self, mock_post: MagicMock) -> None:
+        """http://localhost:5000 должен быть разрешён."""
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge(base_url="http://localhost:5000")
+        self.assertEqual(bridge._base_url, "http://localhost:5000")
+
+    @patch("requests.post")
+    def test_init_allows_127_0_0_1(self, mock_post: MagicMock) -> None:
+        """http://127.0.0.1:8080 должен быть разрешён."""
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge(base_url="http://127.0.0.1:8080")
+        self.assertEqual(bridge._base_url, "http://127.0.0.1:8080")
+
+    @patch("requests.post")
+    def test_init_allows_default_url(self, mock_post: MagicMock) -> None:
+        """Дефолтный URL (http://localhost:8080) должен быть разрешён."""
+        mock_post.return_value = _make_ok_response()
+        bridge = TelegramBridge()
+        self.assertIn("localhost", bridge._base_url)
 
 
 if __name__ == "__main__":

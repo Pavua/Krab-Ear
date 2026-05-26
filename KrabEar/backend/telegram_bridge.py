@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -48,6 +49,10 @@ class TelegramBridge:
     NOTIFY_PATH = "/api/notify"
     CHATS_PATH = "/api/chats"
 
+    # Allowlist of hostnames that the bridge may connect to.
+    # Prevents SSRF via KRAB_EAR_TELEGRAM_BRIDGE_URL env-var override.
+    _ALLOWED_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+
     def __init__(
         self,
         base_url: str = "http://localhost:8080",
@@ -59,6 +64,16 @@ class TelegramBridge:
         self._timeout_sec = timeout_sec
         self._circuit_fail_threshold = circuit_fail_threshold
         self._circuit_reset_sec = circuit_reset_sec
+
+        # Hostname allowlist guard — reject non-localhost targets at construction
+        # time so that a bad KRAB_EAR_TELEGRAM_BRIDGE_URL cannot be used for SSRF
+        # (e.g. 0.0.0.0, 169.254.x.x link-local, private LAN IPs).
+        _parsed = urlparse(self._base_url)
+        if _parsed.hostname not in self._ALLOWED_HOSTS:
+            raise ValueError(
+                f"telegram_bridge: refusing non-localhost base_url {self._base_url!r}; "
+                f"hostname {_parsed.hostname!r} not in {set(self._ALLOWED_HOSTS)}"
+            )
 
         self._lock = threading.Lock()
         self._fail_count: int = 0
