@@ -3067,6 +3067,14 @@ class BackendService:
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 
+        # Privacy mode guard: never send transcript text to external service.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {
+                "ok": False,
+                "error": "privacy_mode_active",
+                "user_msg_ru": "Приватный режим включён — отправка в Telegram запрещена.",
+            }
+
         text = str(params.get("text") or "").strip()
         if not text:
             raise ValueError("Параметр 'text' обязателен и не может быть пустым")

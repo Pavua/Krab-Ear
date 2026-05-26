@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time as _time
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from core.config import settings
 from backend.observability import add_breadcrumb
@@ -30,8 +30,15 @@ logger = logging.getLogger("KrabEar.Backend.AppleIntegrationService")
 class AppleIntegrationService:
     """Обработчики IPC-команд для интеграций с macOS-приложениями и Telegram."""
 
-    def __init__(self, telegram_bridge: TelegramBridge) -> None:
+    def __init__(
+        self,
+        telegram_bridge: TelegramBridge,
+        settings_get: Callable[[str, Any], Any] | None = None,
+    ) -> None:
         self._telegram_bridge = telegram_bridge
+        # Optional runtime settings provider (e.g. BackendService._get_runtime_setting).
+        # Falls back to always returning the default when not provided.
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda key, default: default)
 
     # ── Telegram integration ─────────────────────────────────────────────────
 
@@ -53,6 +60,14 @@ class AppleIntegrationService:
         """
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
+
+        # Privacy mode guard: never send transcript text to external service.
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "ok": False,
+                "error": "privacy_mode_active",
+                "user_msg_ru": "Приватный режим включён — отправка в Telegram запрещена.",
+            }
 
         text = str(params.get("text") or "").strip()
         if not text:
