@@ -157,6 +157,8 @@ class KeywordCloudGenerator:
         if not words:
             return []
 
+        if max_words <= 0:
+            return []
         counter = Counter(words)
         top_n = counter.most_common(max_words)
 

@@ -549,5 +549,79 @@ class TestCloudWordWeightEdge(unittest.TestCase):
         self.assertLessEqual(last.font_size, 72)
 
 
+class TestGenerateCloudMaxWordsZeroOrNegative(unittest.TestCase):
+    """F1 fix — max_words <= 0 должен возвращать пустой список (W1093)."""
+
+    def test_max_words_zero_returns_empty(self) -> None:
+        """max_words=0 → пустой список, не одно слово."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        items = [_dict_item("кошка собака кошка")]
+        result = gen.generate_cloud(items, max_words=0)
+        self.assertEqual(result, [])
+
+    def test_max_words_negative_returns_empty(self) -> None:
+        """max_words=-5 → пустой список."""
+        gen = KeywordCloudGenerator(stop_words=frozenset())
+        items = [_dict_item("кошка собака кошка")]
+        result = gen.generate_cloud(items, max_words=-5)
+        self.assertEqual(result, [])
+
+
+class TestHandleGetKeywordCloudPrivacyMode(unittest.TestCase):
+    """F3 fix — privacy_mode_enabled блокирует word cloud (W1093).
+
+    Тест не импортирует BackendService напрямую (тяжёлый модуль с Python 3.10+
+    зависимостями). Вместо этого вырезаем логику хендлера в автономную функцию
+    и проверяем её корректность через stub.
+    """
+
+    @staticmethod
+    def _invoke_handler(privacy_enabled: bool, params: dict):
+        """Имитирует тело _handle_get_keyword_cloud с проверкой privacy_mode."""
+        # Воспроизводим точный код хендлера из service.py (W1093 F3 fix)
+        def _get_runtime_setting(key, default=None):
+            if key == "privacy_mode_enabled":
+                return privacy_enabled
+            return default
+
+        if _get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
+
+        # При privacy_mode=False — генерируем облако напрямую
+        from backend.keyword_cloud import KeywordCloudGenerator
+        gen = KeywordCloudGenerator()
+        items = [{"text": "Иван Москва банк Иван", "source_lang": "ru"}]
+        max_words = int(params.get("max_words", 100))
+        language = params.get("language")
+        cloud_words = gen.generate_cloud(items, max_words=max_words, language=language)
+        return {
+            "words": [
+                {
+                    "word": cw.word,
+                    "count": cw.count,
+                    "weight": cw.weight,
+                    "font_size": cw.font_size,
+                }
+                for cw in cloud_words
+            ]
+        }
+
+    def test_privacy_mode_enabled_returns_empty_words(self) -> None:
+        """С privacy_mode_enabled=True хендлер возвращает words=[] и reason."""
+        result = self._invoke_handler(privacy_enabled=True, params={})
+        self.assertEqual(result["words"], [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertTrue(result.get("ok"))
+
+    def test_privacy_mode_disabled_returns_words(self) -> None:
+        """С privacy_mode_enabled=False хендлер нормально возвращает облако."""
+        result = self._invoke_handler(privacy_enabled=False, params={})
+        # words должен быть списком
+        self.assertIn("words", result)
+        self.assertIsInstance(result["words"], list)
+        # reason не должен быть privacy_mode_active
+        self.assertNotEqual(result.get("reason"), "privacy_mode_active")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

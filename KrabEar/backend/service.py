@@ -58,7 +58,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
-from backend.period_comparison import PeriodComparisonService
+from backend.period_comparison import compare_periods as _compare_periods_fn
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
 from core.config import settings
@@ -91,7 +91,6 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
-from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -124,7 +123,6 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
-from backend.audit_logger import AuditLogger
 
 import argparse
 from datetime import datetime, timedelta
@@ -360,7 +358,6 @@ class BackendService:
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
-        self._period_comparison_svc = PeriodComparisonService(store=self._store)
         # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting)
         self._recap_scheduler = RecapScheduler(
             email_sender=EmailSender.from_settings(settings),
@@ -398,10 +395,7 @@ class BackendService:
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
-        self._config_presets = ConfigPresetsLibrary(
-            data_dir=self.store.data_dir,
-            settings_svc=self._settings_svc,
-        )
+        self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
         # Отключается через KRAB_EAR_IPC_THROTTLE_ENABLED=false.
         self._ipc_throttle = IPCThrottle() if settings.IPC_THROTTLE_ENABLED else None
@@ -557,10 +551,6 @@ class BackendService:
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
-        # Audit logger — структурированный журнал IPC-запросов (NDJSON, ежедневная ротация 7 дней)
-        # Всегда включён (core observability). Флашится при shutdown через GracefulShutdownHandler.
-        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
-
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
             try:
@@ -572,13 +562,6 @@ class BackendService:
                     )
             except Exception:
                 logger.exception("STT hotwords: ошибка авто-сида")
-
-        # Стартовое компактирование — выполняется ПОСЛЕДНИМ в __init__, чтобы
-        # все late-injection атрибуты (в том числе _transcript_versioning) были
-        # уже установлены.  Подключаем хук до вызова maybe_compact(), чтобы
-        # orphaned версии для tombstone-записей удалялись при первом же compact.
-        self.store._on_compact_hook = self._transcript_versioning.purge_orphaned_versions
-        self.store.maybe_compact()
 
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
@@ -956,8 +939,6 @@ class BackendService:
             "apply_glossary_suggestions": self._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
             "export_glossary_csv": self._handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
             "import_glossary_csv": self._handle_import_glossary_csv,  # импорт CSV в translation_glossary (merge|replace)
-            "get_auto_glossary": self._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
-            "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
             "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
@@ -1032,7 +1013,6 @@ class BackendService:
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
-            "clear_unavailable_models": self._handle_clear_unavailable_models,  # W1304: сбросить blacklist недоступных STT-моделей (TTL override)
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
@@ -1072,7 +1052,6 @@ class BackendService:
             "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_daily_insight": self._handle_get_daily_insight,  # один наиболее релевантный инсайт за сегодня (W1274 F3)
             "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -1107,11 +1086,8 @@ class BackendService:
             "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
-            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # атомарно применить пресет: merge + save + after_save_hooks
+            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
-            "delete_config_preset": self._config_presets.handle_delete_config_preset,  # удалить кастомный конфигурационный пресет по имени
-            "export_config_preset": self._config_presets.handle_export_config_preset,  # экспортировать пресет в JSON-строку для передачи/сохранения
-            "import_config_preset": self._config_presets.handle_import_config_preset,  # импортировать пресет из JSON-строки (envelope или прямой объект)
             "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
             "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
             "get_queue_status": self._transcription_queue.handle_get_status,  # статус задания транскрипции по job_id
@@ -1122,7 +1098,6 @@ class BackendService:
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
-            "add_abbreviation": self._text_processing_svc.handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
             "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
@@ -1311,28 +1286,12 @@ class BackendService:
                 level="info",
             )
 
-        _t0 = time.monotonic()
         try:
             result = handler(params)
-            response = {"id": request_id, "ok": True, "result": result}
+            return {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
-            response = self._error(request_id, "internal_error", str(exc))
-
-        # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
-        try:
-            _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
-            if not _privacy_on:
-                self._audit_logger.log_request(
-                    method=method,
-                    params=params if isinstance(params, dict) else {},
-                    result=response,
-                    duration_ms=(time.monotonic() - _t0) * 1000,
-                )
-        except Exception:
-            pass  # audit logging никогда не должен ронять IPC-ответ
-
-        return response
+            return self._error(request_id, "internal_error", str(exc))
 
     _BATCH_MAX_REQUESTS = 50
 
@@ -1693,50 +1652,6 @@ class BackendService:
             "total": len(new_entries),
         }
 
-    # ── AutoGlossary IPC handlers (W1104) ─────────────────────────────────────
-
-    def _handle_get_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущий auto-glossary из кэша (без пересчёта).
-
-        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список
-        (история недоступна для извлечения терминов).
-
-        Returns:
-            {"ok": True, "terms": [...], "count": N, "from_cache": True}
-        """
-        settings = self._settings_svc.cached_settings()
-        if settings.get("privacy_mode_enabled"):
-            return {"ok": True, "terms": [], "count": 0, "from_cache": False}
-
-        terms = self._auto_glossary.get_cached()
-        return {"ok": True, "terms": terms, "count": len(terms), "from_cache": True}
-
-    def _handle_refresh_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Принудительно пересчитывает auto-glossary из истории транскрибаций.
-
-        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список.
-
-        params (optional):
-            window_days: int — горизонт истории в днях (default 7).
-            top_n: int — максимальное число терминов (default 30).
-
-        Returns:
-            {"ok": True, "terms": [...], "count": N, "refreshed": True}
-        """
-        settings = self._settings_svc.cached_settings()
-        if settings.get("privacy_mode_enabled"):
-            return {"ok": True, "terms": [], "count": 0, "refreshed": False}
-
-        window_days = int(params.get("window_days", 7))
-        top_n = int(params.get("top_n", 30))
-
-        terms = self._auto_glossary.build(
-            window_days=window_days,
-            top_n=top_n,
-            force=True,
-        )
-        return {"ok": True, "terms": terms, "count": len(terms), "refreshed": True}
-
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
         try:
@@ -1808,28 +1723,6 @@ class BackendService:
         """Очищает ring-буфер и dedupe-состояние ErrorBus. Возвращает количество удалённых записей."""
         n = self._error_bus.clear()
         return {"cleared": n}
-
-    def _handle_clear_unavailable_models(self, params: dict) -> dict:
-        """W1304: Сбрасывает blacklist недоступных STT-моделей немедленно (TTL override).
-
-        Полезно после ручного устранения ошибки (например, OOM, timeout) — позволяет
-        вернуть адаптеры в chain без перезапуска backend. Возвращает список сброшенных
-        model_id и их возраст в секундах на момент сброса.
-        """
-        import time as _time
-        engine = getattr(self.transcriber, "engine", None)
-        if engine is None:
-            return {"cleared": [], "error": "engine_not_available"}
-        unavail = getattr(engine, "_unavailable_models", None)
-        if unavail is None:
-            return {"cleared": [], "error": "unavailable_models_not_found"}
-        now = _time.monotonic()
-        cleared = [
-            {"model_id": mid, "age_sec": round(now - ts, 1)}
-            for mid, ts in list(unavail.items())
-        ]
-        unavail.clear()
-        return {"cleared": cleared, "count": len(cleared)}
 
     def _handle_send_diagnostics_to_sentry(self, params: dict) -> dict:
         """Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.
@@ -2903,14 +2796,41 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов.
-
-        Поддерживаемые режимы (параметр mode):
-            "explicit" (по умолчанию) — явные даты period1_start/end + period2_start/end.
-            "weeks"    — текущая неделя vs N недель назад (weeks_back, default=2).
-            "months"   — текущий месяц vs предыдущий.
-        """
-        return self._period_comparison_svc.handle_compare_periods(params)
+        """Сравнивает статистику двух временных периодов."""
+        p1_start = params.get("period1_start")
+        p1_end = params.get("period1_end")
+        p2_start = params.get("period2_start")
+        p2_end = params.get("period2_end")
+        if not all([p1_start, p1_end, p2_start, p2_end]):
+            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
+        report = _compare_periods_fn(
+            store=self.store,
+            period1_start=p1_start,
+            period1_end=p1_end,
+            period2_start=p2_start,
+            period2_end=p2_end,
+        )
+        return {
+            "period1": {
+                "recordings": report.period1.recordings,
+                "duration_sec": report.period1.duration_sec,
+                "words": report.period1.words,
+                "avg_confidence": report.period1.avg_confidence,
+                "languages": report.period1.languages,
+            },
+            "period2": {
+                "recordings": report.period2.recordings,
+                "duration_sec": report.period2.duration_sec,
+                "words": report.period2.words,
+                "avg_confidence": report.period2.avg_confidence,
+                "languages": report.period2.languages,
+            },
+            "recordings_change_pct": report.recordings_change_pct,
+            "duration_change_pct": report.duration_change_pct,
+            "confidence_change": report.confidence_change,
+            "new_languages": report.new_languages,
+            "summary": report.summary,
+        }
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
@@ -2946,29 +2866,8 @@ class BackendService:
             "days": days,
         }
 
-    def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
-
-        Privacy gate: если privacy_mode_enabled=True — возвращает пустой результат
-        без обращения к истории записей.
-        """
-        if self._cached_settings().get("privacy_mode_enabled"):
-            return {"insight": None, "privacy_mode": True}
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        insight = self._recording_insights.get_daily_insight(items)
-        return {
-            "insight": insight.to_dict() if insight is not None else None,
-            "privacy_mode": False,
-        }
-
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "trends": [], "skipped": "privacy_mode"}
         days = int(params.get("days", 30))
         try:
             with self.store._lock():
@@ -3058,8 +2957,9 @@ class BackendService:
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует данные облака ключевых слов из истории транскрипций."""
-        # Зажать max_words в диапазон [0, 1000] на границе IPC — защита от OOM
-        max_words = min(max(0, int(params.get("max_words", 100))), 1000)
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
+        max_words = int(params.get("max_words", 100))
         language = params.get("language")
         try:
             with self.store._lock():
@@ -3553,17 +3453,15 @@ end tell'''
             current_topic (dict) — текущая тема (last_n=window_size).
         """
         window_size = max(1, int(params.get("window_size", 5) or 5))
-        # W1277 F2: treat limit <= 0 as default (50) — "unlimited" caused 103s
-        # block when history had 5000+ items (single-threaded IPC dispatch).
-        _raw_limit = int(params.get("limit", 50) or 50)
-        limit = _raw_limit if _raw_limit > 0 else 50
+        limit = int(params.get("limit", 100) or 100)
         try:
             with self.store._lock():
                 items = self.store._load_active_items_unlocked()
         except Exception:
             items = []
 
-        items = items[-limit:]
+        if limit > 0:
+            items = items[-limit:]
 
         timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
         current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
@@ -3879,17 +3777,11 @@ def configure_logging(data_dir: Path) -> None:
 
 
 def build_service(data_dir: Path) -> BackendService:
-    """Фабрика backend-сервиса с запуском проверок на старте.
-
-    Startup compact переместён в ``BackendService.__init__`` (последний шаг),
-    чтобы гарантировать, что все late-injection атрибуты хранилища
-    (включая ``_on_compact_hook`` / ``TranscriptVersionManager``) уже
-    инициализированы к моменту вызова.  Это исключает orphaned-версии
-    для tombstone-записей, которые удалялись бы без purge-хука (W1302 F1).
-    """
+    """Фабрика backend-сервиса с запуском проверок на старте."""
     store = StateStore(data_dir=data_dir)
     # Гарантируем наличие полного набора дефолтных настроек.
     store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))
+    store.maybe_compact()
     return BackendService(store=store)
 
 
