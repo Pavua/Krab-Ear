@@ -69,7 +69,6 @@ _ES_COMMANDS: list[tuple[str, str, str]] = [
     (r"signo de exclamación", "insert", "!"),
     (r"signo de interrogación", "insert", "?"),
     (r"nueva línea", "insert", "\n"),
-    (r"nueva línea", "insert", "\n"),
     # Одиночные
     (r"coma", "insert", ","),
     (r"punto", "insert", "."),
@@ -118,17 +117,20 @@ _COMPILED: dict[str, list[tuple[re.Pattern[str], str, str]]] = {}
 
 
 def _build_pattern(raw_pattern: str) -> re.Pattern[str]:
-    r"""Оборачивает паттерн в whole-word matching: \b...\b (case-insensitive).
+    r"""Оборачивает паттерн в whole-word matching с lookaround-границами.
 
-    Если паттерн уже содержит спецсимволы регулярного выражения — оставляем
-    как есть (для будущих расширений), иначе экранируем слова через re.escape.
+    Использует (?<!\w) и (?!\w) вместо \b...\b — lookarounds корректно
+    работают при любых символах вокруг слова (скобки, тире и т.д.).
+    Пример: «(точка)» корректно распознаётся, trailing \b провалился бы
+    при ')' справа (non-word char после non-word char — граница не создаётся).
     """
     # Экранируем каждое слово в паттерне, затем соединяем пробелом/\s+
     # Это гарантирует точное совпадение слов, не подстрок
     words = raw_pattern.split()
     escaped = r"\s+".join(re.escape(w) for w in words)
-    # Whole-word boundaries: \b перед первым словом и после последнего
-    return re.compile(r"\b" + escaped + r"\b", re.IGNORECASE)
+    # Lookaround-границы: (?<!\w) перед первым словом, (?!\w) после последнего.
+    # В отличие от \b не зависят от окружающих символов — только от самой границы.
+    return re.compile(r"(?<!\w)" + escaped + r"(?!\w)", re.IGNORECASE)
 
 
 def _get_compiled(lang: str) -> list[tuple[re.Pattern[str], str, str]]:
