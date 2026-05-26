@@ -563,6 +563,13 @@ class BackendService:
             except Exception:
                 logger.exception("STT hotwords: ошибка авто-сида")
 
+        # Стартовое компактирование — выполняется ПОСЛЕДНИМ в __init__, чтобы
+        # все late-injection атрибуты (в том числе _transcript_versioning) были
+        # уже установлены.  Подключаем хук до вызова maybe_compact(), чтобы
+        # orphaned версии для tombstone-записей удалялись при первом же compact.
+        self.store._on_compact_hook = self._transcript_versioning.purge_orphaned_versions
+        self.store.maybe_compact()
+
     def _init_llm_rewriter(self):
         """Создаёт LLMRewriter если settings.LLM_ENABLED. Возвращает None иначе."""
         if not settings.LLM_ENABLED:
@@ -3775,11 +3782,17 @@ def configure_logging(data_dir: Path) -> None:
 
 
 def build_service(data_dir: Path) -> BackendService:
-    """Фабрика backend-сервиса с запуском проверок на старте."""
+    """Фабрика backend-сервиса с запуском проверок на старте.
+
+    Startup compact переместён в ``BackendService.__init__`` (последний шаг),
+    чтобы гарантировать, что все late-injection атрибуты хранилища
+    (включая ``_on_compact_hook`` / ``TranscriptVersionManager``) уже
+    инициализированы к моменту вызова.  Это исключает orphaned-версии
+    для tombstone-записей, которые удалялись бы без purge-хука (W1302 F1).
+    """
     store = StateStore(data_dir=data_dir)
     # Гарантируем наличие полного набора дефолтных настроек.
     store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))
-    store.maybe_compact()
     return BackendService(store=store)
 
 

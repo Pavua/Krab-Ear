@@ -844,7 +844,13 @@ class StateStore:
             return len(self._load_active_items_unlocked())
 
     def _compact_unlocked(self) -> None:
-        """Собирает активные записи в новый основной журнал и очищает дельты."""
+        """Собирает активные записи в новый основной журнал и очищает дельты.
+
+        После компактирования вызывает опциональный хук ``_on_compact_hook``
+        (если задан через late-injection) с множеством активных item_id-ов,
+        что позволяет внешним сервисам (напр. TranscriptVersionManager) удалить
+        orphaned-данные для tombstone-записей.
+        """
         active = self._load_active_items_unlocked()
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
@@ -860,6 +866,15 @@ class StateStore:
         self.favorites_path.write_text("", encoding="utf-8")
         self.text_updates_path.write_text("", encoding="utf-8")
         self.action_items_path.write_text("", encoding="utf-8")
+
+        # Вызываем хук постобработки, если он подключён (напр. TranscriptVersionManager).
+        on_compact = getattr(self, "_on_compact_hook", None)
+        if on_compact is not None:
+            try:
+                active_ids = {item.id for item in active}
+                on_compact(active_ids)
+            except Exception:
+                logger.exception("_compact_unlocked: ошибка в _on_compact_hook")
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""

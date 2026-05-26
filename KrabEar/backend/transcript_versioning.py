@@ -267,3 +267,38 @@ class TranscriptVersionManager:
             raise ValueError("Параметр version_num обязателен")
         version_num = int(version_num)
         return self.revert_to_version(item_id=item_id, version_num=version_num)
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
+
+    def purge_orphaned_versions(self, active_item_ids: set[str]) -> int:
+        """Удаляет версии для item_id-ов, которых больше нет в активной истории.
+
+        Вызывается после компактирования StateStore, когда tombstone-записи
+        окончательно вычеркнуты и соответствующие item_id исчезли из хранилища.
+
+        Args:
+            active_item_ids: Множество item_id-ов, которые остаются активными
+                             после компактирования.
+
+        Returns:
+            Количество удалённых версий (строк).
+        """
+        with self._lock:
+            all_records = self._read_all()
+            kept = [r for r in all_records if r.get("item_id") in active_item_ids]
+            purged = len(all_records) - len(kept)
+            if purged > 0:
+                try:
+                    with self._versions_path.open("w", encoding="utf-8") as fh:
+                        for r in kept:
+                            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    logger.info(
+                        "purge_orphaned_versions: удалено %d версий для tombstone-записей",
+                        purged,
+                    )
+                except Exception as exc:
+                    logger.error("purge_orphaned_versions: ошибка записи: %s", exc)
+                    return 0
+        return purged
