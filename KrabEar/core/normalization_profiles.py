@@ -27,6 +27,10 @@ _RE_STRIP_TRAILING_PERIOD = re.compile(r"[.]+$")
 
 # ── Встроенные профили ──────────────────────────────────────────────────────
 
+# Frozenset of builtin profile names — used to prevent disk JSON from
+# silently overriding them in _load_custom() (W1264 N1).
+_BUILTIN_NAMES: frozenset[str] = frozenset({"verbatim", "clean", "formal", "telegram", "subtitles"})
+
 _BUILTIN_PROFILES: list[dict[str, Any]] = [
     {
         "name": "verbatim",
@@ -194,7 +198,7 @@ class NormalizationProfileRegistry:
         profile = NormalizationProfile(
             name=name.strip(),
             description=description,
-            rules=list(rules),
+            rules=list(dict.fromkeys(rules)),  # deduplicate, preserve order (W1264 N2)
             builtin=False,
         )
         self._profiles[profile.name] = profile
@@ -228,15 +232,24 @@ class NormalizationProfileRegistry:
             return
         try:
             raw_list: list[dict] = json.loads(path.read_text(encoding="utf-8"))
+            loaded = 0
             for raw in raw_list:
+                name = raw.get("name", "")
+                if name in _BUILTIN_NAMES:
+                    logger.warning(
+                        "Пропуск кастомного профиля %r: имя зарезервировано для встроенного профиля",
+                        name,
+                    )
+                    continue
                 p = NormalizationProfile(
-                    name=raw["name"],
+                    name=name,
                     description=raw.get("description", ""),
                     rules=list(raw.get("rules", [])),
                     builtin=False,
                 )
                 self._profiles[p.name] = p
-            logger.debug("Загружено %d пользовательских профилей из %s", len(raw_list), path)
+                loaded += 1
+            logger.debug("Загружено %d пользовательских профилей из %s", loaded, path)
         except Exception as exc:
             logger.warning("Не удалось загрузить кастомные профили: %s", exc)
 
