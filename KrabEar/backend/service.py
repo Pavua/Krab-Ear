@@ -1278,7 +1278,12 @@ class BackendService:
             "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
-            "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
+            # W957 SECURITY: "clear_privacy_audit_log" INTENTIONALLY REMOVED from IPC dispatch.
+            # Exposing audit-log destruction over unauthenticated IPC (IPC_SIGNING_ENABLED=False
+            # by default) allows any local process to permanently erase the compliance trail.
+            # PrivacyAuditLogger.clear() and _handle_clear_privacy_audit_log() are retained for
+            # unit tests and explicit migration scripts ONLY — they must never be re-added here
+            # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
@@ -2413,7 +2418,12 @@ class BackendService:
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет файл privacy audit log. Идемпотентен.
 
-        Возвращает:
+        WARNING (W957): Этот метод НЕ зарегистрирован в таблице IPC dispatch и недоступен
+        через IPC. Оставлен только для unit-тестов и явных migration-скриптов.
+        НЕ добавляй его обратно в dispatch без mandatory request signing и флага
+        ALLOW_PRIVACY_AUDIT_CLEAR=true (W952 CRITICAL finding F-1).
+
+        Returns:
             ok — всегда True.
         """
         audit = get_privacy_audit_logger()

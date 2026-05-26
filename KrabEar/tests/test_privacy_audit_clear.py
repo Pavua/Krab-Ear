@@ -1,19 +1,24 @@
-"""Тесты clear_privacy_audit_log IPC handler + PrivacyAuditLogger.clear().
+"""Тесты PrivacyAuditLogger.clear() — W957 security fix.
 
-3 теста:
-  test_clear_removes_existing_log  — файл существует → clear() удаляет его.
-  test_clear_handles_missing_file  — файл отсутствует → clear() возвращает ok=True (идемпотент).
-  test_clear_returns_ok            — handler через BackendService возвращает {ok: True}.
+Тесты:
+  test_clear_removes_existing_log      — файл существует → clear() удаляет его.
+  test_clear_handles_missing_file      — файл отсутствует → clear() идемпотентен.
+  test_clear_handler_still_callable    — _handle_clear_privacy_audit_log метод доступен
+                                         для unit-тестов/migration-скриптов.
+  test_clear_not_in_ipc_dispatch       — W957: clear_privacy_audit_log НЕ в IPC dispatch.
+
+Примечание W957: test_clear_returns_ok (IPC handler через BackendService) удалён.
+Вместо него test_clear_not_in_ipc_dispatch гарантирует, что метод НЕ регистрирован
+в dispatch table (compliance audit trail нельзя уничтожать через неавторизованный IPC).
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Настройка PYTHONPATH для standalone запуска
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,7 +27,7 @@ if str(_PROJECT_ROOT / "KrabEar") not in sys.path:
 
 
 class TestPrivacyAuditClear(unittest.TestCase):
-    """Тесты PrivacyAuditLogger.clear() и хендлера _handle_clear_privacy_audit_log."""
+    """Тесты PrivacyAuditLogger.clear() — compliance trail protection."""
 
     def setUp(self) -> None:
         # Сбрасываем singleton перед каждым тестом
@@ -82,34 +87,30 @@ class TestPrivacyAuditClear(unittest.TestCase):
         self.assertEqual(audit.total_count(), 0)
 
     # ------------------------------------------------------------------
-    # test_clear_returns_ok
+    # test_clear_handler_still_callable (for tests/migration scripts only)
     # ------------------------------------------------------------------
-    def test_clear_returns_ok(self) -> None:
-        """_handle_clear_privacy_audit_log возвращает {ok: True}."""
-        log_path = Path(self._tmpdir) / "privacy_audit.log"
+    def test_clear_handler_still_callable(self) -> None:
+        """_handle_clear_privacy_audit_log существует и вызывается для тестов/migration-скриптов.
 
-        # Пишем тестовую строку напрямую в файл
+        Метод НАМЕРЕННО не зарегистрирован в IPC dispatch (W957). Этот тест проверяет,
+        что метод не удалён из класса — он нужен migration-скриптам и unit-тестам.
+        """
+        log_path = Path(self._tmpdir) / "privacy_audit.log"
         log_path.write_text(
-            json.dumps({"ts": "2026-05-05T00:00:00+00:00", "category": "test", "action": "dummy", "details": {}})
-            + "\n",
+            '{"ts":"2026-05-26T00:00:00+00:00","category":"test","action":"dummy","details":{}}\n',
             encoding="utf-8",
         )
         self.assertTrue(log_path.exists())
 
-        # Подменяем get_privacy_audit_logger чтобы избежать default path
-        from backend.privacy_audit import PrivacyAuditLogger
+        from backend.privacy_audit import PrivacyAuditLogger, get_privacy_audit_logger
         PrivacyAuditLogger.reset_instance()
+        real_instance = get_privacy_audit_logger(log_path=log_path)
 
-        with patch("backend.service.get_privacy_audit_logger") as mock_factory:
-            from backend.privacy_audit import PrivacyAuditLogger as PAL, get_privacy_audit_logger as real_factory
-            PAL.reset_instance()
-            real_instance = real_factory(log_path=log_path)
-            mock_factory.return_value = real_instance
+        # Создаём минимальный stub с подмененным get_privacy_audit_logger
+        from backend.service import BackendService
+        import unittest.mock as mock
 
-            # Создаём минимальный stub BackendService с нужным handler'ом
-            from backend.service import BackendService
-
-            # Вызываем handler напрямую через unbound метод
+        with mock.patch("backend.service.get_privacy_audit_logger", return_value=real_instance):
             result = BackendService._handle_clear_privacy_audit_log(
                 MagicMock(spec=BackendService),
                 params={},
@@ -117,6 +118,43 @@ class TestPrivacyAuditClear(unittest.TestCase):
 
         self.assertIn("ok", result, "Ответ должен содержать ключ 'ok'")
         self.assertTrue(result["ok"], "ok должен быть True")
+        # Файл должен быть удалён (handler вызвал audit.clear())
+        self.assertFalse(log_path.exists(), "Файл лога должен быть удалён handler'ом")
+
+    # ------------------------------------------------------------------
+    # test_clear_not_in_ipc_dispatch  (W957 security gate)
+    # ------------------------------------------------------------------
+    def test_clear_not_in_ipc_dispatch(self) -> None:
+        """W957: clear_privacy_audit_log НЕ зарегистрирован в IPC dispatch table.
+
+        Compliance audit trail нельзя уничтожать через неавторизованный IPC
+        (W952 CRITICAL finding F-1). Этот тест является security regression gate —
+        провал = compliance audit trail снова уязвим.
+
+        Метод проверяет, что строка `"clear_privacy_audit_log": self._handle_...`
+        отсутствует в source-коде handle_request (шаблон dict-key registration).
+        Комментарии с именем метода допустимы — проверяется именно dict-key pattern.
+        """
+        from backend.service import BackendService
+        import re
+        import inspect
+
+        source = inspect.getsource(BackendService.handle_request)
+
+        # Ищем паттерн dict-key registration: "clear_privacy_audit_log": <callable>
+        # Комментарии не вызывают false positives — они не содержат ": self._handle" рядом
+        match = re.search(
+            r'"clear_privacy_audit_log"\s*:\s*\S',
+            source,
+        )
+
+        self.assertIsNone(
+            match,
+            "SECURITY (W957): 'clear_privacy_audit_log' НЕ должен быть зарегистрирован "
+            "в IPC dispatch table (dict-key pattern). "
+            "Это compliance audit trail — удалять его через неавторизованный IPC запрещено. "
+            "Если ты видишь этот fail — W952 CRITICAL finding F-1 снова открыт.",
+        )
 
 
 if __name__ == "__main__":
