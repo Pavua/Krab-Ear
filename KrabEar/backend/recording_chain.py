@@ -328,3 +328,44 @@ class RecordingChainManager:
                 chain["item_ids"] = new_list
                 self._save()
         return changed
+
+    # ------------------------------------------------------------------
+    # Каскадная очистка призрачных item_id (W1253 RC-3)
+    # ------------------------------------------------------------------
+
+    def remove_item_from_all_chains(self, item_id: str) -> int:
+        """Удаляет item_id из ВСЕХ цепочек, где он встречается.
+
+        Предотвращает накопление «призрачных» ссылок, когда запись удаляется
+        из истории (delete / cleanup / archive), но её item_id остаётся
+        в recording_chains.json.  Вызывается каскадно из трёх мест:
+          - HistoryService.handle_delete_history_item
+          - HistoryService.handle_cleanup_old_history
+          - ArchiveManager.archive_items
+
+        Args:
+            item_id: ID удалённой/архивируемой записи истории.
+
+        Returns:
+            Количество цепочек, из которых был удалён item_id (0 = no-op).
+        """
+        item_id = str(item_id).strip()
+        if not item_id:
+            return 0
+        removed_from = 0
+        with self._lock:
+            dirty = False
+            for chain in self._data["chains"].values():
+                if item_id in chain.get("item_ids", []):
+                    chain["item_ids"].remove(item_id)
+                    removed_from += 1
+                    dirty = True
+            if dirty:
+                self._save()
+        if removed_from:
+            logger.debug(
+                "remove_item_from_all_chains: item_id=%s удалён из %d цепочек",
+                item_id,
+                removed_from,
+            )
+        return removed_from

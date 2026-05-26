@@ -52,6 +52,8 @@ class ArchiveManager:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._archive_path.touch(exist_ok=True)
         self._lock_path.touch(exist_ok=True)
+        # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
+        self._recording_chain_mgr = None
 
     # ------------------------------------------------------------------
     # Файловая блокировка (межпроцессная)
@@ -197,6 +199,10 @@ class ArchiveManager:
                         logger.warning(
                             "archive_items: semantic remove failed for %s", clean_id
                         )
+
+                # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
+                if self._recording_chain_mgr is not None:
+                    self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
 
                 archived_count += 1
 
