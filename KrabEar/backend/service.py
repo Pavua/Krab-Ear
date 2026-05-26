@@ -131,6 +131,7 @@ from backend.text_scoring_service import TextScoringService
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
+import collections
 from datetime import datetime, timedelta
 import json
 import logging
@@ -211,6 +212,9 @@ class BackendService:
 
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
+        # W774: track timestamps of audio-device poll IPC calls for flood detection.
+        # deque maxlen=10 keeps only the 10 most recent call times (one per method combined).
+        self._audio_poll_timestamps: collections.deque = collections.deque(maxlen=10)
         self._settings_svc = SettingsService(store=self.store)
         # Wave 734: STTManagementService — IPC handlers for STT hotwords, warmup, routing, model select.
         self._stt_mgmt_svc = STTManagementService(
@@ -2474,12 +2478,40 @@ class BackendService:
             },
         }
 
+    def _check_audio_poll_flood(self) -> None:
+        """Push ipc.audio_device_poll_flood if called >5 times in 60 s (W774)."""
+        now = time.monotonic()
+        self._audio_poll_timestamps.append(now)
+        # Count calls within the last 60 s window
+        recent = sum(1 for t in self._audio_poll_timestamps if now - t <= 60.0)
+        if recent > 5:
+            try:
+                from backend.error_bus import KrabError
+                from backend.error_codes import ERROR_REGISTRY
+                from datetime import datetime, timezone
+                _entry = ERROR_REGISTRY.get("ipc.audio_device_poll_flood", {})
+                self._error_bus.push(KrabError(
+                    severity=_entry.get("severity", "warn"),
+                    component="ipc",
+                    code="ipc.audio_device_poll_flood",
+                    message_user=_entry.get("user_msg_ru", "Слишком частые запросы аудиоустройств"),
+                    message_debug=f"audio device poll flood: {recent} calls in last 60s",
+                    timestamp=datetime.now(timezone.utc),
+                    context={"recent_count": recent},
+                    actionable=False,
+                    action_id=None,
+                ))
+            except Exception:
+                pass
+
     def _handle_list_audio_inputs(self, params):
         """Delegated to RecordingCoreService."""
+        self._check_audio_poll_flood()
         return self._recording_core_svc.handle_list_audio_inputs(params)
 
     def _handle_get_audio_devices(self, params):
         """Delegated to RecordingCoreService."""
+        self._check_audio_poll_flood()
         return self._recording_core_svc.handle_get_audio_devices(params)
 
     def _handle_transcribe_paths(self, params):
