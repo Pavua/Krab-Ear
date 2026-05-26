@@ -365,6 +365,14 @@ class STTRouter:
                     "mlx-community/whisper-large-v3-mlx",
                 )
 
+        # 5. Sentry tag — позволяет фильтровать crash-отчёты по активному STT движку.
+        #    Lazy import: sentry_sdk опциональная зависимость; no-op если не инициализирован.
+        try:
+            import sentry_sdk  # noqa: PLC0415
+            sentry_sdk.set_tag("stt_engine", model_id)
+        except Exception:  # noqa: BLE001
+            pass  # telemetry никогда не должна ломать routing
+
         return model_id
 
     def get_gigaam_adapter(self) -> Optional[Any]:
