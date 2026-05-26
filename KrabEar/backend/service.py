@@ -24,7 +24,7 @@ from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
 from backend.stt_management_service import STTManagementService
-from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
+from backend.recording_comparison import RecordingComparison
 from backend.playback_tracker import PlaybackTracker
 from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
@@ -43,7 +43,7 @@ from core.auto_title import AutoTitleGenerator
 from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
-from backend.semantic_search import SemanticSearcher, keyword_fallback_search
+from backend.semantic_search import SemanticSearcher
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
 from core.readability_scorer import ReadabilityScorer
@@ -126,6 +126,7 @@ from backend.observability import (
 )
 from backend.analytics_service import AnalyticsService
 from backend.apple_integration_service import AppleIntegrationService
+from backend.search_and_analysis_service import SearchAndAnalysisService
 from backend.calendar_link import CalendarLinker
 from backend.text_scoring_service import TextScoringService
 from backend.privacy_audit import get_privacy_audit_logger
@@ -572,6 +573,16 @@ class BackendService:
             recorder=self.recorder,
             last_stt_engine_ref=self._last_stt_engine_ref,
         )
+        # Wave 757: SearchAndAnalysisService — semantic search + action items + recording analytics.
+        self._search_analysis_svc = SearchAndAnalysisService(
+            store=self.store,
+            semantic_searcher=self._semantic_searcher,
+            action_items_extractor=self._action_items_extractor,
+            topic_tracker=self._topic_tracker,
+            recording_insights=self._recording_insights,
+            recording_comparison=self._recording_comparison,
+            stats_report=self._stats_report,
+        )
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
         try:
             _startup_report = self._startup_diagnostics.run_all_checks()
@@ -717,63 +728,16 @@ class BackendService:
     # ------------------------------------------------------------------
 
     def _handle_semantic_search(self, params: dict) -> dict:
-        """Семантический поиск по истории транскрипций через embeddings.
-
-        Params:
-            query     — поисковый запрос (строка, обязательный)
-            top_k     — максимальное число результатов (int, default 10)
-            fallback  — bool, использовать keyword fallback если модель недоступна (default True)
-        Returns:
-            {"results": [{"id": str, "score": float}], "mode": "semantic"|"keyword"|"disabled"}
-        """
-        query = str(params.get("query", "")).strip()
-        if not query:
-            raise ValueError("Параметр query обязателен")
-        top_k = int(params.get("top_k", 10))
-        top_k = max(1, min(top_k, 100))
-        use_fallback = bool(params.get("fallback", True))
-
-        if not self._semantic_searcher.is_enabled:
-            if use_fallback:
-                items = [{"id": it.id, "text": it.text}
-                         for it in self.store._load_active_items_with_lock()]
-                results = keyword_fallback_search(query, items, top_k=top_k)
-                return {"results": results, "mode": "keyword", "reason": "semantic_disabled"}
-            return {"results": [], "mode": "disabled"}
-
-        results = self._semantic_searcher.search(query, top_k=top_k)
-        if not results and use_fallback:
-            items = [{"id": it.id, "text": it.text}
-                     for it in self.store._load_active_items_with_lock()]
-            results = keyword_fallback_search(query, items, top_k=top_k)
-            return {"results": results, "mode": "keyword", "reason": "model_unavailable"}
-
-        return {"results": results, "mode": "semantic"}
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_semantic_search(params)
 
     def _handle_semantic_search_status(self, params: dict) -> dict:
-        """Возвращает статус семантического поиска.
-
-        Returns:
-            {"enabled": bool, "model_loaded": bool, "model_name": str,
-             "model_error": str|null, "indexed_count": int}
-        """
-        return self._semantic_searcher.status()
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_semantic_search_status(params)
 
     def _handle_semantic_search_reindex(self, params: dict) -> dict:
-        """Переиндексирует всю историю транскрипций.
-
-        Params:
-            force — bool, перестроить индекс с нуля (default False)
-        Returns:
-            {"indexed": int, "skipped": int, "errors": int}
-        """
-        if not self._semantic_searcher.is_enabled:
-            return {"indexed": 0, "skipped": 0, "errors": 0, "reason": "semantic_search_disabled"}
-        force = bool(params.get("force", False))
-        items = [{"id": it.id, "text": it.text}
-                 for it in self.store._load_active_items_with_lock()]
-        result = self._semantic_searcher.index_all(items, force=force)
-        return result
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_semantic_search_reindex(params)
 
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
@@ -2173,109 +2137,16 @@ class BackendService:
         }
 
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
-        item_id = str(params.get("id", "")).strip()
-        if not item_id:
-            raise RuntimeError("Параметр id обязателен")
-
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-        target = next((it for it in items if it.id == item_id), None)
-        if target is None:
-            raise RuntimeError(f"Элемент не найден: {item_id}")
-
-        text = target.text or ""
-        language = str(params.get("language", "ru")).lower()
-
-        result = self._action_items_extractor.extract(text, language=language)
-
-        if result.ok:
-            self.store.update_history_item_action_items(
-                item_id=item_id,
-                action_items=[ai.to_dict() for ai in result.action_items],
-                decisions=result.decisions,
-                questions=result.questions,
-            )
-
-        return {
-            "id": item_id,
-            "ok": result.ok,
-            "action_items": [ai.to_dict() for ai in result.action_items],
-            "decisions": result.decisions,
-            "questions": result.questions,
-            "fallback_reason": result.fallback_reason,
-            "latency_ms": result.latency_ms,
-        }
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_extract_action_items(params)
 
     def _handle_batch_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Пакетное извлечение задач/решений/вопросов для нескольких item_id."""
-        item_ids = params.get("ids", [])
-        if not isinstance(item_ids, list):
-            raise RuntimeError("Параметр ids должен быть списком")
-        language = str(params.get("language", "ru")).lower()
-
-        if self._action_items_extractor is None:
-            raise RuntimeError("LLM не включён (LLM_ENABLED=False)")
-
-        with self.store._lock():
-            all_items = self.store._load_active_items_unlocked()
-        items_by_id = {it.id: it for it in all_items}
-
-        results = []
-        for item_id in item_ids:
-            item_id = str(item_id).strip()
-            target = items_by_id.get(item_id)
-            if target is None:
-                results.append({"id": item_id, "ok": False, "error": "not_found"})
-                continue
-            text = target.text or ""
-            result = self._action_items_extractor.extract(text, language=language)
-            if result.ok:
-                self.store.update_history_item_action_items(
-                    item_id=item_id,
-                    action_items=[ai.to_dict() for ai in result.action_items],
-                    decisions=result.decisions,
-                    questions=result.questions,
-                )
-            results.append({
-                "id": item_id,
-                "ok": result.ok,
-                "action_items": [ai.to_dict() for ai in result.action_items],
-                "decisions": result.decisions,
-                "questions": result.questions,
-                "fallback_reason": result.fallback_reason,
-                "latency_ms": result.latency_ms,
-            })
-
-        return {"results": results, "count": len(results)}
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_batch_extract_action_items(params)
 
     def _handle_get_pending_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает все items у которых action_items=None (ещё не анализировались).
-
-        Параметр min_duration_sec: минимальная длительность для фильтрации (опционально).
-        """
-        min_duration = float(params.get("min_duration_sec", 0.0))
-
-        with self.store._lock():
-            items = self.store._load_active_items_unlocked()
-
-        pending = []
-        for item in items:
-            if item.action_items is not None:
-                continue
-            if min_duration > 0 and (item.audio_duration_sec or 0.0) < min_duration:
-                continue
-            pending.append({
-                "id": item.id,
-                "ts": item.ts,
-                "text_preview": (item.text or "")[:100],
-                "audio_duration_sec": item.audio_duration_sec,
-            })
-
-        return {"pending": pending, "count": len(pending)}
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_get_pending_action_items(params)
 
     def _handle_get_last_llm_diff(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает последний word-level diff от LLM rewriter'а."""
@@ -2519,15 +2390,12 @@ class BackendService:
         }
 
     def _handle_generate_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует полный Markdown-отчёт статистики использования за период."""
-        days = int(params.get("days", 30))
-        markdown = self._stats_report.generate_report(store=self.store, days=days)
-        return {"markdown": markdown, "days": days}
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_generate_stats_report(params)
 
     def _handle_generate_mini_stats_report(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует краткий 5-строчный Markdown-отчёт состояния."""
-        markdown = self._stats_report.generate_mini_report(store=self.store)
-        return {"markdown": markdown}
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_generate_mini_stats_report(params)
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to AnalyticsService (Wave 747 wiring)."""
@@ -2538,31 +2406,16 @@ class BackendService:
         return self._analytics_svc.handle_get_activity_calendar(params)
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Генерирует эвристические инсайты по записям за последние N дней."""
-        days = int(params.get("days", 7))
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-        insights = self._recording_insights.generate_insights(items, days=days)
-        return {
-            "insights": [i.to_dict() for i in insights],
-            "count": len(insights),
-            "days": days,
-        }
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_get_recording_insights(params)
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to AnalyticsService (Wave 747 wiring)."""
         return self._analytics_svc.handle_get_sentiment_trends(params)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает несколько записей side-by-side."""
-        item_ids = params.get("item_ids")
-        if not isinstance(item_ids, list) or not item_ids:
-            raise ValueError("Параметр item_ids обязателен (список строк)")
-        view = self._recording_comparison.compare(item_ids=item_ids, store=self.store)
-        return _comparison_view_to_dict(view)
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_compare_recordings(params)
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to HealthCheckService (Wave 751 wiring)."""
@@ -2680,39 +2533,8 @@ class BackendService:
         return self._analytics_svc.handle_get_analytics_dashboard(params)
 
     def _handle_get_topic_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: get_topic_timeline — таймлайн смен тем разговора из истории транскрибаций.
-
-        Параметры:
-            window_size (int): размер скользящего окна (по умолчанию 5).
-            limit       (int): максимальное количество последних записей
-                               для анализа (по умолчанию 100, 0 — все).
-
-        Возвращает:
-            segments     (list) — список сегментов с полями start_index,
-                                  end_index, topic_words, summary, items_count, is_shift.
-            total_shifts (int)  — количество смен темы.
-            current_topic (dict) — текущая тема (last_n=window_size).
-        """
-        window_size = max(1, int(params.get("window_size", 5) or 5))
-        limit = int(params.get("limit", 100) or 100)
-        try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
-        except Exception:
-            items = []
-
-        if limit > 0:
-            items = items[-limit:]
-
-        timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
-        current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
-        shifts = sum(1 for entry in timeline if entry.get("is_shift"))
-
-        return {
-            "segments": timeline,
-            "total_shifts": shifts,
-            "current_topic": current_topic,
-        }
+        """Delegated to SearchAndAnalysisService (Wave 757)."""
+        return self._search_analysis_svc.handle_get_topic_timeline(params)
 
     def _handle_estimate_recording_cost(self, params: dict) -> dict:
         """IPC: estimate_recording_cost — оценка вычислительной стоимости обработки записи.

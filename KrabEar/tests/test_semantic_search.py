@@ -277,6 +277,17 @@ class TestSemanticSearchIPC(unittest.TestCase):
                 enabled=False,
             )
             self.service._semantic_searcher = self.searcher
+            # Wave 757: inject SearchAndAnalysisService so delegation shims work
+            from backend.search_and_analysis_service import SearchAndAnalysisService
+            self.service._search_analysis_svc = SearchAndAnalysisService(
+                store=self.store,
+                semantic_searcher=self.searcher,
+                action_items_extractor=None,
+                topic_tracker=None,
+                recording_insights=None,
+                recording_comparison=None,
+                stats_report=None,
+            )
 
     def test_semantic_search_status_ipc(self):
         result = self.service._handle_semantic_search_status({})
