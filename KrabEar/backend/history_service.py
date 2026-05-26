@@ -264,7 +264,7 @@ class HistoryService:
             raise RuntimeError("path обязателен")
         resolved = Path(raw_path).expanduser().resolve()
         allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
-        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
             return {"error": {"message": f"Path outside allowed directories: {resolved}"}}
         _t0 = _time.monotonic()
         result = self.store.import_history_ndjson(resolved)
