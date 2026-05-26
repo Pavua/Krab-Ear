@@ -294,10 +294,13 @@ class BackendService:
         self._chains = RecordingChainManager(store=self.store)
         self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
+        # Инициализируем до HistoryService — нужен для каскадного удаления версий (F2)
+        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
+            transcript_versions=self._transcript_versioning,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -393,7 +396,6 @@ class BackendService:
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
-        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
