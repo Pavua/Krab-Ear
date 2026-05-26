@@ -458,6 +458,7 @@ class BackendService:
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
         # Auto-Glossary — автоматический глоссарий из истории транскрибаций
+        # settings_provider wired so privacy_mode_enabled guard is live (F4, W1288).
         self._auto_glossary = AutoGlossaryBuilder(
             store=self.store,
             data_dir=self.store.data_dir,
@@ -466,6 +467,7 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
+            settings_provider=self._cached_settings,
         )
         # Семантический поиск (opt-in, lazy model load)
         self._semantic_searcher = SemanticSearcher(
