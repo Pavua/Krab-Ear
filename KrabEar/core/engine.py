@@ -3063,7 +3063,7 @@ class AudioEngine:
                     headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=60,
+                    timeout=settings.STT_GATEWAY_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
                 data = resp.json()
