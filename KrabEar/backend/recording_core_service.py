@@ -189,6 +189,22 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
+
+        # W930 CRITICAL fix: wire SessionTracker start — skip in privacy mode
+        _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if not _privacy_mode:
+            try:
+                _audio_device = str(settings.get("audio_device", ""))
+                _quality_profile = str(settings.get("quality_profile", "balanced"))
+                _stt_model = str(settings.get("stt_model", ""))
+                self._session_tracker.start_session(
+                    audio_device=_audio_device,
+                    quality_preset=_quality_profile,
+                    stt_model=_stt_model,
+                )
+            except Exception:
+                logger.warning("SessionTracker.start_session завершился с ошибкой (не критично)", exc_info=True)
+
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1229,6 +1245,25 @@ class RecordingCoreService:
                         result_payload["action_items_count"] = len(ai_result.action_items)
                 except Exception:
                     logger.exception("Авто-извлечение action items провалилось для %s", item.id)
+
+        # W930 CRITICAL fix: wire SessionTracker end — skip in privacy mode
+        _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if not _privacy_mode:
+            try:
+                self._session_tracker.end_session({
+                    "duration_sec": duration_sec,
+                    "stt_latency_ms": int(tp.get("stt_latency_ms", 0) or 0),
+                    "confidence": float(tp.get("confidence", 0.0) or 0.0),
+                    "text": display_text,
+                    "had_diarization": bool(diarization_data and isinstance(diarization_data, dict) and diarization_data.get("enabled")),
+                    "had_llm_rewrite": bool(tp.get("llm_applied", False)),
+                    "translation_status": translation_status,
+                    "paste_status": "pending",
+                    "stt_model": str(tp.get("engine", "") or ""),
+                    "quality_preset": sr.get("quality_profile", "balanced"),
+                })
+            except Exception:
+                logger.warning("SessionTracker.end_session завершился с ошибкой (не критично)", exc_info=True)
 
         return result_payload
 
