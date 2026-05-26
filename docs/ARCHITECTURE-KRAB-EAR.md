@@ -199,7 +199,6 @@ Live count: `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py` → **3
 ## 7. Операционные скрипты
 
 - `scripts/run_release_checklist.command` — fail-fast релизный чеклист
-- `scripts/run_daily_driver_validation.command` — daily-driver валидация
 - `scripts/audit_orphan_imports.py` — CI guard: ловит потерянные import сервисов (W750)
 - `scripts/memory_baseline.py` — psutil RSS snapshot в CSV
 - `scripts/repair_permissions.command` — TCC reset + re-grant (PR #234)
