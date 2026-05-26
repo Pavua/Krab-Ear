@@ -111,6 +111,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # Added W905 F2 — startup.stt_model_cache_miss: STT model not yet in
             # HF cache at startup; pushed by startup diagnostics / engine init path.
             "startup.stt_model_cache_miss",
+            # Added W1231 F2 HIGH — two live callsites in llm_rewriter.py were
+            # pushing codes not present in the registry, degrading to empty
+            # metadata + stale user message.
+            "rewriter.mlx_token_bug",
+            "rewriter.gpu_stream_error",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -146,6 +151,28 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         self.assertEqual(entry["dedupe_seconds"], 3600)
         self.assertTrue(entry["user_msg_ru"])
 
+    def test_rewriter_mlx_token_bug_in_registry(self):
+        """W1231 F2: rewriter.mlx_token_bug must be registered with correct shape."""
+        code = "rewriter.mlx_token_bug"
+        self.assertIn(code, ERROR_REGISTRY, f"{code} missing from ERROR_REGISTRY")
+        entry = ERROR_REGISTRY[code]
+        self.assertEqual(entry["severity"], "warn")
+        self.assertFalse(entry["actionable"])
+        self.assertIsNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 600)
+        self.assertIn("MLX", entry["user_msg_ru"])
+
+    def test_rewriter_gpu_stream_error_in_registry(self):
+        """W1231 F2: rewriter.gpu_stream_error must be registered with correct shape."""
+        code = "rewriter.gpu_stream_error"
+        self.assertIn(code, ERROR_REGISTRY, f"{code} missing from ERROR_REGISTRY")
+        entry = ERROR_REGISTRY[code]
+        self.assertEqual(entry["severity"], "warn")
+        self.assertFalse(entry["actionable"])
+        self.assertIsNone(entry["action_id"])
+        self.assertEqual(entry["dedupe_seconds"], 600)
+        self.assertIn("GPU", entry["user_msg_ru"])
+
     def test_error_registry_count_matches_documentation(self):
         """Registry must contain exactly the documented number of codes.
 
@@ -153,8 +180,10 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         Wave 64 +5, Wave 77 +3, Wave 78 +5, Wave 306 +1 = 46,
         plus rewriter.channel_error / rewriter.fallback_used /
         rewriter.unauthorized / rewriter.warmup_failed / stt.mlx_timeout /
-        stt.padding_mismatch / diarization.vad_gated / agent.binary_drift = 54
-        Wave 82 (W1232) added 3 more; test_expected_codes_present guards the
-        exact set so this count test is a redundant but cheap invariant.
+        stt.padding_mismatch / diarization.vad_gated / agent.binary_drift = 54,
+        W1231 F2 (W1233) added rewriter.mlx_token_bug + rewriter.gpu_stream_error = 56,
+        W1231 F1 (W1232) system.proc_cmdline_permission was missing = 57 (prev PR
+        already had disk.critical + startup.stt_model_cache_miss); test_expected_codes_present
+        guards the exact set so this count test is a redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 54)
+        self.assertEqual(len(ERROR_REGISTRY), 56)
