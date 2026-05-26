@@ -179,6 +179,6 @@ if self._router is not None:
 ## Ссылки
 
 - Research backlog: см. memory `[Research backlog 2026-04]` в MEMORY.md
-- STT adapters (Phase 4): `docs/PHASE_4_ADAPTER_COMPARISON.md`
+- STT adapters (Phase 4): `docs/archive/2026-05-26-pre-marathon/PHASE_4_ADAPTER_COMPARISON.md` (archived; Phase 4 shipped)
 - IPC API Reference: `docs/IPC_API_REFERENCE.md`
 - Конфиг: `KrabEar/core/config.py` — секция `STT Language-Aware Router`

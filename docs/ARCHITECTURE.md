@@ -357,6 +357,6 @@ causes "backend недоступен" symptoms. Always sync both after rebuild (
 - Full IPC method catalogue: `docs/IPC_API_REFERENCE.md` (4341 lines, 241 handlers documented)
 - Operational procedures, TCC troubleshooting, sub-agent model routing: `CLAUDE.md`
 - User-facing guide: `docs/USER_MANUAL.md`
-- Sentry observability: `docs/RUNBOOK.md`
+- Sentry observability: see `docs/archive/2026-05-26-pre-marathon/RUNBOOK.md` (archived; current procedures in CLAUDE.md)
 - Distribution build: `docs/DISTRIBUTION.md`
 - Dev codesign identity: `docs/DEV_CODESIGN.md`

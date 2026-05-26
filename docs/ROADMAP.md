@@ -48,7 +48,7 @@
 34. S20 (частично): добавлены backup validation и restore preview скрипты.
 35. S42 (частично): update-channel `stable/beta` вынесен в settings/UI/update flow.
 36. S43 (частично): добавлен GitHub CI workflow (`.github/workflows/krabear-ci.yml`).
-37. S44 (частично): добавлены публичные документы `docs/API.md` и `docs/RUNBOOK.md`.
+37. S44 (частично): добавлены публичные документы `docs/API.md` и `docs/RUNBOOK.md` (оба архивированы в `docs/archive/2026-05-26-pre-marathon/`).
 38. S54 (частично): добавлен локальный UX telemetry report.
 39. S55 (частично): добавлена проверка performance budget по telemetry.
 40. S56 (частично): улучшены keyboard shortcuts для ключевых menu-действий.
@@ -807,7 +807,7 @@ Acceptance:
 - документация для других моделей и разработчиков.
 Deliverables:
 
-- `PRD`, `ARCHITECTURE`, `API`, `RUNBOOK`;
+- `PRD`, `ARCHITECTURE`, `API` (archived), `RUNBOOK` (archived);
 - единые термины и changelog.
 Acceptance:
 
