@@ -1,8 +1,13 @@
 """Персистентный LRU-кэш переводов для Krab Ear.
 
 Хранит результаты перевода на диске (translation_cache.json) и в памяти
-(OrderedDict, LRU-вытеснение). Ключ — хэш (text + source + target + engine).
+(OrderedDict, LRU-вытеснение). Ключ — хэш (text + source + target + engine +
+network_mode). network_mode включён в ключ чтобы предотвратить возврат
+online-результата для offline_strict-запроса (W1313 F1 HIGH — privacy bypass).
 Максимум 5000 записей; при превышении удаляются самые старые.
+
+Backward compat: старые ключи без network_mode имеют другой хэш → автоматически
+трактуются как cache miss (нет специальной обработки).
 """
 
 from __future__ import annotations
@@ -21,9 +26,15 @@ _MAX_ENTRIES = 5000
 _CACHE_FILENAME = "translation_cache.json"
 
 
-def _make_key(text: str, source: str, target: str, engine: str) -> str:
-    """Возвращает SHA-256 hex-хэш параметров перевода."""
-    raw = f"{text}\x00{source}\x00{target}\x00{engine}"
+def _make_key(text: str, source: str, target: str, engine: str, network_mode: str = "") -> str:
+    """Возвращает SHA-256 hex-хэш параметров перевода.
+
+    network_mode включён в ключ (W1313 F1 HIGH) чтобы предотвратить возврат
+    online-кэшированного результата для offline_strict-запроса.
+    Старые ключи без network_mode (пустая строка по умолчанию) имеют другой хэш
+    от ключей с явным network_mode → автоматически трактуются как cache miss.
+    """
+    raw = f"{text}\x00{source}\x00{target}\x00{engine}\x00{network_mode}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -45,9 +56,13 @@ class TranslationCache:
 
     # ── Public API ──────────────────────────────────────────────────────
 
-    def get(self, text: str, source: str, target: str, engine: str) -> Optional[str]:
-        """Возвращает кэшированный перевод или None."""
-        key = _make_key(text, source, target, engine)
+    def get(self, text: str, source: str, target: str, engine: str, network_mode: str = "") -> Optional[str]:
+        """Возвращает кэшированный перевод или None.
+
+        network_mode участвует в ключе: offline_strict-запрос не получит
+        online_opt_in-результат из кэша (W1313 F1 HIGH).
+        """
+        key = _make_key(text, source, target, engine, network_mode)
         with self._lock:
             value = self._cache.get(key)
             if value is None:
@@ -57,9 +72,13 @@ class TranslationCache:
             self._hits += 1
             return value
 
-    def put(self, text: str, source: str, target: str, engine: str, result: str) -> None:
-        """Сохраняет результат перевода в кэш и персистирует на диск."""
-        key = _make_key(text, source, target, engine)
+    def put(self, text: str, source: str, target: str, engine: str, result: str, network_mode: str = "") -> None:
+        """Сохраняет результат перевода в кэш и персистирует на диск.
+
+        network_mode участвует в ключе: разные сетевые режимы → разные записи
+        (W1313 F1 HIGH).
+        """
+        key = _make_key(text, source, target, engine, network_mode)
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)

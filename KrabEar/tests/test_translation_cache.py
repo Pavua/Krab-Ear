@@ -535,5 +535,96 @@ class TestTranslationCacheWave103(unittest.TestCase):
         self.assertEqual(errors, [], f"Thread errors: {errors}")
 
 
+class TestTranslationCacheNetworkModeKey(unittest.TestCase):
+    """W1318 — network_mode включён в ключ кэша (W1313 F1 HIGH — privacy bypass fix)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def test_cache_hit_only_when_network_mode_matches(self):
+        """put с network_mode='online_opt_in' → get с тем же режимом = hit."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put("hello", "en", "ru", "hf_marian", "привет", network_mode="online_opt_in")
+        result = cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in")
+        self.assertEqual(result, "привет")
+
+    def test_offline_strict_request_does_not_hit_online_cached(self):
+        """put online_opt_in → get offline_strict = miss (privacy guarantee)."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        # Кэшируем результат для online_opt_in запроса
+        cache.put("hello", "en", "ru", "hf_marian", "привет_online", network_mode="online_opt_in")
+        # offline_strict запрос ДОЛЖЕН получить miss — не online-результат
+        result = cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict")
+        self.assertIsNone(
+            result,
+            "offline_strict должен получить cache miss, а не online_opt_in результат",
+        )
+
+    def test_legacy_cache_keys_treated_as_miss(self):
+        """Старые ключи без network_mode (пустая строка) — miss для явных режимов.
+
+        Backward compat: ключ _make_key(..., "") != _make_key(..., "offline_strict").
+        Старые записи на диске не «просочатся» в новые режимные запросы.
+        """
+        cache = TranslationCache(data_dir=self._tmpdir)
+        # Записываем с пустым network_mode (имитация legacy put без параметра)
+        cache.put("hello", "en", "ru", "hf_marian", "legacy_value", network_mode="")
+        # Запрос с явным network_mode должен быть miss
+        result_offline = cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict")
+        result_online = cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in")
+        self.assertIsNone(result_offline, "offline_strict не должен найти legacy запись")
+        self.assertIsNone(result_online, "online_opt_in не должен найти legacy запись")
+        # Пустой режим сам себе hit
+        result_empty = cache.get("hello", "en", "ru", "hf_marian", network_mode="")
+        self.assertEqual(result_empty, "legacy_value")
+
+    def test_different_network_modes_stored_independently(self):
+        """offline_strict и online_opt_in → две независимые записи."""
+        cache = TranslationCache(data_dir=self._tmpdir)
+        cache.put("hello", "en", "ru", "hf_marian", "offline_result", network_mode="offline_strict")
+        cache.put("hello", "en", "ru", "hf_marian", "online_result", network_mode="online_opt_in")
+        self.assertEqual(
+            cache.get("hello", "en", "ru", "hf_marian", network_mode="offline_strict"),
+            "offline_result",
+        )
+        self.assertEqual(
+            cache.get("hello", "en", "ru", "hf_marian", network_mode="online_opt_in"),
+            "online_result",
+        )
+
+    def test_make_key_network_mode_changes_hash(self):
+        """_make_key с разными network_mode даёт разные SHA-256 хэши."""
+        from backend.translation_cache import _make_key
+        k_offline = _make_key("hello", "en", "ru", "hf_marian", "offline_strict")
+        k_online = _make_key("hello", "en", "ru", "hf_marian", "online_opt_in")
+        k_default = _make_key("hello", "en", "ru", "hf_marian", "offline_default")
+        k_legacy = _make_key("hello", "en", "ru", "hf_marian", "")
+        all_keys = [k_offline, k_online, k_default, k_legacy]
+        self.assertEqual(
+            len(set(all_keys)), 4,
+            "Все четыре network_mode варианта должны давать уникальные ключи",
+        )
+
+    def test_persist_and_reload_preserves_network_mode_isolation(self):
+        """После перезагрузки с диска network_mode изоляция сохраняется."""
+        cache1 = TranslationCache(data_dir=self._tmpdir)
+        cache1.put("text", "en", "ru", "hf_marian", "offline_cached", network_mode="offline_strict")
+        cache1.put("text", "en", "ru", "hf_marian", "online_cached", network_mode="online_opt_in")
+
+        cache2 = TranslationCache(data_dir=self._tmpdir)
+        self.assertEqual(
+            cache2.get("text", "en", "ru", "hf_marian", network_mode="offline_strict"),
+            "offline_cached",
+        )
+        self.assertEqual(
+            cache2.get("text", "en", "ru", "hf_marian", network_mode="online_opt_in"),
+            "online_cached",
+        )
+        # Пустой режим — miss (не смешивается с именованными режимами)
+        self.assertIsNone(
+            cache2.get("text", "en", "ru", "hf_marian", network_mode=""),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
