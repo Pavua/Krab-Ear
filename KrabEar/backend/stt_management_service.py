@@ -221,9 +221,12 @@ class STTManagementService:
         parakeet_enabled = getattr(settings, "PARAKEET_ENABLED", False)
         adapters.append(_make("parakeet", {"en"}, bool(parakeet_enabled)))
 
-        # SenseVoice — ZH/JA/KO/YUE specialist + decent EN/RU
+        # SenseVoice — ZH/JA/KO/YUE specialist + EN. RU is NOT supported by the
+        # SenseVoiceSmall model; passing language="ru" silently falls back to
+        # language="auto" inside funasr. Advertising RU here misleads the STT
+        # router into selecting SenseVoice for Russian audio (W1218 F1 fix).
         sensevoice_enabled = getattr(settings, "SENSEVOICE_ENABLED", False)
-        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en", "ru"}, bool(sensevoice_enabled)))
+        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en"}, bool(sensevoice_enabled)))
 
         # Whisper-MLX — multilingual generalist (empty set = multilingual)
         adapters.append(_make("whisper-mlx", set(), True))

@@ -289,5 +289,134 @@ class TestStripEmotionTags(unittest.TestCase):
         self.assertEqual(_strip_emotion_tags("<|zh|><|HAPPY|>"), "")
 
 
+# ---------------------------------------------------------------------------
+# W1218 F1 — SenseVoice must NOT advertise RU support in virtual adapter list
+# ---------------------------------------------------------------------------
+
+class TestSenseVoiceDoesNotAdvertiseRuSupport(unittest.TestCase):
+    """W1218 F1 MED: stt_management_service virtual adapter must not include 'ru'.
+
+    When the IPC route_stt_adapter / debug_stt_routing is called, the service
+    builds a list of virtual adapters describing each engine's capabilities.
+    Before this fix, SenseVoice was listed with {"zh", "ja", "ko", "yue", "en", "ru"},
+    causing the scored router to pick SenseVoice for Russian audio. In reality
+    funasr silently falls back to language="auto" when given language="ru".
+    """
+
+    def test_sensevoice_does_not_advertise_ru_support(self) -> None:
+        """_build_virtual_adapters_for_routing() must not include 'ru' for SenseVoice."""
+        from unittest.mock import MagicMock, patch
+        from types import SimpleNamespace
+
+        # Import the service module directly
+        from backend.stt_management_service import STTManagementService
+
+        # Build a minimal fake settings_svc (constructor requires it)
+        fake_settings_svc = MagicMock()
+        fake_settings_svc.cached_settings.return_value = {}
+
+        # Fake core.config.settings for the duration of the call
+        fake_config_settings = SimpleNamespace(
+            SENSEVOICE_ENABLED=True,
+            STT_GIGAAM_ENABLED=False,
+            PARAKEET_ENABLED=False,
+        )
+
+        service = STTManagementService(settings_svc=fake_settings_svc)
+
+        # Patch core.config.settings so _build_virtual_adapters_for_routing uses our stub
+        import core.config
+        original_settings = core.config.settings
+        try:
+            core.config.settings = fake_config_settings  # type: ignore[assignment]
+            adapters = service._build_virtual_adapters_for_routing()
+        finally:
+            core.config.settings = original_settings
+
+        # Find the SenseVoice entry
+        sv_adapters = [a for a in adapters if "sensevoice" in a.name.lower()]
+        self.assertEqual(len(sv_adapters), 1, "Expected exactly one SenseVoice virtual adapter")
+        sv = sv_adapters[0]
+
+        self.assertNotIn(
+            "ru",
+            sv.supported_languages,
+            "SenseVoice virtual adapter must NOT include 'ru' in supported_languages "
+            "(funasr silently ignores language='ru' and falls back to 'auto' — W1218 F1)",
+        )
+        # Confirm the East-Asian + EN set is still present
+        for lang in ("zh", "ja", "ko", "yue", "en"):
+            self.assertIn(lang, sv.supported_languages, f"Missing expected language: {lang}")
+
+
+# ---------------------------------------------------------------------------
+# W1218 F2 — SenseVoice _load_model() must be thread-safe (double-checked lock)
+# ---------------------------------------------------------------------------
+
+class TestSenseVoiceLoadModelThreadSafe(unittest.TestCase):
+    """W1218 F2 MED: concurrent transcribe() calls must not double-load the model.
+
+    Before the fix, two threads could both pass the `if self._model is None`
+    check simultaneously and call _load_model() twice. We verify the lock
+    prevents this by intercepting _load_model and counting actual calls.
+    """
+
+    def test_sensevoice_load_model_thread_safe(self) -> None:
+        """Concurrent transcribe() calls result in exactly one _load_model() call."""
+        import threading
+        import numpy as np
+        from unittest.mock import MagicMock, patch
+
+        call_count = {"n": 0}
+        load_event = threading.Event()   # lets threads pile up before model appears
+        finish_event = threading.Event()  # signals threads to proceed
+
+        mock_auto_model_cls = MagicMock()
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate.return_value = [{"text": "hello", "key": "0"}]
+
+        original_load = SenseVoiceSTTAdapter._load_model
+
+        def slow_load(self_adapter: Any, AutoModel: Any) -> None:
+            call_count["n"] += 1
+            # Simulate slow model load so both threads can race
+            load_event.wait(timeout=2.0)
+            original_load(self_adapter, AutoModel)
+
+        adapter = SenseVoiceSTTAdapter()
+        mock_auto_model_cls.return_value = mock_model_instance
+
+        errors: list = []
+
+        def worker() -> None:
+            try:
+                audio = np.zeros(1600, dtype=np.float32)
+                with patch("core.pipeline.stt_sensevoice._try_import_funasr",
+                           return_value=mock_auto_model_cls):
+                    with patch.object(SenseVoiceSTTAdapter, "_load_model", slow_load):
+                        adapter.transcribe(audio)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        # Let all threads enter transcribe() before the model finishes loading
+        import time
+        time.sleep(0.05)
+        load_event.set()   # unblock the slow load
+        for t in threads:
+            t.join(timeout=5.0)
+
+        # No exceptions
+        self.assertEqual(errors, [], f"Threads raised: {errors}")
+        # The model must have been loaded exactly once
+        self.assertEqual(
+            call_count["n"],
+            1,
+            f"_load_model was called {call_count['n']} times; expected 1 (thread-safety failure)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

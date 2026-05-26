@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any, Optional
 
 from .stt_adapter import STTAdapterBase, STTResult
@@ -92,6 +93,9 @@ class SenseVoiceSTTAdapter(STTAdapterBase):
         self._device_setting = device
         self._model: Any = None   # lazy-loaded on first transcribe()
         self._load_failed: bool = False
+        # Protects check-then-load in _load_model() against concurrent calls
+        # from multiple threads (e.g. parallel warmup + first transcribe()).
+        self._load_lock: threading.Lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # STTAdapterBase contract
@@ -151,8 +155,13 @@ class SenseVoiceSTTAdapter(STTAdapterBase):
             )
 
         # Lazy model load — cache as instance attribute.
+        # Double-checked locking: first check is unsynchronized for speed;
+        # if we need to load, acquire the lock and re-check to prevent a
+        # second thread from loading the model concurrently (W1218 F2 fix).
         if self._model is None and not self._load_failed:
-            self._load_model(AutoModel)
+            with self._load_lock:
+                if self._model is None and not self._load_failed:
+                    self._load_model(AutoModel)
 
         if self._load_failed or self._model is None:
             raise RuntimeError(
@@ -293,10 +302,12 @@ class SenseVoiceSTTAdapter(STTAdapterBase):
         if AutoModel is None:
             return False
         if self._model is None and not self._load_failed:
-            try:
-                self._load_model(AutoModel)
-            except Exception:
-                return False
+            with self._load_lock:
+                if self._model is None and not self._load_failed:
+                    try:
+                        self._load_model(AutoModel)
+                    except Exception:
+                        return False
         return self._model is not None
 
     def unload(self) -> None:
