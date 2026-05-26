@@ -7,6 +7,11 @@
   - "merged"  — запись достаточно похожа, чтобы быть объединённой (reserved)
 
 Настройка AUTO_DEDUP_ENABLED (в DEFAULT_SETTINGS) управляет режимом по умолчанию.
+
+Privacy gate (W1243 F4 MED):
+  Когда privacy_mode_enabled=True все методы обнаружения дубликатов возвращают
+  «не дубликат» без загрузки транскрипций из store в память. Это исключает хранение
+  пользовательских текстов в оперативной памяти при работе в режиме приватности.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 from core.duplicate_detector import DuplicateDetector
 
@@ -35,24 +40,55 @@ class DedupResult:
     is_duplicate: bool
     duplicate_of: str | None  # ID оригинальной записи (или None)
     similarity: float         # коэффициент сходства [0.0, 1.0]
-    action_taken: str         # "kept" | "skipped" | "merged"
+    action_taken: str         # "kept" | "skipped" | "merged" | "privacy_skipped"
+
+
+# Sentinel возвращаемый при включённом privacy_mode — no-op, ничего не загружает.
+_PRIVACY_SKIPPED = DedupResult(
+    is_duplicate=False,
+    duplicate_of=None,
+    similarity=0.0,
+    action_taken="privacy_skipped",
+)
 
 
 class AutoDeduplicator:
     """Автоматическое обнаружение и обработка дубликатов транскрипций.
 
     Потокобезопасен: все счётчики защищены RLock.
+
+    Args:
+        settings_provider: необязательный callable(key, default) → Any для чтения
+            runtime-настроек (передаётся как BackendService._get_runtime_setting).
+            Если не передан, privacy gate отключён (обратная совместимость).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings_provider: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
         self._detector = DuplicateDetector()
         self._lock = threading.RLock()
+        self._settings_provider = settings_provider
 
         # Статистика работы дедупликатора
         self._total_checked: int = 0
         self._duplicates_found: int = 0
         # Суммарная длина (chars) отклонённых дубликатов — для оценки сэкономленного места
         self._chars_saved: int = 0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _privacy_mode_enabled(self) -> bool:
+        """Возвращает True если privacy_mode_enabled включён в runtime settings."""
+        if self._settings_provider is None:
+            return False
+        try:
+            return bool(self._settings_provider("privacy_mode_enabled", False))
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -70,6 +106,9 @@ class AutoDeduplicator:
         Сравнивает text с последними активными записями истории в 60-секундном окне.
         При threshold >= MERGE_THRESHOLD действие помечается как "merged" (не "skipped").
 
+        Privacy gate: если privacy_mode_enabled=True возвращает «не дубликат» без
+        загрузки транскрипций из store (W1243 F4 MED fix).
+
         Args:
             text: текст проверяемой транскрипции.
             timestamp: ISO-8601 строка временной метки новой записи.
@@ -79,6 +118,11 @@ class AutoDeduplicator:
         Returns:
             DedupResult с полями is_duplicate, duplicate_of, similarity, action_taken.
         """
+        # Privacy gate — не загружаем тексты из store в режиме приватности
+        if self._privacy_mode_enabled():
+            logger.debug("check_duplicate: пропуск — privacy_mode включён")
+            return _PRIVACY_SKIPPED
+
         text = (text or "").strip()
         if not text:
             return DedupResult(
@@ -171,6 +215,9 @@ class AutoDeduplicator:
         Не удаляет записи автоматически — только возвращает список групп
         дубликатов для принятия решения пользователем/системой.
 
+        Privacy gate: если privacy_mode_enabled=True возвращает пустой отчёт без
+        загрузки транскрипций из store (W1243 F4 MED fix).
+
         Args:
             store: StateStore-совместимый объект с методом get_history_page().
             threshold: порог текстового сходства [0..1].
@@ -180,7 +227,18 @@ class AutoDeduplicator:
               - total_scanned: int
               - duplicate_groups: int
               - duplicates: list[dict]  — каждый элемент: {original_id, duplicate_ids, similarity}
+              - skipped_reason: str (только если пропущено из-за privacy_mode)
         """
+        # Privacy gate — не загружаем тексты из store в режиме приватности
+        if self._privacy_mode_enabled():
+            logger.debug("run_deduplication: пропуск — privacy_mode включён")
+            return {
+                "total_scanned": 0,
+                "duplicate_groups": 0,
+                "duplicates": [],
+                "skipped_reason": "privacy_mode",
+            }
+
         all_items: list[dict] = []
         cursor: str | None = None
 
@@ -296,13 +354,32 @@ class AutoDeduplicator:
         Params:
             threshold (float, optional): порог сходства, по умолчанию 0.9.
             store: передаётся из BackendService.
+            _semantic_searcher (optional): SemanticSearcher-совместимый объект с методом
+                remove_item(item_id). Если передан, дублирующиеся записи удаляются из
+                семантического индекса (W1247 — предотвращение stale embeddings).
         """
         threshold = float(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
 
-        return self.run_deduplication(store=store, threshold=threshold)
+        semantic_searcher = params.get("_semantic_searcher")
+        result = self.run_deduplication(store=store, threshold=threshold)
+
+        # W1247 semantic search stale embeddings fix:
+        # Удаляем дублирующиеся записи из семантического индекса после дедупликации.
+        if semantic_searcher is not None and result.get("duplicate_groups", 0) > 0:
+            for entry in result.get("duplicates", []):
+                for dup_id in entry.get("duplicate_ids", []):
+                    try:
+                        semantic_searcher.remove_item(dup_id)
+                    except Exception:
+                        logger.debug(
+                            "handle_run_deduplication: не удалось удалить %s из семантического индекса",
+                            dup_id,
+                        )
+
+        return result
 
     def handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода get_dedup_stats."""
