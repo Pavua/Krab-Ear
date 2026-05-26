@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("KrabEar.Backend.RecapScheduler")
 
@@ -165,11 +165,15 @@ class RecapScheduler:
         digest_generator: Экземпляр DailyDigestGenerator.
         store: Экземпляр StateStore (источник истории для дайджеста).
         data_dir: Директория для хранения recap_state.json.
-        recap_email_to: Email получателя.
-        recap_time_hour: Час отправки (0–23, UTC local time).
-        enabled: Если False — ничего не делает (opt-in).
+        recap_email_to: Email получателя (default, переопределяется settings_provider).
+        recap_time_hour: Час отправки (0–23) (default, переопределяется settings_provider).
+        enabled: Включить/выключить (default, переопределяется settings_provider).
         check_interval_sec: Переопределяет интервал проверки (для тестов).
         clock_fn: Переопределяет datetime.now() (для тестов).
+        settings_provider: Опциональный callable () -> Dict, вызывается каждый тик
+            планировщика для чтения актуальных значений recap_enabled,
+            recap_time_hour и recap_email_to.  Если None — используются
+            значения, переданные в конструктор (обратная совместимость).
     """
 
     def __init__(
@@ -183,20 +187,63 @@ class RecapScheduler:
         enabled: bool = False,
         check_interval_sec: int = _CHECK_INTERVAL_SEC,
         clock_fn: Any = None,
+        settings_provider: Optional[Callable[[], Dict]] = None,
     ) -> None:
         self.email_sender = email_sender
         self.digest_generator = digest_generator
         self.store = store
         self.data_dir = Path(data_dir)
+        # Constructor defaults — used as fallback when settings_provider is absent
+        # or raises an exception.
+        self._default_recap_email_to = recap_email_to
+        self._default_recap_time_hour = recap_time_hour
+        self._default_enabled = enabled
+        # Live values (overwritten each tick when settings_provider is wired)
         self.recap_email_to = recap_email_to
         self.recap_time_hour = recap_time_hour
         self.enabled = enabled
+        self._settings_provider = settings_provider
         self._check_interval_sec = check_interval_sec
         self._clock_fn = clock_fn or datetime.now
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+    # ------------------------------------------------------------------
+    # Runtime settings refresh
+    # ------------------------------------------------------------------
+
+    def _current_settings(self) -> Dict:
+        """Возвращает актуальные настройки из settings_provider (с fallback).
+
+        Никогда не бросает исключение — при ошибке возвращает пустой dict,
+        и _refresh_settings() упадёт на default-значения конструктора.
+        """
+        if self._settings_provider is None:
+            return {}
+        try:
+            return self._settings_provider() or {}
+        except Exception:
+            logger.exception("RecapScheduler: не удалось получить настройки, используются defaults")
+            return {}
+
+    def _refresh_settings(self) -> None:
+        """Перечитывает recap_enabled / recap_time_hour / recap_email_to из runtime настроек.
+
+        Вызывается в начале каждого тика _run() вне recap_lock,
+        что соответствует рекомендации W922: re-read происходит до
+        проверки _should_send().
+        """
+        s = self._current_settings()
+        self.enabled = bool(s.get("recap_enabled", self._default_enabled))
+        hour_raw = s.get("recap_time_hour", self._default_recap_time_hour)
+        try:
+            self.recap_time_hour = int(hour_raw)
+        except (TypeError, ValueError):
+            self.recap_time_hour = self._default_recap_time_hour
+        email_raw = s.get("recap_email_to", self._default_recap_email_to)
+        self.recap_email_to = str(email_raw or "")
 
     # ------------------------------------------------------------------
     # State persistence
@@ -301,6 +348,9 @@ class RecapScheduler:
             self.recap_time_hour,
         )
         while not self._stop_event.is_set():
+            # Re-read settings each tick so IPC set_settings() takes effect
+            # without a backend restart.  Happens OUTSIDE _lock (pure dict read).
+            self._refresh_settings()
             try:
                 now = self._clock_fn()
                 if self._should_send(now):
