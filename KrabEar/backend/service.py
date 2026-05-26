@@ -215,6 +215,28 @@ class BackendService:
                     _rewriter_ref.set_api_key(new_key)
             self._settings_svc.register_after_save_hook(_on_settings_saved)
 
+        # W1265 F1 MED: Evict AudioLanguageID._model_cache when MODEL_BALANCED changes.
+        # Without this, the LID model loaded under the old path stays in cache and the
+        # first recording after a profile switch triggers a cold-load stall inside
+        # mlx_lock() (typically 1–3 s blocking the STT pipeline thread).
+        def _on_settings_saved_lang_id(old: dict, new: dict) -> None:
+            old_model = str(old.get("model_balanced", ""))
+            new_model = str(new.get("model_balanced", ""))
+            if new_model != old_model:
+                try:
+                    from core.audio_lang_id import AudioLanguageID
+                    AudioLanguageID.clear_model_cache()
+                    logger.info(
+                        "AudioLanguageID cache evicted: model_balanced changed %s → %s",
+                        old_model,
+                        new_model,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "AudioLanguageID cache evict failed: %s", exc
+                    )
+        self._settings_svc.register_after_save_hook(_on_settings_saved_lang_id)
+
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
