@@ -50,8 +50,14 @@ EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
         "handle_delete_speaker_fingerprint",
         "handle_list_speaker_fingerprints",
     }),
-    # TranscriptionQueue has handle_peek which is internal
+    # W924/W949: TranscriptionQueue is DEAD CODE as of v2.0.5 — process_next() was never
+    # called in production; all 4 IPC handlers removed from dispatch. The class itself
+    # remains for future resurrection. All handle_* methods are now non-dispatch orphans.
     "TranscriptionQueue": frozenset({
+        "handle_enqueue",
+        "handle_cancel",
+        "handle_get_status",
+        "handle_list_queue",
         "handle_peek",
     }),
     # IntegrityChecker exposes handle_check_integrity and handle_repair_data
@@ -180,7 +186,7 @@ def _make_minimal_service():
                         "_call_assist", "_history", "_translation", "_settings_svc",
                         "_glossary_auto_learn", "_paste_app_memory", "_collections",
                         "_chains", "_recording_scheduler", "_error_reporter",
-                        "_event_replay", "_config_presets", "_transcription_queue",
+                        "_event_replay", "_config_presets",
                         "_data_migrator", "_collections", "_sharing",
                         "_transcript_versioning", "_paste_formatter",
                         "_merger", "_obsidian_sync", "_playback_tracker",
