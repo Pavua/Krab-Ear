@@ -18,6 +18,10 @@ logger = logging.getLogger("KrabEar.SilenceDetector")
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
+# Единый порог тишины: -40 дБ в амплитуде.
+# Используется как SSOT для всех модулей (SilenceDetector, NoiseProfiler и др.).
+SILENCE_THRESHOLD_AMP: float = 0.01  # 10 ** (-40 / 20)
+
 
 def _db_to_amplitude(db: float) -> float:
     """Конвертирует порог в дБ в амплитуду (RMS)."""
