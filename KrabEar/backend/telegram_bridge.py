@@ -104,6 +104,14 @@ class TelegramBridge:
         if not text or not text.strip():
             raise ValueError("text не может быть пустым")
 
+        _TELEGRAM_MAX_CHARS = 4096
+        if len(text) > _TELEGRAM_MAX_CHARS:
+            text = text[: _TELEGRAM_MAX_CHARS - 3] + "..."
+            logger.warning(
+                "TelegramBridge.send_message: текст обрезан до %d символов",
+                _TELEGRAM_MAX_CHARS,
+            )
+
         self._check_circuit()
 
         payload = self._build_payload(text=text, chat_id=chat_id, reply_to=reply_to)

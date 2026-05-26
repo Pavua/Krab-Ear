@@ -3260,6 +3260,9 @@ end tell'''
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "chats": [], "skipped": "privacy_mode"}
+
         try:
             chats = self._telegram_bridge.get_chats()
         except CircuitBreakerOpen as exc:
