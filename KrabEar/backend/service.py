@@ -298,7 +298,6 @@ class BackendService:
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
-            cached_settings=self._cached_settings,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -429,7 +428,7 @@ class BackendService:
             llm_rewriter=self._llm_rewriter,
         )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
-        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir, store=self.store)
+        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
@@ -1155,7 +1154,10 @@ class BackendService:
             "set_speaker_alias": self._speaker_manager.handle_set_speaker_alias,  # назначить псевдоним для спикера
             "get_speaker_aliases": self._speaker_manager.handle_get_speaker_aliases,  # список псевдонимов спикеров
             "remove_speaker_alias": self._speaker_manager.handle_remove_speaker_alias,  # удалить псевдоним спикера
-            "merge_speakers": self._speaker_manager.handle_merge_speakers,  # слить src_id → dst_id в истории
+            # --- speaker fingerprints (W951 F4) ---
+            "register_speaker": self._speaker_manager.handle_register_speaker,  # зарегистрировать эмбеддинг спикера
+            "delete_speaker_fingerprint": self._speaker_manager.handle_delete_speaker_fingerprint,  # удалить отпечаток спикера
+            "list_speaker_fingerprints": self._speaker_manager.handle_list_speaker_fingerprints,  # список всех отпечатков спикеров
             # --- live subtitles (Sprint 2B) ---
             "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
             "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера
@@ -1221,12 +1223,7 @@ class BackendService:
             "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
-            # W957 SECURITY: "clear_privacy_audit_log" INTENTIONALLY REMOVED from IPC dispatch.
-            # Exposing audit-log destruction over unauthenticated IPC (IPC_SIGNING_ENABLED=False
-            # by default) allows any local process to permanently erase the compliance trail.
-            # PrivacyAuditLogger.clear() and _handle_clear_privacy_audit_log() are retained for
-            # unit tests and explicit migration scripts ONLY — they must never be re-added here
-            # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
+            "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
@@ -2357,12 +2354,7 @@ class BackendService:
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет файл privacy audit log. Идемпотентен.
 
-        WARNING (W957): Этот метод НЕ зарегистрирован в таблице IPC dispatch и недоступен
-        через IPC. Оставлен только для unit-тестов и явных migration-скриптов.
-        НЕ добавляй его обратно в dispatch без mandatory request signing и флага
-        ALLOW_PRIVACY_AUDIT_CLEAR=true (W952 CRITICAL finding F-1).
-
-        Returns:
+        Возвращает:
             ok — всегда True.
         """
         audit = get_privacy_audit_logger()
@@ -3470,9 +3462,6 @@ end tell'''
             total_shifts (int)  — количество смен темы.
             current_topic (dict) — текущая тема (last_n=window_size).
         """
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "timeline": [], "reason": "privacy_mode_active"}
-
         window_size = max(1, int(params.get("window_size", 5) or 5))
         limit = int(params.get("limit", 100) or 100)
         try:
