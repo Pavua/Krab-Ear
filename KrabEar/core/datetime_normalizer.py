@@ -1,23 +1,46 @@
 """Нормализация дат и времени в транскрибированном тексте.
 
 DateTimeNormalizer конвертирует словесные даты и время в цифровую форму:
-    «третье ноября» → «03.11»
+    «третье ноября» → «2026-11-03» (ISO-8601, default) или «03.11» (european)
     «девять часов утра» → «09:00»
-    «пятнадцатого января две тысячи двадцать шестого года» → «15.01.2026»
+    «пятнадцатого января две тысячи двадцать шестого года» → «2026-01-15»
 
 Поддерживаемые языки: ru, es, en.
 Принцип: эвристический lookup-table + regex без тяжёлых NLP библиотек.
-Идемпотентность: уже нормализованные строки «03.11», «09:00» не трогаются.
+Идемпотентность: уже нормализованные строки «2026-01-15», «09:00» не трогаются.
+
+Формат вывода дат управляется модульной константой ``DATETIME_OUTPUT_FORMAT``:
+
+    * ``"iso8601"`` (default) — ``YYYY-MM-DD`` для полных дат, ``MM-DD`` для
+      дат без года. Подходит для лексикографической сортировки и RFC-3339
+      парсинга.
+    * ``"european"`` — ``DD.MM.YYYY`` / ``DD.MM`` — легаси формат для обратной
+      совместимости с ранними версиями.
+
+Переопределить глобально::
+
+    import core.datetime_normalizer as dn
+    dn.DATETIME_OUTPUT_FORMAT = "european"
+
+Переопределить на уровне экземпляра::
+
+    normalizer = DateTimeNormalizer(output_format="european")
 
 Запуск тестов:
-    PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_normalizers.py -v
+    PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_datetime_iso_W1094.py -v
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
+
+# ---------------------------------------------------------------------------
+# Формат вывода дат.  Значение по умолчанию — ISO-8601 (YYYY-MM-DD).
+# Установите "european" для легаси DD.MM.YYYY поведения.
+# ---------------------------------------------------------------------------
+DATETIME_OUTPUT_FORMAT: Literal["iso8601", "european"] = "iso8601"
 
 logger = logging.getLogger("KrabEar.DateTimeNormalizer")
 
@@ -249,14 +272,58 @@ class DateTimeNormalizer:
 
     Поддерживаемые языки: ``ru``, ``es``, ``en``.
 
+    По умолчанию использует ISO-8601 (``YYYY-MM-DD``) для вывода дат.
+    Для обратной совместимости передайте ``output_format="european"``.
+
     Примеры::
 
         d = DateTimeNormalizer()
-        d.normalize("третье ноября", "ru")                             # → "03.11"
-        d.normalize("девять часов утра", "ru")                         # → "09:00"
+        d.normalize("третье ноября", "ru")                              # → "11-03"
+        d.normalize("девять часов утра", "ru")                          # → "09:00"
         d.normalize("пятнадцатого января две тысячи двадцать шестого", "ru")
-        # → "15.01.2026"
+        # → "2026-01-15"
+
+        d_legacy = DateTimeNormalizer(output_format="european")
+        d_legacy.normalize("третье ноября", "ru")                       # → "03.11"
     """
+
+    def __init__(
+        self,
+        output_format: Optional[Literal["iso8601", "european"]] = None,
+    ) -> None:
+        """Инициализирует нормализатор.
+
+        Args:
+            output_format: ``"iso8601"`` (default) или ``"european"``.
+                           Если ``None`` — берётся из модульной константы
+                           :data:`DATETIME_OUTPUT_FORMAT`.
+        """
+        self._output_format: str = output_format or DATETIME_OUTPUT_FORMAT
+
+    # ------------------------------------------------------------------
+    # Вспомогательный метод форматирования даты
+    # ------------------------------------------------------------------
+
+    def _fmt_date(self, day: int, month: int, year: Optional[int] = None) -> str:
+        """Форматирует дату в соответствии с ``_output_format``.
+
+        Args:
+            day: День (1–31).
+            month: Месяц (1–12).
+            year: Год (4 цифры) или ``None`` для дат без года.
+
+        Returns:
+            Строка даты: ``YYYY-MM-DD`` / ``MM-DD`` (iso8601) или
+            ``DD.MM.YYYY`` / ``DD.MM`` (european).
+        """
+        if self._output_format == "european":
+            if year is not None:
+                return f"{day:02d}.{month:02d}.{year}"
+            return f"{day:02d}.{month:02d}"
+        # iso8601
+        if year is not None:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+        return f"{month:02d}-{day:02d}"
 
     def normalize(self, text: str, language: str = "ru") -> str:
         """Нормализует даты и время в ``text`` для заданного языка."""
@@ -381,8 +448,8 @@ class DateTimeNormalizer:
 
             year = self._parse_year_ru(year_part)
             if year:
-                return f"{day:02d}.{month:02d}.{year}"
-            return f"{day:02d}.{month:02d}"
+                return self._fmt_date(day, month, year)
+            return self._fmt_date(day, month)
 
         text = re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
 
@@ -403,8 +470,8 @@ class DateTimeNormalizer:
             if month is None:
                 return m.group(0)
             if year_str:
-                return f"{day:02d}.{month:02d}.{year_str}"
-            return f"{day:02d}.{month:02d}"
+                return self._fmt_date(day, month, int(year_str))
+            return self._fmt_date(day, month)
 
         text = re.sub(digit_day_pat, _repl_digit_date, text, flags=re.IGNORECASE)
         return text
@@ -563,8 +630,8 @@ class DateTimeNormalizer:
                 return m.group(0)
 
             if year_str:
-                return f"{day:02d}.{month:02d}.{year_str}"
-            return f"{day:02d}.{month:02d}"
+                return self._fmt_date(day, month, int(year_str))
+            return self._fmt_date(day, month)
 
         return re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
 
@@ -659,8 +726,8 @@ class DateTimeNormalizer:
             if month is None:
                 return m.group(0)
             if year_str:
-                return f"{day:02d}.{month:02d}.{year_str}"
-            return f"{day:02d}.{month:02d}"
+                return self._fmt_date(day, month, int(year_str))
+            return self._fmt_date(day, month)
 
         text = re.sub(full_pat_1, _repl_date1, text, flags=re.IGNORECASE)
 
@@ -681,8 +748,8 @@ class DateTimeNormalizer:
             if month is None:
                 return m.group(0)
             if year_str:
-                return f"{day:02d}.{month:02d}.{year_str}"
-            return f"{day:02d}.{month:02d}"
+                return self._fmt_date(day, month, int(year_str))
+            return self._fmt_date(day, month)
 
         text = re.sub(full_pat_2, _repl_date2, text, flags=re.IGNORECASE)
         return text
