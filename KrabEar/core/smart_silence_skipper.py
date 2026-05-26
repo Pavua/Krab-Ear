@@ -15,8 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from core.silence_constants import SILENCE_THRESHOLD_DB
-from core.silence_detector import SilenceDetector
+from core.silence_detector import SilenceDetector, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 
 logger = logging.getLogger("KrabEar.SmartSilenceSkipper")
 
@@ -24,7 +23,9 @@ logger = logging.getLogger("KrabEar.SmartSilenceSkipper")
 _MIN_INTERNAL_SILENCE_SEC: float = 1.0   # минимальная длительность тишины для удаления
 _EDGE_KEEP_SEC: float = 0.30             # сохраняем N секунд в начале и конце
 _SPEECH_PAD_SEC: float = 0.10            # отступ вокруг каждого речевого сегмента
-_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB  # порог тишины в дБ (-40 dBFS)
+# Используем порог для сохранения шёпота: STT должен получить шёпотные
+# фрагменты (-45…-55 дБ), а не терять их как «тишину».
+_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 
 
 @dataclass
