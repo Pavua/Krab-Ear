@@ -206,13 +206,20 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
-        # Hot-propagate api_key changes to the running LLMRewriter without restart.
+        # Hot-propagate LLMRewriter settings changes without restart.
+        # Covers: lm_studio_api_key, llm_model, llm_base_url.
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:
             def _on_settings_saved(old: dict, new: dict) -> None:
                 new_key = str(new.get("lm_studio_api_key", ""))
                 if new_key != str(old.get("lm_studio_api_key", "")):
                     _rewriter_ref.set_api_key(new_key)
+                new_model = str(new.get("llm_model", ""))
+                if new_model and new_model != str(old.get("llm_model", "")):
+                    _rewriter_ref.set_model(new_model)
+                new_url = str(new.get("llm_base_url", ""))
+                if new_url and new_url != str(old.get("llm_base_url", "")):
+                    _rewriter_ref.set_base_url(new_url)
             self._settings_svc.register_after_save_hook(_on_settings_saved)
 
         # Best-effort STT warmup — pre-loads Whisper model in background before
