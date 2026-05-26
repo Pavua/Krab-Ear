@@ -29,6 +29,7 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
+from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -97,6 +98,10 @@ class RecordingCoreService:
         # Realtime partial transcriber state
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
+
+        # Realtime silence filter state (W1325 F1 HIGH wiring)
+        self._rsf: RealtimeSilenceFilter | None = None
+        self._last_silence_ranges: list[tuple[float, float]] = []
 
         # Async transcription jobs
         self._job_tracker = JobTracker()
@@ -189,6 +194,19 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
+        # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF via realtime_silence_filter_enabled)
+        self._rsf = None
+        if bool(settings.get("realtime_silence_filter_enabled", False)):
+            try:
+                self._rsf = RealtimeSilenceFilter(
+                    recorder=self.recorder,
+                    settings=settings,
+                    event_bus_emit=event_bus.emit,
+                )
+                self._rsf.start()
+            except Exception:
+                logger.exception("Не удалось запустить RealtimeSilenceFilter")
+                self._rsf = None
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -732,7 +750,7 @@ class RecordingCoreService:
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
-        """Stop preview worker, stop realtime partial, stop recorder."""
+        """Stop preview worker, stop realtime partial, stop RSF, stop recorder."""
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
         if self._rt_partial is not None:
@@ -742,6 +760,17 @@ class RecordingCoreService:
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
             finally:
                 self._rt_partial = None
+        # W1325 F1 HIGH: stop RSF and capture silence_ranges
+        silence_ranges: list[tuple[float, float]] = []
+        if self._rsf is not None:
+            try:
+                silence_ranges = self._rsf.stop() or []
+            except Exception:
+                logger.exception("Ошибка при остановке RealtimeSilenceFilter")
+                silence_ranges = []
+            finally:
+                self._rsf = None
+        self._last_silence_ranges = silence_ranges
 
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
@@ -944,6 +973,9 @@ class RecordingCoreService:
             },
         )
 
+        # W1325 F1 HIGH: pass silence_ranges captured from RealtimeSilenceFilter
+        _silence_ranges = getattr(self, "_last_silence_ranges", None) or None
+
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -952,6 +984,7 @@ class RecordingCoreService:
             extra_vocabulary=user_vocabulary if user_vocabulary else None,
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
+            silence_ranges=_silence_ranges,
         )
 
         return {"transcribe_payload": transcribe_payload}

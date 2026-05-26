@@ -69,6 +69,8 @@ class Transcriber:
             diarize: Явное управление диаризацией для текущего вызова. None = использовать
                      глобальный settings.DIARIZATION_ENABLED. Если settings передан и
                      diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
+            silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
+                            Если указаны, обнуляет тихие участки аудио перед STT.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
