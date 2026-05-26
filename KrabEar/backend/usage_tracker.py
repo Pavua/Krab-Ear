@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import date, timedelta
 from pathlib import Path
@@ -186,7 +187,7 @@ class UsageTracker:
             del self._daily[k]
 
     def _persist(self) -> None:
-        """Сохраняет текущую статистику в JSON-файл."""
+        """Сохраняет текущую статистику в JSON-файл атомарно (tmp → fsync → rename)."""
         if self._stats_file is None:
             return
         with self._lock:
@@ -200,7 +201,12 @@ class UsageTracker:
             }
         try:
             self._stats_file.parent.mkdir(parents=True, exist_ok=True)
-            self._stats_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp = self._stats_file.with_suffix(self._stats_file.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._stats_file)
         except Exception:
             logger.exception("Не удалось сохранить статистику в %s", self._stats_file)
 
@@ -217,4 +223,9 @@ class UsageTracker:
             self._all_words = int(all_time.get("words", 0))
             self._prune_old_days()
         except Exception:
-            logger.exception("Не удалось загрузить статистику из %s", self._stats_file)
+            logger.warning(
+                "usage_tracker: файл статистики повреждён (%s) — сброс счётчиков в ноль. "
+                "Данные за всё время могут быть утеряны.",
+                self._stats_file,
+                exc_info=True,
+            )
