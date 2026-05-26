@@ -255,6 +255,8 @@ class BackendService:
         # Wire error_bus into rewriter so it can push timeout/connection/etc errors
         if self._llm_rewriter is not None:
             self._llm_rewriter._error_bus = self._error_bus
+            # W979 F4: wire feature_flags so rewrite() respects llm_rewrite flag at runtime
+            self._llm_rewriter._feature_flags = self._feature_flags
 
         # Wire error_bus into transcriber for diarization.no_token and related push
         if self.transcriber is not None:

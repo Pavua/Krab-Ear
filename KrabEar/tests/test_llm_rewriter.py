@@ -1004,5 +1004,80 @@ class LLMRewriterPassiveHealthCheckTestCase(unittest.TestCase):
         self.assertEqual(result, (False, False))
 
 
+class LLMRewriterFeatureFlagTestCase(unittest.TestCase):
+    """W979 F4: FeatureFlags.is_enabled("llm_rewrite") guard в rewrite()."""
+
+    def _make_rewriter(self):
+        from backend.llm_rewriter import LLMRewriter
+        return LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            timeout_sec=4.0,
+        )
+
+    def test_rewrite_passes_through_when_flag_disabled(self):
+        """Если feature flag 'llm_rewrite' отключён — rewrite() возвращает текст как есть без HTTP."""
+        rewriter = self._make_rewriter()
+
+        # Мок FeatureFlags с отключённым флагом
+        mock_ff = MagicMock()
+        mock_ff.is_enabled.return_value = False
+        rewriter._feature_flags = mock_ff
+
+        original = "привет мир"
+        result = rewriter.rewrite(original)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.text, original)
+        self.assertEqual(result.fallback_reason, "feature_flag_disabled")
+        self.assertIsNone(result.latency_ms)
+        mock_ff.is_enabled.assert_called_once_with("llm_rewrite")
+
+    def test_rewrite_proceeds_when_flag_enabled(self):
+        """Если feature flag 'llm_rewrite' включён — rewrite() продолжает обычный путь."""
+        rewriter = self._make_rewriter()
+
+        mock_ff = MagicMock()
+        mock_ff.is_enabled.return_value = True
+        rewriter._feature_flags = mock_ff
+
+        # Имитируем circuit_open чтобы не нужен HTTP, но убеждаемся что флаг был проверен
+        for _ in range(3):
+            rewriter._circuit.record_failure()
+
+        result = rewriter.rewrite("текст для проверки")
+
+        # Флаг был включён → rewrite пошёл дальше (вернул circuit_open, а не flag_disabled)
+        self.assertEqual(result.fallback_reason, "circuit_open")
+        mock_ff.is_enabled.assert_called_once_with("llm_rewrite")
+
+    def test_rewrite_backward_compat_no_feature_flags(self):
+        """Если _feature_flags = None — rewrite() работает как раньше (backward compat)."""
+        rewriter = self._make_rewriter()
+        rewriter._feature_flags = None
+
+        # Circuit open — нет HTTP, но поведение должно быть circuit_open, не flag_disabled
+        for _ in range(3):
+            rewriter._circuit.record_failure()
+
+        result = rewriter.rewrite("текст")
+        self.assertNotEqual(result.fallback_reason, "feature_flag_disabled")
+
+    def test_rewrite_init_accepts_feature_flags_param(self):
+        """LLMRewriter.__init__ принимает feature_flags= параметр напрямую."""
+        from backend.llm_rewriter import LLMRewriter
+        mock_ff = MagicMock()
+        mock_ff.is_enabled.return_value = False
+        rewriter = LLMRewriter(
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+            model="test-model",
+            feature_flags=mock_ff,
+        )
+        result = rewriter.rewrite("текст")
+        self.assertEqual(result.fallback_reason, "feature_flag_disabled")
+
+
 if __name__ == "__main__":
     unittest.main()

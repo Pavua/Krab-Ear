@@ -252,11 +252,15 @@ class LLMRewriter:
         idle_keepalive_enabled: bool = False,  # default OFF: модель естественно выгружается через LM Studio TTL чтобы не держать RAM. Включается через settings.LLM_IDLE_KEEPALIVE_ENABLED.
         idle_keepalive_sec: int = 1500,  # 25 min — LM Studio default idle TTL = 30 min
         runtime_timeout_provider: Optional[Callable[[], float]] = None,  # если задан — читается перед каждым HTTP-запросом вместо fallback timeout
+        feature_flags=None,  # Optional[FeatureFlags] — late-inject или передать при создании; None = флаг не проверяется (backward compat)
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._fallback_timeout = timeout_sec  # статический fallback (init-time value)
+        # W979 F4: feature flag guard — поддерживает late-injection через _feature_flags атрибут.
+        # None = backward-compat (флаг не проверяется, rewrite работает как раньше).
+        self._feature_flags = feature_flags
         self._runtime_timeout_provider = runtime_timeout_provider
         self._circuit = CircuitBreaker(
             fail_threshold=circuit_fail_threshold,
@@ -427,7 +431,21 @@ class LLMRewriter:
         """Отправляет текст в LLM и возвращает исправленную версию.
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
+
+        Если feature flag `llm_rewrite` явно отключён через FeatureFlags, возвращает
+        LLMRewriteResult(ok=False, text=text, fallback_reason="feature_flag_disabled")
+        без HTTP-вызова. None feature_flags = флаг не проверяется (backward compat).
         """
+        # W979 F4: FeatureFlags guard — short-circuit без HTTP если флаг выключен.
+        feature_flags = getattr(self, "_feature_flags", None)
+        if feature_flags is not None and not feature_flags.is_enabled("llm_rewrite"):
+            logger.debug("LLM rewrite пропущен: feature flag 'llm_rewrite' отключён")
+            return LLMRewriteResult(
+                ok=False,
+                text=text,
+                fallback_reason="feature_flag_disabled",
+                latency_ms=None,
+            )
         with _profiler.start_span("llm_rewrite"):
             return self._rewrite_impl(text)
 
