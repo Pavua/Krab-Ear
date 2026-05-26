@@ -13,23 +13,56 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 ## Architecture
 
 ```
-┌─────────────────────────┐    Unix socket (JSON-RPC)    ┌──────────────────────┐
-│  Swift Agent (macOS)    │ ◄────────────────────────── ►│  Python Backend      │
-│  - HotkeyManager        │                              │  - IPCServer         │
-│  - PasteService         │                              │  - BackendService    │
-│  - HistoryPanel         │    Krab Ear.app/             │    → CallAssistSvc   │
-│  - BackendSupervisor    │    (bundle wraps agent       │    → HistorySvc      │
-│  - KrabEarTheme         │     + Python venv)           │    → TranslationSvc  │
-│  - CollapsibleSection   │                              │    → SettingsSvc     │
-│  - RealtimeOverlay      │                              │  - AudioRecorder     │
-│  - NotificationService  │                              │  - Transcriber       │
-│  - LaunchAgentManager   │                              │  - Translator        │
-│  - SystemAudioDucking   │                              │  - LLMRewriter       │
-│                         │                              │  - StateStore (NDJSON)│
-│                         │                              │  - MetricsCollector  │
-│                         │                              │  - VGWSClient        │
-└─────────────────────────┘                              └──────────────────────┘
+┌─────────────────────────┐    Unix socket (JSON-RPC)    ┌──────────────────────────┐
+│  Swift Agent (macOS)    │ ◄────────────────────────── ►│  Python Backend           │
+│  - HotkeyManager        │                              │  - IPCServer              │
+│  - PasteService         │                              │  - BackendService (hub)   │
+│  - HistoryPanel         │    Krab Ear.app/             │    → CallAssistSvc        │
+│  - BackendSupervisor    │    (bundle wraps agent       │    → HistorySvc           │
+│  - KrabEarTheme         │     + Python venv)           │    → TranslationSvc       │
+│  - CollapsibleSection   │                              │    → SettingsSvc          │
+│  - RealtimeOverlay      │                              │    → RecordingCoreSvc     │
+│  - NotificationService  │                              │    → TextProcessingSvc    │
+│  - LaunchAgentManager   │                              │    → TextScoringSvc       │
+│  - SystemAudioDucking   │                              │    → AnalyticsSvc         │
+│                         │                              │    → AudioAnalyticsSvc    │
+│                         │                              │    → HealthCheckSvc       │
+│                         │                              │    → STTManagementSvc     │
+│                         │                              │    → AppleIntegrationSvc  │
+│                         │                              │    → CallSessionSvc       │
+│                         │                              │    → LiveSubsSvc          │
+│                         │                              │  - AudioRecorder          │
+│                         │                              │  - Transcriber            │
+│                         │                              │  - Translator             │
+│                         │                              │  - LLMRewriter            │
+│                         │                              │  - StateStore (NDJSON)    │
+│                         │                              │  - MetricsCollector       │
+│                         │                              │  - VGWSClient             │
+└─────────────────────────┘                              └──────────────────────────┘
 ```
+
+### Service map (post-W751)
+
+14 services extracted from `BackendService` — zero orphan imports as of W751 (guarded by CI):
+
+1. **CallAssistService** — call assist + VG WS client
+2. **HistoryService** — history CRUD, SRT export, clipboard hist
+3. **TranslationService** — translate, glossary mgmt
+4. **SettingsService** — settings CRUD + profile presets + 5s TTL cache
+5. **RecordingCoreService** — start/stop_recording + transcribe_paths
+6. **TextProcessingService** — score readability/transcription, abbrev, post-process
+7. **TextScoringService** — warmup_rewriter, extract_terms, auto_title
+8. **AnalyticsService** — dashboard, sentiment trends, period compare, keyword cloud
+9. **AudioAnalyticsService** — audio quality, waveform, trends
+10. **HealthCheckService** — ping (contract bit-exact), diagnostics, integrity check
+11. **STTManagementService** — STT hotwords CRUD, warmup, routing
+12. **AppleIntegrationService** — Telegram bridge, Notes, Reminders, Calendar, iMessage
+13. **CallSessionService** — call session CRUD + status lifecycle
+14. **LiveSubsService** — system-audio streaming STT for live subtitles (Phase 2)
+
+Note: `TTSService` (`backend/tts_service.py`) is standalone — not extracted from `service.py`.
+
+Orphan-import regression guard: `scripts/audit_orphan_imports.py` runs in CI on every push.
 
 ### Key layers inside `KrabEar/`:
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
