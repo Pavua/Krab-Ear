@@ -428,7 +428,7 @@ class BackendService:
             llm_rewriter=self._llm_rewriter,
         )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
-        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
+        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir, store=self.store)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
@@ -1158,6 +1158,7 @@ class BackendService:
             "get_speaker_statistics": lambda p: self._speaker_statistics.handle_get_speaker_statistics(  # per-speaker stats из истории диаризации
                 p, store=self.store, speaker_manager=self._speaker_manager
             ),
+            "merge_speakers": self._speaker_manager.handle_merge_speakers,  # слить src_id → dst_id в истории
             # --- live subtitles (Sprint 2B) ---
             "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
             "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера
