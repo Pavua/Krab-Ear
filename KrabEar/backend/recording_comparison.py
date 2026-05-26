@@ -131,6 +131,8 @@ class RecordingComparison:
         """
         if not item_ids:
             raise ValueError("item_ids не может быть пустым")
+        if len(item_ids) < 2:
+            raise ValueError("compare requires at least 2 items")
         if len(item_ids) > MAX_ITEMS:
             raise ValueError(
                 f"Максимальное количество записей для сравнения: {MAX_ITEMS}, "
