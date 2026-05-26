@@ -117,6 +117,7 @@ from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
+    get_release_string,
     init_sentry,
     install_signal_handlers,
 )
@@ -3829,11 +3830,13 @@ def main() -> None:
 
     configure_logging(data_dir)
 
-    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан)
+    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
+    # W704: release string читается из Info.plist через get_release_string()
+    # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
     sentry_ok = init_sentry(
         dsn=settings.SENTRY_DSN or None,
         environment=settings.SENTRY_ENVIRONMENT,
-        release=f"krab-ear@{APP_VERSION}",
+        release=get_release_string(),
     )
     if sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)

@@ -372,5 +372,71 @@ class TestConcurrentBreadcrumbsThreadSafe(unittest.TestCase):
         self.assertEqual(sdk.add_breadcrumb.call_count, call_count)
 
 
+# ---------------------------------------------------------------------------
+# Wave 704 / W2.0.5: get_release_string() — Sentry release tag priority chain.
+# ---------------------------------------------------------------------------
+
+
+class GetReleaseStringTests(unittest.TestCase):
+    """Verify the priority chain: env → Info.plist → __version__.
+
+    Regression guard: must NEVER silently fall back to a hardcoded '2.0.0'.
+    """
+
+    def setUp(self):
+        import backend.observability as mod  # noqa: PLC0415
+        self.mod = mod
+
+    def test_env_override_with_prefix(self):
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": "krab-ear@9.9.9"}, clear=False):
+            self.assertEqual(self.mod.get_release_string(), "krab-ear@9.9.9")
+
+    def test_env_override_without_prefix(self):
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": "9.9.9"}, clear=False):
+            self.assertEqual(self.mod.get_release_string(), "krab-ear@9.9.9")
+
+    def test_env_override_empty_skipped(self):
+        """Empty env var → falls through to plist/__version__, not literal 'krab-ear@'."""
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": "   "}, clear=False):
+            result = self.mod.get_release_string()
+            self.assertTrue(result.startswith("krab-ear@"))
+            self.assertNotEqual(result, "krab-ear@")
+
+    def test_plist_reads_version(self):
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": ""}, clear=False), \
+             patch.object(self.mod, "_read_version_from_plist", return_value="2.0.5"):
+            self.assertEqual(self.mod.get_release_string(), "krab-ear@2.0.5")
+
+    def test_plist_missing_falls_back_to_version(self):
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": ""}, clear=False), \
+             patch.object(self.mod, "_read_version_from_plist", return_value=None):
+            result = self.mod.get_release_string()
+            self.assertTrue(result.startswith("krab-ear@"))
+
+    def test_no_2_0_0_regression(self):
+        """W701/W704 regression guard: tag must NOT silently be 2.0.0 when plist says 2.0.5."""
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": ""}, clear=False), \
+             patch.object(self.mod, "_read_version_from_plist", return_value="2.0.5"):
+            self.assertEqual(self.mod.get_release_string(), "krab-ear@2.0.5")
+            self.assertNotEqual(self.mod.get_release_string(), "krab-ear@2.0.0")
+
+    def test_format_always_has_prefix(self):
+        with patch.dict(_os.environ, {"KRAB_EAR_RELEASE": ""}, clear=False), \
+             patch.object(self.mod, "_read_version_from_plist", return_value=None):
+            result = self.mod.get_release_string()
+            self.assertTrue(
+                result.startswith("krab-ear@"),
+                msg=f"release string must start with 'krab-ear@', got: {result!r}",
+            )
+
+    def test_plist_read_error_does_not_crash(self):
+        """Plist read raising any exception must yield None, not propagate."""
+        from unittest.mock import mock_open  # noqa: PLC0415
+        with patch("os.path.isfile", return_value=True), \
+             patch("builtins.open", mock_open(read_data=b"corrupt")):
+            result = self.mod._read_version_from_plist()
+            self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
