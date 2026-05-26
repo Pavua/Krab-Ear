@@ -4,6 +4,7 @@ from backend.transcript_writer import TranscriptWriter
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -196,6 +197,101 @@ class TestTranscriptWriterFormatHelpers(unittest.TestCase):
     def test_format_date_human_invalid_returns_original(self):
         result = TranscriptWriter._format_date_human("not-a-date")
         self.assertEqual(result, "not-a-date")
+
+
+class TestTranscriptWriterAtomicWrite(unittest.TestCase):
+    """Тесты W923 H1 + H2: атомарная запись и collision-resolution без TOCTOU."""
+
+    def _make_item(self, ts="2026-05-26T12:00:00", **kwargs):
+        base = {
+            "text": "Атомарный тест.",
+            "ts": ts,
+            "audio_duration_sec": 2.0,
+            "confidence": 0.95,
+            "translated_text": "",
+            "translation_status": "not_requested",
+            "diarization": None,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_atomic_write_leaves_no_tmp_on_success(self):
+        """H1: после успешной записи .md.tmp файлов в директории быть не должно."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            item = self._make_item()
+            path = TranscriptWriter.write_transcript(item, out_dir)
+
+            # Основной файл должен существовать
+            self.assertTrue(path.exists(), f"Файл не создан: {path}")
+            # Временных .tmp файлов быть не должно
+            tmp_files = list(out_dir.glob("*.tmp"))
+            self.assertEqual(tmp_files, [], f"Найдены .tmp файлы: {tmp_files}")
+            # Файл должен содержать корректный контент (не пустой и не truncated)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("# Транскрибация", content)
+            self.assertIn("Атомарный тест.", content)
+
+    def test_concurrent_same_second_writes_no_clobber(self):
+        """H2: два потока с одним timestamp не должны перезаписать друг друга (TOCTOU race).
+
+        Оба файла должны существовать с разными именами и содержать своё содержимое.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            # Оба элемента имеют один и тот же timestamp — провоцируем collision
+            ts = "2026-05-26T12:00:00"
+            item_a = self._make_item(ts=ts, text="Содержимое потока A")
+            item_b = self._make_item(ts=ts, text="Содержимое потока B")
+
+            results: list[Path] = []
+            errors: list[Exception] = []
+            barrier = threading.Barrier(2)
+
+            def write_a():
+                try:
+                    barrier.wait()  # синхронизируем старт обоих потоков
+                    p = TranscriptWriter.write_transcript(item_a, out_dir)
+                    results.append(p)
+                except Exception as exc:
+                    errors.append(exc)
+
+            def write_b():
+                try:
+                    barrier.wait()
+                    p = TranscriptWriter.write_transcript(item_b, out_dir)
+                    results.append(p)
+                except Exception as exc:
+                    errors.append(exc)
+
+            t1 = threading.Thread(target=write_a)
+            t2 = threading.Thread(target=write_b)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+            self.assertEqual(errors, [], f"Ошибки в потоках: {errors}")
+            self.assertEqual(len(results), 2, "Ожидались пути от обоих потоков")
+
+            path_a, path_b = results[0], results[1]
+            # Имена должны быть разными — второй получил уникальный суффикс
+            self.assertNotEqual(
+                path_a, path_b,
+                "Оба потока получили одинаковый путь — коллизия не разрешена"
+            )
+            # Оба файла должны существовать
+            self.assertTrue(path_a.exists(), f"Файл A не существует: {path_a}")
+            self.assertTrue(path_b.exists(), f"Файл B не существует: {path_b}")
+            # Ни один файл не должен быть пустым (не truncated/clobbered)
+            content_a = path_a.read_text(encoding="utf-8")
+            content_b = path_b.read_text(encoding="utf-8")
+            self.assertIn("# Транскрибация", content_a)
+            self.assertIn("# Транскрибация", content_b)
+            # Каждый файл должен содержать именно своё содержимое (не перезаписан)
+            combined = content_a + content_b
+            self.assertIn("Содержимое потока A", combined)
+            self.assertIn("Содержимое потока B", combined)
 
 
 if __name__ == "__main__":
