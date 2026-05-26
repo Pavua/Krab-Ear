@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,15 +60,21 @@ class PlaybackTracker:
             _log.warning("Не удалось загрузить статистику воспроизведения: %s", exc)
 
     def _save(self) -> None:
-        """Сохраняет статистику воспроизведения в файл (не бросает исключений)."""
+        """Сохраняет статистику воспроизведения в файл (не бросает исключений).
+
+        Использует атомарный паттерн tmp+fsync+rename для предотвращения потери
+        данных при сбое в середине записи (BUG-3 HIGH, W877 audit).
+        """
         if self._path is None:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(self._stats, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            tmp_path = self._path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._stats, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp_path.replace(self._path)
         except Exception as exc:
             _log.warning("Не удалось сохранить статистику воспроизведения: %s", exc)
 
