@@ -112,6 +112,7 @@ from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
+from backend.text_processing_service import TextProcessingService
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
@@ -354,6 +355,15 @@ class BackendService:
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
         self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
+        # W982: Wire periodic worker thread for ExportScheduler (F1 fix).
+        # check_and_export() is a no-op when disabled — cheap to call every 5 min.
+        self._export_scheduler_stop = threading.Event()
+        self._export_scheduler_thread = threading.Thread(
+            target=self._export_scheduler_loop,
+            daemon=True,
+            name="export-scheduler",
+        )
+        self._export_scheduler_thread.start()
         # Note: _transcription_counter is now a property that proxies to
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
@@ -721,12 +731,50 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    # ---------------------------------------------------------------------- #
+    # Export scheduler periodic worker (W982 — F1 fix)                      #
+    # ---------------------------------------------------------------------- #
+
+    _EXPORT_SCHEDULER_INTERVAL_SEC: int = 300  # check every 5 minutes
+
+    def _export_scheduler_loop(self) -> None:
+        """Фоновый поток периодически вызывает ExportScheduler.check_and_export().
+
+        Интервал проверки: 5 минут. check_and_export() возвращает None если
+        авто-экспорт отключён или ещё не подошёл срок — в обоих случаях
+        метод завершается быстро (только чтение файла расписания).
+        """
+        stop = self._export_scheduler_stop
+        while not stop.is_set():
+            try:
+                result = self._export_scheduler.check_and_export(self.store)
+                if result is not None:
+                    logger.info(
+                        "export_scheduler: авто-экспорт выполнен",
+                        extra={
+                            "file_path": result.get("path"),
+                            "format": result.get("format"),
+                            "size_bytes": result.get("size_bytes"),
+                        },
+                    )
+            except Exception:
+                logger.exception("export_scheduler tick failed")
+            stop.wait(self._EXPORT_SCHEDULER_INTERVAL_SEC)
+
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
         signal handler run_server() и в finally serve_forever().
         """
+        # Stop export-scheduler worker thread.
+        stop_event = getattr(self, "_export_scheduler_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        es_thread = getattr(self, "_export_scheduler_thread", None)
+        if es_thread is not None and es_thread.is_alive():
+            es_thread.join(timeout=2.0)
+
         probe = getattr(self, "_llm_probe", None)
         if probe is not None:
             try:
