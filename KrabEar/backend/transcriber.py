@@ -56,6 +56,7 @@ class Transcriber:
         settings: dict | None = None,
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
+        silence_ranges: list[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -91,6 +92,7 @@ class Transcriber:
             stt_hotwords=stt_hotwords,
             diarize=diarize,
             skip_vad_prefilter=skip_vad_prefilter,
+            silence_ranges=silence_ranges,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:

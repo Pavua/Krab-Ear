@@ -29,6 +29,7 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
+from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -97,6 +98,9 @@ class RecordingCoreService:
         # Realtime partial transcriber state
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
+
+        # Realtime silence filter state (W1136/W878)
+        self._realtime_silence_filter: RealtimeSilenceFilter | None = None
 
         # Async transcription jobs
         self._job_tracker = JobTracker()
@@ -189,6 +193,18 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
+        # Realtime silence filter (W1136/W878): start alongside recorder when enabled
+        if bool(settings.get("realtime_silence_filter_enabled", False)):
+            try:
+                self._realtime_silence_filter = RealtimeSilenceFilter(
+                    recorder=self.recorder,
+                    settings=settings,
+                    event_bus_emit=event_bus.emit,
+                )
+                self._realtime_silence_filter.start()
+            except Exception:
+                logger.exception("Не удалось запустить RealtimeSilenceFilter")
+                self._realtime_silence_filter = None
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -205,6 +221,7 @@ class RecordingCoreService:
         stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
         _rt_session_id = phase_a["rt_session_id"]
         sr = phase_a["sr"]
+        rsf_silence_ranges: list[tuple[float, float]] = phase_a.get("silence_ranges") or []
 
         # Phase B: audio quality guards (silence + background)
         phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
@@ -215,7 +232,7 @@ class RecordingCoreService:
         background_guard_rejected = phase_b["background_guard_rejected"]
 
         # Phase C: STT execution
-        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
+        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr, silence_ranges=rsf_silence_ranges)
         transcribe_payload = phase_c["transcribe_payload"]
 
         # Phase D: post-processing
@@ -796,12 +813,23 @@ class RecordingCoreService:
                 )
             }
 
+        # Collect silence_ranges from RealtimeSilenceFilter (W1136/W878)
+        silence_ranges: list[tuple[float, float]] = []
+        if self._realtime_silence_filter is not None:
+            try:
+                silence_ranges = self._realtime_silence_filter.stop()
+            except Exception:
+                logger.exception("Ошибка при остановке RealtimeSilenceFilter")
+            finally:
+                self._realtime_silence_filter = None
+
         return {
             "audio": audio,
             "duration_sec": duration_sec,
             "stop_tail_trim_ms": stop_tail_trim_ms,
             "rt_session_id": rt_session_id,
             "sr": sr,
+            "silence_ranges": silence_ranges,
         }
 
     def _stop_recording_phase_b(
@@ -894,6 +922,7 @@ class RecordingCoreService:
         audio: Any,
         duration_sec: float,
         sr: dict[str, Any],
+        silence_ranges: list[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
         """Load vocabulary/context/glossary and run the transcriber."""
         quality_profile = sr["quality_profile"]
@@ -952,6 +981,7 @@ class RecordingCoreService:
             extra_vocabulary=user_vocabulary if user_vocabulary else None,
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
+            silence_ranges=silence_ranges if silence_ranges else None,
         )
 
         return {"transcribe_payload": transcribe_payload}
