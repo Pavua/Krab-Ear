@@ -147,7 +147,8 @@ class AudioConverter:
             )
 
         fmt = output_format.lower().lstrip(".")
-        if output_path is None:
+        _tmp_created = output_path is None
+        if _tmp_created:
             handle = tempfile.NamedTemporaryFile(
                 prefix="krab_ear_conv_", suffix=f".{fmt}", delete=False
             )
@@ -165,14 +166,32 @@ class AudioConverter:
             dst,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if _tmp_created:
+                Path(dst).unlink(missing_ok=True)
+            raise RuntimeError(
+                f"ffmpeg превысил таймаут 60 с при конвертации {input_path}"
+            ) from exc
         except (FileNotFoundError, OSError) as exc:
-            Path(dst).unlink(missing_ok=True)
+            if _tmp_created:
+                Path(dst).unlink(missing_ok=True)
             raise RuntimeError(
                 f"ffmpeg не удалось запустить ({self._ffmpeg}): {exc}"
             ) from exc
+        except Exception:
+            if _tmp_created:
+                Path(dst).unlink(missing_ok=True)
+            raise
         if result.returncode != 0:
-            Path(dst).unlink(missing_ok=True)
+            if _tmp_created:
+                Path(dst).unlink(missing_ok=True)
             raise RuntimeError(
                 f"ffmpeg завершился с кодом {result.returncode}: {result.stderr.strip()}"
             )
