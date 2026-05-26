@@ -17,14 +17,10 @@ Handlers (8):
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from backend.observability import add_breadcrumb
-from core.silence_constants import SILENCE_THRESHOLD_DB
 
 logger = logging.getLogger("KrabEar.Backend.AudioAnalytics")
 
@@ -71,38 +67,12 @@ class AudioAnalyticsService:
         """
         from core.audio_quality import analyze_file
 
-        _t0 = time.monotonic()
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
-        try:
-            report = analyze_file(file_path)
-            result = report.to_dict()
-            add_breadcrumb(
-                category="audio_analytics",
-                message="analyze_audio_quality",
-                level="info",
-                data={
-                    "ok": True,
-                    "quality_score": result.get("quality_score"),
-                    "warning_count": len(result.get("warnings") or []),
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            return result
-        except Exception as exc:
-            add_breadcrumb(
-                category="audio_analytics",
-                message="analyze_audio_quality",
-                level="error",
-                data={
-                    "ok": False,
-                    "error_type": type(exc).__name__,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            raise
+        report = analyze_file(file_path)
+        return report.to_dict()
 
     def handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
         """Обнаруживает участки тишины в аудиофайле.
@@ -120,54 +90,26 @@ class AudioAnalyticsService:
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
-        threshold_db = float(params.get("threshold_db", SILENCE_THRESHOLD_DB))
+        threshold_db = float(params.get("threshold_db", -40.0))
         return analyze_silence_file(file_path, threshold_db=threshold_db)
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды качества распознавания за последние N дней."""
-        _t0 = time.monotonic()
-        days = max(1, int(params.get("days", 30)))
+        days = int(params.get("days", 30))
         try:
-            try:
-                with self._store._lock():
-                    items = self._store._load_active_items_unlocked()
-            except Exception:
-                items = []
-            report = self._quality_trends.analyze_trends(items, days=days)
-            result = {
-                "daily_confidence": report.daily_confidence,
-                "overall_trend": report.overall_trend,
-                "trend_slope": report.trend_slope,
-                "best_day": report.best_day,
-                "worst_day": report.worst_day,
-                "confidence_distribution": report.confidence_distribution,
-            }
-            add_breadcrumb(
-                category="audio_analytics",
-                message="analyze_quality_trends",
-                level="info",
-                data={
-                    "ok": True,
-                    "days": days,
-                    "item_count": len(items),
-                    "overall_trend": report.overall_trend,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            return result
-        except Exception as exc:
-            add_breadcrumb(
-                category="audio_analytics",
-                message="analyze_quality_trends",
-                level="error",
-                data={
-                    "ok": False,
-                    "days": days,
-                    "error_type": type(exc).__name__,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            raise
+            with self._store._lock():
+                items = self._store._load_active_items_unlocked()
+        except Exception:
+            items = []
+        report = self._quality_trends.analyze_trends(items, days=days)
+        return {
+            "daily_confidence": report.daily_confidence,
+            "overall_trend": report.overall_trend,
+            "trend_slope": report.trend_slope,
+            "best_day": report.best_day,
+            "worst_day": report.worst_day,
+            "confidence_distribution": report.confidence_distribution,
+        }
 
     def handle_analyze_word_timing(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует ритм речи по пословным таймстемпам Whisper.
@@ -209,47 +151,20 @@ class AudioAnalyticsService:
         """
         from core.waveform_generator import WaveformGenerator
 
-        _t0 = time.monotonic()
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
 
         num_points = int(params.get("num_points", 200))
-        try:
-            gen = WaveformGenerator()
-            wf = gen.generate_from_file(file_path, num_points=num_points)
-            result = {
-                "points": wf.points,
-                "duration_sec": wf.duration_sec,
-                "sample_rate": wf.sample_rate,
-                "peak_amplitude": wf.peak_amplitude,
-                "rms_amplitude": wf.rms_amplitude,
-            }
-            add_breadcrumb(
-                category="audio_analytics",
-                message="get_waveform",
-                level="info",
-                data={
-                    "ok": True,
-                    "num_points": num_points,
-                    "duration_sec": wf.duration_sec,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            return result
-        except Exception as exc:
-            add_breadcrumb(
-                category="audio_analytics",
-                message="get_waveform",
-                level="error",
-                data={
-                    "ok": False,
-                    "num_points": num_points,
-                    "error_type": type(exc).__name__,
-                    "duration_ms": round((time.monotonic() - _t0) * 1000),
-                },
-            )
-            raise
+        gen = WaveformGenerator()
+        wf = gen.generate_from_file(file_path, num_points=num_points)
+        return {
+            "points": wf.points,
+            "duration_sec": wf.duration_sec,
+            "sample_rate": wf.sample_rate,
+            "peak_amplitude": wf.peak_amplitude,
+            "rms_amplitude": wf.rms_amplitude,
+        }
 
     def handle_profile_noise(self, params: dict[str, Any]) -> dict[str, Any]:
         """Профилирует фоновый шум в аудиофайле.
@@ -285,10 +200,15 @@ class AudioAnalyticsService:
           - audio1: list[float] — первый аудио-сигнал (PCM float32).
           - audio2: list[float] — второй аудио-сигнал (PCM float32).
           - sample_rate: int — частота дискретизации (по умолчанию 16000).
-          - threshold: float — порог сходства [0..1] (по умолчанию 0.95).
+          - threshold: float — DEPRECATED, игнорируется (W1125/W1063: SHA-256
+            Hamming distance бессмысленна; используется точное совпадение).
 
         Возвращает dict с ключами:
-          fingerprint1, fingerprint2, similarity, is_duplicate.
+          - fingerprint1: str — SHA-256 фингерпринт первого аудио.
+          - fingerprint2: str — SHA-256 фингерпринт второго аудио.
+          - is_duplicate: bool — True если фингерпринты идентичны.
+          - similarity: float — DEPRECATED backwards-compat поле: 1.0 если
+            дубликат, 0.0 иначе. Клиенты должны использовать is_duplicate.
         """
         audio1_raw = params.get("audio1")
         audio2_raw = params.get("audio2")
@@ -296,21 +216,22 @@ class AudioAnalyticsService:
             raise RuntimeError("audio1 и audio2 обязательны")
 
         sample_rate = int(params.get("sample_rate", 16000))
-        threshold = float(params.get("threshold", 0.95))
+        # threshold parameter is ignored post-W1063: exact-match only
 
         audio1 = np.asarray(audio1_raw, dtype=np.float32)
         audio2 = np.asarray(audio2_raw, dtype=np.float32)
 
         fp1 = self._audio_fingerprinter.fingerprint(audio1, sample_rate)
         fp2 = self._audio_fingerprinter.fingerprint(audio2, sample_rate)
-        # W1063: use equals() — SHA-256 Hamming distance is statistically meaningless.
-        # similarity is 1.0 for exact match, 0.0 otherwise (binary).
+        # W1125/W1063: use equals() — compare() was returning binary 0.0/1.0
+        # after W1078 shim anyway; switch to correct bool API directly.
         is_exact_match = self._audio_fingerprinter.equals(fp1, fp2)
-        similarity = 1.0 if is_exact_match else 0.0
 
         return {
             "fingerprint1": fp1,
             "fingerprint2": fp2,
-            "similarity": round(similarity, 6),
-            "is_duplicate": is_exact_match or threshold <= 0.0,
+            "is_duplicate": is_exact_match,
+            # Backwards-compat: keep similarity field but populate from bool
+            # so existing clients reading float still get meaningful 0/1 value.
+            "similarity": 1.0 if is_exact_match else 0.0,
         }
