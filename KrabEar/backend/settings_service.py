@@ -291,6 +291,24 @@ class SettingsService:
                 "key_count": len(params),
             },
         )
+        # W1199 (W1193 F1 HIGH): runtime privacy-mode Sentry disable.
+        # When privacy_mode_enabled flips True via IPC, flush pending Sentry
+        # events and re-init SDK with dsn=None to fully silence telemetry.
+        if params.get("privacy_mode_enabled") is True and not old_settings.get("privacy_mode_enabled"):
+            try:
+                import backend.observability as _obs  # noqa: PLC0415
+                if _obs._sentry_initialized:
+                    try:
+                        import sentry_sdk as _sdk  # noqa: PLC0415
+                        _sdk.flush(timeout=2)
+                        _sdk.init(dsn=None)  # type: ignore[call-overload]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _obs._sentry_initialized = False
+                    _log.info("set_settings: Sentry disabled — privacy_mode_enabled=True")
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("set_settings: failed to disable Sentry for privacy mode: %s", exc)
+
         # Hot-reload pydantic Settings из обновлённого settings.json — без
         # restart engine.py видит новые feature flags (STT_GIGAAM_ENABLED,
         # STT_LANGUAGE_ROUTING_ENABLED, etc).
