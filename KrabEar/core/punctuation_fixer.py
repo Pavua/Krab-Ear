@@ -168,12 +168,14 @@ class PunctuationFixer:
 
         return "".join(out)
 
-    def get_fixes_applied(self, original: str, fixed: str) -> List[str]:
+    def get_fixes_applied(self, original: str, fixed: str, language: str = "ru") -> List[str]:
         """Возвращает список описаний применённых изменений.
 
         Args:
             original: Исходный текст до коррекции.
             fixed: Текст после коррекции.
+            language: Код языка ("ru" / "es"), нужен для language-specific проверок
+                      (например, я-капитализация — только для RU).
 
         Returns:
             Список строк-описаний изменений (пустой, если изменений нет).
@@ -197,7 +199,8 @@ class PunctuationFixer:
         if original and original[0].islower() and fixed and fixed[0].isupper():
             fixes.append("capitalized first letter")
 
-        if _STANDALONE_YA_RE.search(original) and "Я" not in original:
+        # Я-капитализация специфична для русского языка (W1348 R2 gate)
+        if language == "ru" and _STANDALONE_YA_RE.search(original) and "Я" not in original:
             fixes.append("capitalized standalone 'я'")
 
         if '"' in original and "«" in fixed:
