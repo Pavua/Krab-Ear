@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -85,6 +86,8 @@ class SearchIndex:
     """Инвертированный индекс для быстрого полнотекстового поиска."""
 
     def __init__(self) -> None:
+        # Защита от гонки между build_index и search в многопоточном окружении
+        self._lock = threading.RLock()
         # {stemmed_token: set[item_id]}
         self._index: dict[str, set[str]] = {}
         # {item_id: raw_text} для генерации снипетов
@@ -99,23 +102,27 @@ class SearchIndex:
     def build_index(self, items: list[dict]) -> None:
         """Строит инвертированный индекс из списка записей истории."""
         new_sig = self._compute_signature(items)
-        if new_sig == self._signature:
-            return  # данные не изменились
+        with self._lock:
+            if new_sig == self._signature:
+                return  # данные не изменились
 
-        self._index = {}
-        self._texts = {}
-        self._signature = new_sig
+            new_index: dict[str, set[str]] = {}
+            new_texts: dict[str, str] = {}
 
-        for item in items:
-            item_id = item.get("id")
-            if not item_id:
-                continue
-            raw = self._item_text(item)
-            self._texts[item_id] = raw
-            for token in _tokenize(raw):
-                if token not in self._index:
-                    self._index[token] = set()
-                self._index[token].add(item_id)
+            for item in items:
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                raw = self._item_text(item)
+                new_texts[item_id] = raw
+                for token in _tokenize(raw):
+                    if token not in new_index:
+                        new_index[token] = set()
+                    new_index[token].add(item_id)
+
+            self._index = new_index
+            self._texts = new_texts
+            self._signature = new_sig
 
     # ------------------------------------------------------------------
     # Поиск
@@ -131,38 +138,40 @@ class SearchIndex:
         if not query_tokens:
             return []
 
-        # AND: пересечение множеств item_id для каждого токена
-        candidate_sets: list[set[str]] = []
-        matched_per_token: dict[str, str] = {}  # token -> original query word
         raw_words = _RE_TOKEN.findall(query.lower())
 
-        for i, token in enumerate(query_tokens):
-            ids = self._index.get(token)
-            if ids is None:
-                # Нет ни одного документа с этим токеном — AND не выполнимо
+        with self._lock:
+            # AND: пересечение множеств item_id для каждого токена
+            candidate_sets: list[set[str]] = []
+            matched_per_token: dict[str, str] = {}  # token -> original query word
+
+            for i, token in enumerate(query_tokens):
+                ids = self._index.get(token)
+                if ids is None:
+                    # Нет ни одного документа с этим токеном — AND не выполнимо
+                    return []
+                candidate_sets.append(ids)
+                matched_per_token[token] = raw_words[i] if i < len(raw_words) else token
+
+            common_ids: set[str] = candidate_sets[0].copy()
+            for s in candidate_sets[1:]:
+                common_ids &= s
+
+            if not common_ids:
                 return []
-            candidate_sets.append(ids)
-            matched_per_token[token] = raw_words[i] if i < len(raw_words) else token
 
-        common_ids: set[str] = candidate_sets[0].copy()
-        for s in candidate_sets[1:]:
-            common_ids &= s
-
-        if not common_ids:
-            return []
-
-        results: list[SearchResult] = []
-        for item_id in common_ids:
-            raw = self._texts.get(item_id, "")
-            snippet = self._make_snippet(raw, raw_words)
-            results.append(
-                SearchResult(
-                    item_id=item_id,
-                    score=len(query_tokens),
-                    matched_terms=list(matched_per_token.values()),
-                    snippet=snippet,
+            results: list[SearchResult] = []
+            for item_id in common_ids:
+                raw = self._texts.get(item_id, "")
+                snippet = self._make_snippet(raw, raw_words)
+                results.append(
+                    SearchResult(
+                        item_id=item_id,
+                        score=len(query_tokens),
+                        matched_terms=list(matched_per_token.values()),
+                        snippet=snippet,
+                    )
                 )
-            )
 
         # Сортируем по score (убывание), затем по item_id (детерминированность)
         results.sort(key=lambda r: (-r.score, r.item_id))
@@ -174,13 +183,14 @@ class SearchIndex:
 
     def get_index_stats(self) -> dict:
         """Возвращает статистику индекса."""
-        total_refs = sum(len(ids) for ids in self._index.values())
-        return {
-            "unique_words": len(self._index),
-            "items_indexed": len(self._texts),
-            "total_word_refs": total_refs,
-            "signature": self._signature,
-        }
+        with self._lock:
+            total_refs = sum(len(ids) for ids in self._index.values())
+            return {
+                "unique_words": len(self._index),
+                "items_indexed": len(self._texts),
+                "total_word_refs": total_refs,
+                "signature": self._signature,
+            }
 
     # ------------------------------------------------------------------
     # Вспомогательные
