@@ -350,6 +350,27 @@ class TextProcessingService:
         abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
         return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
 
+    def handle_add_abbreviation(self, params: dict) -> dict:
+        """IPC: add_abbreviation — добавить пользовательскую аббревиатуру.
+
+        Params:
+            abbr (str): Аббревиатура (например, "т.н.").
+            expansion (str): Полная форма (например, "так называемый").
+            language (str, optional): Код языка (по умолчанию "ru").
+            flags (str, optional): Дополнительные флаги (например, "no_after_digit").
+
+        Returns:
+            {"added": bool, "abbr": str, "language": str}
+        """
+        abbr = str(params.get("abbr", "")).strip()
+        expansion = str(params.get("expansion", "")).strip()
+        language = str(params.get("language", "ru"))
+        flags = str(params.get("flags", ""))
+        if not abbr or not expansion:
+            raise ValueError("abbr и expansion обязательны")
+        self._abbreviation_expander.add_abbreviation(abbr, expansion, language=language, flags=flags)
+        return {"added": True, "abbr": abbr, "language": language}
+
     # ------------------------------------------------------------------ #
     # post_process_text / list_post_process_steps                         #
     # ------------------------------------------------------------------ #
