@@ -564,6 +564,20 @@ class RecordingCoreService:
             "total_bytes": total_bytes,
         }
 
+    def handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Обновляет paste_status для записи истории (Swift вызывает после вставки).
+
+        Логически принадлежит RecordingCoreService: paste — финальный шаг цикла
+        запись → транскрипция → вставка. store.set_paste_status вызывается и внутри
+        этого сервиса (phase_e) — централизация здесь убирает дублирование.
+        """
+        item_id = str(params.get("id", "")).strip()
+        paste_status = str(params.get("paste_status", "failed")).strip() or "failed"
+        ok = self.store.set_paste_status(item_id=item_id, paste_status=paste_status)
+        if not ok:
+            raise RuntimeError("Не удалось обновить paste_status")
+        return {"updated": True, "id": item_id, "paste_status": paste_status}
+
     # ------------------------------------------------------------------ #
     # Preview worker (used by CallAssistService too via reset/start fns)  #
     # ------------------------------------------------------------------ #
