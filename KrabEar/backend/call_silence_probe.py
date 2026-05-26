@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from core.silence_constants import SILENCE_THRESHOLD_DB
+
 logger = logging.getLogger("KrabEar.Backend.CallSilenceProbe")
 
 # Длительность probe-TTS в секундах (macOS say ~2 сек)
@@ -60,7 +62,7 @@ class CallSilenceProbe:
         self,
         audio_buffer: "np.ndarray[Any, np.dtype[np.float32]]",
         sample_rate: int = 16000,
-        threshold_db: float = -40.0,
+        threshold_db: float = SILENCE_THRESHOLD_DB,
         duration_sec: float = 10.0,
     ) -> bool:
         """Определяет, содержит ли буфер непрерывную тишину >= duration_sec.
@@ -194,7 +196,7 @@ class CallSilenceProbe:
         self,
         audio_buffer: "np.ndarray[Any, np.dtype[np.float32]]",
         sample_rate: int = 16000,
-        threshold_db: float = -40.0,
+        threshold_db: float = SILENCE_THRESHOLD_DB,
         duration_sec: float = 10.0,
     ) -> dict[str, Any]:
         """Публичный метод для интеграции с CallAutoEnd.
