@@ -499,6 +499,9 @@ class BackendService:
                 )
             ),
         )
+        # Late-inject AutoGlossaryBuilder into HistoryService so that
+        # handle_add_history_item can invalidate the glossary cache immediately.
+        self._history._auto_glossary = self._auto_glossary
         # Семантический поиск (opt-in, lazy model load)
         self._semantic_searcher = SemanticSearcher(
             data_dir=self.store.data_dir,

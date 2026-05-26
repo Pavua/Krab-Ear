@@ -36,6 +36,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
+        auto_glossary_builder: Any | None = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -43,6 +44,9 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
+        # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
+        # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
+        self._auto_glossary = auto_glossary_builder
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
         # Менеджер профилей резюмирования (персистентность в data_dir).
@@ -69,6 +73,13 @@ class HistoryService:
             translation_status=str(params.get("translation_status", "not_requested")).strip() or "not_requested",
             translation_engine=str(params.get("translation_engine", "")).strip(),
         )
+        # Инвалидируем кэш автоглоссария после добавления новой записи.
+        # Новые имена собственные сразу попадут в STT-промпт при следующем вызове.
+        if self._auto_glossary is not None:
+            try:
+                self._auto_glossary.invalidate()
+            except Exception as _ag_exc:
+                logger.warning("auto_glossary invalidate error after add_history_item: %s", _ag_exc)
         return item.to_dict()
 
     def handle_get_history_page(self, params: dict[str, Any]) -> dict[str, Any]:
