@@ -120,13 +120,18 @@ class ConfigPresetsLibrary:
 
     Встроенные пресеты: interview, meeting, voice_memo, language_practice, podcast.
     Кастомные пресеты сохраняются в {data_dir}/config_presets.json.
+
+    Если передан settings_svc, handle_apply_config_preset атомарно сохраняет
+    настройки через него (merge + save + after_save_hooks), аналогично
+    apply_profile_preset в SettingsService.
     """
 
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(self, data_dir: str | Path, settings_svc: Any = None) -> None:
         self._data_dir = Path(data_dir)
         self._presets_path = self._data_dir / _PRESETS_FILE
         self._lock = threading.Lock()
         self._custom: dict[str, dict[str, Any]] = {}
+        self._settings_svc = settings_svc
         self._load()
 
     # ------------------------------------------------------------------
@@ -341,7 +346,11 @@ class ConfigPresetsLibrary:
         return {"presets": self.list_presets()}
 
     def handle_apply_config_preset(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: применить пресет — вернуть settings_patch.
+        """IPC: атомарно применить пресет — merge patch в текущие настройки и сохранить.
+
+        Если settings_svc доступен, мержит патч в текущие настройки, сохраняет через
+        settings_svc.handle_set_settings (единый вызов, аналог apply_profile_preset).
+        Без settings_svc возвращает только settings_patch (режим совместимости).
 
         Params:
             name (str): имя пресета.
@@ -350,7 +359,61 @@ class ConfigPresetsLibrary:
         if not name:
             raise ValueError("Параметр 'name' обязателен для apply_config_preset")
         patch = self.apply_preset(name)
-        return {"name": name, "settings_patch": patch}
+
+        if self._settings_svc is not None:
+            # Атомарное применение: делегируем handle_set_settings, который
+            # выполняет merge, save_settings, invalidate_cache и after_save_hooks.
+            save_result = self._settings_svc.handle_set_settings(patch)
+            logger.info("Пресет '%s' применён атомарно (%d ключей)", name, len(patch))
+            return {
+                "name": name,
+                "settings_patch": patch,
+                "applied": True,
+                "saved": save_result,
+            }
+
+        # Режим без settings_svc: вернуть только патч (caller делает второй set_settings)
+        logger.warning(
+            "apply_config_preset '%s': settings_svc недоступен, возвращаем только patch",
+            name,
+        )
+        return {"name": name, "settings_patch": patch, "applied": False}
+
+    def handle_delete_config_preset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: удалить кастомный пресет.
+
+        Params:
+            name (str): имя пресета.
+        """
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен для delete_config_preset")
+        deleted = self.delete_preset(name)
+        return {"name": name, "deleted": deleted}
+
+    def handle_export_config_preset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: экспортировать пресет в JSON-строку.
+
+        Params:
+            name (str): имя пресета.
+        """
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен для export_config_preset")
+        json_str = self.export_preset(name)
+        return {"name": name, "json": json_str}
+
+    def handle_import_config_preset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: импортировать пресет из JSON-строки.
+
+        Params:
+            json (str): JSON-строка пресета (envelope или прямой объект).
+        """
+        json_str = params.get("json")
+        if not json_str or not str(json_str).strip():
+            raise ValueError("Параметр 'json' обязателен для import_config_preset")
+        preset = self.import_preset(str(json_str))
+        return {"preset": preset}
 
     def handle_create_config_preset(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: создать кастомный пресет.
