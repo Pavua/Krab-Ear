@@ -605,5 +605,169 @@ class TestAutoGlossaryWave133(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ── TestAtomicPersist (W1012 F1) ─────────────────────────────────────────────
+
+class TestAtomicPersist(unittest.TestCase):
+    """Verify that _save_cache_to_disk uses tmp+fsync+os.replace (no partial writes)."""
+
+    def test_atomic_persist_no_partial_file(self):
+        """After build(), cache file must exist and be valid JSON; no .tmp leftovers."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            items = [_make_item("Python используется много раз")]
+            store = _FakeStore(items=items)
+            builder = AutoGlossaryBuilder(store=store, data_dir=Path(tmpdir))
+            builder.build(force=True)
+
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            # File must exist after build
+            self.assertTrue(cache_file.exists(), "auto_glossary.json не создан")
+            # Must be valid JSON (no partial write)
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertIn("terms", data)
+            self.assertIn("built_at", data)
+            # No leftover .tmp files
+            tmp_files = list(Path(tmpdir).glob(".auto_glossary_*.tmp"))
+            self.assertEqual(tmp_files, [], f"Оставлены tmp-файлы: {tmp_files}")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_atomic_persist_simulated_crash_leaves_no_partial(self):
+        """If the write-to-tmp fails, the original file must remain intact."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            # Write a valid pre-existing cache
+            cache_file.write_text(
+                json.dumps({"terms": ["OldTerm"], "built_at": 1000.0}), encoding="utf-8"
+            )
+
+            items = [_make_item("NewTerm используется")]
+            store = _FakeStore(items=items)
+            builder = AutoGlossaryBuilder(store=store, data_dir=Path(tmpdir))
+
+            # Patch os.replace to simulate a crash after tmp write
+            with unittest.mock.patch("os.replace", side_effect=OSError("simulated crash")):
+                # Should not raise — exception is caught internally
+                builder._save_cache_to_disk()
+
+            # Original file must still be valid (atomic guarantee)
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(data["terms"], ["OldTerm"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── TestPrivacyModeGuard (W1012 F4) ──────────────────────────────────────────
+
+class TestPrivacyModeGuard(unittest.TestCase):
+    """Verify that build() skips disk persist when privacy_mode is active."""
+
+    def test_build_skips_persist_in_privacy_mode(self):
+        """When privacy_mode=True, _save_cache_to_disk must NOT be called."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            items = [_make_item("Python используется много раз")]
+            store = _FakeStore(items=items)
+
+            settings_dict = {"privacy_mode": True}
+            builder = AutoGlossaryBuilder(
+                store=store,
+                data_dir=Path(tmpdir),
+                settings_provider=lambda: settings_dict,
+            )
+            builder.build(force=True)
+
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            # File must NOT exist — privacy_mode blocks persist
+            self.assertFalse(
+                cache_file.exists(),
+                "auto_glossary.json записан при privacy_mode=True — утечка данных",
+            )
+            # In-memory cache is still populated
+            self.assertIsInstance(builder.get_cached(), list)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_build_persists_when_privacy_mode_off(self):
+        """When privacy_mode=False, disk persist proceeds normally."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            items = [_make_item("Python используется много раз")]
+            store = _FakeStore(items=items)
+
+            settings_dict = {"privacy_mode": False}
+            builder = AutoGlossaryBuilder(
+                store=store,
+                data_dir=Path(tmpdir),
+                settings_provider=lambda: settings_dict,
+            )
+            builder.build(force=True)
+
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            self.assertTrue(cache_file.exists(), "auto_glossary.json должен быть записан")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_build_skips_in_privacy_mode(self):
+        """Alias test name from task spec: test_build_skips_in_privacy_mode."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            items = [_make_item("Тест приватности")]
+            store = _FakeStore(items=items)
+            builder = AutoGlossaryBuilder(
+                store=store,
+                data_dir=Path(tmpdir),
+                settings_provider=lambda: {"privacy_mode": True},
+            )
+            builder.build(force=True)
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            self.assertFalse(cache_file.exists())
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_settings_provider_exception_defaults_to_no_privacy(self):
+        """If settings_provider raises, privacy_mode defaults to False (persist proceeds)."""
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            items = [_make_item("Python используется")]
+            store = _FakeStore(items=items)
+
+            def _broken_provider():
+                raise RuntimeError("settings unavailable")
+
+            builder = AutoGlossaryBuilder(
+                store=store,
+                data_dir=Path(tmpdir),
+                settings_provider=_broken_provider,
+            )
+            # Should not raise; _is_privacy_mode_active catches the error
+            builder.build(force=True)
+            # File should NOT be persisted when provider raises (fails-safe to no persist)
+            # Actually: _is_privacy_mode_active returns False on exception → persists
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            self.assertTrue(cache_file.exists(), "При ошибке провайдера должен записывать (fail-open)")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from core.term_extractor import TermExtractor, _is_stop_word
 
@@ -195,11 +197,15 @@ class AutoGlossaryBuilder:
         term_extractor: Optional[TermExtractor] = None,
         data_dir: Optional[Path] = None,
         refresh_hours: float = 6.0,
+        settings_provider: Optional[Callable[[], dict]] = None,
     ) -> None:
         self._store = store
         self._extractor = term_extractor or TermExtractor()
         self._data_dir = data_dir
         self._refresh_hours = refresh_hours
+        # Callable returning current settings dict; used to check privacy_mode.
+        # None means privacy_mode is assumed off (backward-compatible).
+        self._settings_provider = settings_provider
 
         # In-memory cache
         self._cache: List[str] = []
@@ -243,8 +249,12 @@ class AutoGlossaryBuilder:
         self._cache = terms
         self._cache_built_at = time.time()
 
-        if self._data_dir:
+        if self._data_dir and not self._is_privacy_mode_active():
             self._save_cache_to_disk()
+        elif self._is_privacy_mode_active():
+            logger.debug(
+                "auto_glossary: privacy_mode активен — пропускаем сохранение на диск"
+            )
 
         return list(terms)
 
@@ -267,6 +277,19 @@ class AutoGlossaryBuilder:
             return False
         age_hours = (time.time() - self._cache_built_at) / 3600.0
         return age_hours < self._refresh_hours
+
+    def _is_privacy_mode_active(self) -> bool:
+        """Возвращает True если privacy_mode включён в текущих настройках."""
+        if self._settings_provider is None:
+            return False
+        try:
+            settings = self._settings_provider()
+            return bool(settings.get("privacy_mode", False))
+        except Exception as exc:
+            logger.warning(
+                "auto_glossary: не удалось получить настройки для privacy_mode: %s", exc
+            )
+            return False
 
     def _build_from_history(self, window_days: int, top_n: int) -> List[str]:
         """Основная логика построения глоссария из истории."""
@@ -362,18 +385,40 @@ class AutoGlossaryBuilder:
             self._cache_built_at = 0.0
 
     def _save_cache_to_disk(self) -> None:
-        """Сохраняет кэш на диск."""
+        """Атомарно сохраняет кэш на диск через tmp-файл + fsync + os.replace.
+
+        Запись во временный файл в той же директории гарантирует, что
+        os.replace() выполняется в рамках одной файловой системы (атомарно
+        на POSIX). Это исключает частично-записанный auto_glossary.json при
+        crash или SIGKILL в момент записи.
+        """
         path = self._cache_path()
         if not path:
             return
         try:
-            path.write_text(
-                json.dumps(
-                    {"terms": self._cache, "built_at": self._cache_built_at},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            payload = json.dumps(
+                {"terms": self._cache, "built_at": self._cache_built_at},
+                ensure_ascii=False,
+                indent=2,
             )
+            dir_path = path.parent
+            dir_path.mkdir(parents=True, exist_ok=True)
+            # Пишем во временный файл в той же директории (важно для os.replace)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(dir_path), prefix=".auto_glossary_", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, str(path))
+            except Exception:
+                # Убираем tmp-файл при любой ошибке, не прячем исключение
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as exc:
             logger.warning("auto_glossary: ошибка сохранения кэша на диск: %s", exc)
