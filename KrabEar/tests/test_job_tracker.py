@@ -393,6 +393,65 @@ class PurgeOldCompletedJobsTestCase(unittest.TestCase):
         self.assertIsNotNone(tracker.get(young_jid))
 
 
+class PruneStaleRunningTestCase(unittest.TestCase):
+    """Тест W965 HIGH: prune() evicts stale running jobs to prevent memory leak."""
+
+    def test_prune_evicts_stale_running(self) -> None:
+        """Задача в статусе 'running' с started_at > 8 часов назад должна быть удалена."""
+        import logging
+
+        tracker = JobTracker()
+        jid = tracker.create_job(1)
+        tracker.update(jid, status="running")
+
+        # Fake-age started_at to 8 hours ago (>7200s threshold).
+        eight_hours_ago = time.monotonic() - 8 * 3600
+        tracker.update(jid, started_at=eight_hours_ago)
+
+        with self.assertLogs("backend.job_tracker", level="WARNING") as log_ctx:
+            removed = tracker.prune(max_running_age_sec=7200.0)
+
+        self.assertEqual(removed, 1, "prune() должен вернуть 1 (одна задача удалена)")
+        self.assertIsNone(
+            tracker.get(jid),
+            "stale running job должна быть удалена из трекера",
+        )
+        # Verify warning was emitted with the job_id.
+        self.assertTrue(
+            any(jid in msg for msg in log_ctx.output),
+            f"WARNING с job_id={jid!r} не найден в логах: {log_ctx.output}",
+        )
+
+    def test_prune_keeps_young_running(self) -> None:
+        """Задача в статусе 'running' с недавним started_at должна сохраняться."""
+        tracker = JobTracker()
+        jid = tracker.create_job(1)
+        tracker.update(jid, status="running")
+        # started_at is just now — well within 7200s limit.
+        removed = tracker.prune(max_running_age_sec=7200.0)
+        self.assertEqual(removed, 0)
+        self.assertIsNotNone(tracker.get(jid))
+
+    def test_prune_returns_count_of_removed(self) -> None:
+        """prune() возвращает количество удалённых задач."""
+        tracker = JobTracker()
+        # Create both jobs first, then mark terminal status — avoids auto-prune in create_job()
+        # removing jid1 before jid2 is even created.
+        jid1 = tracker.create_job(1)
+        jid2 = tracker.create_job(1)
+
+        tracker.mark_done(jid1, items=[], errors=[])
+        tracker.update(jid1, finished_at=time.monotonic() - 7200)
+
+        tracker.update(jid2, status="running")
+        tracker.update(jid2, started_at=time.monotonic() - 8 * 3600)
+
+        with self.assertLogs("backend.job_tracker", level="WARNING"):
+            removed = tracker.prune(max_age_sec=1.0, max_running_age_sec=7200.0)
+
+        self.assertEqual(removed, 2, "должны быть удалены 2 задачи (1 terminal + 1 stale running)")
+
+
 class ConcurrentCreateUniqueIdsTestCase(unittest.TestCase):
     """Тест уникальности job_id при конкурентном создании задач."""
 

@@ -19,10 +19,13 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class JobTracker:
@@ -134,19 +137,46 @@ class JobTracker:
             job["cancel_requested"] = True
             return True
 
-    def prune(self, max_age_sec: int = 3600) -> None:
-        """Удаляет давно завершённые задачи (done/failed/cancelled старше max_age_sec).
+    def prune(
+        self,
+        max_age_sec: float = 3600.0,
+        max_running_age_sec: float = 7200.0,
+    ) -> int:
+        """Удаляет давно завершённые задачи и зависшие running-задачи.
+
+        Args:
+            max_age_sec: максимальный возраст (с) для terminal-задач
+                         (done/failed/cancelled) по finished_at.
+            max_running_age_sec: максимальный возраст (с) для задач в статусе
+                         «running» по started_at. Защита от утечки памяти,
+                         если worker-поток упал с BaseException и не вызвал
+                         mark_done/mark_failed. По умолчанию 7200 с (2 ч) —
+                         достаточно для самых длинных реальных транскрибаций.
+
+        Returns:
+            Количество удалённых задач.
 
         Вызывается автоматически из create_job(). Не требует фонового GC-потока.
         """
-        threshold = time.monotonic() - max_age_sec
+        now = time.monotonic()
         terminal = {"done", "failed", "cancelled"}
         with self._lock:
-            stale = [
-                jid
-                for jid, job in self._jobs.items()
-                if job.get("status") in terminal
-                and (job.get("finished_at") or 0.0) < threshold
-            ]
-            for jid in stale:
-                self._jobs.pop(jid, None)
+            to_remove = []
+            for job_id, job in self._jobs.items():
+                status = job.get("status")
+                if status in terminal:
+                    finished_at = job.get("finished_at") or 0.0
+                    if (now - finished_at) > max_age_sec:
+                        to_remove.append(job_id)
+                elif status == "running":
+                    age = now - (job.get("started_at") or now)
+                    if age > max_running_age_sec:
+                        logger.warning(
+                            "job_tracker: evicting stale running job %s (age=%.0fs)",
+                            job_id,
+                            age,
+                        )
+                        to_remove.append(job_id)
+            for jid in to_remove:
+                del self._jobs[jid]
+            return len(to_remove)
