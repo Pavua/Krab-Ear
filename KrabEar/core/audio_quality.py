@@ -13,6 +13,8 @@ from typing import Optional
 
 import numpy as np
 
+from core.silence_detector import SILENCE_THRESHOLD_AMP
+
 logger = logging.getLogger("KrabEar.AudioQuality")
 
 # ---------------------------------------------------------------------------
@@ -21,7 +23,9 @@ logger = logging.getLogger("KrabEar.AudioQuality")
 
 _CLIPPING_THRESHOLD = 0.99      # амплитуда ≥ порога считается клиппингом
 _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме при анализе тишины
-_SILENCE_RMS_THRESHOLD = 0.001  # RMS фрейма ниже этого → тишина
+# Единый порог тишины: используем SILENCE_THRESHOLD_AMP (0.01, -40 dB)
+# из silence_detector — один источник правды для всего проекта (W912/W1107).
+_SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 
@@ -188,7 +192,7 @@ class AudioQualityAnalyzer:
             return 0.0
 
         # Если есть тихие фреймы — берём их как noise floor
-        quiet_mask = frame_rms < _SILENCE_RMS_THRESHOLD * 10
+        quiet_mask = frame_rms < _SILENCE_RMS_THRESHOLD
         if np.sum(quiet_mask) >= 2:
             noise_rms = float(np.mean(frame_rms[quiet_mask]))
             if noise_rms < 1e-10:

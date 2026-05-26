@@ -18,6 +18,11 @@ logger = logging.getLogger("KrabEar.SilenceDetector")
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
+# Единый порог тишины по амплитуде (RMS) — -40 dB.
+# Экспортируется как публичная константа для использования в других модулях
+# (например, audio_quality.py) во избежание расхождения значений.
+SILENCE_THRESHOLD_AMP: float = 0.01
+
 
 def _db_to_amplitude(db: float) -> float:
     """Конвертирует порог в дБ в амплитуду (RMS)."""
