@@ -786,6 +786,7 @@ def _format_uptime(seconds: float) -> str:
 
 
 @monitoring_blp.route("/health/dashboard", methods=["GET"])
+@require_api_key
 def health_dashboard():
     """Self-contained HTML health dashboard with auto-refresh every 30 seconds.
 
@@ -833,6 +834,7 @@ MAX_WORD_LENGTH = 100
 
 @v1_blp.route("/vocabulary", methods=["GET"])
 @v1_blp.response(200, VocabularyResponseSchema)
+@require_api_key
 def get_vocabulary():
     """Return the current persistent user vocabulary."""
     return {"words": store.load_vocabulary()}
@@ -841,6 +843,7 @@ def get_vocabulary():
 @v1_blp.route("/vocabulary", methods=["POST"])
 @v1_blp.arguments(VocabularyPostSchema)
 @v1_blp.response(200, VocabularyUpdateResponseSchema)
+@require_api_key
 def add_vocabulary(args):
     """Add words to the persistent user vocabulary.
 
@@ -862,6 +865,7 @@ def add_vocabulary(args):
 @v1_blp.route("/stt/transcribe", methods=["POST"])
 @v1_blp.response(200, TranscribeResponseSchema)
 @limiter.limit("10 per minute")
+@require_api_key
 def transcribe_audio():
     """Transcribe an audio file to text.
 
