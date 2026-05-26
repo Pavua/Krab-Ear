@@ -55,6 +55,9 @@ _MIN_WORD_LENGTH = 2
 _FONT_SIZE_MIN = 12
 _FONT_SIZE_MAX = 72
 
+# Верхняя граница max_words на уровне модуля (защита от OOM при огромных значениях)
+_MAX_WORDS_LIMIT = 1000
+
 # ---------------------------------------------------------------------------
 # Похожие слова: пары вариантов написания для слияния
 # ---------------------------------------------------------------------------
@@ -63,6 +66,10 @@ _MERGE_PAIRS: list[tuple[str, str]] = [
     ("ещё", "еще"),
     ("её", "ее"),
 ]
+
+# Словарь слияния похожих слов (вариант → канонический вид).
+# Построен один раз на уровне модуля, не пересоздаётся при каждом вызове.
+_MERGE_MAP: dict[str, str] = {variant: canonical for canonical, variant in _MERGE_PAIRS}
 
 
 # ---------------------------------------------------------------------------
@@ -140,12 +147,18 @@ class KeywordCloudGenerator:
         if not items:
             return []
 
+        # Зажать max_words в диапазон [0, _MAX_WORDS_LIMIT] на уровне генератора.
+        # max_words <= 0 означает «вернуть пустой список».
+        max_words = min(max(0, int(max_words)), _MAX_WORDS_LIMIT)
+        if max_words == 0:
+            return []
+
         words = self._collect_words(items, language=language)
         if not words:
             return []
 
         counter = Counter(words)
-        top_n = counter.most_common(max(1, max_words))
+        top_n = counter.most_common(max_words)
 
         if not top_n:
             return []
@@ -270,12 +283,12 @@ class KeywordCloudGenerator:
 
     @staticmethod
     def _merge_similar(words: list[str]) -> list[str]:
-        """Объединяет известные варианты написания одного слова."""
-        merge_map: dict[str, str] = {}
-        for canonical, variant in _MERGE_PAIRS:
-            merge_map[variant] = canonical
+        """Объединяет известные варианты написания одного слова.
 
-        return [merge_map.get(w, w) for w in words]
+        Использует модульную константу _MERGE_MAP (вариант → канонический вид),
+        которая построена один раз при загрузке модуля.
+        """
+        return [_MERGE_MAP.get(w, w) for w in words]
 
     def _scale_font(self, weight: float) -> int:
         """Масштабирует вес (0-1) в размер шрифта (font_size_min..font_size_max)."""
