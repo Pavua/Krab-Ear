@@ -301,6 +301,7 @@ class BackendService:
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
+            cached_settings=self._cached_settings,
         )
         self._call_assist = CallAssistService(
             store=self.store,
