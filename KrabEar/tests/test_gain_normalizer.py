@@ -382,10 +382,12 @@ class TestWave130RequiredCases(unittest.TestCase):
 
     # test_target_db_clamped_to_safe_range
     def test_target_db_clamped_to_safe_range(self):
-        """Экстремальные target_db не вызывают исключений и не приводят к
-        бесконечным значениям или NaN в результате."""
+        """Негативные target_db не вызывают исключений и не приводят к
+        бесконечным значениям или NaN в результате.
+        Позитивные target_db отклоняются с ValueError (W1066 F5).
+        """
         audio = _sine(amplitude=0.1, duration=1.0)
-        for extreme_target in (-80.0, 0.0, 6.0):
+        for extreme_target in (-80.0, 0.0):
             result = self.normalizer.normalize(audio, target_db=extreme_target)
             self.assertFalse(
                 np.any(np.isnan(result.audio)),
@@ -398,6 +400,9 @@ class TestWave130RequiredCases(unittest.TestCase):
             peak = float(np.max(np.abs(result.audio))) if len(result.audio) else 0.0
             self.assertLessEqual(peak, 1.0 + 1e-6,
                                  msg=f"Clipping at target_db={extreme_target}")
+        # target_db > 0 must now raise ValueError (W1066 F5)
+        with self.assertRaises(ValueError):
+            self.normalizer.normalize(audio, target_db=6.0)
 
     # test_concurrent_normalize
     def test_concurrent_normalize(self):
@@ -432,6 +437,90 @@ class TestWave130RequiredCases(unittest.TestCase):
             self.assertFalse(np.any(np.isnan(r.audio)))
             peak = float(np.max(np.abs(r.audio)))
             self.assertLessEqual(peak, 1.0 + 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Тест 10: W1066 — NaN/Inf guard + target_db validation (W1064 F1+F2+F5)
+# ---------------------------------------------------------------------------
+
+class TestW1066Guards(unittest.TestCase):
+    """W1066: NaN/Inf propagation guard and target_db > 0 validation."""
+
+    def setUp(self):
+        self.normalizer = GainNormalizer()
+
+    def test_nan_input_returns_unchanged_with_warning(self):
+        """NaN samples in input → audio returned unchanged, warning logged."""
+        import logging
+
+        audio = _sine(amplitude=0.1, duration=0.5)
+        audio[10] = float("nan")
+
+        with self.assertLogs("KrabEar.GainNormalizer", level=logging.WARNING) as cm:
+            result = self.normalizer.normalize(audio)
+
+        # Result must be a valid GainResult with same length
+        self.assertIsInstance(result, GainResult)
+        self.assertEqual(len(result.audio), len(audio))
+        # Gain must be zero — signal was not processed
+        self.assertAlmostEqual(result.gain_applied_db, 0.0, delta=1e-6)
+        # Warning must mention non-finite
+        self.assertTrue(
+            any("non-finite" in line for line in cm.output),
+            msg=f"Expected 'non-finite' in warning, got: {cm.output}",
+        )
+
+    def test_inf_input_returns_unchanged_with_warning(self):
+        """Inf samples in input → audio returned unchanged, warning logged."""
+        import logging
+
+        audio = _sine(amplitude=0.1, duration=0.5)
+        audio[5] = float("inf")
+
+        with self.assertLogs("KrabEar.GainNormalizer", level=logging.WARNING) as cm:
+            result = self.normalizer.normalize(audio)
+
+        self.assertIsInstance(result, GainResult)
+        self.assertAlmostEqual(result.gain_applied_db, 0.0, delta=1e-6)
+        self.assertTrue(
+            any("non-finite" in line for line in cm.output),
+            msg=f"Expected 'non-finite' in warning, got: {cm.output}",
+        )
+
+    def test_positive_target_db_raises_value_error(self):
+        """target_db > 0 must raise ValueError (guarantees clipping)."""
+        audio = _sine(amplitude=0.1, duration=0.5)
+        with self.assertRaises(ValueError):
+            self.normalizer.normalize(audio, target_db=1.0)
+
+    def test_zero_target_db_does_not_raise(self):
+        """target_db == 0 is on the boundary and must not raise."""
+        audio = _sine(amplitude=0.1, duration=0.5)
+        # Should complete without exception (limiter handles any overshoot)
+        result = self.normalizer.normalize(audio, target_db=0.0)
+        self.assertIsInstance(result, GainResult)
+
+    def test_finite_clean_audio_not_affected_by_guard(self):
+        """Clean audio (all finite) must not trigger the NaN guard path."""
+        audio = _sine(amplitude=0.1, duration=1.0)
+        import io
+        import logging
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.WARNING)
+        log = logging.getLogger("KrabEar.GainNormalizer")
+        log.addHandler(handler)
+        try:
+            result = self.normalizer.normalize(audio, target_db=-20.0)
+        finally:
+            log.removeHandler(handler)
+
+        # Guard path logs warning — make sure it was NOT triggered
+        warnings_output = stream.getvalue()
+        self.assertNotIn("non-finite", warnings_output)
+        # Normal normalisation should have applied a nonzero gain
+        self.assertIsInstance(result, GainResult)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,10 @@ GainNormalizer приводит входной сигнал к целевому 
 клиппинга и возвращает подробный GainResult с диагностикой.
 
 Только numpy — без внешних зависимостей.
+
+# DEAD CODE — not wired in v2.0.5; kept for resurrection.
+# Wiring deferred: requires careful tuning to avoid clipping/distortion on
+# the STT audio path (engine.py). Tracked as W1064 F4.
 """
 
 from __future__ import annotations
@@ -108,8 +112,32 @@ class GainNormalizer:
 
         Returns:
             GainResult с нормализованным аудио и диагностикой.
+
+        Raises:
+            ValueError: если target_db > 0 (неверный знак — было бы усиление
+                        выше 0 дБFS, что гарантированно приводит к клиппингу).
         """
+        if target_db > 0:
+            raise ValueError(
+                f"target_db должен быть ≤ 0 дБFS, получено {target_db}. "
+                "Положительные значения гарантируют клиппинг."
+            )
+
         audio = self._to_mono_float32(audio)
+
+        # Защита от NaN/Inf во входном сигнале (F1/F2)
+        if len(audio) > 0 and not np.all(np.isfinite(audio)):
+            logger.warning(
+                "gain_normalizer: non-finite samples in input (NaN/Inf), "
+                "returning audio unchanged."
+            )
+            return GainResult(
+                audio=audio.copy(),
+                gain_applied_db=0.0,
+                input_rms_db=_SILENCE_FLOOR_DB,
+                output_rms_db=_SILENCE_FLOOR_DB,
+                clipped_samples=0,
+            )
 
         input_rms_db = _rms_db(audio)
 
