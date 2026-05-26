@@ -296,3 +296,34 @@ class TranscriptVersionManager:
             raise ValueError("Параметр version_num обязателен")
         version_num = int(version_num)
         return self.revert_to_version(item_id=item_id, version_num=version_num)
+
+    def purge_versions_for_item(self, item_id: str) -> int:
+        """Удаляет все версии транскрипции для указанного item_id.
+
+        Используется при удалении, архивировании или слиянии записей, чтобы
+        избежать «висячих» версий в хранилище.
+
+        Args:
+            item_id: ID записи истории.
+
+        Returns:
+            Количество удалённых версий.
+        """
+        clean_id = str(item_id).strip()
+        if not clean_id:
+            return 0
+        with self._lock:
+            all_records = self._read_all()
+            remaining = [r for r in all_records if r.get("item_id") != clean_id]
+            purged = len(all_records) - len(remaining)
+            if purged > 0:
+                tmp = self._versions_path.with_suffix(".ndjson.tmp")
+                try:
+                    with tmp.open("w", encoding="utf-8") as fh:
+                        for record in remaining:
+                            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    tmp.replace(self._versions_path)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+            return purged

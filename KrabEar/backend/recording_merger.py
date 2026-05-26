@@ -20,14 +20,10 @@ class RecordingMerger:
 
     Конструктор не требует store — он передаётся явно в каждый метод,
     чтобы упростить тестирование и следовать паттерну других сервисов.
-
-    Параметр *semantic_searcher* опциональный — передаётся через
-    late-injection из BackendService после инициализации SemanticSearcher.
-    Если не передан (None), обновления индекса молча пропускаются.
     """
 
-    def __init__(self, *, semantic_searcher: Any | None = None) -> None:
-        self._semantic_searcher = semantic_searcher
+    def __init__(self, transcript_versioner: Any | None = None) -> None:
+        self._transcript_versioner = transcript_versioner
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -70,31 +66,18 @@ class RecordingMerger:
             tags=merged_data["tags"],
         )
 
-        # Обновляем индекс семантического поиска для нового объединённого элемента.
-        if self._semantic_searcher is not None:
-            try:
-                self._semantic_searcher.index_item(new_item.id, new_item.text)
-            except Exception:
-                logger.warning(
-                    "semantic_searcher.index_item failed for merged item %s",
-                    new_item.id,
-                    exc_info=True,
-                )
-
         if delete_originals:
             deleted_ids: list[str] = []
             for item in items:
                 if store.delete_history_item(item.id):
                     deleted_ids.append(item.id)
-                    # Удаляем эмбеддинг оригинала из индекса семантического поиска.
-                    if self._semantic_searcher is not None:
+                    # W1254 F1: purge version cascade on merge-delete
+                    if self._transcript_versioner is not None:
                         try:
-                            self._semantic_searcher.remove_item(item.id)
+                            self._transcript_versioner.purge_versions_for_item(item.id)
                         except Exception:
-                            logger.warning(
-                                "semantic_searcher.remove_item failed for item %s",
-                                item.id,
-                                exc_info=True,
+                            logger.exception(
+                                "merge_items: не удалось удалить версии для id=%s", item.id
                             )
             logger.info(
                 "Объединено %d записей → %s; удалено %d оригиналов",

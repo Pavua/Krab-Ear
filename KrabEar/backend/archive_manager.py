@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import threading
@@ -19,7 +18,6 @@ logger = logging.getLogger("KrabEar.Backend.ArchiveManager")
 
 _ARCHIVE_SUBDIR = "archive"
 _ARCHIVE_FILE = "archive.ndjson"
-_ARCHIVE_LOCK_FILE = "archive.ndjson.lock"
 
 
 @dataclass
@@ -36,49 +34,17 @@ class ArchiveManager:
 
     Архив хранится в {data_dir}/archive/archive.ndjson отдельно от активной
     истории. Удалённые из активной истории записи могут быть восстановлены.
-
-    Файловая блокировка через fcntl.flock на archive.ndjson.lock обеспечивает
-    безопасность при одновременном доступе нескольких процессов к одному data_dir.
     """
 
-    def __init__(self, store: Any, semantic_searcher: Any | None = None) -> None:
+    def __init__(self, store: Any, transcript_versioner: Any | None = None) -> None:
         self._store = store
-        self._semantic_searcher = semantic_searcher
+        self._transcript_versioner = transcript_versioner
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
-        self._lock_path = self._archive_dir / _ARCHIVE_LOCK_FILE
-        self._thread_lock = threading.Lock()
+        self._lock = threading.Lock()
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._archive_path.touch(exist_ok=True)
-        self._lock_path.touch(exist_ok=True)
-        # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
-        self._recording_chain_mgr = None
-
-    # ------------------------------------------------------------------
-    # Файловая блокировка (межпроцессная)
-    # ------------------------------------------------------------------
-
-    def _flock(self):
-        """Контекстный менеджер: POSIX flock на archive.ndjson.lock.
-
-        Паттерн из state_store.py: отдельный lock-файл, чтобы избежать
-        stat-race на самом data-файле. Блокировка удерживается на всё
-        время записи.
-        """
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _ctx():
-            self._lock_path.touch(exist_ok=True)
-            with self._lock_path.open("r+", encoding="utf-8") as lf:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-
-        return _ctx()
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
@@ -102,24 +68,23 @@ class ArchiveManager:
             logger.warning("Не удалось прочитать архив: %s", exc)
         return items
 
-    def _append_ndjson(self, path: Path, payload: dict[str, Any]) -> None:
-        """Атомарный append JSON-строки с fcntl.flock."""
-        with self._flock():
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    @staticmethod
+    def _append_ndjson(path: Path, payload: dict[str, Any]) -> None:
+        """Атомарный append JSON-строки."""
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _rewrite_archive(self, items: list[dict[str, Any]]) -> None:
-        """Перезаписывает файл архива атомарно через tmp-файл с fcntl.flock."""
+        """Перезаписывает файл архива атомарно через tmp-файл."""
         tmp = self._archive_path.with_suffix(".ndjson.tmp")
-        with self._flock():
-            try:
-                with tmp.open("w", encoding="utf-8") as fh:
-                    for item in items:
-                        fh.write(json.dumps(item, ensure_ascii=False) + "\n")
-                tmp.replace(self._archive_path)
-            except Exception:
-                tmp.unlink(missing_ok=True)
-                raise
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                for item in items:
+                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+            tmp.replace(self._archive_path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -127,12 +92,6 @@ class ArchiveManager:
 
     def archive_items(self, item_ids: list[str], store: Any | None = None) -> ArchiveResult:
         """Перемещает записи из активной истории в архив.
-
-        Порядок операций (write-first, delete-second):
-        1. Запись добавляется в архив.
-        2. Запись удаляется из активной истории.
-        При сбое удаления (шаг 2) выполняется откат: архив перезаписывается
-        без только что добавленной записи, чтобы не допустить дублирования.
 
         Args:
             item_ids: Список ID записей для архивирования.
@@ -150,7 +109,7 @@ class ArchiveManager:
             )
 
         archived_count = 0
-        with self._thread_lock:
+        with self._lock:
             for item_id in item_ids:
                 clean_id = str(item_id).strip()
                 if not clean_id:
@@ -162,48 +121,16 @@ class ArchiveManager:
                 item_dict = item.to_dict() if hasattr(item, "to_dict") else item
                 item_dict = dict(item_dict)
                 item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-                # Шаг 1: записываем в архив первым делом.
                 self._append_ndjson(self._archive_path, item_dict)
-
-                # Шаг 2: удаляем из активной истории.
-                # При сбое — откатываем архивную запись.
-                try:
-                    _store.delete_history_item(clean_id)
-                except Exception as exc:
-                    logger.error(
-                        "archive_items: не удалось удалить id=%s из активной истории, "
-                        "откатываем архивную запись: %s",
-                        clean_id,
-                        exc,
-                    )
-                    # Откат: перечитываем архив и убираем только что добавленную запись.
+                _store.delete_history_item(clean_id)
+                # W1254 F1: purge version cascade on archive
+                if self._transcript_versioner is not None:
                     try:
-                        existing = self._read_archive()
-                        rollback = [r for r in existing if r.get("id") != clean_id]
-                        self._rewrite_archive(rollback)
-                    except Exception as rb_exc:
-                        logger.critical(
-                            "archive_items: откат не удался для id=%s — запись может "
-                            "присутствовать в обоих хранилищах: %s",
-                            clean_id,
-                            rb_exc,
-                        )
-                    continue
-
-                # Шаг 3: удаляем из индекса семантического поиска (W1449 F1).
-                if self._semantic_searcher is not None:
-                    try:
-                        self._semantic_searcher.remove_item(clean_id)
+                        self._transcript_versioner.purge_versions_for_item(clean_id)
                     except Exception:
-                        logger.warning(
-                            "archive_items: semantic remove failed for %s", clean_id
+                        logger.exception(
+                            "archive_items: не удалось удалить версии для id=%s", clean_id
                         )
-
-                # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
-                if self._recording_chain_mgr is not None:
-                    self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
-
                 archived_count += 1
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
@@ -215,13 +142,6 @@ class ArchiveManager:
 
     def unarchive_items(self, item_ids: list[str], store: Any | None = None) -> dict[str, Any]:
         """Восстанавливает записи из архива обратно в активную историю.
-
-        Порядок операций (restore-first, remove-second):
-        1. Запись добавляется в активную историю.
-        2. Архив перезаписывается без восстановленных записей.
-        При сбое перезаписи архива (шаг 2) все успешно восстановленные записи уже
-        находятся в активной истории; архив содержит их копии — логируем CRITICAL
-        для последующего ручного устранения.
 
         Args:
             item_ids: Список ID записей для восстановления.
@@ -237,10 +157,8 @@ class ArchiveManager:
 
         unarchived_count = 0
         not_found: list[str] = []
-        # Записи, успешно восстановленные в активную историю (для отката архива).
-        restored_ids: set[str] = set()
 
-        with self._thread_lock:
+        with self._lock:
             all_archived = self._read_archive()
             found_ids: set[str] = set()
             remaining: list[dict[str, Any]] = []
@@ -249,52 +167,29 @@ class ArchiveManager:
                 item_id = item.get("id", "")
                 if item_id in ids_set:
                     found_ids.add(item_id)
-                    # Восстанавливаем полный словарь без поля archived_at,
-                    # сохраняя все оригинальные поля (id, ts, теги, эмоции и т.д.)
+                    # Восстанавливаем без поля archived_at
                     restore_dict = {k: v for k, v in item.items() if k != "archived_at"}
                     try:
-                        if hasattr(_store, "restore_history_item_raw"):
-                            # Предпочтительный путь: сохранить все поля + оригинальный id
-                            _store.restore_history_item_raw(restore_dict)
-                        else:
-                            # Фоллбэк для фейковых store в тестах без restore_history_item_raw
-                            _store.add_history_item(
-                                text=restore_dict.get("text", ""),
-                                paste_status=restore_dict.get("paste_status", "failed"),
-                                source_text=restore_dict.get("source_text", ""),
-                                translated_text=restore_dict.get("translated_text", ""),
-                                translation_mode=restore_dict.get("translation_mode", "off"),
-                                source_lang=restore_dict.get("source_lang", ""),
-                                target_lang=restore_dict.get("target_lang", ""),
-                                translation_status=restore_dict.get("translation_status", "not_requested"),
-                                translation_engine=restore_dict.get("translation_engine", ""),
-                            )
-                        restored_ids.add(item_id)
+                        _store.add_history_item(
+                            text=restore_dict.get("text", ""),
+                            paste_status=restore_dict.get("paste_status", "failed"),
+                            source_text=restore_dict.get("source_text", ""),
+                            translated_text=restore_dict.get("translated_text", ""),
+                            translation_mode=restore_dict.get("translation_mode", "off"),
+                            source_lang=restore_dict.get("source_lang", ""),
+                            target_lang=restore_dict.get("target_lang", ""),
+                            translation_status=restore_dict.get("translation_status", "not_requested"),
+                            translation_engine=restore_dict.get("translation_engine", ""),
+                        )
                         unarchived_count += 1
-                        # Успешно восстановлено — не включаем в remaining.
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
-                        # Восстановление не удалось — оставляем в архиве.
                         remaining.append(item)
                 else:
                     remaining.append(item)
 
             not_found = sorted(ids_set - found_ids)
-
-            # Шаг 2: перезаписываем архив без успешно восстановленных записей.
-            # При сбое — записи уже в активной истории, но архив содержит их копии.
-            if restored_ids:
-                try:
-                    self._rewrite_archive(remaining)
-                except Exception as exc:
-                    logger.critical(
-                        "unarchive_items: не удалось перезаписать архив после восстановления "
-                        "%d записей (ids=%s). Записи существуют в обоих хранилищах — "
-                        "требуется ручное устранение: %s",
-                        len(restored_ids),
-                        sorted(restored_ids),
-                        exc,
-                    )
+            self._rewrite_archive(remaining)
 
         return {"unarchived_count": unarchived_count, "not_found": not_found}
 
@@ -308,7 +203,7 @@ class ArchiveManager:
             Список словарей записей с полем archived_at.
         """
         safe_limit = max(1, min(limit, 500))
-        with self._thread_lock:
+        with self._lock:
             items = self._read_archive()
         # Сортируем по archived_at (новые первыми)
         items_sorted = sorted(
@@ -329,7 +224,7 @@ class ArchiveManager:
             - newest_ts: временная метка самой новой записи (ISO8601) или None
             - archive_path: путь к файлу архива
         """
-        with self._thread_lock:
+        with self._lock:
             items = self._read_archive()
 
         total = len(items)

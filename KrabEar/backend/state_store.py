@@ -16,7 +16,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import threading
 from typing import Any, Iterator
 
 from core.parsing_utils import safe_json_loads
@@ -101,7 +100,7 @@ class StateStore:
             # Wave 222: surface push failures to Sentry instead of silent swallow
             try:
                 from backend.observability import capture_exception
-                capture_exception(e, component="state_store")
+                capture_exception(e, "_push_error_internal")
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
@@ -186,14 +185,6 @@ class StateStore:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
-        reasoning: str | None = None,
-        audio_path: str = "",
-        is_protected: bool = False,
-        tags: list | None = None,
-        favorite: bool = False,
-        action_items: list | None = None,
-        decisions: list | None = None,
-        questions: list | None = None,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -217,14 +208,6 @@ class StateStore:
             emotion=emotion,
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
-            reasoning=reasoning,
-            audio_path=audio_path,
-            is_protected=is_protected,
-            tags=tags,
-            favorite=favorite,
-            action_items=action_items,
-            decisions=decisions,
-            questions=questions,
         )
         try:
             with self._lock():
@@ -259,29 +242,6 @@ class StateStore:
         with self._lock():
             self._append_ndjson(self.tombstones_path, {"id": clean_id})
         return True
-
-    def restore_history_item_raw(self, raw_dict: "dict[str, Any]") -> str:
-        """Записывает словарь записи напрямую в history.ndjson, сохраняя все поля.
-
-        Если запись с таким же ID уже существует в активной истории, к ID
-        добавляется суффикс ``-restored`` для сохранения трассируемости.
-        Возвращает итоговый ID, под которым запись была сохранена.
-        """
-        item_id = str(raw_dict.get("id", "")).strip()
-        if not item_id:
-            import uuid as _uuid
-            item_id = str(_uuid.uuid4())
-
-        payload = dict(raw_dict)
-
-        with self._lock():
-            existing_ids = {item.id for item in self._load_active_items_unlocked()}
-            if item_id in existing_ids:
-                item_id = item_id + "-restored"
-            payload["id"] = item_id
-            self._append_ndjson(self.history_path, payload)
-
-        return item_id
 
     def get_history_page(self, cursor: str | None, limit: int) -> tuple[list[dict[str, Any]], str | None]:
         """Возвращает страницу истории от новых к старым."""
@@ -545,21 +505,13 @@ class StateStore:
         return True
 
     def import_history_ndjson(self, path: Path) -> dict[str, int]:
-        """Импортирует записи истории из NDJSON без дублей по `id`.
-
-        W1471 F2 (MED): dedup-множество включает как существующие активные id,
-        так и tombstone-id (tombstone_ids), чтобы удалённые записи не могли
-        воскреснуть после компактирования (когда tombstones вычищены, а id
-        уже не числится в iter_history_items_unlocked).
-        """
+        """Импортирует записи истории из NDJSON без дублей по `id`."""
         source_path = path.expanduser().resolve()
         if not source_path.exists() or not source_path.is_file():
             raise RuntimeError("Файл импорта не найден")
 
         with self._lock():
-            existing_ids = {item.id for item in self._iter_history_items_unlocked()}
-            tombstone_ids = self._load_tombstone_ids_unlocked()
-            skip_ids = existing_ids | tombstone_ids
+            known_ids = {item.id for item in self._iter_history_items_unlocked()}
             imported = 0
             skipped = 0
             errors = 0
@@ -575,24 +527,18 @@ class StateStore:
                     errors += 1
                     continue
 
-                if item.id in skip_ids:
+                if item.id in known_ids:
                     skipped += 1
                     continue
 
                 self._append_ndjson(self.history_path, item.to_dict())
-                skip_ids.add(item.id)
+                known_ids.add(item.id)
                 imported += 1
 
         return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def maybe_compact(self) -> bool:
-        """Запускает компактирование при превышении порога размера файла.
-
-        При вызове с фоновым флагом (background=True — см. compact_async)
-        выполняется синхронно внутри уже созданного daemon-потока.
-        При вызове напрямую (startup / scheduled paths) — синхронный блокирующий
-        вызов; используй maybe_compact_async() чтобы не блокировать startup.
-        """
+        """Запускает компактирование при превышении порога размера файла."""
         with self._lock():
             try:
                 current_size = self.history_path.stat().st_size
@@ -605,97 +551,10 @@ class StateStore:
             self._compact_unlocked()
             return True
 
-    def maybe_compact_async(
-        self,
-        job_tracker: "Any | None" = None,
-    ) -> "str | None":
-        """Запускает maybe_compact() в daemon-потоке и немедленно возвращает управление.
-
-        Используется на startup и в scheduled paths вместо прямого вызова
-        maybe_compact(), чтобы не блокировать IPC-цикл на время 75 MB I/O.
-
-        Args:
-            job_tracker: опциональный JobTracker для отслеживания состояния задачи.
-                Если None — задача не регистрируется в JobTracker.
-
-        Returns:
-            job_id если job_tracker передан и порог превышен, иначе None.
-        """
-        # Быстрая проверка размера — без захвата file-lock.
-        try:
-            current_size = self.history_path.stat().st_size
-        except FileNotFoundError:
-            return None
-
-        if current_size <= self.compact_threshold_bytes:
-            return None
-
-        job_id: "str | None" = None
-        if job_tracker is not None:
-            job_id = job_tracker.create_job(total_files=1)
-
-        def _worker() -> None:
-            if job_tracker is not None and job_id is not None:
-                job_tracker.update(job_id, status="running", current_stage="compact")
-            try:
-                self.maybe_compact()
-                if job_tracker is not None and job_id is not None:
-                    job_tracker.mark_done(job_id, items=[], errors=[])
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "maybe_compact_async failed",
-                    extra={"error": str(exc)},
-                )
-                if job_tracker is not None and job_id is not None:
-                    job_tracker.mark_failed(job_id, str(exc))
-
-        t = threading.Thread(target=_worker, daemon=True, name="StateStore-compact-async")
-        t.start()
-        return job_id
-
     def compact(self) -> bool:
         """Явная команда компактирования истории."""
         self.compact_with_stats()
         return True
-
-    def compact_async(
-        self,
-        job_tracker: "Any | None" = None,
-    ) -> "str | None":
-        """Запускает полное компактирование (compact_with_stats) в daemon-потоке.
-
-        В отличие от maybe_compact_async() — всегда запускает компактирование
-        независимо от текущего размера файла.  Предназначен для IPC-вызовов,
-        которым нужна немедленная отдача управления без ожидания I/O.
-
-        Args:
-            job_tracker: опциональный JobTracker для отслеживания состояния задачи.
-
-        Returns:
-            job_id если job_tracker передан, иначе None.
-        """
-        job_id: "str | None" = None
-        if job_tracker is not None:
-            job_id = job_tracker.create_job(total_files=1)
-
-        def _worker() -> None:
-            if job_tracker is not None and job_id is not None:
-                job_tracker.update(job_id, status="running", current_stage="compact")
-            try:
-                self.compact_with_stats()
-                if job_tracker is not None and job_id is not None:
-                    job_tracker.mark_done(job_id, items=[], errors=[])
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "compact_async failed",
-                    extra={"error": str(exc)},
-                )
-                if job_tracker is not None and job_id is not None:
-                    job_tracker.mark_failed(job_id, str(exc))
-
-        t = threading.Thread(target=_worker, daemon=True, name="StateStore-compact-async-full")
-        t.start()
-        return job_id
 
     def compact_with_stats(self) -> dict[str, int]:
         """Компактирует историю и возвращает детальную статистику."""
@@ -766,11 +625,6 @@ class StateStore:
     ) -> dict[str, Any]:
         """Удаляет записи истории старше days дней (tombstone-удаление).
 
-        W1471 F1 (MED): весь метод выполняется в одном критическом разделе —
-        снимок + фильтрация + tombstone-запись — чтобы устранить TOCTOU-окно,
-        в котором конкурирующий import_history_ndjson / add_history_item мог
-        вставить запись между снимком и циклом удаления.
-
         Args:
             days: Записи старше этого числа дней будут удалены (>= 1).
             dry_run: Если True - возвращает количество, но не удаляет.
@@ -786,25 +640,25 @@ class StateStore:
         with self._lock():
             active = self._load_active_items_unlocked()
 
-            to_delete = [
-                item
-                for item in active
-                if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
-            ]
+        to_delete = [
+            item
+            for item in active
+            if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
+        ]
 
-            oldest_age_days = None
-            if active:
-                oldest_ts_str = min(
-                    (item.ts for item in active if item.ts), default=None
-                )
-                if oldest_ts_str:
-                    oldest_dt = datetime.fromisoformat(oldest_ts_str)
-                    oldest_age_days = (datetime.now() - oldest_dt).days
+        oldest_age_days = None
+        if active:
+            oldest_ts_str = min(
+                (item.ts for item in active if item.ts), default=None
+            )
+            if oldest_ts_str:
+                oldest_dt = datetime.fromisoformat(oldest_ts_str)
+                oldest_age_days = (datetime.now() - oldest_dt).days
 
-            if not dry_run:
-                for item in to_delete:
-                    if item.id:
-                        self._append_ndjson(self.tombstones_path, {"id": item.id})
+        if not dry_run:
+            for item in to_delete:
+                if item.id:
+                    self.delete_history_item(item.id)
 
         return {
             "deleted_count": len(to_delete),
@@ -990,15 +844,10 @@ class StateStore:
             return len(self._load_active_items_unlocked())
 
     def _compact_unlocked(self) -> None:
-        """Собирает активные записи в новый основной журнал и очищает дельты.
+        """Собирает активные записи в новый основной журнал и очищает дельты."""
+        # W1254 F1: capture deleted IDs before clearing tombstones
+        deleted_ids = self._load_deleted_ids_unlocked()
 
-        Durability guarantees (W837 fixes):
-        - Bug 1 fixed: os.fsync() called before tmp_history.replace() so the
-          compacted data is on disk before the atomic rename commits it.
-        - Bug 2 fixed: each delta-journal truncation goes through a tmp file
-          that is fsynced and renamed atomically, preventing half-truncated
-          journals on crash (orphaned overrides).
-        """
         active = self._load_active_items_unlocked()
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
@@ -1006,30 +855,25 @@ class StateStore:
             for item in active:
                 fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
             fh.flush()
-            # W837 fix 1: fsync before the atomic rename so the data is
-            # guaranteed to be on disk if a crash occurs during replace().
-            os.fsync(fh.fileno())
 
         tmp_history.replace(self.history_path)
+        self.tombstones_path.write_text("", encoding="utf-8")
+        self.status_path.write_text("", encoding="utf-8")
+        self.tags_path.write_text("", encoding="utf-8")
+        self.favorites_path.write_text("", encoding="utf-8")
+        self.text_updates_path.write_text("", encoding="utf-8")
+        self.action_items_path.write_text("", encoding="utf-8")
 
-        # W837 fix 2: truncate each delta journal atomically via tmp-file +
-        # fsync + rename.  A plain write_text("") is not atomic — a crash
-        # between two truncations leaves some journals cleared and others
-        # intact, producing orphaned overrides on the next load.
-        delta_journals = [
-            self.tombstones_path,
-            self.status_path,
-            self.tags_path,
-            self.favorites_path,
-            self.text_updates_path,
-            self.action_items_path,
-        ]
-        for journal in delta_journals:
-            tmp_journal = journal.with_suffix(".ndjson.tmp")
-            with tmp_journal.open("w", encoding="utf-8") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp_journal.replace(journal)
+        # W1254 F1: purge version cascade for all compacted-away (tombstoned) items
+        _versioner = getattr(self, "_transcript_versioner", None)
+        if _versioner is not None and deleted_ids:
+            for _item_id in deleted_ids:
+                try:
+                    _versioner.purge_versions_for_item(_item_id)
+                except Exception:
+                    logger.exception(
+                        "_compact_unlocked: не удалось удалить версии для id=%s", _item_id
+                    )
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
@@ -1248,14 +1092,6 @@ class StateStore:
             if item_id:
                 deleted.add(item_id)
         return deleted
-
-    def _load_tombstone_ids_unlocked(self) -> set[str]:
-        """Alias for _load_deleted_ids_unlocked — returns tombstoned (deleted) IDs.
-
-        Used by import_history_ndjson (W1471 F2) to prevent resurrection of
-        tombstoned items after compaction clears the tombstone journal.
-        """
-        return self._load_deleted_ids_unlocked()
 
     def _load_status_overrides_unlocked(self) -> dict[str, str]:
         """Собирает последние значения paste_status по id."""
