@@ -18,18 +18,14 @@ detect_language() (encoder + language head, без decoder).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+import threading
+from typing import Any, Dict, Optional
 
 import numpy as np
 
 from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
-
-# Языки, для которых STTRouter знает специализированный адаптер.
-# Коды вне этого множества роутятся в STT_OTHER_PRIMARY_MODEL — это может быть
-# неверно для fr/tr/pt/etc. Если Whisper вернул неизвестный код, логируем warning.
-SUPPORTED_LANGUAGES: frozenset = frozenset({"ru", "uk", "en", "es"})
 
 
 class AudioLanguageID:
@@ -46,16 +42,18 @@ class AudioLanguageID:
 
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
+    # Lock guards _model_cache modifications from clear_model_cache() vs _detect_with_mlx().
+    # Note: _detect_with_mlx() already runs inside mlx_lock(), so this lock is only
+    # needed for clear_model_cache() calls from outside the mlx_lock() context.
+    _cache_lock: threading.Lock = threading.Lock()
 
     def __init__(
         self,
         model_path: Optional[str] = None,
         preview_sec: Optional[float] = None,
-        restrict_to_supported: bool = False,
     ) -> None:
         self._model_path = model_path
         self._preview_sec = preview_sec
-        self._restrict_to_supported = restrict_to_supported
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -115,25 +113,32 @@ class AudioLanguageID:
         # 6. Запускаем inference под mlx_lock
         result = self._run_detect(audio_preview)
 
-        # 7. Проверяем allowlist поддерживаемых языков
-        if result is not None and result not in SUPPORTED_LANGUAGES:
-            logger.warning(
-                "AudioLanguageID: detected unsupported language, STTRouter will use fallback",
-                extra={"detected_lang": result, "fallback": "other"},
-            )
-            if self._restrict_to_supported:
-                logger.debug(
-                    "AudioLanguageID: restrict_to_supported=True → suppressing lang=%s",
-                    result,
-                )
-                return None
-
-        # 8. Сохраняем в кеш
+        # 7. Сохраняем в кеш
         if result is not None and cache is not None:
             cache["audio_lang"] = result
             logger.debug("AudioLanguageID: cached result → %s", result)
 
         return result
+
+    @classmethod
+    def clear_model_cache(cls) -> None:
+        """Вытесняет загруженную LID-модель из кеша класса.
+
+        Вызывается из _on_settings_saved hook в BackendService при изменении
+        MODEL_BALANCED — предотвращает использование стale модели после переключения
+        профиля STT, устраняя cold-load stall внутри mlx_lock() на следующей записи.
+
+        Потокобезопасно: захватывает _cache_lock перед очисткой dict.
+        """
+        with cls._cache_lock:
+            if cls._model_cache:
+                logger.debug(
+                    "AudioLanguageID.clear_model_cache: вытесняем %d запись(ей) из кеша",
+                    len(cls._model_cache),
+                )
+                cls._model_cache.clear()
+            else:
+                logger.debug("AudioLanguageID.clear_model_cache: кеш уже пуст")
 
     # ------------------------------------------------------------------
     # Внутренние методы
@@ -237,23 +242,25 @@ class AudioLanguageID:
         # H4: старые записи — чистый leak: объект модели удерживает MLX Metal
         # буферы, даже после mx.clear_cache() в engine.py.  Держим только
         # текущую модель; при смене профиля (balanced→max) старая вытесняется.
-        if model_path not in AudioLanguageID._model_cache:
-            logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
-            if len(AudioLanguageID._model_cache) >= 1:
-                logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
-                AudioLanguageID._model_cache.clear()
-            try:
-                model = mlx_whisper.load_models.load_model(model_path)
-                AudioLanguageID._model_cache[model_path] = model
-            except Exception as exc:
-                logger.warning(
-                    "AudioLanguageID: не удалось загрузить модель %s: %s",
-                    model_path,
-                    exc,
-                )
-                return None
+        # _cache_lock защищает от гонки с clear_model_cache() из settings hook.
+        with AudioLanguageID._cache_lock:
+            if model_path not in AudioLanguageID._model_cache:
+                logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
+                if len(AudioLanguageID._model_cache) >= 1:
+                    logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
+                    AudioLanguageID._model_cache.clear()
+                try:
+                    model = mlx_whisper.load_models.load_model(model_path)
+                    AudioLanguageID._model_cache[model_path] = model
+                except Exception as exc:
+                    logger.warning(
+                        "AudioLanguageID: не удалось загрузить модель %s: %s",
+                        model_path,
+                        exc,
+                    )
+                    return None
 
-        model = AudioLanguageID._model_cache[model_path]
+            model = AudioLanguageID._model_cache[model_path]
 
         # Строим log-mel spectrogram
         try:
