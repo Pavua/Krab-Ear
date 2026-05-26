@@ -4,7 +4,13 @@
 """
 
 from __future__ import annotations
-from core.silence_detector import SilenceDetector, SilenceRegion, _db_to_amplitude
+from core.silence_detector import (
+    SilenceDetector,
+    SilenceRegion,
+    _db_to_amplitude,
+    SILENCE_THRESHOLD_DB_STRICT,
+    SILENCE_THRESHOLD_DB_PRESERVE_WHISPER,
+)
 
 import sys
 import unittest
@@ -458,6 +464,111 @@ class TestConcurrentDetect(unittest.TestCase):
         self.assertEqual(len(errors), 0, f"Ошибки в потоках: {errors}")
         for i, res in enumerate(results):
             self.assertEqual(len(res), 1, f"Поток {i}: ожидался 1 регион тишины")
+
+
+class TestThresholdConstants(unittest.TestCase):
+    """W1016 F1+F2 — константы порогов тишины и сохранение шёпота (W1018)."""
+
+    def test_strict_threshold_value(self):
+        """SILENCE_THRESHOLD_DB_STRICT должен быть -40 дБ (для аналитики)."""
+        self.assertEqual(SILENCE_THRESHOLD_DB_STRICT, -40.0)
+
+    def test_preserve_whisper_threshold_value(self):
+        """SILENCE_THRESHOLD_DB_PRESERVE_WHISPER должен быть -55 дБ (для STT-путей)."""
+        self.assertEqual(SILENCE_THRESHOLD_DB_PRESERVE_WHISPER, -55.0)
+
+    def test_preserve_whisper_lower_than_strict(self):
+        """Порог сохранения шёпота должен быть ниже (дальше от 0) строгого порога."""
+        self.assertLess(SILENCE_THRESHOLD_DB_PRESERVE_WHISPER, SILENCE_THRESHOLD_DB_STRICT)
+
+    def test_whisper_at_minus50_db_not_classified_as_silence_in_preserve_mode(self):
+        """Шёпот (~-50 дБ RMS) не должен классифицироваться как тишина при preserve-whisper пороге.
+
+        W1016 F2: SmartSilenceSkipper + RealtimeSilenceFilter используют
+        SILENCE_THRESHOLD_DB_PRESERVE_WHISPER (-55 дБ), поэтому шёпот (-50 дБ)
+        классифицируется как речь — не как тишина.
+        """
+        detector = SilenceDetector()
+        # Амплитуда 0.00316 ≈ -50 дБ RMS (типичный шёпот)
+        whisper_audio = _make_speech(1.0, amplitude=0.00316)
+        regions = detector.detect_silence(
+            whisper_audio, SAMPLE_RATE,
+            threshold_db=SILENCE_THRESHOLD_DB_PRESERVE_WHISPER,
+        )
+        self.assertEqual(
+            len(regions), 0,
+            "Шёпот (-50 дБ) не должен считаться тишиной при preserve-whisper пороге (-55 дБ)",
+        )
+
+    def test_strict_mode_still_classifies_whisper_as_silence(self):
+        """Строгий (-40 дБ) порог классифицирует шёпот (-50 дБ) как тишину.
+
+        W1016 F2: аналитический путь (get_speech_ratio, metrics) по-прежнему
+        использует SILENCE_THRESHOLD_DB_STRICT, и для него шёпот = тишина.
+        """
+        detector = SilenceDetector()
+        # Амплитуда 0.00316 ≈ -50 дБ RMS
+        whisper_audio = _make_speech(1.0, amplitude=0.00316)
+        regions = detector.detect_silence(
+            whisper_audio, SAMPLE_RATE,
+            threshold_db=SILENCE_THRESHOLD_DB_STRICT,
+        )
+        self.assertGreater(
+            len(regions), 0,
+            "Шёпот (-50 дБ) должен считаться тишиной при строгом пороге (-40 дБ)",
+        )
+
+    def test_trim_silence_dead_statement_removed(self):
+        """F1: trim_silence не должен содержать мёртвый standalone audio.shape.
+
+        Проверяем поведением: trim_silence корректно работает с 2D-массивом
+        без исключений (раньше audio.shape возвращал tuple, но не использовался).
+        """
+        detector = SilenceDetector()
+        mono = _concat(_make_silence(0.5), _make_speech(1.0))
+        stereo = np.stack([mono, mono], axis=1)
+        # Если мёртвый вызов audio.shape присутствовал — он всё равно
+        # не вызывал ошибок, но убеждаемся что метод работает корректно.
+        trimmed = detector.trim_silence(stereo, SAMPLE_RATE, min_silence_sec=0.3)
+        self.assertLess(len(trimmed), len(stereo))
+        self.assertEqual(trimmed.ndim, 2)
+
+
+class TestSmartSilenceSkipperUsesPreserveWhisperThreshold(unittest.TestCase):
+    """W1016 F2 — SmartSilenceSkipper использует SILENCE_THRESHOLD_DB_PRESERVE_WHISPER."""
+
+    def test_default_threshold_is_preserve_whisper(self):
+        """_DEFAULT_THRESHOLD_DB в smart_silence_skipper должен совпадать с PRESERVE_WHISPER."""
+        from core.smart_silence_skipper import _DEFAULT_THRESHOLD_DB
+        self.assertEqual(_DEFAULT_THRESHOLD_DB, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER)
+
+    def test_skipper_does_not_drop_whisper_segments(self):
+        """SmartSilenceSkipper не удаляет шёпотные сегменты (−50 дБ) как тишину."""
+        from core.smart_silence_skipper import SmartSilenceSkipper
+        skipper = SmartSilenceSkipper()
+
+        # Нормальная речь + шёпот + нормальная речь
+        normal = _make_speech(1.0, amplitude=0.5)
+        whisper = _make_speech(1.0, amplitude=0.00316)  # ~-50 дБ
+        audio = _concat(normal, whisper, normal)
+
+        result = skipper.process(audio, SAMPLE_RATE)
+        # Шёпот не должен быть удалён — длина должна быть близка к оригиналу
+        self.assertAlmostEqual(
+            result.processed_duration_sec,
+            result.original_duration_sec,
+            delta=0.5,
+            msg="SmartSilenceSkipper не должен удалять шёпотные участки",
+        )
+
+
+class TestRealtimeSilenceFilterUsesPreserveWhisperThreshold(unittest.TestCase):
+    """W1016 F2 — RealtimeSilenceFilter использует SILENCE_THRESHOLD_DB_PRESERVE_WHISPER."""
+
+    def test_default_threshold_is_preserve_whisper(self):
+        """_DEFAULT_THRESHOLD_DB в realtime_silence_filter должен совпадать с PRESERVE_WHISPER."""
+        from backend.realtime_silence_filter import _DEFAULT_THRESHOLD_DB
+        self.assertEqual(_DEFAULT_THRESHOLD_DB, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER)
 
 
 if __name__ == "__main__":

@@ -13,18 +13,18 @@ from typing import Optional
 
 import numpy as np
 
-from core.silence_constants import SILENCE_THRESHOLD_AMP, SILENCE_THRESHOLD_DB
-
 logger = logging.getLogger("KrabEar.SilenceDetector")
 
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
-# Re-export для обратной совместимости с модулями, которые импортируют
-# SILENCE_THRESHOLD_AMP из silence_detector.
-# Источник истины — core.silence_constants.
-__all__ = ["SilenceDetector", "SilenceRegion", "analyze_silence_file",
-           "SILENCE_THRESHOLD_AMP", "SILENCE_THRESHOLD_DB"]
+# Пороги тишины в дБ
+# Строгий порог используется для аналитики (доля речи, метрики качества).
+SILENCE_THRESHOLD_DB_STRICT: float = -40.0
+# Порог для STT-путей (SmartSilenceSkipper, RealtimeSilenceFilter):
+# шёпот даёт типичные -45…-55 дБ RMS, поэтому используем -55 дБ, чтобы
+# не выбрасывать нешёпотные фрагменты как тишину и не терять транскрипт.
+SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
 
 
 def _db_to_amplitude(db: float) -> float:
@@ -55,7 +55,7 @@ class SilenceDetector:
         self,
         audio: np.ndarray,
         sample_rate: int,
-        threshold_db: float = SILENCE_THRESHOLD_DB,
+        threshold_db: float = -40.0,
     ) -> list[SilenceRegion]:
         """Обнаруживает участки тишины в аудио.
 
@@ -119,7 +119,7 @@ class SilenceDetector:
         self,
         audio: np.ndarray,
         sample_rate: int,
-        threshold_db: float = SILENCE_THRESHOLD_DB,
+        threshold_db: float = -40.0,
         min_silence_sec: float = 0.5,
     ) -> np.ndarray:
         """Обрезает тишину в начале и конце аудио.
@@ -133,7 +133,6 @@ class SilenceDetector:
         Returns:
             Аудио с обрезанной ведущей/завершающей тишиной.
         """
-        audio.shape
         mono = self._to_mono(audio)
 
         if len(mono) == 0 or sample_rate <= 0:
@@ -181,7 +180,7 @@ class SilenceDetector:
         self,
         audio: np.ndarray,
         sample_rate: int,
-        threshold_db: float = SILENCE_THRESHOLD_DB,
+        threshold_db: float = -40.0,
     ) -> float:
         """Возвращает долю речи от общей длительности (0-1).
 
@@ -223,7 +222,7 @@ class SilenceDetector:
 
 def analyze_silence_file(
     path: str | Path,
-    threshold_db: float = SILENCE_THRESHOLD_DB,
+    threshold_db: float = -40.0,
     detector: Optional[SilenceDetector] = None,
 ) -> dict:
     """Анализирует тишину в аудиофайле по пути.
