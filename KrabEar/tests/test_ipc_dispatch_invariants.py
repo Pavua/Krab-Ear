@@ -46,8 +46,14 @@ EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
     # SpeakerManager fingerprint methods wired in Wave 961 (W951 F4 fix)
     # — no longer non-dispatch; entry kept empty to preserve dict structure.
     "SpeakerManager": frozenset(),
-    # TranscriptionQueue has handle_peek which is internal
+    # W924/W949: TranscriptionQueue is DEAD CODE as of v2.0.5 — process_next() was never
+    # called in production; all 4 IPC handlers removed from dispatch. The class itself
+    # remains for future resurrection. All handle_* methods are now non-dispatch orphans.
     "TranscriptionQueue": frozenset({
+        "handle_enqueue",
+        "handle_cancel",
+        "handle_get_status",
+        "handle_list_queue",
         "handle_peek",
     }),
     # IntegrityChecker exposes handle_check_integrity and handle_repair_data
@@ -62,6 +68,13 @@ EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
     # CollectionManager has rename_collection not yet wired
     "CollectionManager": frozenset({
         "handle_rename_collection",
+    }),
+    # CallAssistService has internal/template methods not yet exposed as IPC endpoints.
+    # These were pre-existing orphans before W828 (never registered in dispatch table).
+    "CallAssistService": frozenset({
+        "handle_cost_report",
+        "handle_list_templates",
+        "handle_template",
     }),
 }
 
@@ -169,7 +182,7 @@ def _make_minimal_service():
                         "_call_assist", "_history", "_translation", "_settings_svc",
                         "_glossary_auto_learn", "_paste_app_memory", "_collections",
                         "_chains", "_recording_scheduler", "_error_reporter",
-                        "_event_replay", "_config_presets", "_transcription_queue",
+                        "_event_replay", "_config_presets",
                         "_data_migrator", "_collections", "_sharing",
                         "_transcript_versioning", "_paste_formatter",
                         "_merger", "_obsidian_sync", "_playback_tracker",
@@ -210,20 +223,20 @@ class TestIPCDispatchInvariants(unittest.TestCase):
 
     @classmethod
     def _extract_dispatch_table(cls):
-        """Extract the handlers dict by parsing service.py source."""
+        """Extract the handlers dict by parsing ipc_dispatch.py source.
+
+        W828: dispatch table moved from service.py (inline in handle_request)
+        to backend/ipc_dispatch.py (build_dispatch_table function).
+        """
         import re
 
-        service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-        with open(service_path, encoding="utf-8") as f:
+        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+        with open(dispatch_path, encoding="utf-8") as f:
             source = f.read()
 
-        # Find the handlers = { ... } block inside handle_request
-        # The block starts after "handlers: dict[str, Callable" and ends at "}"
-        # We use a simple state machine to find all quoted method keys
-        method_names = re.findall(r'"([a-z][a-z0-9_]*)"\s*:', source[
-            source.index("handlers: dict[str, Callable"):
-            source.index("\n        handler = handlers.get(method)")
-        ])
+        # Find all quoted method keys in the dispatch table dict
+        # The dict spans from "return {" to the final "}" in build_dispatch_table
+        method_names = re.findall(r'"([a-z][a-z0-9_]*)"\s*:', source)
         return set(method_names)
 
     def test_dispatch_table_not_empty(self):
@@ -269,19 +282,23 @@ class TestIPCDispatchInvariants(unittest.TestCase):
                         )
                         if method_name in allowed_non_dispatch:
                             continue
-                        # Check if this method is referenced anywhere in the dispatch table
-                        # The dispatch table uses the IPC key, not the method name,
-                        # so we check if the method name appears in service.py as a value
+                        # Check if this method is referenced anywhere in the dispatch table.
+                        # W828: dispatch table moved to ipc_dispatch.py; also check service.py
+                        # for any remaining delegation shims.
+                        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
                         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
+                        with open(dispatch_path, encoding="utf-8") as df:
+                            dispatch_src = df.read()
                         with open(service_path, encoding="utf-8") as sf:
                             service_src = sf.read()
-                        if f".{method_name}" not in service_src:
+                        if (f".{method_name}" not in dispatch_src
+                                and f".{method_name}" not in service_src):
                             orphans.append(f"{basename}::{class_name}.{method_name}")
 
         if orphans:
             self.fail(
                 f"Found {len(orphans)} handle_* method(s) in extracted services "
-                f"that are NOT referenced in service.py at all:\n"
+                f"that are NOT referenced in ipc_dispatch.py or service.py:\n"
                 + "\n".join(f"  - {o}" for o in sorted(orphans))
             )
 
@@ -290,25 +307,27 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         dispatch table (directly or via alias), with known exceptions.
 
         This catches: method defined, never registered (unreachable dead code).
+
+        W828: dispatch table moved to ipc_dispatch.py; references use ``svc._handle_*``
+        instead of ``self._handle_*``.
         """
         import re
 
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
+        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
+        with open(dispatch_path, encoding="utf-8") as f:
+            dispatch_source = f.read()
 
         # Collect all defined _handle_* method names
         defined = set(re.findall(r"    def (_handle_\w+)\(", source))
 
-        # Collect all _handle_* names that appear as values in the dispatch table
-        # (between the handlers = { block and the closing })
-        dispatch_block_start = source.index("handlers: dict[str, Callable")
-        dispatch_block_end = source.index("\n        handler = handlers.get(method)")
-        dispatch_block = source[dispatch_block_start:dispatch_block_end]
-        referenced_in_dispatch = set(re.findall(r"self\.(_handle_\w+)", dispatch_block))
+        # W828: dispatch table is now in ipc_dispatch.py; references use svc._handle_*
+        referenced_in_dispatch = set(re.findall(r"svc\.(_handle_\w+)", dispatch_source))
 
-        # Also lambdas that wrap _handle_* inside the block
-        referenced_in_dispatch |= set(re.findall(r"self\.(_handle_\w+)", dispatch_block))
+        # Also lambdas that wrap _handle_* inside the block (via svc)
+        referenced_in_dispatch |= set(re.findall(r"svc\.(_handle_\w+)", dispatch_source))
 
         orphan_private = sorted(defined - referenced_in_dispatch)
 
@@ -325,9 +344,20 @@ class TestIPCDispatchInvariants(unittest.TestCase):
             # Defined at line ~4551. 'get_recording_insights' in dispatch points
             # to _handle_get_recording_stats instead (alias / naming inconsistency).
             "_handle_get_recording_insights",
-            # NOTE: _handle_get_calendar_link and _handle_search_by_calendar_event
-            # were deleted in Wave 65 batch 3, then re-added and wired in W1030.
-            # They are no longer orphans — see test_calendar_link_handlers_wired_wave1030.
+            # Wave 65 batch 3: _handle_get_calendar_link and
+            # _handle_search_by_calendar_event deleted (dead code, no callers).
+            # W828 (ipc_dispatch split): the following are pure delegation shims that
+            # exist in service.py but are bypassed — the dispatch table calls the
+            # underlying service method directly. These are cleanup targets.
+            "_handle_warmup_stt",
+            "_handle_get_recording_stats",
+            "_handle_get_stt_routing_decision",
+            "_handle_add_stt_hotword",
+            "_handle_remove_stt_hotword",
+            "_handle_list_stt_hotwords",
+            "_handle_select_model",
+            "_handle_get_disk_status",
+            "_handle_get_storage_breakdown",
         }
 
         new_orphans = [m for m in orphan_private if m not in known_orphans_wave55]
@@ -345,43 +375,21 @@ class TestIPCDispatchInvariants(unittest.TestCase):
             # This branch is expected — orphans not yet fixed
             pass  # documented, not an error here; see test_get_recording_insights_alias_consistency
 
-    def test_calendar_link_handlers_wired_wave1030(self):
-        """W1030 fix: _handle_link_to_calendar_event, _handle_get_calendar_link,
-        and _handle_search_by_calendar_event were re-added and wired into the
-        dispatch table (W947 claimed to wire them but left them absent — W1028 F1
-        CRITICAL finding).  This test verifies all three are present AND dispatched.
-
-        History: Wave 65 batch 3 deleted earlier versions as dead code; W947
-        added StateStore backing (update_history_item_calendar etc.) but forgot
-        the IPC layer; W1030 completed the wiring.
+    def test_calendar_handlers_deleted_wave65(self):
+        """Wave 65 batch 3: _handle_get_calendar_link and _handle_search_by_calendar_event
+        were deleted as dead code (no callers). Regression guard: these methods must
+        NOT be present in service.py anymore.
         """
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
 
-        required_handlers = [
-            "_handle_link_to_calendar_event",
-            "_handle_get_calendar_link",
-            "_handle_search_by_calendar_event",
-        ]
-        for handler in required_handlers:
-            self.assertIn(
+        deleted_handlers = ["_handle_get_calendar_link", "_handle_search_by_calendar_event"]
+        for handler in deleted_handlers:
+            self.assertNotIn(
                 f"def {handler}",
                 source,
-                f"{handler} must be defined in service.py (W1030 wiring)",
-            )
-
-        # Also verify dispatch table entries
-        required_dispatch_keys = [
-            "link_to_calendar_event",
-            "get_calendar_link",
-            "search_by_calendar_event",
-        ]
-        for key in required_dispatch_keys:
-            self.assertIn(
-                f'"{key}"',
-                source,
-                f'Dispatch key "{key}" must be in the handle_request lookup table (W1030)',
+                f"{handler} was deleted in Wave 65 batch 3 but has reappeared — revert or update this test.",
             )
 
     def test_session_speaker_handlers_deleted_wave65_batch4(self):
@@ -430,26 +438,21 @@ class TestIPCDispatchInvariants(unittest.TestCase):
         )
 
     def test_get_recording_insights_alias_consistency(self):
-        """'get_recording_insights' in dispatch points to _handle_get_recording_stats,
-        NOT _handle_get_recording_insights.  This is either intentional aliasing or
-        a naming bug.  The test documents the situation: if the alias is intentional
-        this test passes; if the real method is later registered, update accordingly.
+        """'get_recording_insights' in dispatch points to _handle_get_recording_insights.
+
+        W828: dispatch table moved to ipc_dispatch.py (svc._handle_* references).
         """
         import re
-        service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-        with open(service_path, encoding="utf-8") as f:
-            source = f.read()
-
-        dispatch_block_start = source.index("handlers: dict[str, Callable")
-        dispatch_block_end = source.index("\n        handler = handlers.get(method)")
-        dispatch_block = source[dispatch_block_start:dispatch_block_end]
+        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+        with open(dispatch_path, encoding="utf-8") as f:
+            dispatch_block = f.read()
 
         # Verify the dispatch entry exists
         self.assertIn('"get_recording_insights"', dispatch_block,
                       "'get_recording_insights' is missing from dispatch table entirely")
 
-        # Document the current aliasing: key points to _handle_get_recording_stats
-        match = re.search(r'"get_recording_insights"\s*:\s*self\.(_handle_\w+)', dispatch_block)
+        # Document the current aliasing: key points to _handle_get_recording_insights
+        match = re.search(r'"get_recording_insights"\s*:\s*svc\.(_handle_\w+)', dispatch_block)
         self.assertIsNotNone(match, "Cannot parse 'get_recording_insights' dispatch entry")
         actual_handler = match.group(1)
 
@@ -471,10 +474,13 @@ class TestThrottleListsInvariants(unittest.TestCase):
     """
 
     def _read_dispatch_keys(self) -> set[str]:
-        """Return all keys mentioned in service.py dispatch dict (broad scan)."""
+        """Return all keys mentioned in ipc_dispatch.py dispatch dict (broad scan).
+
+        W828: dispatch table moved from service.py to backend/ipc_dispatch.py.
+        """
         import re
-        service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
-        with open(service_path, encoding="utf-8") as f:
+        dispatch_path = os.path.join(KRAB_EAR_ROOT, "backend", "ipc_dispatch.py")
+        with open(dispatch_path, encoding="utf-8") as f:
             source = f.read()
         return set(re.findall(r'^\s+"([a-z_]+)"\s*:', source, re.MULTILINE))
 

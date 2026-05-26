@@ -91,6 +91,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -112,6 +113,7 @@ from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
+from backend.text_processing_service import TextProcessingService
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
@@ -123,6 +125,7 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
+from backend.text_processing_service import TextProcessingService
 
 import argparse
 from datetime import datetime, timedelta
@@ -298,7 +301,6 @@ class BackendService:
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
-            cached_settings=self._cached_settings,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -355,6 +357,15 @@ class BackendService:
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
         self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
+        # W982: Wire periodic worker thread for ExportScheduler (F1 fix).
+        # check_and_export() is a no-op when disabled — cheap to call every 5 min.
+        self._export_scheduler_stop = threading.Event()
+        self._export_scheduler_thread = threading.Thread(
+            target=self._export_scheduler_loop,
+            daemon=True,
+            name="export-scheduler",
+        )
+        self._export_scheduler_thread.start()
         # Note: _transcription_counter is now a property that proxies to
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
@@ -429,7 +440,7 @@ class BackendService:
             llm_rewriter=self._llm_rewriter,
         )
         self._obsidian_sync = ObsidianSyncManager(data_dir=self.store.data_dir, event_bus=event_bus)
-        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir, store=self.store)
+        self._speaker_manager = SpeakerManager(data_dir=self.store.data_dir)
         # Wire speaker_manager into HistoryService for name resolution during exports
         self._history._speaker_manager = self._speaker_manager
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
@@ -722,12 +733,50 @@ class BackendService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    # ---------------------------------------------------------------------- #
+    # Export scheduler periodic worker (W982 — F1 fix)                      #
+    # ---------------------------------------------------------------------- #
+
+    _EXPORT_SCHEDULER_INTERVAL_SEC: int = 300  # check every 5 minutes
+
+    def _export_scheduler_loop(self) -> None:
+        """Фоновый поток периодически вызывает ExportScheduler.check_and_export().
+
+        Интервал проверки: 5 минут. check_and_export() возвращает None если
+        авто-экспорт отключён или ещё не подошёл срок — в обоих случаях
+        метод завершается быстро (только чтение файла расписания).
+        """
+        stop = self._export_scheduler_stop
+        while not stop.is_set():
+            try:
+                result = self._export_scheduler.check_and_export(self.store)
+                if result is not None:
+                    logger.info(
+                        "export_scheduler: авто-экспорт выполнен",
+                        extra={
+                            "file_path": result.get("path"),
+                            "format": result.get("format"),
+                            "size_bytes": result.get("size_bytes"),
+                        },
+                    )
+            except Exception:
+                logger.exception("export_scheduler tick failed")
+            stop.wait(self._EXPORT_SCHEDULER_INTERVAL_SEC)
+
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
         Идемпотентен — безопасно вызывать несколько раз. Используется в
         signal handler run_server() и в finally serve_forever().
         """
+        # Stop export-scheduler worker thread.
+        stop_event = getattr(self, "_export_scheduler_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        es_thread = getattr(self, "_export_scheduler_thread", None)
+        if es_thread is not None and es_thread.is_alive():
+            es_thread.join(timeout=2.0)
+
         probe = getattr(self, "_llm_probe", None)
         if probe is not None:
             try:
@@ -1095,6 +1144,7 @@ class BackendService:
             "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
             "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
+            "estimate_batch_cost": self._handle_estimate_batch_cost,  # суммарная оценка стоимости пакетного импорта записей
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
@@ -1155,7 +1205,14 @@ class BackendService:
             "set_speaker_alias": self._speaker_manager.handle_set_speaker_alias,  # назначить псевдоним для спикера
             "get_speaker_aliases": self._speaker_manager.handle_get_speaker_aliases,  # список псевдонимов спикеров
             "remove_speaker_alias": self._speaker_manager.handle_remove_speaker_alias,  # удалить псевдоним спикера
-            "merge_speakers": self._speaker_manager.handle_merge_speakers,  # слить src_id → dst_id в истории
+            # --- speaker statistics ---
+            "get_speaker_statistics": lambda p: self._speaker_statistics.handle_get_speaker_statistics(  # per-speaker stats из истории диаризации
+                p, store=self.store, speaker_manager=self._speaker_manager
+            ),
+            # --- speaker fingerprints (W951 F4) ---
+            "register_speaker": self._speaker_manager.handle_register_speaker,  # зарегистрировать эмбеддинг спикера
+            "delete_speaker_fingerprint": self._speaker_manager.handle_delete_speaker_fingerprint,  # удалить отпечаток спикера
+            "list_speaker_fingerprints": self._speaker_manager.handle_list_speaker_fingerprints,  # список всех отпечатков спикеров
             # --- live subtitles (Sprint 2B) ---
             "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
             "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера
@@ -1191,6 +1248,10 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- CalendarLinker — auto-link transcriptions to Calendar.app events (W942 MEDIUM-1) ---
+            "link_to_calendar_event": self._handle_link_to_calendar_event,  # явно связать запись с текущим событием Calendar
+            "get_calendar_link": self._handle_get_calendar_link_v2,  # получить привязанное событие Calendar для записи
+            "search_by_calendar_event": self._handle_search_by_calendar_event_v2,  # поиск записей по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -1221,9 +1282,18 @@ class BackendService:
             "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
-            "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
+            # W957 SECURITY: "clear_privacy_audit_log" INTENTIONALLY REMOVED from IPC dispatch.
+            # Exposing audit-log destruction over unauthenticated IPC (IPC_SIGNING_ENABLED=False
+            # by default) allows any local process to permanently erase the compliance trail.
+            # PrivacyAuditLogger.clear() and _handle_clear_privacy_audit_log() are retained for
+            # unit tests and explicit migration scripts ONLY — they must never be re-added here
+            # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
+            "export_timeline_svg": self._handle_export_timeline_svg,  # экспорт таймлайна в SVG-файл
+            "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
+            "export_timeline_ical": self._handle_export_timeline_ical,  # экспорт таймлайна в iCalendar (.ics) файл
             # --- Default STT hotwords seed ---
         }
 
@@ -2352,7 +2422,12 @@ class BackendService:
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """Удаляет файл privacy audit log. Идемпотентен.
 
-        Возвращает:
+        WARNING (W957): Этот метод НЕ зарегистрирован в таблице IPC dispatch и недоступен
+        через IPC. Оставлен только для unit-тестов и явных migration-скриптов.
+        НЕ добавляй его обратно в dispatch без mandatory request signing и флага
+        ALLOW_PRIVACY_AUDIT_CLEAR=true (W952 CRITICAL finding F-1).
+
+        Returns:
             ok — всегда True.
         """
         audit = get_privacy_audit_logger()
@@ -2870,6 +2945,8 @@ class BackendService:
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "trends": [], "skipped": "privacy_mode"}
         days = int(params.get("days", 30))
         try:
             with self.store._lock():
@@ -3004,6 +3081,14 @@ class BackendService:
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 
+        # Privacy mode guard: never send transcript text to external service.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {
+                "ok": False,
+                "error": "privacy_mode_active",
+                "user_msg_ru": "Приватный режим включён — отправка в Telegram запрещена.",
+            }
+
         text = str(params.get("text") or "").strip()
         if not text:
             raise ValueError("Параметр 'text' обязателен и не может быть пустым")
@@ -3042,6 +3127,18 @@ class BackendService:
 
         return result
 
+    # ── AppleScript injection helper ────────────────────────────────────────
+
+    @staticmethod
+    def _escape_as_str(value: str) -> str:
+        """Escape a string for safe embedding inside AppleScript double-quoted literals.
+
+        Handles double-quotes and backslashes so that arbitrary user text cannot
+        break out of an AppleScript string literal or inject extra commands.
+        Backslashes must be escaped first to avoid double-escaping the quotes.
+        """
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
 
     def _handle_create_apple_note(self, params: dict) -> dict:
@@ -3052,12 +3149,12 @@ class BackendService:
         """
         import subprocess
 
-        title = params.get("title", "Krab Ear note").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
+        title = self._escape_as_str(params.get("title", "Krab Ear note"))
+        body = self._escape_as_str(params.get("body", ""))
         folder = params.get("folder", "") or ""
 
         if folder:
-            folder_escaped = folder.replace('"', '\\"')
+            folder_escaped = self._escape_as_str(folder)
             script = f'''
 tell application "Notes"
     tell account "iCloud"
@@ -3094,8 +3191,8 @@ end tell
         """
         import subprocess
 
-        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
+        title = self._escape_as_str(params.get("title", "Krab Ear reminder"))
+        body = self._escape_as_str(params.get("body", ""))
         list_name = params.get("list_name") or None
         due_date = params.get("due_date") or None
 
@@ -3104,11 +3201,11 @@ end tell
         if body:
             properties += f', body:"{body}"'
         if due_date:
-            due_date_escaped = due_date.replace('"', '\\"')
+            due_date_escaped = self._escape_as_str(due_date)
             properties += f', due date:date "{due_date_escaped}"'
 
         if list_name:
-            list_name_escaped = list_name.replace('"', '\\"')
+            list_name_escaped = self._escape_as_str(list_name)
             script = f'''
 tell application "Reminders"
     tell list "{list_name_escaped}"
@@ -3138,6 +3235,19 @@ end tell
 
     # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
 
+    @staticmethod
+    def _escape_as_str(s: str) -> str:
+        """Escape a string for safe embedding inside an AppleScript double-quoted string.
+
+        Backslashes MUST be doubled before quotes so that a trailing backslash
+        cannot cancel the closing-quote escape (W1028-F5 / W944 fix).
+        Also strips control characters (CR, LF, NUL) that would break the script.
+        """
+        s = re.sub(r'[\r\n\x00]', ' ', s)
+        s = s.replace('\\', '\\\\')  # backslash FIRST — prevents Stand\" → Stand\\"
+        s = s.replace('"', '\\"')
+        return s
+
     def _handle_create_calendar_event(self, params: dict) -> dict:
         """Create Apple Calendar event via osascript.
 
@@ -3155,13 +3265,13 @@ end tell
         if not title:
             return {"ok": False, "error": "title is required"}
 
-        title_esc = title.replace('"', '\\"')
+        title_esc = self._escape_as_str(title)
         notes = params.get("notes", "") or ""
-        notes_esc = notes.replace('"', '\\"')
+        notes_esc = self._escape_as_str(notes)
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}
-        start_date_esc = start_date.replace('"', '\\"')
+        start_date_esc = self._escape_as_str(start_date)
         duration_minutes = int(params.get("duration_minutes", 30) or 30)
         calendar_name = params.get("calendar_name") or None
 
@@ -3171,7 +3281,7 @@ end tell
         make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
 
         if calendar_name:
-            cal_esc = calendar_name.replace('"', '\\"')
+            cal_esc = self._escape_as_str(calendar_name)
             script = f'''tell application "Calendar"
     tell calendar "{cal_esc}"{event_block}
     end tell
@@ -3194,6 +3304,133 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    # ── CalendarLinker IPC handlers (W942 MEDIUM-1) ─────────────────────────
+
+    def _handle_link_to_calendar_event(self, params: dict) -> dict:
+        """Явно связывает запись истории с активным событием Calendar.app.
+
+        params:
+          history_item_id: str (required) — id записи в истории
+          at_time: str | None (optional) — ISO 8601 момент записи; по умолчанию now()
+
+        Returns:
+          {"ok": bool, "calendar_event": dict | None, "skipped": bool, "reason": str | None}
+
+        Поведение:
+        - Если calendar_link_enabled=False → skipped=True, reason="disabled".
+        - Если privacy_mode_enabled=True → skipped=True, reason="privacy_mode".
+        - TCC denial / timeout → soft-fail (ok=True, calendar_event=None, reason="tcc_denied"|"timeout").
+        - Если событие найдено — сохраняет в StateStore и возвращает его.
+        """
+        item_id = str(params.get("history_item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "error": "history_item_id is required"}
+
+        # Privacy mode guard — calendar event titles are sensitive
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            logger.debug(
+                "link_to_calendar_event: пропуск — privacy_mode включён",
+                extra={"item_id": item_id},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": True, "reason": "privacy_mode"}
+
+        # Feature flag guard
+        if not self._get_runtime_setting("calendar_link_enabled", False):
+            logger.debug(
+                "link_to_calendar_event: пропуск — calendar_link_enabled=False",
+                extra={"item_id": item_id},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": True, "reason": "disabled"}
+
+        # Parse optional at_time
+        at_time = None
+        at_time_raw = params.get("at_time")
+        if at_time_raw:
+            try:
+                from datetime import datetime as _dt
+                at_time = _dt.fromisoformat(str(at_time_raw))
+            except (ValueError, TypeError):
+                pass  # fall through to now()
+
+        # Query Calendar — CalendarLinker already does all error-handling internally
+        try:
+            event = self._calendar_linker.find_active_event(at_time=at_time)
+        except Exception as exc:
+            logger.warning(
+                "link_to_calendar_event: неожиданная ошибка CalendarLinker",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": False, "reason": "error"}
+
+        if event is None:
+            return {"ok": True, "calendar_event": None, "skipped": False, "reason": "no_active_event"}
+
+        # Persist the link — best-effort; StateStore validates item_id exists
+        try:
+            saved = self.store.update_history_item_calendar(item_id, event)
+        except Exception as exc:
+            logger.warning(
+                "link_to_calendar_event: ошибка сохранения в StateStore",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            saved = False
+
+        logger.info(
+            "link_to_calendar_event: %s → «%s»",
+            item_id,
+            event.get("title"),
+            extra={"item_id": item_id, "event_title": event.get("title"), "saved": saved},
+        )
+        return {"ok": True, "calendar_event": event, "skipped": False, "reason": None}
+
+    def _handle_get_calendar_link_v2(self, params: dict) -> dict:
+        """Возвращает сохранённое событие Calendar для записи или None.
+
+        params:
+          history_item_id: str (required)
+
+        Returns:
+          {"ok": bool, "calendar_event": dict | None}
+
+        Note: метод назван _v2 чтобы не конфликтовать с _handle_get_calendar_link,
+        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "get_calendar_link".
+        """
+        item_id = str(params.get("history_item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "error": "history_item_id is required"}
+        try:
+            event = self.store.get_history_item_calendar(item_id)
+        except Exception as exc:
+            logger.warning(
+                "get_calendar_link: ошибка StateStore",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "calendar_event": event}
+
+    def _handle_search_by_calendar_event_v2(self, params: dict) -> dict:
+        """Ищет записи, связанные с событием Calendar по подстроке в названии.
+
+        params:
+          event_title: str (required, пустая строка = все)
+
+        Returns:
+          {"ok": bool, "results": [{"item_id": str, "calendar_event": dict}, ...]}
+
+        Note: метод назван _v2 чтобы не конфликтовать с _handle_search_by_calendar_event,
+        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "search_by_calendar_event".
+        """
+        event_title = str(params.get("event_title", ""))
+        try:
+            results = self.store.search_by_calendar_event(event_title)
+        except Exception as exc:
+            logger.warning(
+                "search_by_calendar_event: ошибка StateStore",
+                extra={"event_title": event_title, "error": str(exc)},
+            )
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "results": results}
 
     # ── iMessage integration (Phase D.4) ────────────────────────────────────
 
@@ -3223,9 +3460,9 @@ end tell'''
         # Map service name to AppleScript service type constant
         service_type = "iMessage" if service_name == "iMessage" else "SMS"
 
-        # Escape double quotes to prevent AppleScript injection
-        recipient_esc = recipient.replace('"', '\\"')
-        body_esc = body.replace('"', '\\"')
+        # Escape double quotes and backslashes to prevent AppleScript injection
+        recipient_esc = self._escape_as_str(recipient)
+        body_esc = self._escape_as_str(body)
 
         script = f'''tell application "Messages"
     set targetService to 1st service whose service type = {service_type}
@@ -3452,9 +3689,6 @@ end tell'''
             total_shifts (int)  — количество смен темы.
             current_topic (dict) — текущая тема (last_n=window_size).
         """
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "timeline": [], "reason": "privacy_mode_active"}
-
         window_size = max(1, int(params.get("window_size", 5) or 5))
         limit = int(params.get("limit", 100) or 100)
         try:
@@ -3505,6 +3739,18 @@ end tell'''
     def _handle_get_daily_cost_summary(self, params: dict) -> dict:
         """IPC: get_daily_cost_summary — сводка вычислительных расходов за сегодня."""
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
+
+    def _handle_estimate_batch_cost(self, params: dict) -> dict:
+        """IPC: estimate_batch_cost — суммарная оценка стоимости пакетного импорта.
+
+        Параметры:
+            files — список объектов, каждый: {"duration_sec": float,
+                    "quality": str, "features": dict}.
+
+        Ответ: суммарные вычислительные затраты по всем файлам.
+        """
+        files = list(params.get("files") or [])
+        return self._cost_estimator.estimate_batch_cost(files)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
 
@@ -3604,6 +3850,178 @@ end tell'''
     def _handle_score_transcription(self, params: dict) -> dict:
         """Delegated to TextProcessingService."""
         return self._text_processing_svc.handle_score_transcription(params)
+
+    # ------------------------------------------------------------------ #
+    #  W1284 — TimelineExporter IPC handlers (W1279 F3 LOW)               #
+    # ------------------------------------------------------------------ #
+
+    def _resolve_timeline_export_dir(self, output_dir: str | None) -> "Path":
+        """Резолвит директорию экспорта с проверкой allowlist.
+
+        Допустимые корни: data_dir, home, /tmp, tempfile.gettempdir().
+        При None возвращает <data_dir>/exports/timeline.
+        Бросает ValueError при path traversal.
+        """
+        import tempfile
+        from pathlib import Path
+
+        if output_dir is None:
+            out = Path(self.store.data_dir) / "exports" / "timeline"
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+
+        resolved = Path(output_dir).expanduser().resolve()
+        allowed_roots = [
+            Path(self.store.data_dir).resolve(),
+            Path.home().resolve(),
+            Path("/tmp").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
+        ]
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            raise ValueError(
+                f"output_dir вне разрешённых директорий: {resolved}"
+            )
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _handle_export_timeline_svg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в SVG-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+            width       (int):      ширина SVG в пикселях (по умолчанию 1200).
+            height      (int):      высота SVG в пикселях (по умолчанию 400).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому SVG-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+        width = max(200, int(params.get("width", 1200)))
+        height = max(100, int(params.get("height", 400)))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        svg_content = self._timeline_exporter.export_svg(block_dicts, width=width, height=height)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.svg"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(svg_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_json(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в структурированный JSON-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому JSON-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        json_content = self._timeline_exporter.export_json(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.json"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(json_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_ical(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в iCalendar (.ics) файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому .ics-файлу.
+            blocks      (int): количество временных блоков (VEVENT в файле).
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        ical_content = self._timeline_exporter.export_ical(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.ics"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(ical_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
 
 
 class IPCServer:
