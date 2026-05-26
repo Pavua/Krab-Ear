@@ -57,6 +57,7 @@ class RealtimePartialTranscriber:
         self._buffer_sec = max(1.0, float(buffer_sec))
 
         self._stop_event = threading.Event()
+        self._stop_requested: bool = False
         self._thread: threading.Thread | None = None
         self._session_id: str = ""
         self._sample_rate: int = 16000
@@ -91,6 +92,7 @@ class RealtimePartialTranscriber:
         self._session_id = session_id
         self._sample_rate = sample_rate
         self._stop_event.clear()
+        self._stop_requested = False
         self._thread = threading.Thread(
             target=self._worker,
             name="RealtimePartialTranscriber",
@@ -104,14 +106,27 @@ class RealtimePartialTranscriber:
             self._buffer_sec,
         )
 
-    def stop(self, timeout_sec: float = 4.0) -> None:
+    def stop(self, timeout_sec: float = 30.0) -> None:
         """Остановить поток и дождаться его завершения.
 
         Idempotent: безопасно вызывать если поток не запущен.
+
+        Таймаут увеличен до 30s чтобы покрыть случай когда mlx_lock удерживается
+        финальным STT-вызовом (бюджет STT timeout = 30s). При истечении таймаута
+        пишется предупреждение и self._thread обнуляется, чтобы следующий start()
+        не отказал с «поток уже запущен».
         """
+        self._stop_requested = True
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout_sec)
+            if self._thread.is_alive():
+                logger.warning(
+                    "realtime_partial worker did not stop within 30s"
+                    " — daemon thread may emit stale partials"
+                    " (session=%s)",
+                    self._session_id,
+                )
         self._thread = None
         logger.debug("RealtimePartialTranscriber остановлен: session=%s", self._session_id)
 
@@ -125,6 +140,10 @@ class RealtimePartialTranscriber:
         last_transcribed_duration: float = 0.0
 
         while not self._stop_event.is_set():
+            # Быстрая проверка флага остановки в начале каждой итерации.
+            # Дублирует _stop_event но позволяет остановиться без ожидания wait().
+            if self._stop_requested:
+                break
             # Ждём интервал (прерывается при вызове stop())
             self._stop_event.wait(self._interval_sec)
             if self._stop_event.is_set():
