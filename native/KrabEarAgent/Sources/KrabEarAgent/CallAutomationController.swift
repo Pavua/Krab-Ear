@@ -819,7 +819,7 @@ final class CallAutomationController: NSViewController {
             let from = (settings["twilio_from_number"] as? String) ?? ""
             isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
         }
-        providerStatusDot.textColor = isConfigured ? .systemGreen : .systemGray
+        providerStatusDot.contentTintColor = isConfigured ? NSColor.systemGreen : NSColor.systemGray
         providerStatusDot.toolTip   = isConfigured
             ? "\(provider.capitalized) настроен"
             : "\(provider.capitalized): API key или from-number не задан в Настройках"
