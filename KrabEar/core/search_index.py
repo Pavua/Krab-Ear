@@ -178,9 +178,9 @@ class SearchIndex:
                     )
                 )
 
-        # Сортируем по score (убывание), затем по item_id (детерминированность)
-        results.sort(key=lambda r: (-r.score, r.item_id))
-        return results[:limit]
+            # Сортируем по score (убывание), затем по item_id (детерминированность)
+            results.sort(key=lambda r: (-r.score, r.item_id))
+            return results[:limit]
 
     # ------------------------------------------------------------------
     # Статистика
@@ -213,12 +213,19 @@ class SearchIndex:
 
     @staticmethod
     def _compute_signature(items: list[dict]) -> str:
-        """Быстрая хэш-сигнатура для инвалидации кэша."""
-        h = hashlib.md5()
+        """Быстрая хэш-сигнатура для инвалидации кэша.
+
+        Включает все три текстовых поля (text, source_text, translated_text),
+        чтобы изменения в любом из них корректно сбрасывали кэш.
+        """
+        h = hashlib.sha1()
         for item in items:
-            item_id = item.get("id", "")
-            text = (item.get("text") or "") + (item.get("translated_text") or "")
-            h.update(f"{item_id}:{text}".encode("utf-8", errors="replace"))
+            h.update((item.get("text") or "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((item.get("source_text") or "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((item.get("translated_text") or "").encode("utf-8"))
+            h.update(b"\x1e")
         return h.hexdigest()
 
     @staticmethod
