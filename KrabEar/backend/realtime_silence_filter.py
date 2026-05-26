@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from core.silence_detector import SilenceDetector, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
+from core.silence_constants import SILENCE_THRESHOLD_DB
+from core.silence_detector import SilenceDetector
 
 if TYPE_CHECKING:
     from backend.recorder import AudioRecorder
@@ -27,9 +28,7 @@ logger = logging.getLogger("KrabEar.Backend.RealtimeSilenceFilter")
 _DEFAULT_CHECK_SEC: float = 5.0
 _DEFAULT_WINDOW_SEC: float = 10.0
 _DEFAULT_MAX_SILENCE_SEC: float = 8.0
-# Используем порог для сохранения шёпота: real-time фильтр не должен подавлять
-# события во время шёпотной речи (типичный RMS: -45…-55 дБ).
-_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
+_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB  # -40 dBFS
 
 
 class RealtimeSilenceFilter:
@@ -46,7 +45,9 @@ class RealtimeSilenceFilter:
         self._check_sec: float = float(settings.get("rt_silence_check_sec", _DEFAULT_CHECK_SEC))
         self._window_sec: float = float(settings.get("rt_silence_window_sec", _DEFAULT_WINDOW_SEC))
         self._max_silence_sec: float = float(settings.get("rt_silence_max_sec", _DEFAULT_MAX_SILENCE_SEC))
-        self._threshold_db: float = _DEFAULT_THRESHOLD_DB
+        self._threshold_db: float = float(
+            settings.get("realtime_silence_threshold_db", _DEFAULT_THRESHOLD_DB)
+        )
         self._emit = event_bus_emit
 
         self._detector = SilenceDetector()
@@ -125,8 +126,23 @@ class RealtimeSilenceFilter:
 
         window_start_sec = max(0.0, total_duration - self._window_sec)
 
+        # Skip already-analyzed prefix: compute how far into the current window
+        # we have already scanned and trim the audio array accordingly.
+        with self._lock:
+            checked_up_to = self._checked_up_to_sec
+
+        already_analyzed_in_window = max(0.0, checked_up_to - window_start_sec)
+        skip_samples = int(already_analyzed_in_window * sample_rate)
+
+        if skip_samples >= audio_window.size:
+            # Nothing new to analyze yet.
+            return
+
+        analysis_audio = audio_window[skip_samples:]
+        analysis_start_sec = window_start_sec + already_analyzed_in_window
+
         silence_regions = self._detector.detect_silence(
-            audio_window, sample_rate, threshold_db=self._threshold_db
+            analysis_audio, sample_rate, threshold_db=self._threshold_db
         )
 
         total_silence = sum(r.duration_sec for r in silence_regions)
@@ -139,12 +155,18 @@ class RealtimeSilenceFilter:
         if total_silence < self._max_silence_sec:
             return
 
+        # Advance cursor only after confirming there is significant silence to
+        # record — on the fast path (no silence) the cursor is NOT advanced so
+        # the next tick can re-examine the same window with fresh audio appended.
+        with self._lock:
+            self._checked_up_to_sec = total_duration
+
         new_ranges: list[tuple[float, float]] = []
         for region in silence_regions:
             if region.duration_sec < self._max_silence_sec:
                 continue
-            abs_start = window_start_sec + region.start_sec
-            abs_end = window_start_sec + region.end_sec
+            abs_start = analysis_start_sec + region.start_sec
+            abs_end = analysis_start_sec + region.end_sec
             new_ranges.append((round(abs_start, 3), round(abs_end, 3)))
 
         if not new_ranges:
