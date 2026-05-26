@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import threading
 from typing import Any, Iterator
 
 from core.parsing_utils import safe_json_loads
@@ -538,7 +539,13 @@ class StateStore:
         return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def maybe_compact(self) -> bool:
-        """Запускает компактирование при превышении порога размера файла."""
+        """Запускает компактирование при превышении порога размера файла.
+
+        При вызове с фоновым флагом (background=True — см. compact_async)
+        выполняется синхронно внутри уже созданного daemon-потока.
+        При вызове напрямую (startup / scheduled paths) — синхронный блокирующий
+        вызов; используй maybe_compact_async() чтобы не блокировать startup.
+        """
         with self._lock():
             try:
                 current_size = self.history_path.stat().st_size
@@ -551,10 +558,97 @@ class StateStore:
             self._compact_unlocked()
             return True
 
+    def maybe_compact_async(
+        self,
+        job_tracker: "Any | None" = None,
+    ) -> "str | None":
+        """Запускает maybe_compact() в daemon-потоке и немедленно возвращает управление.
+
+        Используется на startup и в scheduled paths вместо прямого вызова
+        maybe_compact(), чтобы не блокировать IPC-цикл на время 75 MB I/O.
+
+        Args:
+            job_tracker: опциональный JobTracker для отслеживания состояния задачи.
+                Если None — задача не регистрируется в JobTracker.
+
+        Returns:
+            job_id если job_tracker передан и порог превышен, иначе None.
+        """
+        # Быстрая проверка размера — без захвата file-lock.
+        try:
+            current_size = self.history_path.stat().st_size
+        except FileNotFoundError:
+            return None
+
+        if current_size <= self.compact_threshold_bytes:
+            return None
+
+        job_id: "str | None" = None
+        if job_tracker is not None:
+            job_id = job_tracker.create_job(total_files=1)
+
+        def _worker() -> None:
+            if job_tracker is not None and job_id is not None:
+                job_tracker.update(job_id, status="running", current_stage="compact")
+            try:
+                self.maybe_compact()
+                if job_tracker is not None and job_id is not None:
+                    job_tracker.mark_done(job_id, items=[], errors=[])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "maybe_compact_async failed",
+                    extra={"error": str(exc)},
+                )
+                if job_tracker is not None and job_id is not None:
+                    job_tracker.mark_failed(job_id, str(exc))
+
+        t = threading.Thread(target=_worker, daemon=True, name="StateStore-compact-async")
+        t.start()
+        return job_id
+
     def compact(self) -> bool:
         """Явная команда компактирования истории."""
         self.compact_with_stats()
         return True
+
+    def compact_async(
+        self,
+        job_tracker: "Any | None" = None,
+    ) -> "str | None":
+        """Запускает полное компактирование (compact_with_stats) в daemon-потоке.
+
+        В отличие от maybe_compact_async() — всегда запускает компактирование
+        независимо от текущего размера файла.  Предназначен для IPC-вызовов,
+        которым нужна немедленная отдача управления без ожидания I/O.
+
+        Args:
+            job_tracker: опциональный JobTracker для отслеживания состояния задачи.
+
+        Returns:
+            job_id если job_tracker передан, иначе None.
+        """
+        job_id: "str | None" = None
+        if job_tracker is not None:
+            job_id = job_tracker.create_job(total_files=1)
+
+        def _worker() -> None:
+            if job_tracker is not None and job_id is not None:
+                job_tracker.update(job_id, status="running", current_stage="compact")
+            try:
+                self.compact_with_stats()
+                if job_tracker is not None and job_id is not None:
+                    job_tracker.mark_done(job_id, items=[], errors=[])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "compact_async failed",
+                    extra={"error": str(exc)},
+                )
+                if job_tracker is not None and job_id is not None:
+                    job_tracker.mark_failed(job_id, str(exc))
+
+        t = threading.Thread(target=_worker, daemon=True, name="StateStore-compact-async-full")
+        t.start()
+        return job_id
 
     def compact_with_stats(self) -> dict[str, int]:
         """Компактирует историю и возвращает детальную статистику."""

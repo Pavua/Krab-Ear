@@ -3779,7 +3779,10 @@ def build_service(data_dir: Path) -> BackendService:
     store = StateStore(data_dir=data_dir)
     # Гарантируем наличие полного набора дефолтных настроек.
     store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))
-    store.maybe_compact()
+    # Запускаем компактирование в фоне — не блокируем startup I/O-петлю.
+    # IPC-инициированное компактирование (compact / compact_with_stats) остаётся
+    # синхронным, так как вызывающая сторона явно решила подождать результата.
+    store.maybe_compact_async()
     return BackendService(store=store)
 
 
