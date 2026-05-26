@@ -467,5 +467,110 @@ class TestAbbreviationExpanderUnicode(unittest.TestCase):
         self.assertIn("eñora", result)  # проверяем ядро слова независимо от регистра
 
 
+class TestAmbiguousAbbreviations(unittest.TestCase):
+    """Tests for W1060 F2 HIGH — ambiguous abbreviation defaults.
+
+    Key invariants:
+      * гл. is NOT expanded by default (ambiguous: глава vs главный врач).
+      * т.е. IS still expanded by default (unambiguous).
+      * expand_ambiguous=True opt-in restores legacy behaviour.
+    """
+
+    def setUp(self):
+        self.expander = AbbreviationExpander()
+
+    # ── default (safe) mode ──────────────────────────────────────────────────
+
+    def test_gl_dot_not_expanded_by_default(self):
+        """гл. is NOT expanded by default (W1060 F2 fix)."""
+        result = self.expander.expand("гл. врач принял решение", language="ru")
+        self.assertIn("гл.", result)
+        self.assertNotIn("глава", result)
+
+    def test_gl_dot_context_glavred_not_expanded(self):
+        """гл.редактор pattern stays intact by default."""
+        result = self.expander.expand("Решение принял гл. редактор", language="ru")
+        self.assertIn("гл.", result)
+        self.assertNotIn("глава", result)
+
+    def test_sv_not_expanded_by_default(self):
+        """св. is NOT expanded by default (святой vs свежий)."""
+        result = self.expander.expand("ул. св. Михаила", language="ru")
+        self.assertIn("св.", result)
+        self.assertNotIn("святой", result)
+
+    def test_te_dot_still_expanded_by_default(self):
+        """Unambiguous т.е. is still expanded even without expand_ambiguous."""
+        result = self.expander.expand("Это важно, т.е. нужно запомнить", language="ru")
+        self.assertIn("то есть", result)
+        self.assertNotIn("т.е.", result)
+
+    def test_napr_still_expanded_by_default(self):
+        """напр. (unambiguous) stays in default active set."""
+        result = self.expander.expand("напр. вот этот вариант", language="ru")
+        self.assertIn("например", result)
+
+    # ── opt-in (legacy) mode ─────────────────────────────────────────────────
+
+    def test_expand_ambiguous_init_flag_expands_gl(self):
+        """expand_ambiguous=True at __init__ causes гл. to expand."""
+        expander = AbbreviationExpander(expand_ambiguous=True)
+        result = expander.expand("гл. врач принял решение", language="ru")
+        self.assertIn("глава", result)
+        self.assertNotIn("гл.", result)
+
+    def test_expand_ambiguous_per_call_flag(self):
+        """expand_ambiguous=True per call overrides instance default."""
+        result = self.expander.expand(
+            "гл. врач принял решение", language="ru", expand_ambiguous=True
+        )
+        self.assertIn("глава", result)
+        self.assertNotIn("гл.", result)
+
+    def test_expand_not_ambiguous_per_call_false_overrides_instance_true(self):
+        """expand_ambiguous=False per call overrides instance expand_ambiguous=True."""
+        expander = AbbreviationExpander(expand_ambiguous=True)
+        result = expander.expand(
+            "гл. врач принял решение", language="ru", expand_ambiguous=False
+        )
+        self.assertIn("гл.", result)
+        self.assertNotIn("глава", result)
+
+    # ── list_abbreviations shows ambiguous field ─────────────────────────────
+
+    def test_list_abbreviations_has_ambiguous_field(self):
+        """list_abbreviations includes ambiguous key in each entry."""
+        items = self.expander.list_abbreviations(language="ru")
+        for item in items:
+            self.assertIn("ambiguous", item, f"Missing 'ambiguous' key for {item['abbr']}")
+
+    def test_gl_dot_listed_as_ambiguous(self):
+        """гл. is present in list_abbreviations with ambiguous=True."""
+        items = self.expander.list_abbreviations(language="ru")
+        gl_items = [i for i in items if i["abbr"] == "гл."]
+        self.assertEqual(len(gl_items), 1, "гл. should appear in list_abbreviations")
+        self.assertTrue(
+            gl_items[0]["ambiguous"],
+            "гл. should be marked ambiguous=True",
+        )
+
+    def test_te_dot_listed_as_unambiguous(self):
+        """т.е. is present in list_abbreviations with ambiguous=False."""
+        items = self.expander.list_abbreviations(language="ru")
+        te_items = [i for i in items if i["abbr"] == "т.е."]
+        self.assertEqual(len(te_items), 1)
+        self.assertFalse(te_items[0]["ambiguous"])
+
+    # ── user-added abbreviations are never ambiguous ─────────────────────────
+
+    def test_custom_abbreviation_is_not_ambiguous(self):
+        """User-added abbreviations are always non-ambiguous."""
+        self.expander.add_abbreviation("т.н.", "так называемый", language="ru")
+        items = self.expander.list_abbreviations(language="ru")
+        tn_items = [i for i in items if i["abbr"] == "т.н."]
+        self.assertEqual(len(tn_items), 1)
+        self.assertFalse(tn_items[0]["ambiguous"])
+
+
 if __name__ == "__main__":
     unittest.main()
