@@ -290,5 +290,52 @@ class TestSlidingWindowTimeExpiry(unittest.TestCase):
         self.assertAlmostEqual(summary["stt_metrics"]["latency_ms"]["avg"], 15.5, delta=0.1)
 
 
+class TestNonFiniteSafety(unittest.TestCase):
+    """W966 F2 — NaN/Inf samples must not crash get_summary() or json.dumps()."""
+
+    def test_record_silently_drops_nan_latency(self):
+        """record() with NaN latency is silently dropped; total_requests not incremented."""
+        import math
+        mc = MetricsCollector()
+        mc.record(100.0, 0.9)
+        mc.record(float("nan"), 0.8)  # должна быть отброшена
+
+        summary = mc.get_summary()
+        # Только одна запись прошла
+        self.assertEqual(summary["window_size"], 1)
+        # total_requests не должен считать отброшенный сэмпл
+        self.assertEqual(summary["total_requests"], 1)
+        self.assertAlmostEqual(summary["stt_metrics"]["latency_ms"]["avg"], 100.0, delta=0.1)
+
+    def test_record_silently_drops_inf_confidence(self):
+        """record() with Inf confidence is silently dropped."""
+        mc = MetricsCollector()
+        mc.record(200.0, 0.7)
+        mc.record(150.0, float("inf"))  # должна быть отброшена
+
+        summary = mc.get_summary()
+        self.assertEqual(summary["window_size"], 1)
+        self.assertEqual(summary["total_requests"], 1)
+        self.assertAlmostEqual(summary["stt_metrics"]["confidence"]["avg"], 0.7, delta=0.01)
+
+    def test_get_summary_after_nan_does_not_raise(self):
+        """get_summary() result is JSON-serialisable even after NaN/Inf attempts."""
+        import json
+        mc = MetricsCollector()
+        mc.record(100.0, 0.9)
+        # Попытки записи не-конечных значений — все отбрасываются
+        mc.record(float("nan"), 0.5)
+        mc.record(100.0, float("nan"))
+        mc.record(float("inf"), 0.5)
+        mc.record(-float("inf"), 0.5)
+
+        summary = mc.get_summary()
+        # Должно сериализоваться без TypeError/ValueError
+        serialized = json.dumps(summary)
+        self.assertIsInstance(serialized, str)
+        # Только один валидный сэмпл
+        self.assertEqual(summary["window_size"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
