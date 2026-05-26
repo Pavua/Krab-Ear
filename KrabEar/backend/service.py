@@ -1209,6 +1209,10 @@ class BackendService:
             "get_speaker_statistics": lambda p: self._speaker_statistics.handle_get_speaker_statistics(  # per-speaker stats из истории диаризации
                 p, store=self.store, speaker_manager=self._speaker_manager
             ),
+            # --- speaker fingerprints (W951 F4) ---
+            "register_speaker": self._speaker_manager.handle_register_speaker,  # зарегистрировать эмбеддинг спикера
+            "delete_speaker_fingerprint": self._speaker_manager.handle_delete_speaker_fingerprint,  # удалить отпечаток спикера
+            "list_speaker_fingerprints": self._speaker_manager.handle_list_speaker_fingerprints,  # список всех отпечатков спикеров
             # --- live subtitles (Sprint 2B) ---
             "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
             "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера

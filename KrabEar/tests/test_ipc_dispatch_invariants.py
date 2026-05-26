@@ -43,13 +43,9 @@ BACKEND_SERVICE_NON_DISPATCH = frozenset({
 # These are on extracted *service* objects and intentionally not in dispatch
 # (helper/internal methods, not exposed as IPC endpoints)
 EXTRACTED_SERVICE_NON_DISPATCH: dict[str, frozenset] = {
-    # SpeakerManager has speaker fingerprint methods added after Wave 48
-    # that are not yet wired into the dispatch table
-    "SpeakerManager": frozenset({
-        "handle_register_speaker",
-        "handle_delete_speaker_fingerprint",
-        "handle_list_speaker_fingerprints",
-    }),
+    # SpeakerManager fingerprint methods wired in Wave 961 (W951 F4 fix)
+    # — no longer non-dispatch; entry kept empty to preserve dict structure.
+    "SpeakerManager": frozenset(),
     # W924/W949: TranscriptionQueue is DEAD CODE as of v2.0.5 — process_next() was never
     # called in production; all 4 IPC handlers removed from dispatch. The class itself
     # remains for future resurrection. All handle_* methods are now non-dispatch orphans.
@@ -416,6 +412,30 @@ class TestIPCDispatchInvariants(unittest.TestCase):
                 source,
                 f"{handler} was deleted in Wave 65 batch 4 but has reappeared — revert or update this test.",
             )
+
+    def test_register_speaker_wired_wave961(self):
+        """W951 F4: 'register_speaker' must be in the dispatch table (wired in Wave 961)."""
+        self.assertIn(
+            "register_speaker",
+            self._dispatch_table,
+            "'register_speaker' is missing from dispatch table — W951 F4 regression",
+        )
+
+    def test_delete_speaker_fingerprint_wired_wave961(self):
+        """W951 F4: 'delete_speaker_fingerprint' must be in the dispatch table (wired in Wave 961)."""
+        self.assertIn(
+            "delete_speaker_fingerprint",
+            self._dispatch_table,
+            "'delete_speaker_fingerprint' is missing from dispatch table — W951 F4 regression",
+        )
+
+    def test_list_speaker_fingerprints_wired_wave961(self):
+        """W951 F4: 'list_speaker_fingerprints' must be in the dispatch table (wired in Wave 961)."""
+        self.assertIn(
+            "list_speaker_fingerprints",
+            self._dispatch_table,
+            "'list_speaker_fingerprints' is missing from dispatch table — W951 F4 regression",
+        )
 
     def test_get_recording_insights_alias_consistency(self):
         """'get_recording_insights' in dispatch points to _handle_get_recording_insights.
