@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Literal
 
 
 @dataclass
@@ -17,6 +17,8 @@ class DiffChange:
     type: str  # "added" | "removed" | "unchanged"
     text: str  # слово или группа слов
     position: int  # позиция (индекс слова) в соответствующей строке
+    coordinate_space: Literal["orig", "new"] = "orig"  # "orig" = индекс в orig_words; "new" = индекс в new_words
+    # Правило: "unchanged" и "removed" → coordinate_space="orig"; "added" → coordinate_space="new".
 
 
 @dataclass
@@ -65,27 +67,27 @@ class TextDiffAnalyzer:
         for tag, i1, i2, j1, j2 in word_matcher.get_opcodes():
             if tag == "equal":
                 for k, word in enumerate(orig_words[i1:i2]):
-                    changes.append(DiffChange(type="unchanged", text=word, position=i1 + k))
+                    changes.append(DiffChange(type="unchanged", text=word, position=i1 + k, coordinate_space="orig"))
                 words_unchanged += i2 - i1
 
             elif tag == "replace":
                 # Убранные слова (из оригинала)
                 for k, word in enumerate(orig_words[i1:i2]):
-                    changes.append(DiffChange(type="removed", text=word, position=i1 + k))
+                    changes.append(DiffChange(type="removed", text=word, position=i1 + k, coordinate_space="orig"))
                 words_removed += i2 - i1
                 # Добавленные слова (в rewritten)
                 for k, word in enumerate(new_words[j1:j2]):
-                    changes.append(DiffChange(type="added", text=word, position=j1 + k))
+                    changes.append(DiffChange(type="added", text=word, position=j1 + k, coordinate_space="new"))
                 words_added += j2 - j1
 
             elif tag == "delete":
                 for k, word in enumerate(orig_words[i1:i2]):
-                    changes.append(DiffChange(type="removed", text=word, position=i1 + k))
+                    changes.append(DiffChange(type="removed", text=word, position=i1 + k, coordinate_space="orig"))
                 words_removed += i2 - i1
 
             elif tag == "insert":
                 for k, word in enumerate(new_words[j1:j2]):
-                    changes.append(DiffChange(type="added", text=word, position=j1 + k))
+                    changes.append(DiffChange(type="added", text=word, position=j1 + k, coordinate_space="new"))
                 words_added += j2 - j1
 
         summary = self._build_summary(words_added, words_removed, words_unchanged, similarity_ratio)
