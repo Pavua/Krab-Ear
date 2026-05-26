@@ -201,10 +201,24 @@ class AudioLanguageID:
 
         try:
             with mlx_lock():
-                return self._detect_with_mlx(mlx_whisper, audio_16k)
+                result = self._detect_with_mlx(mlx_whisper, audio_16k)
         except Exception as exc:
             logger.warning("AudioLanguageID: inference failed: %s", exc)
             return None
+
+        # F3: Release MLX Metal buffers after inference to prevent memory growth
+        # (outside mlx_lock so it doesn't block other threads)
+        # Guard: only clear if mlx.core is already in sys.modules to avoid
+        # double-registration crash (nanobind) in test environments.
+        import sys as _sys
+        _mx = _sys.modules.get("mlx.core")
+        if _mx is not None:
+            try:
+                _mx.clear_cache()
+            except Exception:
+                pass
+
+        return result
 
     def _detect_with_mlx(self, mlx_whisper: Any, audio_16k: np.ndarray) -> Optional[str]:
         """Внутренний метод LID внутри mlx_lock() контекста.
@@ -235,6 +249,15 @@ class AudioLanguageID:
 
         model = AudioLanguageID._model_cache[model_path]
 
+        # F1: Early-exit on all-silence (zero-peak) input — no point building mel on zeros
+        _peak = float(np.abs(audio_16k).max()) if audio_16k.size > 0 else 0.0
+        if _peak < 1e-6:
+            logger.debug(
+                "AudioLanguageID: all-silence detected (peak=%.2e) → returning 'und'",
+                _peak,
+            )
+            return "und"  # undetermined — silence has no language
+
         # Строим log-mel spectrogram
         try:
             # mlx_whisper ожидает float32 numpy array нормализованный в [-1, 1]
@@ -261,11 +284,15 @@ class AudioLanguageID:
             # или может возвращать (str, dict) в разных версиях — обрабатываем оба
             result = mlx_whisper.decoding.detect_language(model, mel)
 
+            probs: dict = {}
             if isinstance(result, tuple):
                 # (language_str, probs_dict)
                 lang_code = result[0]
+                if len(result) > 1 and isinstance(result[1], dict):
+                    probs = result[1]
             elif isinstance(result, dict):
                 # {lang: prob, ...} — берём argmax
+                probs = result
                 lang_code = max(result, key=lambda k: result[k])
             elif isinstance(result, str):
                 lang_code = result
@@ -275,6 +302,19 @@ class AudioLanguageID:
                     type(result),
                 )
                 return None
+
+            # F2: Confidence threshold — reject low-confidence results (music/noise/silence)
+            _MIN_LANG_CONFIDENCE = 0.40
+            if probs:
+                best_prob = probs.get(str(lang_code).strip().lower(), 0.0)
+                if best_prob < _MIN_LANG_CONFIDENCE:
+                    logger.debug(
+                        "AudioLanguageID: low confidence (%.2f < %.2f) for lang=%s → 'und'",
+                        best_prob,
+                        _MIN_LANG_CONFIDENCE,
+                        lang_code,
+                    )
+                    return "und"  # undetermined — caller should fall through to alternate detection
 
             lang_code = str(lang_code).strip().lower()
             logger.info("AudioLanguageID: detected language = %s", lang_code)

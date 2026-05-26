@@ -573,5 +573,188 @@ class TestAudioLangIDEmptyAudioHandled(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ---------------------------------------------------------------------------
+# W1061 — F1/F2/F3 fix tests (Wave 1070)
+# ---------------------------------------------------------------------------
+
+class TestAudioLangIDAllSilenceReturnsUnd(unittest.TestCase):
+    """F1: Zero-peak (all-silence) audio returns 'und' immediately without inference."""
+
+    def test_all_silence_returns_und(self):
+        """np.zeros audio with peak < 1e-6 → 'und', inference never called."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.95})
+
+        # All-silence audio (peak == 0.0)
+        silence_audio = np.zeros(int(16000 * 3.0), dtype=np.float32)
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(silence_audio, sample_rate=16000)
+
+        self.assertEqual(result, "und", "All-silence should return 'und'")
+        # detect_language should NOT be called — early exit before mel build
+        mock_mlx.decoding.detect_language.assert_not_called()
+
+    def test_near_zero_peak_returns_und(self):
+        """Audio with peak just below 1e-6 → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("en", {"en": 0.9})
+
+        tiny_audio = np.full(int(16000 * 3.0), fill_value=1e-8, dtype=np.float32)
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(tiny_audio, sample_rate=16000)
+
+        self.assertEqual(result, "und")
+        mock_mlx.decoding.detect_language.assert_not_called()
+
+    def test_non_silence_still_runs_inference(self):
+        """Audio with non-trivial peak does NOT trigger early exit."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.85})
+
+        audio = _speech(seconds=3.0)  # peak ≈ 0.1, >> 1e-6
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(audio, sample_rate=16000)
+
+        self.assertEqual(result, "ru")
+        mock_mlx.decoding.detect_language.assert_called_once()
+
+
+class TestAudioLangIDLowConfidenceReturnsUnd(unittest.TestCase):
+    """F2: Low confidence result (< 0.40) returns 'und' instead of spurious lang."""
+
+    def test_low_confidence_returns_und(self):
+        """detect_language returns prob=0.2 → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # Low confidence: prob = 0.2 (below 0.40 threshold)
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.2, "en": 0.15})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und", "Low-confidence result should return 'und'")
+
+    def test_exactly_at_threshold_returns_und(self):
+        """prob == 0.39 (just below threshold) → 'und'."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("es", {"es": 0.39})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und")
+
+    def test_music_noise_low_confidence_rejected(self):
+        """Music/noise scenario: argmax=0.2 → 'und' not spurious language."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # Noise: spread across many languages, max only 0.15
+        mock_mlx.decoding.detect_language.return_value = (
+            "fr", {"fr": 0.15, "de": 0.12, "ru": 0.11, "en": 0.10}
+        )
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "und")
+
+
+class TestAudioLangIDHighConfidenceSpeechReturnsLang(unittest.TestCase):
+    """Regression: high confidence speech still returns correct lang code."""
+
+    def test_high_confidence_ru_returns_ru(self):
+        """prob=0.92 ≥ 0.40 → 'ru' returned (F2 fix doesn't break high-confidence)."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.92})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "ru")
+
+    def test_high_confidence_en_returns_en(self):
+        """prob=0.85 → 'en' returned."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("en", {"en": 0.85})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "en")
+
+    def test_boundary_exactly_040_accepted(self):
+        """prob == 0.40 (exact threshold) → lang returned (boundary inclusive)."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("es", {"es": 0.40})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        # 0.40 is NOT < 0.40, so it should pass and return "es"
+        self.assertEqual(result, "es")
+
+    def test_no_probs_dict_returns_lang_code(self):
+        """When detect_language returns plain string (no probs), lang returned as-is."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        # String return: no confidence info → confidence check skipped
+        mock_mlx.decoding.detect_language.return_value = "ru"
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertEqual(result, "ru")
+
+
 if __name__ == "__main__":
     unittest.main()
