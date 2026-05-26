@@ -3451,6 +3451,9 @@ end tell'''
             total_shifts (int)  — количество смен темы.
             current_topic (dict) — текущая тема (last_n=window_size).
         """
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "timeline": [], "reason": "privacy_mode_active"}
+
         window_size = max(1, int(params.get("window_size", 5) or 5))
         limit = int(params.get("limit", 100) or 100)
         try:
