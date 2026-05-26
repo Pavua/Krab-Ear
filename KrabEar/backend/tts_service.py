@@ -29,6 +29,12 @@ logger = logging.getLogger("KrabEar.Backend.TTS")
 # Порог кириллицы для определения RU
 _CYRILLIC_THRESHOLD = 0.30  # >30% символов кириллица -> Russian
 
+# Silero v4 valid speaker IDs (allowlist — W1215 F2)
+_SILERO_VALID_VOICES: frozenset[str] = frozenset({"baya", "kseniya", "xenia", "eugene", "random"})
+
+# Максимальная длина текста для Silero (W1215 F3)
+_SILERO_MAX_TEXT_LEN = 5000
+
 
 def _detect_language(text: str) -> str:
     """Эвристика определения языка: доля кириллических символов.
@@ -58,6 +64,7 @@ def _load_silero(model_id: str) -> Any | None:
             model="silero_tts",
             language="ru",
             speaker=model_id,
+            trust_repo=True,  # W1215 F1: headless launchd daemon has no TTY for consent prompt
         )
         model = model.to(device)
         logger.info("Silero TTS загружен: model=%s sample_rate=%s", model_id, sample_rate)
@@ -180,7 +187,25 @@ class TTSService:
         model, symbols, sample_rate, _example_text, apply_tts, device = silero
         try:
             import numpy as np
-            speaker = voice or settings.TTS_SILERO_VOICE
+            # W1215 F2: validate voice against Silero v4 speaker allowlist
+            raw_voice = voice or settings.TTS_SILERO_VOICE
+            if raw_voice not in _SILERO_VALID_VOICES:
+                logger.warning(
+                    "Silero: неизвестный голос %r, использую 'xenia'. Допустимые: %s",
+                    raw_voice,
+                    sorted(_SILERO_VALID_VOICES),
+                )
+                raw_voice = "xenia"
+            speaker = raw_voice
+
+            # W1215 F3: cap text length to avoid OOM / hangs on very long inputs
+            if len(text) > _SILERO_MAX_TEXT_LEN:
+                logger.warning(
+                    "Silero: текст обрезан с %d до %d символов (лимит W1215 F3)",
+                    len(text),
+                    _SILERO_MAX_TEXT_LEN,
+                )
+                text = text[:_SILERO_MAX_TEXT_LEN]
             audio_tensor = apply_tts(
                 texts=[text],
                 model=model,
