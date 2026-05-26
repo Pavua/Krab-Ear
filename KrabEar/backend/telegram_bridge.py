@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -55,6 +56,12 @@ class TelegramBridge:
         circuit_fail_threshold: int = 3,
         circuit_reset_sec: float = 60.0,
     ) -> None:
+        parsed = urlparse(base_url)
+        if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError(
+                f"TelegramBridge base_url must point to localhost; "
+                f"got hostname={parsed.hostname!r}"
+            )
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
         self._circuit_fail_threshold = circuit_fail_threshold
