@@ -53,37 +53,44 @@ class AudioFingerprinter:
         features = self._extract_features(mono, sample_rate)
         return self._hash_features(features)
 
-    def compare(self, fp1: str, fp2: str) -> float:
-        """Сравнивает два фингерпринта и возвращает сходство [0.0, 1.0].
+    def equals(self, fp1: str, fp2: str) -> bool:
+        """Проверяет точное совпадение двух фингерпринтов.
 
-        Точное совпадение возвращает 1.0, разные строки SHA-256 сравниваются
-        побайтово (число совпадающих битов Хэмминга, нормализованное).
+        SHA-256 — криптографический хеш. Лавинный эффект делает расстояние
+        Хэмминга между любыми двумя разными хешами статистически бессмысленным
+        (~50% совпадающих бит). Перцептивное сходство («похожие») НЕ
+        поддерживается — только точное совпадение (W1063).
 
         Args:
             fp1: SHA-256 hex-строка от :meth:`fingerprint`.
             fp2: SHA-256 hex-строка от :meth:`fingerprint`.
 
         Returns:
-            Значение сходства: 1.0 — идентично, 0.0 — максимально различно.
+            True, если фингерпринты идентичны (аудио одинаково); False иначе.
         """
         if not fp1 or not fp2:
-            return 0.0
-        if fp1 == fp2:
-            return 1.0
+            return False
+        return fp1 == fp2
 
-        try:
-            bytes1 = bytes.fromhex(fp1)
-            bytes2 = bytes.fromhex(fp2)
-        except ValueError:
-            return 0.0
+    def compare(self, fp1: str, fp2: str) -> float:
+        """Сравнивает два фингерпринта и возвращает сходство [0.0, 1.0].
 
-        if len(bytes1) != len(bytes2):
-            return 0.0
+        .. deprecated::
+            После W1063 этот метод является deprecated shim. SHA-256 Hamming
+            distance статистически бессмысленна (~50% для любых неидентичных
+            входов из-за лавинного эффекта). Используйте :meth:`equals`.
+            Возвращает 1.0 при точном совпадении и 0.0 во всех остальных случаях.
 
-        # Число совпадающих бит (дополнение расстояния Хэмминга)
-        total_bits = len(bytes1) * 8
-        differing_bits = sum(bin(b1 ^ b2).count("1") for b1, b2 in zip(bytes1, bytes2))
-        return (total_bits - differing_bits) / total_bits
+        Args:
+            fp1: SHA-256 hex-строка от :meth:`fingerprint`.
+            fp2: SHA-256 hex-строка от :meth:`fingerprint`.
+
+        Returns:
+            1.0 если идентично, 0.0 иначе (binary — не непрерывная шкала).
+        """
+        # W1063: SHA-256 Hamming distance is statistically meaningless.
+        # This shim preserves backwards-compatible float return type only.
+        return 1.0 if self.equals(fp1, fp2) else 0.0
 
     def is_duplicate_audio(
         self,
@@ -105,7 +112,8 @@ class AudioFingerprinter:
         """
         fp1 = self.fingerprint(audio1, sample_rate)
         fp2 = self.fingerprint(audio2, sample_rate)
-        return self.compare(fp1, fp2) >= threshold
+        # W1063: use equals() — threshold is irrelevant for SHA-256 exact match
+        return self.equals(fp1, fp2)
 
     # ── Внутренние методы ────────────────────────────────────────────────────
 

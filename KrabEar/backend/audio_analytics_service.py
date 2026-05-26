@@ -200,10 +200,15 @@ class AudioAnalyticsService:
           - audio1: list[float] — первый аудио-сигнал (PCM float32).
           - audio2: list[float] — второй аудио-сигнал (PCM float32).
           - sample_rate: int — частота дискретизации (по умолчанию 16000).
-          - threshold: float — порог сходства [0..1] (по умолчанию 0.95).
+          - threshold: float — DEPRECATED, игнорируется (W1125/W1063: SHA-256
+            Hamming distance бессмысленна; используется точное совпадение).
 
         Возвращает dict с ключами:
-          fingerprint1, fingerprint2, similarity, is_duplicate.
+          - fingerprint1: str — SHA-256 фингерпринт первого аудио.
+          - fingerprint2: str — SHA-256 фингерпринт второго аудио.
+          - is_duplicate: bool — True если фингерпринты идентичны.
+          - similarity: float — DEPRECATED backwards-compat поле: 1.0 если
+            дубликат, 0.0 иначе. Клиенты должны использовать is_duplicate.
         """
         audio1_raw = params.get("audio1")
         audio2_raw = params.get("audio2")
@@ -211,18 +216,22 @@ class AudioAnalyticsService:
             raise RuntimeError("audio1 и audio2 обязательны")
 
         sample_rate = int(params.get("sample_rate", 16000))
-        threshold = float(params.get("threshold", 0.95))
+        # threshold parameter is ignored post-W1063: exact-match only
 
         audio1 = np.asarray(audio1_raw, dtype=np.float32)
         audio2 = np.asarray(audio2_raw, dtype=np.float32)
 
         fp1 = self._audio_fingerprinter.fingerprint(audio1, sample_rate)
         fp2 = self._audio_fingerprinter.fingerprint(audio2, sample_rate)
-        similarity = self._audio_fingerprinter.compare(fp1, fp2)
+        # W1125/W1063: use equals() — compare() was returning binary 0.0/1.0
+        # after W1078 shim anyway; switch to correct bool API directly.
+        is_exact_match = self._audio_fingerprinter.equals(fp1, fp2)
 
         return {
             "fingerprint1": fp1,
             "fingerprint2": fp2,
-            "similarity": round(similarity, 6),
-            "is_duplicate": similarity >= threshold,
+            "is_duplicate": is_exact_match,
+            # Backwards-compat: keep similarity field but populate from bool
+            # so existing clients reading float still get meaningful 0/1 value.
+            "similarity": 1.0 if is_exact_match else 0.0,
         }
