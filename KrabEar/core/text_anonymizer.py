@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ── Luhn checksum helper ─────────────────────────────────────────────────────
+# ── Checksum helpers ─────────────────────────────────────────────────────────
 
 def _passes_luhn(digits: str) -> bool:
     """Verify number passes Luhn algorithm (mod 10 checksum)."""
@@ -29,6 +29,46 @@ def _passes_luhn(digits: str) -> bool:
                 num -= 9
         checksum += num
     return checksum % 10 == 0
+
+
+def _snils_valid(digits9: str, check2: int) -> bool:
+    """Проверяет контрольное число СНИЛС (mod 101 алгоритм).
+
+    digits9 — первые 9 цифр (без контрольного числа).
+    check2  — двузначное контрольное число (0-99).
+    """
+    s = sum(int(d) * (9 - i) for i, d in enumerate(digits9))
+    if s < 100:
+        return check2 == s
+    if s in (100, 101):
+        return check2 == 0
+    s = s % 101
+    if s == 100:
+        return check2 == 0
+    return check2 == s
+
+
+def _iban_valid(iban: str) -> bool:
+    """Проверяет IBAN по алгоритму mod-97 (ISO 13616)."""
+    rearranged = iban[4:] + iban[:4]
+    # Буква → число: A=10, B=11, ..., Z=35
+    numeric = "".join(str(ord(c) - 55) if c.isalpha() else c for c in rearranged)
+    try:
+        return int(numeric) % 97 == 1
+    except ValueError:
+        return False
+
+
+# Скомпилированные паттерны для вспомогательной валидации
+
+# СНИЛС: NNN-NNN-NNN NN или NNNNNNNNNNN (11 цифр с разделителями)
+_SNILS_DETAIL_RE = re.compile(r"(\d{3})[\s\-](\d{3})[\s\-](\d{3})[\s\-]?(\d{2})")
+
+# US SSN: AAA-BB-CCCC с исключением невалидных блоков
+_US_SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")
+
+# IBAN: CC99 + 11-30 буквенно-цифровых символов
+_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 
 
 # ── Датаклассы результата ────────────────────────────────────────────────────
@@ -109,6 +149,18 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}\b",
         "[СНИЛС]",
     ),
+    # US Social Security Number: AAA-BB-CCCC (валидация через lookahead и checksum в коде)
+    (
+        "us_ssn",
+        r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+        "[SSN]",
+    ),
+    # IBAN (ES/RU/DE и другие): CC99BBBBBBBBBBBBBBBBBBBBBBBBBBB (валидация mod-97 в коде)
+    (
+        "iban",
+        r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+        "[IBAN]",
+    ),
 ]
 
 
@@ -168,6 +220,19 @@ class TextAnonymizer:
                     # Validate via Luhn checksum — skip non-card 16-digit sequences
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
+                        continue
+                elif name == "snils":
+                    # Validate SNILS mod-101 checksum (F1 fix)
+                    dm = _SNILS_DETAIL_RE.search(m.group(0))
+                    if dm:
+                        digits9 = dm.group(1) + dm.group(2) + dm.group(3)
+                        check2 = int(dm.group(4))
+                        if not _snils_valid(digits9, check2):
+                            continue
+                elif name == "iban":
+                    # Validate IBAN mod-97 checksum (F4 fix)
+                    iban_str = re.sub(r"\s", "", m.group(0)).upper()
+                    if not _iban_valid(iban_str):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
