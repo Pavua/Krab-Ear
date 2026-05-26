@@ -1222,6 +1222,8 @@ class BackendService:
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- Speech pace analysis ---
+            "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
             # --- Default STT hotwords seed ---
         }
 
@@ -2391,6 +2393,34 @@ class BackendService:
             "language": language,
             "audio_duration_s": audio_duration_s,
         }
+
+    def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует темп речи по тексту и длительности аудио.
+
+        Параметры:
+            text         — транскрибированный текст (обязательно).
+            duration_sec — длительность аудиозаписи в секундах (float, обязательно).
+
+        Возвращает:
+            words_per_minute          — слов в минуту.
+            chars_per_minute          — символов в минуту.
+            pace_category             — «slow» | «normal» | «fast» | «very_fast».
+            estimated_reading_time_sec — расчётное время чтения при 150 wpm.
+            word_count                — количество слов.
+            char_count                — количество символов (без пробелов).
+            duration_sec              — фактическая длительность записи.
+        """
+        text = str(params.get("text", ""))
+        raw_dur = params.get("duration_sec")
+        if raw_dur is None:
+            return {"error": "duration_sec is required"}
+        try:
+            duration_sec = float(raw_dur)
+        except (TypeError, ValueError):
+            return {"error": "duration_sec must be a number"}
+
+        report = self._speech_pace_analyzer.analyze(text, duration_sec)
+        return report.as_dict()
 
     def _build_virtual_adapters_for_routing(self) -> "list[Any]":
         """Создаёт список виртуальных адаптеров для scored selection.
