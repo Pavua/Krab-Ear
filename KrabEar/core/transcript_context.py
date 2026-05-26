@@ -7,13 +7,11 @@
 
 from __future__ import annotations
 
-import logging
+import re
 import time
 from typing import Any
 
 from core.code_switching_detector import CodeSwitchingDetector
-
-logger = logging.getLogger(__name__)
 
 # Горизонт давности: элементы старше этого порога не используются как контекст.
 _MAX_AGE_SECONDS: int = 30 * 60  # 30 минут
@@ -27,11 +25,18 @@ _ITEM_SEP: str = " "
 # Максимальное число терминов в объединённом глоссарии (hotwords + auto_glossary).
 _MAX_COMBINED_TERMS: int = 250
 
-# Максимальная длина итогового initial_prompt в символах.
-# Основано на лимите Whisper в 224 токена × 2.5 символа/токен (Кириллица — worst-case BPE).
-# При 250 многословных терминах один раздел Glossary может превысить лимит в 3×.
-_MAX_PROMPT_CHARS: int = 560
-
+# W873-4 MEDIUM: Whisper BPE limit is 224 tokens for initial_prompt.
+# Cyrillic words tokenize at ~2.5–3 BPE tokens each (morphologically rich,
+# multi-character grapheme clusters), while Latin words average ~1.5 tokens.
+# A 250-word Latin budget already risks overflow; 250 Cyrillic words exceed
+# the limit by ~3×. We apply a language-aware cap:
+#   - Cyrillic-heavy text (≥1 Cyrillic char in combined):  80 words  (~224 tokens)
+#   - Latin / mixed / empty text:                         170 words  (~224 tokens)
+# The detection is a fast O(1) regex search on the combined string — no
+# character-level counting required.
+_CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
+_MAX_WORDS_CYRILLIC: int = 80
+_MAX_WORDS_LATIN: int = 170
 # Hint добавляемый в initial_prompt при детектировании code-switching.
 _CODE_SWITCHING_HINT = (
     "В записи может звучать смесь русского и английского (технические термины)."
@@ -104,7 +109,14 @@ def build_initial_prompt(
     Алгоритм:
     1. Берёт последние history_limit элементов newest-first, реверсирует для хронологии.
     2. Отфильтровывает элементы старше max_age_seconds.
-    3. Объединяет тексты через пробел, обрезает до max_words слов.
+    3. Объединяет тексты через пробел, обрезает до effective_max_words слов.
+       effective_max_words выбирается динамически:
+         - Если combined содержит хотя бы одну кириллическую букву →
+           min(max_words, _MAX_WORDS_CYRILLIC).  Кириллические слова
+           кодируются ~2.5–3 BPE-токена каждое; без лимита 250 слов
+           на кириллице превышают лимит Whisper 224 токена в ~3×.
+         - Иначе → min(max_words, _MAX_WORDS_LATIN).
+       (W873-4 MEDIUM fix)
     4. Если заданы hotwords -- добавляет "Glossary: term1, term2. ".
     5. Если code_switching_detect=True и последний item содержит смешение
        кириллицы/латиницы выше code_switching_threshold -- добавляет hint для Whisper.
@@ -112,7 +124,9 @@ def build_initial_prompt(
     Args:
         history_items: Список HistoryItem или dict (text, ts). newest-first.
         hotwords: Пользовательские термины для boosting. None/[] -- без эффекта.
-        max_words: Максимальное число слов в "Previous transcript".
+        max_words: Верхняя граница числа слов (caller-supplied); перекрывается
+                   языковым лимитом если он строже (см. _MAX_WORDS_CYRILLIC /
+                   _MAX_WORDS_LATIN).
         max_age_seconds: Максимальный возраст элемента в секундах.
         history_limit: Сколько последних элементов рассматривать.
         auto_glossary: Автоматически извлечённые термины из истории (AutoGlossaryBuilder).
@@ -124,9 +138,6 @@ def build_initial_prompt(
     Returns:
         Строка initial_prompt (может быть пустой).
     """
-    if max_words <= 0:
-        return ""
-
     now = time.time()
 
     recent = list(history_items[:history_limit])
@@ -154,8 +165,15 @@ def build_initial_prompt(
     combined = _ITEM_SEP.join(texts).strip()
     if combined:
         words = combined.split()
-        if len(words) > max_words:
-            words = words[-max_words:]
+        # W873-4 MEDIUM: choose word cap based on script to stay within the
+        # Whisper BPE 224-token limit for initial_prompt.  Cyrillic text uses
+        # ~2×-more tokens per word than Latin due to morphological richness.
+        if _CYRILLIC_RE.search(combined):
+            effective_max = min(max_words, _MAX_WORDS_CYRILLIC)
+        else:
+            effective_max = min(max_words, _MAX_WORDS_LATIN)
+        if len(words) > effective_max:
+            words = words[-effective_max:]
         combined = " ".join(words)
 
     parts: list[str] = []
@@ -193,29 +211,4 @@ def build_initial_prompt(
             if cs_result["is_mixed"]:
                 parts.append(_CODE_SWITCHING_HINT)
 
-    prompt = " ".join(parts)
-
-    # Обрезаем до _MAX_PROMPT_CHARS, чтобы не превысить лимит 224 токена Whisper.
-    # Эвристика BPE: ~2.5 символа/токен для кириллицы (worst-case).
-    if len(prompt) > _MAX_PROMPT_CHARS:
-        orig_len = len(prompt)
-        capped = prompt[:_MAX_PROMPT_CHARS]
-        # Если обрезка попала в середину глоссарного термина (после запятой),
-        # откатываемся до последней полной запятой, чтобы не оставлять рваный конец.
-        last_comma = capped.rfind(",")
-        last_period = capped.rfind(".")
-        # Граница: последний разделитель терминов (запятая) или конец секции (точка)
-        cut_at = max(last_comma, last_period)
-        if cut_at > _MAX_PROMPT_CHARS // 2:
-            capped = capped[:cut_at + 1].rstrip()
-        else:
-            capped = capped.rstrip()
-        logger.info(
-            "initial_prompt truncated to fit Whisper 224-token limit "
-            "(input %d chars → %d chars)",
-            orig_len,
-            len(capped),
-        )
-        return capped
-
-    return prompt
+    return " ".join(parts)
