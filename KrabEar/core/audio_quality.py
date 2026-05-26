@@ -23,8 +23,8 @@ logger = logging.getLogger("KrabEar.AudioQuality")
 
 _CLIPPING_THRESHOLD = 0.99      # амплитуда ≥ порога считается клиппингом
 _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме при анализе тишины
-# Единый порог тишины: используем SILENCE_THRESHOLD_AMP (0.01, -40 dB)
-# из silence_detector — один источник правды для всего проекта (W912/W1107).
+# Порог тишины импортирован из core.silence_detector (SILENCE_THRESHOLD_AMP = 0.01,
+# соответствует -40 дБ). Ранее было захардкожено 0.001 (~-60 дБ) — исправлено в W885/F8.
 _SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
@@ -192,7 +192,7 @@ class AudioQualityAnalyzer:
             return 0.0
 
         # Если есть тихие фреймы — берём их как noise floor
-        quiet_mask = frame_rms < _SILENCE_RMS_THRESHOLD
+        quiet_mask = frame_rms < _SILENCE_RMS_THRESHOLD * 10
         if np.sum(quiet_mask) >= 2:
             noise_rms = float(np.mean(frame_rms[quiet_mask]))
             if noise_rms < 1e-10:
