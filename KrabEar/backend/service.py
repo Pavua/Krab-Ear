@@ -215,28 +215,6 @@ class BackendService:
                     _rewriter_ref.set_api_key(new_key)
             self._settings_svc.register_after_save_hook(_on_settings_saved)
 
-        # W1265 F1 MED: Evict AudioLanguageID._model_cache when MODEL_BALANCED changes.
-        # Without this, the LID model loaded under the old path stays in cache and the
-        # first recording after a profile switch triggers a cold-load stall inside
-        # mlx_lock() (typically 1–3 s blocking the STT pipeline thread).
-        def _on_settings_saved_lang_id(old: dict, new: dict) -> None:
-            old_model = str(old.get("model_balanced", ""))
-            new_model = str(new.get("model_balanced", ""))
-            if new_model != old_model:
-                try:
-                    from core.audio_lang_id import AudioLanguageID
-                    AudioLanguageID.clear_model_cache()
-                    logger.info(
-                        "AudioLanguageID cache evicted: model_balanced changed %s → %s",
-                        old_model,
-                        new_model,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "AudioLanguageID cache evict failed: %s", exc
-                    )
-        self._settings_svc.register_after_save_hook(_on_settings_saved_lang_id)
-
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
@@ -414,10 +392,8 @@ class BackendService:
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
+        self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
-        # W1254 F1: late-inject versioner into StateStore for compact cascade
-        self.store._transcript_versioner = self._transcript_versioning
-        self._merger = RecordingMerger(transcript_versioner=self._transcript_versioning)
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
@@ -463,10 +439,7 @@ class BackendService:
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
-        self._archive_manager = ArchiveManager(
-            store=self.store,
-            transcript_versioner=self._transcript_versioning,
-        )
+        self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
@@ -500,8 +473,9 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
-        # Поздняя инжекция — RecordingMerger создаётся раньше SemanticSearcher.
-        self._merger._semantic_searcher = self._semantic_searcher
+        # W1261: late-inject semantic_searcher into ArchiveManager so archived
+        # items are removed from the embedding index (W1255 F1+F3).
+        self._archive_manager._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -2882,8 +2856,6 @@ class BackendService:
 
     def _handle_get_recording_insights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует эвристические инсайты по записям за последние N дней."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "insights": [], "skipped": "privacy_mode"}
         days = int(params.get("days", 7))
         try:
             with self.store._lock():
