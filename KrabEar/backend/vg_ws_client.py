@@ -65,7 +65,10 @@ class VGWebSocketClient:
                     "vgw.reconnect",
                     f"{type(exc).__name__}: {exc} (reconnect in {backoff:.0f}s)",
                 )
-                await asyncio.sleep(backoff)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass  # backoff elapsed without stop signal — proceed with reconnect
                 backoff = min(backoff * 2, _RECONNECT_MAX_SEC)
 
         logger.info("VG WS client stopped for session %s", self.session_id)
