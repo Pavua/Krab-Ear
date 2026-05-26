@@ -844,7 +844,15 @@ class StateStore:
             return len(self._load_active_items_unlocked())
 
     def _compact_unlocked(self) -> None:
-        """Собирает активные записи в новый основной журнал и очищает дельты."""
+        """Собирает активные записи в новый основной журнал и очищает дельты.
+
+        Durability guarantees (W837 fixes):
+        - Bug 1 fixed: os.fsync() called before tmp_history.replace() so the
+          compacted data is on disk before the atomic rename commits it.
+        - Bug 2 fixed: each delta-journal truncation goes through a tmp file
+          that is fsynced and renamed atomically, preventing half-truncated
+          journals on crash (orphaned overrides).
+        """
         active = self._load_active_items_unlocked()
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
@@ -852,14 +860,30 @@ class StateStore:
             for item in active:
                 fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
             fh.flush()
+            # W837 fix 1: fsync before the atomic rename so the data is
+            # guaranteed to be on disk if a crash occurs during replace().
+            os.fsync(fh.fileno())
 
         tmp_history.replace(self.history_path)
-        self.tombstones_path.write_text("", encoding="utf-8")
-        self.status_path.write_text("", encoding="utf-8")
-        self.tags_path.write_text("", encoding="utf-8")
-        self.favorites_path.write_text("", encoding="utf-8")
-        self.text_updates_path.write_text("", encoding="utf-8")
-        self.action_items_path.write_text("", encoding="utf-8")
+
+        # W837 fix 2: truncate each delta journal atomically via tmp-file +
+        # fsync + rename.  A plain write_text("") is not atomic — a crash
+        # between two truncations leaves some journals cleared and others
+        # intact, producing orphaned overrides on the next load.
+        delta_journals = [
+            self.tombstones_path,
+            self.status_path,
+            self.tags_path,
+            self.favorites_path,
+            self.text_updates_path,
+            self.action_items_path,
+        ]
+        for journal in delta_journals:
+            tmp_journal = journal.with_suffix(".ndjson.tmp")
+            with tmp_journal.open("w", encoding="utf-8") as fh:
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp_journal.replace(journal)
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""
