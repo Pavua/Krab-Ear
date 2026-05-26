@@ -473,6 +473,9 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
+        # W1261: late-inject semantic_searcher into ArchiveManager so archived
+        # items are removed from the embedding index (W1255 F1+F3).
+        self._archive_manager._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,

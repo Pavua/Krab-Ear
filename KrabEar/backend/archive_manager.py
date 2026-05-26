@@ -36,8 +36,9 @@ class ArchiveManager:
     истории. Удалённые из активной истории записи могут быть восстановлены.
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, semantic_searcher: Any | None = None) -> None:
         self._store = store
+        self._semantic_searcher = semantic_searcher
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
@@ -123,6 +124,14 @@ class ArchiveManager:
                 self._append_ndjson(self._archive_path, item_dict)
                 _store.delete_history_item(clean_id)
                 archived_count += 1
+                if self._semantic_searcher is not None:
+                    try:
+                        self._semantic_searcher.remove_item(clean_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "archive_items: не удалось удалить %s из semantic index: %s",
+                            clean_id, exc,
+                        )
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
         return ArchiveResult(
@@ -173,6 +182,16 @@ class ArchiveManager:
                             translation_engine=restore_dict.get("translation_engine", ""),
                         )
                         unarchived_count += 1
+                        if self._semantic_searcher is not None:
+                            restore_text = restore_dict.get("text", "")
+                            if restore_text and restore_text.strip():
+                                try:
+                                    self._semantic_searcher.index_item(item_id, restore_text)
+                                except Exception as exc:
+                                    logger.warning(
+                                        "unarchive_items: не удалось переиндексировать %s: %s",
+                                        item_id, exc,
+                                    )
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
                         remaining.append(item)
