@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from KrabEar.__version__ import __version__ as APP_VERSION
+from backend.observability import add_breadcrumb
 
 logger = logging.getLogger("KrabEar.Backend.StartupDiagnostics")
 
@@ -153,6 +154,19 @@ class StartupDiagnostics:
             startup_time_ms=suite_elapsed_ms,
             warnings=warnings,
             errors=errors,
+        )
+        add_breadcrumb(
+            category="startup",
+            message="run_all_checks",
+            level="info" if overall == "ready" else "warning" if overall == "degraded" else "error",
+            data={
+                "status": overall,
+                "total_checks": len(checks),
+                "failed_count": len(errors),
+                "warning_count": len(warnings),
+                "duration_ms": round(suite_elapsed_ms),
+                "ok": overall == "ready",
+            },
         )
         self._cached_report = report
         self._cache_ts = time.monotonic()

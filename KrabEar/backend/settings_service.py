@@ -114,6 +114,7 @@ class SettingsService:
         return self.cached_settings()
 
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        _t0 = time.monotonic()
         old_settings = self.cached_settings()
         try:
             self._backup.create_backup(old_settings, reason="before_set")
@@ -272,9 +273,24 @@ class SettingsService:
         settings["stt_hotwords_enabled"] = bool(settings.get("stt_hotwords_enabled", True))
 
         # Final validation pass before persisting — raises on hard errors
-        vr = self._validator.validate(settings)
-        if not vr.valid:
-            raise ValueError(f"Настройки содержат ошибки: {'; '.join(vr.errors)}")
+        try:
+            vr = self._validator.validate(settings)
+            if not vr.valid:
+                raise ValueError(f"Настройки содержат ошибки: {'; '.join(vr.errors)}")
+        except Exception as _exc:
+            add_breadcrumb(
+                category="settings",
+                message="set_settings",
+                level="error",
+                data={
+                    "keys": sorted(params.keys()),
+                    "key_count": len(params),
+                    "duration_ms": round((time.monotonic() - _t0) * 1000),
+                    "ok": False,
+                    "error_type": type(_exc).__name__,
+                },
+            )
+            raise
         if vr.warnings:
             for w in vr.warnings:
                 _log.warning("settings save: %s", w)
@@ -282,13 +298,15 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
-        _t1 = time.monotonic()
         add_breadcrumb(
             category="settings",
             message="set_settings",
+            level="info",
             data={
                 "keys": sorted(params.keys()),
                 "key_count": len(params),
+                "duration_ms": round((time.monotonic() - _t0) * 1000),
+                "ok": True,
             },
         )
         # Hot-reload pydantic Settings из обновлённого settings.json — без
@@ -314,6 +332,7 @@ class SettingsService:
 
         После успешного применения эмитирует preset.changed через EventBus.
         """
+        _t0 = time.monotonic()
         profile = str(params.get("profile", "")).strip()
         preset = self._PROFILE_PRESETS.get(profile)
         if preset is None:
@@ -328,9 +347,12 @@ class SettingsService:
         add_breadcrumb(
             category="settings",
             message="apply_profile_preset",
+            level="info",
             data={
                 "profile": profile,
                 "keys_changed": sorted(preset.keys()),
+                "duration_ms": round((time.monotonic() - _t0) * 1000),
+                "ok": True,
             },
         )
         try:
@@ -523,6 +545,7 @@ class SettingsService:
         Returns:
             {"restored_settings": {...}, "backup_id": str}
         """
+        _t0 = time.monotonic()
         backup_id = str(params.get("backup_id", "")).strip()
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
@@ -531,6 +554,15 @@ class SettingsService:
         self.store.save_settings(restored)
         self.invalidate_cache()
 
+        add_breadcrumb(
+            category="settings",
+            message="restore_settings_backup",
+            level="info",
+            data={
+                "duration_ms": round((time.monotonic() - _t0) * 1000),
+                "ok": True,
+            },
+        )
         _log.info("handle_restore_settings_backup: restored from %s", backup_id)
         return {"restored_settings": restored, "backup_id": backup_id}
 
