@@ -1730,32 +1730,8 @@ class BackendService:
         return {"ok": True}
 
     def _handle_handshake(self, params: dict) -> dict:
-        """Swift→backend handshake on connect.
-
-        Verifies version compatibility and returns backend metadata.
-        Swift sends this once immediately after establishing a connection.
-
-        Params:
-            swift_agent_version (str): Swift agent bundle version, e.g. "1.0.0"
-            capabilities (list[str]): declared Swift capabilities,
-                e.g. ["error_bus_consumer", "live_subs", "selection_translator"]
-        """
-        swift_version = params.get("swift_agent_version", "unknown")
-        swift_capabilities = params.get("capabilities", [])
-        logger.info(
-            "IPC handshake: swift_version=%s capabilities=%s",
-            swift_version, swift_capabilities,
-        )
-        # Collect registered method names for capability negotiation.
-        # We can't reference _dispatch (local variable) here, so enumerate
-        # a representative stable subset for phase compatibility checks.
-        return {
-            "ok": True,
-            "backend_version": "1.0.0",
-            "phase_b_capable": True,   # has list_recent_errors, report_paste_failure, etc.
-            "phase_c_capable": True,   # has handshake, report_reconnect
-            "swift_version_ack": swift_version,
-        }
+        """Delegated to HealthCheckService (Wave 795 — handshake logic moved there)."""
+        return self._health_check_svc.handle_handshake(params)
 
     def _handle_report_reconnect(self, params: dict) -> dict:
         """Swift→backend reconnect telemetry.
