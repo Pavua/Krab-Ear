@@ -2957,6 +2957,8 @@ class BackendService:
 
     def _handle_get_keyword_cloud(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует данные облака ключевых слов из истории транскрипций."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "words": [], "reason": "privacy_mode_active"}
         max_words = int(params.get("max_words", 100))
         language = params.get("language")
         try:
