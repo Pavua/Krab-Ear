@@ -1463,12 +1463,8 @@ class BackendService:
         return self._system_monitor.get_system_info()
 
     def _handle_set_paste_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        item_id = str(params.get("id", "")).strip()
-        paste_status = str(params.get("paste_status", "failed")).strip() or "failed"
-        ok = self.store.set_paste_status(item_id=item_id, paste_status=paste_status)
-        if not ok:
-            raise RuntimeError("Не удалось обновить paste_status")
-        return {"updated": True, "id": item_id, "paste_status": paste_status}
+        """Delegated to RecordingCoreService.handle_set_paste_status (W796)."""
+        return self._recording_core_svc.handle_set_paste_status(params)
 
     # ------------------------------------------------------------------
     # Audio converter IPC handlers
