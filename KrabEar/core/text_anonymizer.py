@@ -12,6 +12,46 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ── ИНН checksum helpers ─────────────────────────────────────────────────────
+
+def _passes_inn_fl_checksum(digits: str) -> bool:
+    """Проверяет контрольную сумму ИНН физического лица (12 цифр).
+
+    Алгоритм:
+    - 11-й знак: коэффициенты [7,2,4,10,3,5,9,4,6,8] для знаков 1–10
+    - 12-й знак: коэффициенты [3,7,2,4,10,3,5,9,4,6,8] для знаков 1–11
+    """
+    if len(digits) != 12:
+        return False
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+    c11 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    c12 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    check11 = sum(d[i] * c11[i] for i in range(10)) % 11 % 10
+    check12 = sum(d[i] * c12[i] for i in range(11)) % 11 % 10
+    return d[10] == check11 and d[11] == check12
+
+
+def _passes_inn_yul_checksum(digits: str) -> bool:
+    """Проверяет контрольную сумму ИНН юридического лица (10 цифр).
+
+    Алгоритм:
+    - Коэффициенты [2,4,10,3,5,9,4,6,8] для знаков 1–9
+    - 10-й знак == sum(d[i]*c[i] for i in range(9)) % 11 % 10
+    """
+    if len(digits) != 10:
+        return False
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+    coefs = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+    check = sum(d[i] * coefs[i] for i in range(9)) % 11 % 10
+    return d[9] == check
+
+
 # ── Luhn checksum helper ─────────────────────────────────────────────────────
 
 def _passes_luhn(digits: str) -> bool:
@@ -85,7 +125,16 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{16}\b",  # 0000000000000000
         "[КАРТА]",
     ),
+    # ИНН юридического лица (10 цифр) — должен идти раньше passport,
+    # т.к. правило passport тоже матчит \d{10} (паспорт без пробела).
+    # Checksum-валидация в anonymize() отсеивает несовпадения.
+    (
+        "inn_yul",
+        r"\b\d{10}\b",
+        "[ИНН_ЮЛ]",
+    ),
     # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр)
+    # Примечание: \d{10} здесь не поймает ИНН ЮЛ — они уже поглощены выше.
     (
         "passport",
         r"\b(?:\d{4}[\s\-]\d{6}|\d{10})\b",
@@ -168,6 +217,14 @@ class TextAnonymizer:
                     # Validate via Luhn checksum — skip non-card 16-digit sequences
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
+                        continue
+                elif name == "inn_yul":
+                    # Validate ИНН ЮЛ checksum — skip random 10-digit numbers
+                    if not _passes_inn_yul_checksum(m.group(0)):
+                        continue
+                elif name == "inn":
+                    # Validate ИНН ФЛ checksum — skip random 12-digit numbers
+                    if not _passes_inn_fl_checksum(m.group(0)):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
