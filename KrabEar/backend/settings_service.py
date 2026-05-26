@@ -18,7 +18,7 @@ from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
-from backend.settings_backup import SettingsBackup
+from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS_BACKUP, SettingsBackup
 from backend.settings_validator import SettingsValidator
 
 _log = logging.getLogger(__name__)
@@ -382,13 +382,9 @@ class SettingsService:
         self.invalidate_cache()
         return result
 
-    # Sensitive fields — никогда не экспортируются
-    _SENSITIVE_FIELDS: frozenset[str] = frozenset({
-        "voice_gateway_api_key",
-        "hf_token",
-        "rest_api_key",
-        "lm_studio_api_key",
-    })
+    # W929 F4: single source of truth — imported from settings_backup.
+    # Covers all 9 secret fields; local 4-field set was a subset causing leaks.
+    _SENSITIVE_FIELDS: frozenset[str] = _SENSITIVE_FIELDS_BACKUP
 
     def handle_export_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля.

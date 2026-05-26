@@ -609,5 +609,60 @@ class TestBreadcrumbs(unittest.TestCase):
         self.assertGreater(len(keys_changed), 0)
 
 
+class TestExportSettingsRedactsAllSensitiveFields(unittest.TestCase):
+    """W929 F4 — handle_export_settings must redact all 9 SENSITIVE_FIELDS, not just 4."""
+
+    def test_export_settings_redacts_all_9_sensitive_fields(self):
+        """All 9 fields from SENSITIVE_FIELDS (imported from settings_backup)
+        must be absent from the exported file after the F4 fix."""
+        import json
+        import os
+        import tempfile
+
+        from backend.settings_backup import SENSITIVE_FIELDS
+
+        # Build a store that contains all 9 sensitive fields + a safe key.
+        all_9_secret_values = {f: f"secret_{f}" for f in SENSITIVE_FIELDS}
+        base = _make_store()
+        # Inject the 9 sensitive values into the mocked store's current dict.
+        base._current.update(all_9_secret_values)
+        base.load_settings.return_value = dict(base._current)
+
+        svc = SettingsService(store=base)
+        svc.invalidate_cache()  # ensure fresh load picks up updated mock
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as fh:
+            tmp_path = fh.name
+
+        try:
+            result = svc.handle_export_settings({"file": tmp_path})
+            with open(tmp_path, encoding="utf-8") as f:
+                exported = json.load(f)
+        finally:
+            os.unlink(tmp_path)
+
+        # None of the 9 sensitive keys should appear in the export.
+        leaked = [k for k in SENSITIVE_FIELDS if k in exported]
+        self.assertEqual(
+            leaked,
+            [],
+            f"Sensitive fields leaked into export: {leaked}",
+        )
+        # The count reported should not include the sensitive keys.
+        self.assertEqual(result["settings_count"], len(exported))
+
+    def test_sensitive_fields_set_has_9_entries(self):
+        """Canonical SENSITIVE_FIELDS in settings_backup must have exactly 9 entries."""
+        from backend.settings_backup import SENSITIVE_FIELDS
+
+        self.assertEqual(
+            len(SENSITIVE_FIELDS),
+            9,
+            f"Expected 9 sensitive fields, got {len(SENSITIVE_FIELDS)}: {SENSITIVE_FIELDS}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

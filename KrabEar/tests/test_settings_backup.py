@@ -383,5 +383,31 @@ class TestSettingsBackupConcurrent(unittest.TestCase):
         self.assertLessEqual(len(files), MAX_BACKUPS)
 
 
+class TestRestoreBackupPathTraversal(unittest.TestCase):
+    """W929 F1 — restore_backup must reject path-traversal backup_id values."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.backup = SettingsBackup(backup_dir=Path(self.tmp))
+
+    def test_restore_backup_rejects_path_traversal(self):
+        """backup_id containing '..' escaping the backup dir must raise ValueError."""
+        traversal_ids = [
+            "../../etc/passwd",
+            "../sibling/evil",
+            "/absolute/path",
+        ]
+        for bad_id in traversal_ids:
+            with self.subTest(backup_id=bad_id):
+                with self.assertRaises(ValueError, msg=f"Expected ValueError for {bad_id!r}"):
+                    self.backup.restore_backup(bad_id)
+
+    def test_restore_backup_accepts_valid_id(self):
+        """A normal backup_id (no traversal) must still work after the guard."""
+        bid = self.backup.create_backup({"key": "value"}, reason="test")
+        restored = self.backup.restore_backup(bid)
+        self.assertEqual(restored, {"key": "value"})
+
+
 if __name__ == "__main__":
     unittest.main()
