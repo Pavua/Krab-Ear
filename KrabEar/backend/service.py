@@ -537,6 +537,9 @@ class BackendService:
             last_stt_engine_ref=self._last_stt_engine_ref,
             auto_deduplicator=self._auto_deduplicator,  # W1247: wire dedup into recording flow
         )
+        # Wire error_bus into recording_core_svc for stt.transcribe_failed push (W1177)
+        self._recording_core_svc._error_bus = self._error_bus
+
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
