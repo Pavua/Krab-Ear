@@ -36,6 +36,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
+        semantic_searcher: Any = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -43,6 +44,9 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
+        # SemanticSearcher — синхронизируем удаление из индекса при delete_history_item.
+        # W1172: fix W1163 broken wiring (was .remove() → AttributeError silently swallowed).
+        self._semantic_searcher = semantic_searcher
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
         # Менеджер профилей резюмирования (персистентность в data_dir).
@@ -245,6 +249,17 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        # W1163/W1172: remove embedding from semantic index when history item is deleted.
+        # Use .remove_item() — the canonical method name on SemanticSearcher.
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(item_id)
+            except Exception as _exc:
+                logger.warning(
+                    "handle_delete_history_item: не удалось удалить embedding %s: %s",
+                    item_id,
+                    _exc,
+                )
         add_breadcrumb(
             category="history",
             message="delete_history_item",
