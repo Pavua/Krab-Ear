@@ -27,8 +27,15 @@ _RE_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 # ---------------------------------------------------------------------------
 
 
+_TELEGRAM_MAX_LENGTH = 4000  # Bot API hard limit is 4096; leave 96 chars headroom for affixes
+
+
 def _fmt_telegram(text: str) -> str:
-    """Telegram: без точки в конце, предложения разбиваются если длинные."""
+    """Telegram: без точки в конце, разбивка длинных предложений, лимит 4096 символов.
+
+    Telegram Bot API отклоняет сообщения длиннее 4096 символов с ошибкой
+    MESSAGE_TOO_LONG. Используем 4000 для небольшого запаса под аффиксы.
+    """
     text = text.strip()
     # Убираем trailing period/точку
     if text.endswith("."):
@@ -37,6 +44,10 @@ def _fmt_telegram(text: str) -> str:
     if len(text) > 120:
         sentences = _RE_SENT_SPLIT.split(text)
         text = "\n".join(s.strip() for s in sentences if s.strip())
+    # F1 fix: enforce Telegram 4096-char limit (Bot API hard limit)
+    if len(text) > _TELEGRAM_MAX_LENGTH:
+        truncated = text[:_TELEGRAM_MAX_LENGTH].rsplit(" ", 1)[0]
+        text = truncated + "…"
     return text
 
 
@@ -149,16 +160,21 @@ def _apply_rules(text: str, rules: dict) -> str:
         if len(sentences) > 1:
             text = "\n".join(f"• {s.strip()}" for s in sentences if s.strip())
 
-    max_len = rules.get("max_length")
-    if max_len and isinstance(max_len, int) and len(text) > max_len:
-        words = text[:max_len].rsplit(" ", 1)
-        text = words[0] + "…"
-
+    # F3 fix: apply prepend/append BEFORE max_length so the cap accounts for affixes
     if rules.get("prepend"):
         text = f"{rules['prepend']}\n{text}"
 
     if rules.get("append"):
         text = f"{text}\n{rules['append']}"
+
+    # F4 fix: use explicit None + > 0 check so max_length=0 is honoured (returns empty)
+    max_len = rules.get("max_length")
+    if max_len is not None and isinstance(max_len, int) and max_len >= 0 and len(text) > max_len:
+        if max_len == 0:
+            text = ""
+        else:
+            words = text[:max_len].rsplit(" ", 1)
+            text = words[0] + "…"
 
     return text
 
