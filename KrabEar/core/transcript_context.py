@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from core.code_switching_detector import CodeSwitchingDetector
+
+logger = logging.getLogger(__name__)
 
 # Горизонт давности: элементы старше этого порога не используются как контекст.
 _MAX_AGE_SECONDS: int = 30 * 60  # 30 минут
@@ -23,6 +26,12 @@ _ITEM_SEP: str = " "
 
 # Максимальное число терминов в объединённом глоссарии (hotwords + auto_glossary).
 _MAX_COMBINED_TERMS: int = 250
+
+# Максимальная длина итогового initial_prompt в символах.
+# Основано на лимите Whisper в 224 токена × 2.5 символа/токен (Кириллица — worst-case BPE).
+# При 250 многословных терминах один раздел Glossary может превысить лимит в 3×.
+_MAX_PROMPT_CHARS: int = 560
+
 # Hint добавляемый в initial_prompt при детектировании code-switching.
 _CODE_SWITCHING_HINT = (
     "В записи может звучать смесь русского и английского (технические термины)."
@@ -181,4 +190,29 @@ def build_initial_prompt(
             if cs_result["is_mixed"]:
                 parts.append(_CODE_SWITCHING_HINT)
 
-    return " ".join(parts)
+    prompt = " ".join(parts)
+
+    # Обрезаем до _MAX_PROMPT_CHARS, чтобы не превысить лимит 224 токена Whisper.
+    # Эвристика BPE: ~2.5 символа/токен для кириллицы (worst-case).
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        orig_len = len(prompt)
+        capped = prompt[:_MAX_PROMPT_CHARS]
+        # Если обрезка попала в середину глоссарного термина (после запятой),
+        # откатываемся до последней полной запятой, чтобы не оставлять рваный конец.
+        last_comma = capped.rfind(",")
+        last_period = capped.rfind(".")
+        # Граница: последний разделитель терминов (запятая) или конец секции (точка)
+        cut_at = max(last_comma, last_period)
+        if cut_at > _MAX_PROMPT_CHARS // 2:
+            capped = capped[:cut_at + 1].rstrip()
+        else:
+            capped = capped.rstrip()
+        logger.info(
+            "initial_prompt truncated to fit Whisper 224-token limit "
+            "(input %d chars → %d chars)",
+            orig_len,
+            len(capped),
+        )
+        return capped
+
+    return prompt
