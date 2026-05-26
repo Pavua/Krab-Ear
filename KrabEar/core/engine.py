@@ -1097,6 +1097,16 @@ class AudioEngine:
                 f"broad except in transcribe(): {type(exc).__name__}: {exc}",
                 severity="critical",
             )
+            try:
+                from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
+                _add_bc(
+                    category="transcription",
+                    message="transcribe_error",
+                    level="error",
+                    data={"ok": False, "error_type": type(exc).__name__},
+                )
+            except Exception:
+                pass  # telemetry must never break transcription
             return {"text": "", "error": str(exc), "status": "error"}
         finally:
             # Cleanup iCloud temp copy
