@@ -213,15 +213,51 @@ class TestValidateSpecialFields(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.errors, [])
 
+    def test_voice_gateway_url_valid_localhost_name(self):
+        result = self.v.validate({"voice_gateway_url": "http://localhost:9000/ws"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
+
     def test_voice_gateway_url_valid_https(self):
         result = self.v.validate({"voice_gateway_url": "https://gateway.example.com"})
         self.assertTrue(result.valid)
+
+    # W850 — IPv6 loopback variants
+    def test_voice_gateway_url_ipv6_loopback_http(self):
+        """http://[::1] must be allowed — IPv6 loopback for dual-stack VG installs."""
+        result = self.v.validate({"voice_gateway_url": "http://[::1]:9000/ws"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
+
+    def test_voice_gateway_url_ipv6_loopback_https(self):
+        """https://[::1] must be allowed."""
+        result = self.v.validate({"voice_gateway_url": "https://[::1]:9000/ws"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
+
+    def test_voice_gateway_url_ipv6_loopback_no_port(self):
+        """http://[::1] without explicit port must be allowed."""
+        result = self.v.validate({"voice_gateway_url": "http://[::1]/ws"})
+        self.assertTrue(result.valid)
+        self.assertEqual(result.errors, [])
 
     def test_voice_gateway_url_invalid(self):
         result = self.v.validate({"voice_gateway_url": "http://evil.com/api"})
         self.assertFalse(result.valid)
         self.assertEqual(len(result.errors), 1)
         self.assertIn("voice_gateway_url", result.errors[0])
+
+    def test_voice_gateway_url_rfc1918_http_invalid(self):
+        """http://192.168.x.x must be rejected (not loopback, not external HTTPS)."""
+        result = self.v.validate({"voice_gateway_url": "http://192.168.1.100:9000/ws"})
+        self.assertFalse(result.valid)
+        self.assertEqual(len(result.errors), 1)
+
+    def test_voice_gateway_url_ftp_scheme_invalid(self):
+        """ftp:// must be rejected."""
+        result = self.v.validate({"voice_gateway_url": "ftp://localhost/ws"})
+        self.assertFalse(result.valid)
+        self.assertEqual(len(result.errors), 1)
 
     def test_empty_settings_valid(self):
         result = self.v.validate({})

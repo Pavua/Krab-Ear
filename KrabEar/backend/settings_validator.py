@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 
 CURRENT_SCHEMA_VERSION = "2.0"
@@ -96,6 +98,48 @@ _MIGRATIONS: dict[tuple[str, str], list[tuple]] = {
         ("add_default", "history_focus_mode", True),
     ],
 }
+
+
+def _is_allowed_gateway_url(url: str) -> bool:
+    """Проверяет, допустим ли URL Voice Gateway.
+
+    Разрешено:
+    - HTTP или HTTPS на любом loopback-адресе (127.0.0.0/8, ::1, и все формы
+      IPv6-mapped loopback типа ::ffff:127.0.0.1).
+    - Имена «localhost» и «localhost.<tld>» (браузерное соглашение).
+    - Внешний HTTPS (scheme=https, нелокальный хост).
+
+    Блокировано:
+    - HTTP на нелокальный хост (SSRF-вектор).
+    - Любые другие схемы (ws://, ftp:// …).
+
+    W850: заменяет старую проверку через startswith(), которая не покрывала
+    http://[::1], http://[::ffff:7f00:1] и другие IPv6-loopback формы.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return False
+
+    host = (parsed.hostname or "").lower()
+
+    # Имя «localhost» (RFC 6761) — всегда loopback
+    if host == "localhost":
+        return True
+
+    # Попытка разобрать как IP-литерал (urlparse убирает скобки для IPv6)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback:
+            return True  # 127.x.x.x, ::1, ::ffff:127.0.0.1 и т.п.
+    except ValueError:
+        pass  # не IP-литерал
+
+    # Внешний HTTPS разрешён
+    if scheme == "https":
+        return True
+
+    return False
 
 
 @dataclass
@@ -203,16 +247,16 @@ class SettingsValidator:
                         cleaned[k.strip()] = v.strip()
                 fixed["text_templates"] = cleaned
 
-        # voice_gateway_url: должен быть localhost или HTTPS
+        # voice_gateway_url: должен быть localhost/loopback (HTTP или HTTPS) или внешний HTTPS.
+        # W850: старая проверка по строковому префиксу пропускала IPv6-loopback формы
+        # (http://[::1], http://[::ffff:127.0.0.1] и т.д.).  Теперь используем urlparse +
+        # ipaddress.is_loopback для корректного охвата всех loopback-адресов.
         if "voice_gateway_url" in fixed:
             gw_url = str(fixed["voice_gateway_url"]).strip()
-            if not (
-                gw_url.startswith("http://localhost")
-                or gw_url.startswith("http://127.0.0.1")
-                or gw_url.startswith("https://")
-            ):
+            if not _is_allowed_gateway_url(gw_url):
                 errors.append(
-                    f"'voice_gateway_url': должен быть localhost или HTTPS, получен {gw_url!r}"
+                    f"'voice_gateway_url': должен быть loopback (любой HTTP/HTTPS) "
+                    f"или внешний HTTPS, получен {gw_url!r}"
                 )
 
         return ValidationResult(
