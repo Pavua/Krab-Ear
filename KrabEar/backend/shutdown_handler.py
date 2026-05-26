@@ -186,14 +186,9 @@ class GracefulShutdownHandler:
             return {
                 "clean": self._last_shutdown_clean,
                 "last_shutdown_time": self._last_shutdown_time,
+                # W975 MEDIUM: правильная логика — started но ещё не done.
                 "shutdown_in_progress": (
-                    self._shutdown_done.is_set() is False
-                    and self._last_shutdown_time is None
-                    and self._service is not None
-                    # Признак того, что сигнал уже получен, но обработка идёт.
-                    # Определяем косвенно — если _shutdown_done не установлен,
-                    # это либо «не начат», либо «в процессе».
-                    # Упрощаем: False до завершения, True только после.
+                    self._shutdown_started and not self._shutdown_done.is_set()
                 ),
             }
 
