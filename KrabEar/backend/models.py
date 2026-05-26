@@ -72,6 +72,9 @@ class HistoryItem:
     decisions: list | None = None
     # Open questions identified in the transcript. None = не извлекались.
     questions: list | None = None
+    # Privacy mode flag: True when the recording was made while privacy_mode_enabled=True.
+    # Allows audit/filtering of privacy-mode sessions; user can purge these separately.
+    privacy_mode: bool = False
 
     @classmethod
     def create(
@@ -104,6 +107,7 @@ class HistoryItem:
         action_items: list | None = None,
         decisions: list | None = None,
         questions: list | None = None,
+        privacy_mode: bool = False,
     ) -> "HistoryItem":
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
@@ -137,6 +141,7 @@ class HistoryItem:
             action_items=list(action_items) if action_items is not None else None,
             decisions=list(decisions) if decisions is not None else None,
             questions=list(questions) if questions is not None else None,
+            privacy_mode=bool(privacy_mode),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,6 +182,7 @@ class HistoryItem:
             action_items=payload.get("action_items") if isinstance(payload.get("action_items"), list) else None,
             decisions=payload.get("decisions") if isinstance(payload.get("decisions"), list) else None,
             questions=payload.get("questions") if isinstance(payload.get("questions"), list) else None,
+            privacy_mode=bool(payload.get("privacy_mode", False)),
         )
 
 

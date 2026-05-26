@@ -1102,6 +1102,14 @@ class RecordingCoreService:
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
 
+        # W1134 F2 HIGH: tag items recorded in privacy mode so they can be filtered/purged.
+        _privacy_mode_active = bool(settings.get("privacy_mode_enabled", False))
+        if _privacy_mode_active:
+            logger.info(
+                "privacy_mode: recording persisted with privacy_mode=True (history_id will be set)",
+                extra={"duration_sec": round(float(duration_sec), 2)},
+            )
+
         item = self.store.add_history_item(
             text=display_text,
             paste_status="failed",
@@ -1121,6 +1129,7 @@ class RecordingCoreService:
             emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
             word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
             speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+            privacy_mode=_privacy_mode_active,
         )
         self._clipboard_history.append({
             "text": final_text,
@@ -1173,6 +1182,7 @@ class RecordingCoreService:
             "silence_detected": silence_detected,
             "silence_guard_enabled": silence_guard_enabled,
             "background_guard_rejected": background_guard_rejected,
+            "privacy_mode": _privacy_mode_active,
         }
         event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
             history_id=item.id,

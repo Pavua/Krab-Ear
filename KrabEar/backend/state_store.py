@@ -185,6 +185,7 @@ class StateStore:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
+        privacy_mode: bool = False,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -208,6 +209,7 @@ class StateStore:
             emotion=emotion,
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
+            privacy_mode=privacy_mode,
         )
         try:
             with self._lock():
