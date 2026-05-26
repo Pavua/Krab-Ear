@@ -37,7 +37,10 @@ _STRENGTH_PARAMS: dict[str, dict] = {
     "strong":   {"prop_decrease": 0.95, "n_std_thresh_stationary": 2.0},
 }
 
-# Количество семплов для оценки noise floor (первые ~200 мс @ 16 кГц)
+# Размер окна оценки noise floor в миллисекундах
+_NOISE_FLOOR_WINDOW_MS = 200
+
+# Количество семплов в окне noise floor @ 16 кГц (дефолтная частота STT)
 _NOISE_FLOOR_SAMPLES = 3200
 
 # Размер FFT-окна для spectral gating
@@ -75,13 +78,49 @@ def _has_whispered_segments(audio: np.ndarray, sr: int) -> bool:
     return bool(np.any((rms_db > -50.0) & (rms_db < -35.0)))
 
 
+def _find_noise_window(audio: np.ndarray, sample_rate: int, window_ms: int = _NOISE_FLOOR_WINDOW_MS) -> int:
+    """Находит начало самого тихого окна в аудиосигнале для оценки noise floor.
+
+    Вместо использования фиксированных первых 200 мс (которые могут содержать
+    речь, если пользователь начал говорить сразу после хоткея), находим окно
+    с минимальным RMS. Это защищает от ситуации, когда речевые гармоники
+    попадают в noise reference и подавляются.
+
+    Args:
+        audio: float64 моно-аудиомассив.
+        sample_rate: частота дискретизации в Гц.
+        window_ms: размер окна в миллисекундах.
+
+    Returns:
+        Индекс начала тишайшего окна (в семплах).
+    """
+    window = int(window_ms * sample_rate / 1000)
+    if len(audio) < window:
+        return 0
+
+    n_windows = len(audio) // window
+    rms_per = np.array([
+        np.sqrt(np.mean(audio[i * window:(i + 1) * window] ** 2))
+        for i in range(n_windows)
+    ])
+    quietest_idx = int(np.argmin(rms_per))
+    start = quietest_idx * window
+    logger.debug(
+        "[Denoiser] noise window: idx=%d start=%d rms=%.4f (из %d окон)",
+        quietest_idx, start, rms_per[quietest_idx], n_windows,
+    )
+    return start
+
+
 class AudioDenoiser:
     """Адаптивный деноизер аудиосигнала.
 
     Алгоритм:
     1. Если ``noisereduce`` установлен — делегируем ему (stationary mode).
     2. Иначе — собственная реализация spectral gating через STFT (scipy.signal):
-       a. Оцениваем noise floor по первым 200 мс (предполагаем тишину/фон в начале).
+       a. Оцениваем noise floor по тишайшему 200-мс окну (W1062 F1 fix: ранее
+          всегда брались первые 200 мс, что приводило к подавлению речи, если
+          пользователь начинал говорить сразу после нажатия хоткея).
        b. Вычисляем mask: бины ниже noise_floor * gain_thresh → приглушаем.
        c. Применяем маску в частотной области, восстанавливаем через ISTFT.
        d. Клипуем результат в [-1, 1].
@@ -181,8 +220,10 @@ class AudioDenoiser:
         """Шумоподавление через пакет noisereduce (stationary mode)."""
         import noisereduce as nr  # type: ignore
 
-        # Оцениваем noise floor по первым ~200 мс
-        noise_clip = audio[:_NOISE_FLOOR_SAMPLES] if len(audio) > _NOISE_FLOOR_SAMPLES else audio
+        # Оцениваем noise floor по тишайшему 200-мс окну (W1062 F1 fix)
+        window = int(_NOISE_FLOOR_WINDOW_MS * sample_rate / 1000)
+        noise_start = _find_noise_window(audio, sample_rate, _NOISE_FLOOR_WINDOW_MS)
+        noise_clip = audio[noise_start:noise_start + window] if len(audio) > window else audio
 
         result = nr.reduce_noise(
             y=audio,
@@ -207,7 +248,7 @@ class AudioDenoiser:
         """Встроенная реализация spectral gating через STFT/ISTFT.
 
         Алгоритм spectral subtraction:
-        1. Оцениваем noise floor через первые ~200 мс.
+        1. Оцениваем noise floor через тишайшее 200-мс окно (W1062 F1 fix).
         2. Вычисляем STFT всего сигнала.
         3. Для каждого бина: если амплитуда < noise_threshold * factor → подавляем.
         4. Восстанавливаем через ISTFT.
@@ -222,8 +263,10 @@ class AudioDenoiser:
         prop_decrease: float = params["prop_decrease"]
         n_std: float = params["n_std_thresh_stationary"]
 
-        # 1. Noise floor estimate по первым 200 мс
-        noise_clip = audio[:_NOISE_FLOOR_SAMPLES] if len(audio) > _NOISE_FLOOR_SAMPLES else audio
+        # 1. Noise floor estimate по тишайшему 200-мс окну (W1062 F1 fix)
+        window = int(_NOISE_FLOOR_WINDOW_MS * sample_rate / 1000)
+        noise_start = _find_noise_window(audio, sample_rate, _NOISE_FLOOR_WINDOW_MS)
+        noise_clip = audio[noise_start:noise_start + window] if len(audio) > window else audio
 
         _, _, noise_stft = stft(noise_clip, fs=sample_rate, nperseg=_N_FFT, noverlap=_N_FFT - _HOP)
         noise_amp = np.abs(noise_stft)
