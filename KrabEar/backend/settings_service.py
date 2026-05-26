@@ -517,22 +517,51 @@ class SettingsService:
     def handle_restore_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает настройки из указанного бэкапа и сохраняет их.
 
+        W1337 F2 fix: если бэкап не содержит credential-поля (SENSITIVE_FIELDS),
+        которые присутствуют в текущих настройках — они сохраняются из текущих
+        настроек и НЕ затираются. В ответе добавляется warning + список потерянных полей.
+
         Params:
             backup_id (str): идентификатор бэкапа.
 
         Returns:
-            {"restored_settings": {...}, "backup_id": str}
+            {"restored_settings": {...}, "backup_id": str,
+             "warning": "credentials_dropped", "dropped_fields": [...]}  # при наличии
         """
         backup_id = str(params.get("backup_id", "")).strip()
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
 
         restored = self._backup.restore_backup(backup_id)
+
+        # Detect credential fields present in current settings but missing from backup.
+        current = self.cached_settings()
+        dropped_fields = sorted(
+            field
+            for field in self._SENSITIVE_FIELDS
+            if current.get(field) and not restored.get(field)
+        )
+
+        # Preserve existing credentials — don't clobber them with absent/empty values.
+        if dropped_fields:
+            for field in dropped_fields:
+                restored[field] = current[field]
+            _log.warning(
+                "handle_restore_settings_backup: backup '%s' missing credential fields %s"
+                " — preserving current values",
+                backup_id,
+                dropped_fields,
+            )
+
         self.store.save_settings(restored)
         self.invalidate_cache()
 
         _log.info("handle_restore_settings_backup: restored from %s", backup_id)
-        return {"restored_settings": restored, "backup_id": backup_id}
+        result: dict[str, Any] = {"restored_settings": restored, "backup_id": backup_id}
+        if dropped_fields:
+            result["warning"] = "credentials_dropped"
+            result["dropped_fields"] = dropped_fields
+        return result
 
     def handle_create_manual_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Создаёт ручной бэкап текущих настроек с произвольной причиной.
