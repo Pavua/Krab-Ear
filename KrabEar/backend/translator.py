@@ -102,6 +102,11 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
+        # Персистентный LRU-кэш переводов — поздняя инжекция из BackendService.__init__.
+        # Когда задан, результаты успешных переводов сохраняются на диск и переживают
+        # перезапуск процесса. Ключ: hash(text, source_lang, target_lang, engine).
+        # Используется ТОЛЬКО для успешных (status="ok") результатов с непустым text.
+        self._translation_cache: Any | None = None  # type: TranslationCache | None
         # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
@@ -190,6 +195,34 @@ class Translator:
         if cached is not None:
             return self._apply_glossary_to_result(cached, safe_glossary)
 
+        # Персистентный кэш — проверяем после промаха in-memory кэша.
+        # Ключ: (text, normalized_mode, normalized_style, "persistent") — стабильный,
+        # не зависит от сети или имени модели. Только successful (status="ok") результаты.
+        if self._translation_cache is not None:
+            persistent_hit = self._translation_cache.get(
+                text=clean_text,
+                source=normalized_mode,
+                target=normalized_style,
+                engine="persistent",
+            )
+            if persistent_hit is not None:
+                # Восстанавливаем объект из кэшированной строки (text)
+                # Исходный результат был успешным; source/target_lang берём из engine-field
+                # закодированного вида "src:target:engine_name" → разбираем здесь.
+                parts = persistent_hit.split("\x00", 3)
+                if len(parts) == 4:
+                    src_lang, tgt_lang, orig_engine, translated_text = parts
+                    restored = TranslationResult(
+                        text=translated_text,
+                        status="ok",
+                        source_lang=src_lang,
+                        target_lang=tgt_lang,
+                        mode=normalized_mode,
+                        engine=orig_engine + "_cached",
+                    )
+                    self._cache_set(cache_key, restored)
+                    return self._apply_glossary_to_result(restored, safe_glossary)
+
         if normalized_mode == "off":
             result = TranslationResult(
                 text="",
@@ -209,6 +242,15 @@ class Translator:
                 translation_style=normalized_style,
             )
             self._cache_set(cache_key, result)
+            # Персистируем успешные результаты
+            if result.ok and self._translation_cache is not None:
+                self._translation_cache.put(
+                    text=clean_text,
+                    source=normalized_mode,
+                    target=normalized_style,
+                    engine="persistent",
+                    result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+                )
             return self._apply_glossary_to_result(result, safe_glossary)
 
         result = self._translate_single_mode(
@@ -218,6 +260,15 @@ class Translator:
             translation_style=normalized_style,
         )
         self._cache_set(cache_key, result)
+        # Персистируем успешные результаты
+        if result.ok and self._translation_cache is not None:
+            self._translation_cache.put(
+                text=clean_text,
+                source=normalized_mode,
+                target=normalized_style,
+                engine="persistent",
+                result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+            )
         return self._apply_glossary_to_result(result, safe_glossary)
 
     def _translate_single_mode(
