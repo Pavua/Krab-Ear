@@ -258,3 +258,52 @@ class RecordingChainManager:
             raise ValueError("Параметр 'item_id' обязателен")
         removed = self.unlink_recording_from_chain(chain_id, item_id)
         return {"ok": True, "removed": removed}
+
+    # ------------------------------------------------------------------
+    # Merge helpers
+    # ------------------------------------------------------------------
+
+    def find_chains_containing(self, item_ids: list[str]) -> dict[str, list[str]]:
+        """Возвращает словарь {chain_id: [matched_item_ids]} для всех цепочек,
+        содержащих хотя бы один из переданных item_ids.
+
+        Используется RecordingMerger для обнаружения «ghost refs» перед удалением
+        оригиналов и последующей заменой их на merged item_id.
+        """
+        item_id_set = set(item_ids)
+        result: dict[str, list[str]] = {}
+        with self._lock:
+            for chain_id, chain in self._data["chains"].items():
+                matched = [iid for iid in chain.get("item_ids", []) if iid in item_id_set]
+                if matched:
+                    result[chain_id] = matched
+        return result
+
+    def replace_items_in_chain(self, chain_id: str, old_ids: list[str], new_id: str) -> bool:
+        """Заменяет все вхождения old_ids в цепочке на new_id (однократно, в позиции первого).
+
+        Возвращает True, если были произведены изменения.
+        Не бросает исключение, если цепочка не найдена — идемпотентно.
+        """
+        old_id_set = set(old_ids)
+        with self._lock:
+            chain = self._data["chains"].get(chain_id)
+            if chain is None:
+                return False
+            item_ids: list[str] = list(chain.get("item_ids", []))
+            new_list: list[str] = []
+            inserted = False
+            changed = False
+            for iid in item_ids:
+                if iid in old_id_set:
+                    changed = True
+                    if not inserted:
+                        new_list.append(new_id)
+                        inserted = True
+                    # остальные вхождения old_ids пропускаем (дедупликация)
+                else:
+                    new_list.append(iid)
+            if changed:
+                chain["item_ids"] = new_list
+                self._save()
+        return changed
