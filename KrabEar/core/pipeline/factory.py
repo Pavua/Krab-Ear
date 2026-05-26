@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from core.pipeline.executor import PipelineExecutor
+from core.pipeline.stage_cache import StageCache
 from core.pipeline.stages.audio_normalization import AudioNormalizationStage
 from core.pipeline.stages.stt import STTStage
 from core.pipeline.stages.diarization import DiarizationStage
@@ -19,6 +20,7 @@ def create_default_pipeline(
     translator: Optional[Any] = None,
     diarization_fn: Optional[Callable[[str], list]] = None,
     settings_get: Optional[Callable] = None,
+    stage_cache: Optional[StageCache] = None,
 ) -> PipelineExecutor:
     """Собирает и возвращает PipelineExecutor со всеми 6 стадиями.
 
@@ -39,6 +41,8 @@ def create_default_pipeline(
             По умолчанию берётся engine.run_diarization, если такой метод есть.
         settings_get: callable(key, default=None) для чтения настроек.
             По умолчанию читает из core.config.settings.
+        stage_cache: StageCache или None.  W1263 F3 — если передан, executor
+            использует кэш для кэшируемых стадий (cacheable = True).
 
     Returns:
         PipelineExecutor с 6 стадиями.
@@ -66,4 +70,4 @@ def create_default_pipeline(
         TranslationStage(translator, settings_get=settings_get),
     ]
 
-    return PipelineExecutor(stages)
+    return PipelineExecutor(stages, cache=stage_cache)

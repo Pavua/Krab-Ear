@@ -36,6 +36,6 @@ class TextCleanupStage:
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("text_cleanup failed: %s", exc)
-            ctx.errors.append(f"text_cleanup_error: {exc}")
+            ctx.errors.append(f"text_cleanup: {exc}")
             ctx.cleaned_text = ctx.raw_text  # fallback: передаём нечищеный текст
         return ctx

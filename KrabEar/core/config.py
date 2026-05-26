@@ -876,6 +876,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
+    # --- Phase 4 deterministic pipeline (pipeline_v2) ---
+    # EXPERIMENTAL: Phase 4 pipeline stages (audio norm, STT, text cleanup,
+    # diarization, translation, LLM rewrite) run as an explicit stage chain.
+    # Default False — dormant since Phase 4 implementation; activating could
+    # affect STT quality. Enable via set_settings or KRAB_EAR_PIPELINE_V2_ENABLED=true.
+    "pipeline_v2_enabled": False,
     # --- Audio-level Language ID (AudioLanguageID) ---
     # Encoder-only mlx-whisper forward pass для автодетекции языка аудио (~50ms).
     # Включено по умолчанию; используется router'ом когда hint_language=None.

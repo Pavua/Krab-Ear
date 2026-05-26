@@ -134,6 +134,9 @@ def _short_model_name(model: str) -> str:
 
 logger = logging.getLogger("KrabEar.Engine")
 
+# Module-level flag: emit the pipeline_v2 experimental warning only once per process.
+_pipeline_v2_warned: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Утилита: поиск ffmpeg в PATH (portable на Intel/Apple Silicon/нестандартные установки)
@@ -698,6 +701,49 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
+
+        # --- pipeline_v2 opt-in gate (W1263 F1) ---
+        # Phase 4 deterministic pipeline is EXPERIMENTAL and OFF by default.
+        # Enable via: set_settings {"pipeline_v2_enabled": true}
+        #          or: KRAB_EAR_PIPELINE_V2_ENABLED=true env var.
+        # Falls back to this legacy path automatically on any gate check failure.
+        _pipeline_v2_enabled = False
+        try:
+            from core.config import DEFAULT_SETTINGS as _DS  # noqa: F401 — imported for default
+            _pipeline_v2_enabled = bool(
+                getattr(settings, "PIPELINE_V2_ENABLED", None)
+                if getattr(settings, "PIPELINE_V2_ENABLED", None) is not None
+                else getattr(settings, "PIPELINE_V2", False)
+            )
+        except Exception:
+            pass
+        if _pipeline_v2_enabled:
+            global _pipeline_v2_warned
+            if not _pipeline_v2_warned:
+                logger.warning(
+                    "pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated. "
+                    "Report issues if STT quality regresses."
+                )
+                _pipeline_v2_warned = True
+            try:
+                from core.pipeline.bridge import transcribe_v2 as _transcribe_v2
+                return _transcribe_v2(
+                    engine=self,
+                    audio_input=audio_data,
+                    llm_rewriter=getattr(self, "_llm_rewriter", None),
+                    translator=getattr(self, "_translator", None),
+                    cleanup_profile=cleanup_profile,
+                    is_preview=is_preview,
+                    domain=domain,
+                    extra_vocabulary=extra_vocabulary,
+                    lang_hint=lang_hint,
+                )
+            except Exception as _v2_exc:
+                logger.warning(
+                    "pipeline_v2 failed (%s), falling back to legacy path", _v2_exc
+                )
+                # Fall through to legacy path below
+
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
         try:
