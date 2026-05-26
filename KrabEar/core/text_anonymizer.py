@@ -31,6 +31,39 @@ def _passes_luhn(digits: str) -> bool:
     return checksum % 10 == 0
 
 
+# ── ИНН checksum helper ───────────────────────────────────────────────────────
+
+def _passes_inn_checksum(digits: str) -> bool:
+    """Verify ИНН (Russian TIN) passes control digit checksum.
+
+    10-digit ИНН (organisation): one control digit at position 9.
+    12-digit ИНН (individual): two control digits at positions 10 and 11.
+
+    Returns True if the number passes all applicable control digit checks.
+    Returns True unconditionally for lengths other than 10 or 12 (caller
+    should pre-filter by length).
+    """
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+
+    if len(d) == 10:
+        weights = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+        control = sum(w * v for w, v in zip(weights, d[:9])) % 11 % 10
+        return d[9] == control
+
+    if len(d) == 12:
+        weights11 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        weights12 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        c11 = sum(w * v for w, v in zip(weights11, d[:10])) % 11 % 10
+        c12 = sum(w * v for w, v in zip(weights12, d[:11])) % 11 % 10
+        return d[10] == c11 and d[11] == c12
+
+    # Unexpected length — do not redact
+    return False
+
+
 # ── Датаклассы результата ────────────────────────────────────────────────────
 
 @dataclass
@@ -54,18 +87,24 @@ class AnonymizeResult:
 
 # Формат: (name, compiled_pattern, replacement_label)
 _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
-    # Российские телефоны: +7/8 и различные форматы скобок/дефисов/пробелов
+    # Телефонные номера: RU (+7/8), ES (+34), EN/US (+1) и локальный формат
     (
         "phone",
         r"(?<!\d)"
         r"(?:"
-        # +7 (999) 123-45-67  /  +7(999)1234567  /  +79991234567
+        # RU: +7 (999) 123-45-67  /  +7(999)1234567  /  +79991234567
         r"\+7[\s\-]?[\(\s]?\d{3}[\)\s]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
         r"|"
-        # 8 (999) 123-45-67  /  8(999)1234567  /  89991234567
+        # RU: 8 (999) 123-45-67  /  8(999)1234567  /  89991234567
         r"8[\s\-]?[\(\s]?\d{3}[\)\s]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
         r"|"
-        # Короткий локальный: (999) 123-45-67
+        # ES: +34 NNN NNN NNN  (9 цифр: мобильные 6xx/7xx, фиксированные 9xx)
+        r"\+34[\s\-]?\d{3}[\s\-]?\d{3}[\s\-]?\d{3}"
+        r"|"
+        # EN/US/CA: +1 NNN NNN NNNN  /  +1-NNN-NNN-NNNN  /  +1 (NNN) NNN-NNNN
+        r"\+1[\s\-]?[\(\s]?\d{3}[\)\s]?[\s\-]?\d{3}[\s\-]?\d{4}"
+        r"|"
+        # Локальный: (999) 123-45-67
         r"\(\d{3,4}\)[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
         r")"
         r"(?!\d)",
@@ -168,6 +207,11 @@ class TextAnonymizer:
                     # Validate via Luhn checksum — skip non-card 16-digit sequences
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
+                        continue
+                if name == "inn":
+                    # Validate ИНН control digit(s) — skip numbers that aren't valid ИНН
+                    digits = re.sub(r"[\s\-]", "", m.group(0))
+                    if not _passes_inn_checksum(digits):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
