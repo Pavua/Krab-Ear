@@ -248,7 +248,15 @@ class StartupDiagnostics:
         )
 
     def _check_data_dir_writable(self) -> CheckResult:
-        """Директория данных доступна для записи."""
+        """Директория данных доступна для записи.
+
+        Предусловие: StateStore уже создал директорию до вызова диагностики,
+        поэтому mkdir здесь избыточен и может породить гонку.
+        Исключения разбиваются на два типа:
+          - PermissionError → настоящая ошибка прав доступа (статус "error").
+          - FileNotFoundError → транзиентная гонка (директория ещё создаётся);
+            делаем одну попытку повтора после минимальной паузы.
+        """
         t0 = time.monotonic()
         try:
             if self._data_dir is None:
@@ -257,10 +265,36 @@ class StartupDiagnostics:
             else:
                 data_dir = self._data_dir
 
-            data_dir.mkdir(parents=True, exist_ok=True)
             test_file = data_dir / ".startup_write_test"
-            test_file.write_text("ok")
-            test_file.unlink()
+
+            def _try_write() -> None:
+                test_file.write_text("ok")
+                test_file.unlink(missing_ok=True)
+
+            try:
+                _try_write()
+            except PermissionError as exc:
+                return CheckResult(
+                    name="data_dir_writable",
+                    status="error",
+                    message=f"Нет прав на запись в директорию данных: {exc}",
+                    duration_ms=(time.monotonic() - t0) * 1000.0,
+                    details={"path": str(data_dir)},
+                )
+            except FileNotFoundError:
+                # Транзиентная гонка: директория ещё не создана. Одна попытка повтора.
+                time.sleep(0.05)
+                try:
+                    _try_write()
+                except Exception as exc2:
+                    return CheckResult(
+                        name="data_dir_writable",
+                        status="error",
+                        message=f"Директория данных недоступна для записи (после повтора): {exc2}",
+                        duration_ms=(time.monotonic() - t0) * 1000.0,
+                        details={"path": str(data_dir)},
+                    )
+
             return CheckResult(
                 name="data_dir_writable",
                 status="ok",
@@ -405,8 +439,12 @@ class StartupDiagnostics:
             except Exception:
                 model_name = "mlx-community/whisper-large-v3-turbo"
 
-            # Стандартное расположение кэша HF: ~/.cache/huggingface/hub/
-            hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+            # Расположение кэша HF: сначала HF_HOME env, затем дефолт ~/.cache/huggingface/hub/
+            hf_home_env = os.environ.get("HF_HOME", "")
+            if hf_home_env:
+                hf_cache = Path(hf_home_env) / "hub"
+            else:
+                hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
             if not hf_cache.exists():
                 # Wave 490: push startup.stt_model_cache_miss to error bus
                 self._push_stt_cache_miss_error(model_name)
