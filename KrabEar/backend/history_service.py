@@ -1864,6 +1864,61 @@ class HistoryService:
     # Экспорт в формат Obsidian
     # ------------------------------------------------------------------
 
+    # Allowed roots for export output_dir.  These are intentionally permissive
+    # so that legitimate user workflows (export to ~/Documents, ~/Downloads,
+    # ~/Desktop, or the app data dir) all work without friction.  Any path
+    # outside this set is rejected to prevent IPC-based path traversal writes
+    # to sensitive locations (e.g. ~/.ssh, ~/Library/Keychains).
+    _ALLOWED_EXPORT_ROOTS: tuple[Path, ...] = ()  # populated lazily by _resolve_export_dir
+
+    def _resolve_export_dir(self, output_dir: str | None) -> Path | None:
+        """Validates *output_dir* against the export allowlist.
+
+        Returns the resolved absolute Path when *output_dir* is provided and
+        allowed, or ``None`` when *output_dir* is ``None`` / empty (callers
+        should fall back to their default directory).
+
+        Raises ``ValueError`` if the resolved path is not relative to any
+        allowed root.
+
+        Allowed roots (evaluated at call time so that data_dir changes in
+        tests are respected):
+          - ``self.store.data_dir``
+          - ``~/Documents``
+          - ``~/Downloads``
+          - ``~/Desktop``
+          - ``/tmp`` / ``tempfile.gettempdir()``  (for tests / scripts)
+        """
+        import tempfile as _tempfile
+
+        if not output_dir:
+            return None
+
+        resolved = Path(output_dir).expanduser().resolve()
+
+        data_dir_root = Path(self.store.data_dir).resolve()
+        home = Path.home()
+        allowed_roots: list[Path] = [
+            data_dir_root,
+            (home / "Documents").resolve(),
+            (home / "Downloads").resolve(),
+            (home / "Desktop").resolve(),
+            Path("/tmp").resolve(),
+            Path(_tempfile.gettempdir()).resolve(),
+        ]
+
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root)
+                return resolved
+            except ValueError:
+                continue
+
+        raise ValueError(
+            f"export output_dir is outside allowed directories: {resolved!s}. "
+            f"Allowed roots: {[str(r) for r in allowed_roots]}"
+        )
+
     def handle_export_obsidian(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует транскрипции в формат Obsidian-совместимого Markdown.
 
@@ -2099,10 +2154,8 @@ class HistoryService:
         content = "\n".join(fm_lines) + "\n" + "\n".join(body_lines)
 
         # --- Сохраняем ---
-        if output_dir_param:
-            out_dir = Path(output_dir_param).expanduser().resolve()
-        else:
-            out_dir = Path(self.store.data_dir) / "transcripts"
+        validated = self._resolve_export_dir(output_dir_param)
+        out_dir = validated if validated is not None else Path(self.store.data_dir) / "transcripts"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         safe_title = (
@@ -2609,10 +2662,8 @@ class HistoryService:
 
         # Создаём директорию бандла
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if output_dir_param:
-            base_dir = Path(output_dir_param).expanduser().resolve()
-        else:
-            base_dir = Path(self.store.data_dir) / "exports"
+        validated_base = self._resolve_export_dir(output_dir_param)
+        base_dir = validated_base if validated_base is not None else Path(self.store.data_dir) / "exports"
         bundle_dir = base_dir / f"export_{timestamp_str}"
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
