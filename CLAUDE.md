@@ -41,9 +41,9 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 └─────────────────────────┘                              └──────────────────────────┘
 ```
 
-### Service map (post-W751)
+### Service map (post-W797, 100+ PR marathon)
 
-14 services extracted from `BackendService` — zero orphan imports as of W751 (guarded by CI):
+17 services extracted from `BackendService` — zero orphan imports as of W751 (guarded by CI). W797 additionally split `service.py` into three infrastructure files (`service_logging.py`, `ipc_server.py`, `ipc_dispatch.py`), bringing `service.py` from ~3224 → ~2213 LOC (−62% vs 5821 baseline):
 
 1. **CallAssistService** — call assist + VG WS client
 2. **HistoryService** — history CRUD, SRT export, clipboard hist
@@ -59,6 +59,9 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 12. **AppleIntegrationService** — Telegram bridge, Notes, Reminders, Calendar, iMessage
 13. **CallSessionService** — call session CRUD + status lifecycle
 14. **LiveSubsService** — system-audio streaming STT for live subtitles (Phase 2)
+15. **GlossaryService** — glossary CSV export/import (W772)
+16. **LLMOpsService** — list_llm_models, get_last_llm_diff, replace_word_in_last_transcript (W783)
+17. **SearchAndAnalysisService** — semantic search + action items + recording analytics (W757)
 
 Note: `TTSService` (`backend/tts_service.py`) is standalone — not extracted from `service.py`.
 
@@ -68,7 +71,10 @@ Orphan-import regression guard: `scripts/audit_orphan_imports.py` runs in CI on 
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
 - **`core/engine.py`** — `AudioEngine`: STT via mlx-whisper with fallback chain (balanced → max candidates → remote), audio normalization, diarization pipeline (pyannote), TTS via macOS `say`.
 - **`core/utils.py`** — `TextUtils`: transcript cleanup (soft/strict profiles), hallucination stripping, phrase dedup.
-- **`backend/service.py`** — `BackendService` (business logic) + `IPCServer` (Unix socket server). Single file, **~3224 lines** (down from 5821 baseline, −45% after marathon extractions). The `handle_request` method dispatches **300** JSON-RPC methods via a handler lookup table, delegating to **14 extracted services** with **zero remaining orphans** (HealthCheckService wired in W751 closed the last gap). Wave 65 batch 1 removed 19 dead handlers; marathon waves W172/W392/W404/W423/W525/W683/W691/W734/W741/W742/W746/W747/W751 added RecordingCoreService, AnalyticsService, TextScoringService, HealthCheckService, AppleIntegrationService, STTManagementService, TextProcessingService and others. **W746 lesson**: the `TextProcessingService` import was silently lost in a W173 rebase — instantiation survived but import vanished — production stayed alive only because Python had loaded the .py before the drop. **W750 audit script** (`scripts/audit_orphan_imports.py`) is wired into CI to catch this regression class. Post-W742 the lookup table may bypass local `_handle_X` shims and call `self._<svc>.handle_X` directly for already-extracted handlers. Full API reference: `docs/IPC_API_REFERENCE.md` (regen in W745, ~2422 lines, 289 handlers documented) — cross-check live via `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`.
+- **`backend/service.py`** — `BackendService` (business logic hub). **~2213 lines** (down from 5821 baseline, −62% after marathon extractions + W797 split). `handle_request` dispatches **~300** JSON-RPC methods via `self._dispatch_table` (O(1), built once in `__init__` by `backend.ipc_dispatch.build_dispatch_table`), delegating to **17 extracted services** with **zero remaining orphans** (HealthCheckService wired in W751 closed the last gap). Wave 65 batch 1 removed 19 dead handlers; marathon waves W172/W392/W404/W423/W525/W683/W691/W734/W741/W742/W746/W747/W751/W797 added services and split logging/IPC layers. **W746 lesson**: the `TextProcessingService` import was silently lost in a W173 rebase — production survived only because Python had the .py loaded. **W750 audit script** (`scripts/audit_orphan_imports.py`) is wired into CI. **W797 split (phases 1–3, W797/W813/W828)**: logging config, IPC socket server, and dispatch table extracted into three dedicated files — see below. Full API reference: `docs/IPC_API_REFERENCE.md` (regen in W745, ~2422 lines, 289 handlers) — cross-check live via `grep -cE '"[a-z_]+":\s*self\._' KrabEar/backend/service.py`.
+- **`backend/service_logging.py`** — `configure_logging()`, `JsonFormatter`, `_STANDARD_LOG_ATTRS`. Extracted from `service.py` in W797 phase 1 (70 LOC).
+- **`backend/ipc_server.py`** — `IPCServer` class: Unix-socket listener, connection accept loop, per-client reader threads. Extracted from `service.py` in W797 phase 2 / W813 (154 LOC).
+- **`backend/ipc_dispatch.py`** — `build_dispatch_table(backend_service)`: builds and returns the `{method: handler}` dict cached as `self._dispatch_table` in `BackendService.__init__`. Extracted in W797 phase 3 / W828 (357 LOC).
 - **`backend/call_assist_service.py`** — `CallAssistService`: call assist delegation, VoiceGatewayClient integration.
 - **`backend/history_service.py`** — `HistoryService`: history CRUD, SRT export, clipboard history, storage info.
 - **`backend/translation_service.py`** — `TranslationService`: translate, glossary management, vocabulary suggestions.
