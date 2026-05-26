@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable, Optional
 
 from core.auto_title import AutoTitleGenerator
 from core.emotion_detector import EmotionDetector
@@ -63,7 +63,20 @@ class MetadataEnricher:
         stats = enricher.get_enrichment_stats()
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings_provider: Optional[Callable[[], dict]] = None,
+    ) -> None:
+        """Инициализация обогатителя метаданных.
+
+        Args:
+            settings_provider: опциональный callable, возвращающий текущий dict
+                настроек (runtime). Используется для проверки ``privacy_mode_enabled``.
+                Если ``None`` — приватный режим считается выключенным (безопасное
+                поведение по умолчанию).
+        """
+        self._settings_provider = settings_provider
+
         self._language_detector = LanguageDetector()
         self._emotion_detector = EmotionDetector()
         self._pace_analyzer = SpeechPaceAnalyzer()
@@ -141,7 +154,14 @@ class MetadataEnricher:
         # ── Темы (извлекаем ключевые слова текущей записи) ───────────────────
         # TopicTracker работает со списком элементов; передаём одну запись
         # и получаем её ключевые слова как topics.
-        topics = self._extract_topics_for_item(item)
+        # W1277 F5: в privacy_mode пропускаем обогащение темами — топики могут
+        # раскрывать паттерны содержимого записи.
+        privacy_mode = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+        if privacy_mode:
+            topics: list[str] = []
+            logger.debug("MetadataEnricher: topic enrichment skipped (privacy_mode_enabled=True)")
+        else:
+            topics = self._extract_topics_for_item(item)
 
         elapsed = time.monotonic() - t0
         self._enriched_count += 1
@@ -229,6 +249,19 @@ class MetadataEnricher:
         }
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
+
+    def _get_runtime_setting(self, key: str, default: Any) -> Any:
+        """Читает runtime-настройку через settings_provider.
+
+        Если ``settings_provider`` не задан или выбросил исключение,
+        возвращает ``default``.
+        """
+        if self._settings_provider is None:
+            return default
+        try:
+            return self._settings_provider().get(key, default)
+        except Exception:
+            return default
 
     def _extract_topics_for_item(self, item: dict[str, Any]) -> list[str]:
         """Извлекает ключевые слова-темы из одной записи."""

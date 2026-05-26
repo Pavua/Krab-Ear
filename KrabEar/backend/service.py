@@ -434,7 +434,9 @@ class BackendService:
         self._playback_tracker = PlaybackTracker(data_dir=self.store.data_dir)
         self._recording_comparison = RecordingComparison()
         self._smart_vocabulary = SmartVocabularyBuilder()
-        self._metadata_enricher = MetadataEnricher()
+        self._metadata_enricher = MetadataEnricher(
+            settings_provider=self._cached_settings,
+        )
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
