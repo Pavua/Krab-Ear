@@ -685,10 +685,20 @@ class Translator:
 
     @staticmethod
     def _apply_glossary(text: str, glossary: dict[str, str]) -> str:
-        """Применяет пользовательские замены терминов к переводу."""
+        """Применяет пользовательские замены терминов к переводу.
+
+        Использует regex с границами слов (\b) чтобы избежать порчи
+        субстрок: «el» не заменяет часть «elecciones», «дом» — часть «домой».
+        re.UNICODE включён по умолчанию в Python 3, что корректно обрабатывает
+        кириллицу и диакритику.
+        """
         result = text
         for source, target in glossary.items():
-            result = result.replace(source, target)
+            result = re.sub(
+                rf"\b{re.escape(source)}\b",
+                target,
+                result,
+            )
         return result
 
     def _apply_glossary_to_result(self, result: TranslationResult, glossary: dict[str, str]) -> TranslationResult:
