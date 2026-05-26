@@ -1,11 +1,13 @@
 """Dispatch invariant tests — Wave 790 (full coverage).
 
-Covers all 263 IPC handler keys NOT yet asserted by the earlier
+Covers all 255 IPC handler keys NOT yet asserted by the earlier
 W654 / W693 / W768 test files.  Every test is a pure source-grep — no runtime
 import of service.py is required.
 
-After this file, combined coverage spans all 294 real dispatch keys
+After this file, combined coverage spans all 281 real dispatch keys
 in ``BackendService.handle_request``.
+
+W801 update: removed 8 confirmed-dead handler tests per W786 audit.
 """
 
 import os
@@ -46,22 +48,16 @@ _EXPECTED = {
     "batch": "self._handle_batch",
     "batch_export": "self._history.handle_batch_export",
     "batch_extract_action_items": "self._handle_batch_extract_action_items",
-    "call_assist_add_template": "self._call_assist.handle_add_template",
     "call_assist_cost_estimate": "self._call_assist.handle_cost_estimate",
-    "call_assist_cost_report": "self._call_assist.handle_cost_report",
     "call_assist_diagnostics": "self._call_assist.handle_diagnostics",
-    "call_assist_list_templates": "self._call_assist.handle_list_templates",
     "call_assist_quick_phrase": "self._call_assist.handle_quick_phrase",
-    "call_assist_remove_template": "self._call_assist.handle_remove_template",
     "call_assist_summary": "self._call_assist.handle_summary",
-    "call_assist_template": "self._call_assist.handle_template",
     "call_assist_timeline": "self._call_assist.handle_timeline",
     "call_assist_timeline_clear": "self._call_assist.handle_timeline_clear",
     "call_assist_timeline_export": "self._call_assist.handle_timeline_export",
     "call_assist_timeline_stats": "self._call_assist.handle_timeline_stats",
     "call_assist_timeline_summary": "self._call_assist.handle_timeline_summary",
     "call_assist_timeline_to_history": "self._call_assist.handle_timeline_to_history",
-    "call_check_auto_end": "self._call_auto_end.handle_check_auto_end",
     "call_estimate_cost": "self._call_cost_estimator.handle_estimate_cost",
     "call_session_add_transcript": "self._call_session_service.handle_call_session_add_transcript",
     "call_session_create": "self._call_session_service.handle_call_session_create",
@@ -77,7 +73,6 @@ _EXPECTED = {
     "check_hotwords": "self._hotword_detector.handle_check_hotwords",
     "check_migration": "self._data_migrator.handle_check_migration",
     "cleanup_old_history": "self._history.handle_cleanup_old_history",
-    "cleanup_stale_app_profiles": "self._paste_app_memory.handle_cleanup_stale_app_profiles",
     "clear_privacy_audit_log": "self._handle_clear_privacy_audit_log",
     "clear_recent_errors": "self._handle_clear_recent_errors",
     "clear_search_history": "self._search_history.handle_clear_search_history",
@@ -92,7 +87,6 @@ _EXPECTED = {
     "create_collection": "self._collections.handle_create_collection",
     "create_config_preset": "self._config_presets.handle_create_config_preset",
     "create_manual_settings_backup": "self._settings_svc.handle_create_manual_settings_backup",
-    "delete_app_profile": "self._paste_app_memory.handle_delete_app_profile",
     "delete_bookmark": "self._bookmarks.handle_delete_bookmark",
     "delete_collection": "self._collections.handle_delete_collection",
     "detect_emotion": "self._text_processing_svc.handle_detect_emotion",
@@ -464,50 +458,25 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertIn("batch_extract_action_items", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "batch_extract_action_items"), "self._handle_batch_extract_action_items")
 
-    def test_call_assist_add_template_dispatch_entry(self):
-        """'call_assist_add_template' must be in dispatch table mapping to self._call_assist.handle_add_template."""
-        self.assertIn("call_assist_add_template", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_assist_add_template"), "self._call_assist.handle_add_template")
-
     def test_call_assist_cost_estimate_dispatch_entry(self):
         """'call_assist_cost_estimate' must be in dispatch table mapping to self._call_assist.handle_cost_estimate."""
         self.assertIn("call_assist_cost_estimate", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "call_assist_cost_estimate"), "self._call_assist.handle_cost_estimate")
-
-    def test_call_assist_cost_report_dispatch_entry(self):
-        """'call_assist_cost_report' must be in dispatch table mapping to self._call_assist.handle_cost_report."""
-        self.assertIn("call_assist_cost_report", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_assist_cost_report"), "self._call_assist.handle_cost_report")
 
     def test_call_assist_diagnostics_dispatch_entry(self):
         """'call_assist_diagnostics' must be in dispatch table mapping to self._call_assist.handle_diagnostics."""
         self.assertIn("call_assist_diagnostics", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "call_assist_diagnostics"), "self._call_assist.handle_diagnostics")
 
-    def test_call_assist_list_templates_dispatch_entry(self):
-        """'call_assist_list_templates' must be in dispatch table mapping to self._call_assist.handle_list_templates."""
-        self.assertIn("call_assist_list_templates", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_assist_list_templates"), "self._call_assist.handle_list_templates")
-
     def test_call_assist_quick_phrase_dispatch_entry(self):
         """'call_assist_quick_phrase' must be in dispatch table mapping to self._call_assist.handle_quick_phrase."""
         self.assertIn("call_assist_quick_phrase", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "call_assist_quick_phrase"), "self._call_assist.handle_quick_phrase")
 
-    def test_call_assist_remove_template_dispatch_entry(self):
-        """'call_assist_remove_template' must be in dispatch table mapping to self._call_assist.handle_remove_template."""
-        self.assertIn("call_assist_remove_template", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_assist_remove_template"), "self._call_assist.handle_remove_template")
-
     def test_call_assist_summary_dispatch_entry(self):
         """'call_assist_summary' must be in dispatch table mapping to self._call_assist.handle_summary."""
         self.assertIn("call_assist_summary", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "call_assist_summary"), "self._call_assist.handle_summary")
-
-    def test_call_assist_template_dispatch_entry(self):
-        """'call_assist_template' must be in dispatch table mapping to self._call_assist.handle_template."""
-        self.assertIn("call_assist_template", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_assist_template"), "self._call_assist.handle_template")
 
     def test_call_assist_timeline_dispatch_entry(self):
         """'call_assist_timeline' must be in dispatch table mapping to self._call_assist.handle_timeline."""
@@ -538,11 +507,6 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         """'call_assist_timeline_to_history' must be in dispatch table mapping to self._call_assist.handle_timeline_to_history."""
         self.assertIn("call_assist_timeline_to_history", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "call_assist_timeline_to_history"), "self._call_assist.handle_timeline_to_history")
-
-    def test_call_check_auto_end_dispatch_entry(self):
-        """'call_check_auto_end' must be in dispatch table mapping to self._call_auto_end.handle_check_auto_end."""
-        self.assertIn("call_check_auto_end", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "call_check_auto_end"), "self._call_auto_end.handle_check_auto_end")
 
     def test_call_estimate_cost_dispatch_entry(self):
         """'call_estimate_cost' must be in dispatch table mapping to self._call_cost_estimator.handle_estimate_cost."""
@@ -619,11 +583,6 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertIn("cleanup_old_history", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "cleanup_old_history"), "self._history.handle_cleanup_old_history")
 
-    def test_cleanup_stale_app_profiles_dispatch_entry(self):
-        """'cleanup_stale_app_profiles' must be in dispatch table mapping to self._paste_app_memory.handle_cleanup_stale_app_profiles."""
-        self.assertIn("cleanup_stale_app_profiles", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "cleanup_stale_app_profiles"), "self._paste_app_memory.handle_cleanup_stale_app_profiles")
-
     def test_clear_privacy_audit_log_dispatch_entry(self):
         """'clear_privacy_audit_log' must be in dispatch table mapping to self._handle_clear_privacy_audit_log."""
         self.assertIn("clear_privacy_audit_log", self.keys)
@@ -693,11 +652,6 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         """'create_manual_settings_backup' must be in dispatch table mapping to self._settings_svc.handle_create_manual_settings_backup."""
         self.assertIn("create_manual_settings_backup", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "create_manual_settings_backup"), "self._settings_svc.handle_create_manual_settings_backup")
-
-    def test_delete_app_profile_dispatch_entry(self):
-        """'delete_app_profile' must be in dispatch table mapping to self._paste_app_memory.handle_delete_app_profile."""
-        self.assertIn("delete_app_profile", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "delete_app_profile"), "self._paste_app_memory.handle_delete_app_profile")
 
     def test_delete_bookmark_dispatch_entry(self):
         """'delete_bookmark' must be in dispatch table mapping to self._bookmarks.handle_delete_bookmark."""
