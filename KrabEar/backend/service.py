@@ -35,7 +35,6 @@ from core.topic_tracker import TopicTracker
 from core.text_postprocessor import TextPostProcessor
 from core.text_anonymizer import TextAnonymizer
 from backend.data_migrator import DataMigrator
-from backend.text_processing_service import TextProcessingService
 from backend.config_presets_library import ConfigPresetsLibrary
 from core.paste_formatter import PasteFormatter
 from backend.language_learning import LanguageLearningManager
@@ -295,13 +294,11 @@ class BackendService:
         self._chains = RecordingChainManager(store=self.store)
         self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
-        # Инициализируем до HistoryService — нужен для каскадного удаления версий (F2)
-        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
-            transcript_versions=self._transcript_versioning,
+            cached_settings=self._cached_settings,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -397,6 +394,7 @@ class BackendService:
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
+        self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
@@ -419,26 +417,6 @@ class BackendService:
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
-        # W1026 F1 — run data migration at startup if v1.0 store detected.
-        # Soft-fail: log + continue, never crash the backend.
-        try:
-            if self._data_migrator.check_migration_needed(self.store.data_dir):
-                _plan = self._data_migrator.get_migration_plan(self.store.data_dir)
-                logger.info("data_migrator: migration needed — plan: %s", _plan)
-                _mig_result = self._data_migrator.migrate(self.store.data_dir)
-                logger.info(
-                    "data_migrator: migration complete %s → %s "
-                    "(migrated=%d skipped=%d backup=%s)",
-                    _mig_result.from_version,
-                    _mig_result.to_version,
-                    _mig_result.items_migrated,
-                    _mig_result.items_skipped,
-                    _mig_result.backup_path,
-                )
-            else:
-                logger.debug("data_migrator: schema up-to-date, no migration needed")
-        except Exception:
-            logger.exception("data_migrator: startup migration failed (continuing with current schema)")
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         self._text_processing_svc = TextProcessingService(
             readability_scorer=self._readability_scorer,
@@ -489,7 +467,6 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
-            settings_provider=self._settings_svc.cached_settings,
         )
         # Семантический поиск (opt-in, lazy model load)
         self._semantic_searcher = SemanticSearcher(
@@ -1121,7 +1098,6 @@ class BackendService:
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
-            "rollback_migration": self._data_migrator.handle_rollback_migration,  # откат миграции из резервной копии
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
@@ -1179,10 +1155,6 @@ class BackendService:
             "set_speaker_alias": self._speaker_manager.handle_set_speaker_alias,  # назначить псевдоним для спикера
             "get_speaker_aliases": self._speaker_manager.handle_get_speaker_aliases,  # список псевдонимов спикеров
             "remove_speaker_alias": self._speaker_manager.handle_remove_speaker_alias,  # удалить псевдоним спикера
-            # --- speaker statistics ---
-            "get_speaker_statistics": lambda p: self._speaker_statistics.handle_get_speaker_statistics(  # per-speaker stats из истории диаризации
-                p, store=self.store, speaker_manager=self._speaker_manager
-            ),
             # --- live subtitles (Sprint 2B) ---
             "live_subs_ingest": self._live_subs.handle_ingest,  # потоковая STT+translate (частый вызов)
             "live_subs_stop": self._live_subs.handle_stop,  # flush и сброс буфера
@@ -1218,10 +1190,6 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
-            # --- Calendar link (W947 re-wired W1030): link transcription to active Calendar event ---
-            "link_to_calendar_event": self._handle_link_to_calendar_event,  # связать запись истории с событием Calendar (auto-detect active)
-            "get_calendar_link": self._handle_get_calendar_link,  # получить сохранённую ссылку на событие Calendar для записи
-            "search_by_calendar_event": self._handle_search_by_calendar_event,  # поиск записей истории по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -3035,14 +3003,6 @@ class BackendService:
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 
-        # Privacy mode guard: never send transcript text to external service.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": False,
-                "error": "privacy_mode_active",
-                "user_msg_ru": "Приватный режим включён — отправка в Telegram запрещена.",
-            }
-
         text = str(params.get("text") or "").strip()
         if not text:
             raise ValueError("Параметр 'text' обязателен и не может быть пустым")
@@ -3233,63 +3193,6 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-
-    # ── Calendar link IPC handlers (W947 re-wired W1030) ────────────────────
-
-    def _handle_link_to_calendar_event(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Связать запись истории с активным событием Calendar.app.
-
-        Параметры:
-            item_id (str): ID записи истории (required)
-            event (dict | None): явный словарь события. Если не передан —
-                CalendarLinker.find_active_event() определяет текущее событие.
-
-        Возвращает:
-            {"ok": bool, "event": dict | None, "error": str | None}
-        """
-        item_id = str(params.get("item_id", "")).strip()
-        if not item_id:
-            return {"ok": False, "event": None, "error": "item_id required"}
-
-        event = params.get("event")
-        if not isinstance(event, dict) or not event.get("title"):
-            # Auto-detect current Calendar event
-            event = self._calendar_linker.find_active_event()
-            if not event:
-                return {"ok": False, "event": None, "error": "Нет активного события Calendar или Calendar не открыт"}
-
-        ok = self.store.update_history_item_calendar(item_id, event)
-        if not ok:
-            return {"ok": False, "event": None, "error": f"Запись {item_id!r} не найдена или событие пустое"}
-        return {"ok": True, "event": event, "error": None}
-
-    def _handle_get_calendar_link(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Получить сохранённую ссылку на событие Calendar для записи истории.
-
-        Параметры:
-            item_id (str): ID записи истории (required)
-
-        Возвращает:
-            {"item_id": str, "event": dict | None}
-        """
-        item_id = str(params.get("item_id", "")).strip()
-        if not item_id:
-            return {"item_id": "", "event": None}
-        event = self.store.get_history_item_calendar(item_id)
-        return {"item_id": item_id, "event": event}
-
-    def _handle_search_by_calendar_event(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Поиск записей истории по подстроке в названии события Calendar.
-
-        Параметры:
-            event_title (str): строка поиска (пустая строка = все записи с Calendar-ссылкой)
-
-        Возвращает:
-            {"results": [{"item_id": str, "calendar_event": dict}, ...]}
-        """
-        event_title = str(params.get("event_title", ""))
-        results = self.store.search_by_calendar_event(event_title)
-        return {"results": results}
 
     # ── iMessage integration (Phase D.4) ────────────────────────────────────
 

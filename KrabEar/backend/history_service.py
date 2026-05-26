@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
 from core.fuzzy_search import FuzzySearcher
@@ -24,7 +24,6 @@ from backend.summary_profiles import SummaryProfileManager
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
-    from backend.transcript_versioning import TranscriptVersionManager
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
@@ -37,7 +36,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
-        transcript_versions: "TranscriptVersionManager | None" = None,
+        cached_settings: "Callable[[], dict[str, Any]] | None" = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -47,12 +46,25 @@ class HistoryService:
         self._llm_rewriter = llm_rewriter
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
-        # F2: TranscriptVersionManager для каскадного удаления версий при удалении записей.
-        # Опционально — None безопасен (cascade skip), для обратной совместимости с тестами.
-        self._transcript_versions = transcript_versions
+        # Callable для получения текущих настроек (для privacy mode guard и др.).
+        self._cached_settings = cached_settings
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
+
+    # ------------------------------------------------------------------
+    # Privacy helpers
+    # ------------------------------------------------------------------
+
+    def _is_privacy_mode(self) -> bool:
+        """Возвращает True если privacy_mode_enabled активен в текущих настройках."""
+        if self._cached_settings is None:
+            return False
+        try:
+            settings = self._cached_settings()
+            return bool(settings.get("privacy_mode_enabled", False))
+        except Exception:  # noqa: BLE001
+            return False
 
     # ------------------------------------------------------------------
     # История
@@ -204,6 +216,10 @@ class HistoryService:
               - highlighted_text (str): текст с маркерами вокруг совпадений
               - snippets (list[str]): контекстные сниппеты
         """
+        # Privacy mode guard: не раскрывать текст транскрипций в режиме приватности.
+        if self._is_privacy_mode():
+            return {"ok": True, "results": [], "reason": "privacy_mode_active"}
+
         query = str(params.get("query", "")).strip()
         marker = str(params.get("marker", "**"))
         context_chars = int(params.get("context_chars", 50))
@@ -250,15 +266,6 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
-        # F2: каскадное удаление версий транскрипций (privacy — не оставляем следов)
-        if self._transcript_versions is not None:
-            try:
-                self._transcript_versions.delete_versions_for(item_id)
-            except Exception:
-                logger.warning(
-                    "Не удалось каскадно удалить версии для item_id=%r",
-                    item_id, exc_info=True,
-                )
         add_breadcrumb(
             category="history",
             message="delete_history_item",
@@ -1302,17 +1309,6 @@ class HistoryService:
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
-
-        # F2: каскадное удаление версий транскрипций для всех удалённых записей
-        if to_delete and self._transcript_versions is not None:
-            deleted_ids = [item.id for item in to_delete]
-            try:
-                self._transcript_versions.cleanup_for_ids(deleted_ids)
-            except Exception:
-                logger.warning(
-                    "Не удалось каскадно удалить версии для %d записей",
-                    len(deleted_ids), exc_info=True,
-                )
 
         add_breadcrumb(
             category="history",
