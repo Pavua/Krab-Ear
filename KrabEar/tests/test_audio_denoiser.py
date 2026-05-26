@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.audio_denoiser import AudioDenoiser
+from core.audio_denoiser import AudioDenoiser, _find_noise_window
 from core.noise_profiler import NoiseProfiler
 
 _SR = 16000  # стандартная частота дискретизации Whisper
@@ -278,6 +278,91 @@ class TestAudioDenoiserWave128(unittest.TestCase):
             self.assertIsNotNone(res, f"Thread {i} produced no result")
             self.assertFalse(np.any(np.isnan(res)),
                              f"Thread {i} result contains NaN")
+
+
+# ---------------------------------------------------------------------------
+# W1067 — Regression: noise floor из тишайшего окна, а не из первых 200 мс
+# ---------------------------------------------------------------------------
+
+class TestNoiseWindowSelection(unittest.TestCase):
+    """W1062 F1 HIGH: noise floor должен браться из тишайшего окна, а не первых 200 мс."""
+
+    def test_find_noise_window_returns_int(self) -> None:
+        """_find_noise_window возвращает целочисленный индекс начала окна."""
+        audio = np.random.default_rng(0).standard_normal(32000).astype(np.float64)
+        start = _find_noise_window(audio, _SR)
+        self.assertIsInstance(start, int)
+        self.assertGreaterEqual(start, 0)
+
+    def test_find_noise_window_selects_quietest_region(self) -> None:
+        """_find_noise_window выбирает тишайшее окно, а не первое."""
+        # Первые 3200 сэмплов (200 мс) — речевой сигнал (высокая амплитуда)
+        # Вторые 3200 сэмплов — тишина (почти нулевая амплитуда)
+        rng = np.random.default_rng(42)
+        speech_window = rng.standard_normal(3200).astype(np.float64) * 0.5
+        silence_window = np.zeros(3200, dtype=np.float64) + 1e-6
+        # Ещё один речевой фрагмент в конце
+        tail = rng.standard_normal(9600).astype(np.float64) * 0.4
+        audio = np.concatenate([speech_window, silence_window, tail])
+
+        start = _find_noise_window(audio, _SR, window_ms=200)
+        # Тишайшее окно — второе (индекс 1 → start = 3200)
+        self.assertEqual(start, 3200,
+                         f"Ожидали start=3200 (тишина), получили {start}")
+
+    def test_find_noise_window_short_audio_returns_zero(self) -> None:
+        """Если аудио короче одного окна — возвращаем 0."""
+        short = np.ones(100, dtype=np.float64)
+        start = _find_noise_window(short, _SR, window_ms=200)
+        self.assertEqual(start, 0)
+
+    def test_speech_at_start_not_suppressed(self) -> None:
+        """Речевой сигнал в НАЧАЛЕ записи не должен подавляться через noise floor.
+
+        Регрессионный тест для W1062 F1 HIGH: до фикса первые 200 мс брались как
+        noise reference. Если пользователь начал говорить сразу после хоткея —
+        речевые гармоники попадали в noise reference и подавлялись.
+
+        Схема теста:
+        - Первые 200 мс: громкий речеподобный синусоидальный сигнал (440 Гц).
+        - Следующие 200 мс: полная тишина (noise floor).
+        - Ещё 600 мс: слабый фоновый шум.
+
+        После деноизинга речь в начале должна остаться достаточно громкой.
+        """
+        sr = _SR
+        window = int(0.2 * sr)  # 3200 сэмплов @ 16 кГц
+
+        # Первые 200 мс — речь (громкий синус)
+        t_speech = np.linspace(0, 0.2, window, endpoint=False)
+        speech = (0.5 * np.sin(2 * np.pi * 440.0 * t_speech)).astype(np.float64)
+
+        # Следующие 200 мс — тишина (истинный noise floor)
+        silence = np.zeros(window, dtype=np.float64)
+
+        # Оставшиеся 600 мс — слабый шум
+        rng = np.random.default_rng(99)
+        tail = rng.standard_normal(int(0.6 * sr)).astype(np.float64) * 0.02
+
+        audio = np.concatenate([speech, silence, tail]).astype(np.float32)
+
+        denoiser = AudioDenoiser()
+        result = denoiser.denoise(audio, sr, strength="moderate")
+
+        # RMS первых 200 мс результата должна быть близка к RMS входных 200 мс.
+        # До фикса: noise reference = speech → mask удаляла гармоники речи.
+        # После фикса: noise reference = тишина → речь должна сохраняться.
+        speech_rms_in = float(np.sqrt(np.mean(audio[:window].astype(np.float64) ** 2)))
+        speech_rms_out = float(np.sqrt(np.mean(result[:window].astype(np.float64) ** 2)))
+
+        # Допускаем не более 40% потерь амплитуды речи
+        ratio = speech_rms_out / (speech_rms_in + 1e-10)
+        self.assertGreater(
+            ratio, 0.6,
+            f"Речь в начале подавлена слишком сильно: ratio={ratio:.3f} "
+            f"(rms_in={speech_rms_in:.4f}, rms_out={speech_rms_out:.4f}). "
+            f"Вероятно, noise floor взят из речевого фрагмента, а не из тишины."
+        )
 
 
 if __name__ == "__main__":
