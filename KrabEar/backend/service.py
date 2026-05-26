@@ -91,6 +91,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -1222,6 +1223,10 @@ class BackendService:
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
+            "export_timeline_svg": self._handle_export_timeline_svg,  # экспорт таймлайна в SVG-файл
+            "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
+            "export_timeline_ical": self._handle_export_timeline_ical,  # экспорт таймлайна в iCalendar (.ics) файл
             # --- Default STT hotwords seed ---
         }
 
@@ -3599,6 +3604,178 @@ end tell'''
     def _handle_score_transcription(self, params: dict) -> dict:
         """Delegated to TextProcessingService."""
         return self._text_processing_svc.handle_score_transcription(params)
+
+    # ------------------------------------------------------------------ #
+    #  W1284 — TimelineExporter IPC handlers (W1279 F3 LOW)               #
+    # ------------------------------------------------------------------ #
+
+    def _resolve_timeline_export_dir(self, output_dir: str | None) -> "Path":
+        """Резолвит директорию экспорта с проверкой allowlist.
+
+        Допустимые корни: data_dir, home, /tmp, tempfile.gettempdir().
+        При None возвращает <data_dir>/exports/timeline.
+        Бросает ValueError при path traversal.
+        """
+        import tempfile
+        from pathlib import Path
+
+        if output_dir is None:
+            out = Path(self.store.data_dir) / "exports" / "timeline"
+            out.mkdir(parents=True, exist_ok=True)
+            return out
+
+        resolved = Path(output_dir).expanduser().resolve()
+        allowed_roots = [
+            Path(self.store.data_dir).resolve(),
+            Path.home().resolve(),
+            Path("/tmp").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
+        ]
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            raise ValueError(
+                f"output_dir вне разрешённых директорий: {resolved}"
+            )
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _handle_export_timeline_svg(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в SVG-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+            width       (int):      ширина SVG в пикселях (по умолчанию 1200).
+            height      (int):      высота SVG в пикселях (по умолчанию 400).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому SVG-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+        width = max(200, int(params.get("width", 1200)))
+        height = max(100, int(params.get("height", 400)))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        svg_content = self._timeline_exporter.export_svg(block_dicts, width=width, height=height)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.svg"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(svg_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_json(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в структурированный JSON-файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому JSON-файлу.
+            blocks      (int): количество временных блоков.
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        json_content = self._timeline_exporter.export_json(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.json"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(json_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
+
+    def _handle_export_timeline_ical(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Экспортирует таймлайн записей истории в iCalendar (.ics) файл.
+
+        Параметры:
+            output_dir  (str|None): директория для файла (None = <data_dir>/exports/timeline).
+            group_by    (str):      гранулярность блоков: «hour»|«day»|«week» (по умолчанию «day»).
+            limit       (int):      макс. записей для анализа (по умолчанию 500).
+
+        Возвращает:
+            path        (str): абсолютный путь к сохранённому .ics-файлу.
+            blocks      (int): количество временных блоков (VEVENT в файле).
+        """
+        settings = self._cached_settings()
+        if settings.get("privacy_mode_enabled"):
+            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        output_dir_param = params.get("output_dir")
+        try:
+            out_dir = self._resolve_timeline_export_dir(output_dir_param)
+        except ValueError as exc:
+            return {"error": {"code": "invalid_path", "message": str(exc)}}
+
+        group_by = str(params.get("group_by", "day")).strip()
+        limit = max(1, min(int(params.get("limit", 500)), 5000))
+
+        try:
+            with self.store._lock():
+                raw_items = self.store._load_active_items_unlocked()[:limit]
+        except Exception:
+            raw_items = []
+
+        blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
+        block_dicts = [b.to_dict() for b in blocks]
+        ical_content = self._timeline_exporter.export_ical(block_dicts)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"timeline_{ts}.ics"
+        file_path = Path(out_dir) / filename
+        file_path.write_text(ical_content, encoding="utf-8")
+
+        return {"path": str(file_path), "blocks": len(blocks)}
 
 
 class IPCServer:
