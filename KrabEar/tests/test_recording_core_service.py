@@ -413,6 +413,189 @@ class TestAudioGuardHelpers(unittest.TestCase):
         for val in (True, 1, "1", "true", "True", "on", "yes"):
             self.assertTrue(RecordingCoreService._coerce_bool(val, default=False), f"failed for {val!r}")
 
+
+# ---------------------------------------------------------------------------
+# W948: SessionTracker wiring tests
+# ---------------------------------------------------------------------------
+
+class _TrackingSessionTracker:
+    """Minimal SessionTracker stub that records calls."""
+
+    def __init__(self):
+        self._active_session = None
+        self.start_calls: list[dict] = []
+        self.end_calls: list[dict] = []
+
+    def start_session(self, audio_device="", quality_preset="balanced", stt_model=""):
+        self._active_session = {"session_id": "fake-sid"}
+        self.start_calls.append({
+            "audio_device": audio_device,
+            "quality_preset": quality_preset,
+            "stt_model": stt_model,
+        })
+        return "fake-sid"
+
+    def end_session(self, result: dict):
+        self._active_session = None
+        self.end_calls.append(dict(result))
+        return result
+
+
+def _make_service_with_tracker(tmp_dir, tracker, recorder=None, settings_override=None):
+    """Construct a RecordingCoreService wired to a given tracker."""
+    store = StateStore(data_dir=Path(tmp_dir))
+    vocab = MagicMock()
+    vocab.load = MagicMock(return_value=[])
+    vocab.get_words = MagicMock(return_value=[])
+
+    class _SettingsSvc:
+        def __init__(self, override):
+            self._override = override or {}
+
+        def cached_settings(self):
+            return dict(self._override)
+
+        def invalidate_cache(self):
+            pass
+
+    return RecordingCoreService(
+        recorder=recorder or _FakeRecorder(),
+        transcriber=_FakeTranscriber(),
+        translator=_FakeTranslator(),
+        store=store,
+        vocabulary=vocab,
+        settings_svc=_SettingsSvc(settings_override),
+        llm_rewriter=None,
+        auto_glossary=None,
+        semantic_searcher=_FakeSemanticSearcher(),
+        context_memory=None,
+        clipboard_history=[],
+        auto_backup=MagicMock(),
+        session_tracker=tracker,
+        action_items_extractor=None,
+        transcription_counter_ref=[0],
+        last_stt_engine_ref=[None],
+    )
+
+
+class TestSessionTrackerWiredStart(unittest.TestCase):
+    """W948: start_session() is called when recording starts (non-privacy mode)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_start_session_called_on_handle_start_recording(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": False, "quality_profile": "balanced"},
+        )
+        svc.handle_start_recording({})
+        self.assertEqual(len(tracker.start_calls), 1, "start_session должен быть вызван ровно один раз")
+
+    def test_start_session_receives_quality_profile(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": False, "quality_profile": "max"},
+        )
+        svc.handle_start_recording({})
+        self.assertEqual(tracker.start_calls[0]["quality_preset"], "max")
+
+    def test_already_recording_does_not_call_start_session_again(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": False},
+        )
+        svc.handle_start_recording({})
+        svc.handle_start_recording({})  # idempotent — recorder.start() returns False
+        self.assertEqual(len(tracker.start_calls), 1)
+
+
+class TestSessionTrackerWiredEnd(unittest.TestCase):
+    """W948: end_session() is called when recording stops successfully (non-privacy mode)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_end_session_called_after_successful_stop(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": False, "quality_profile": "balanced"},
+        )
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({"quality_profile": "balanced"})
+        # end_session is only called when status == "ok" (phase_e reached)
+        if result.get("status") == "ok":
+            self.assertEqual(len(tracker.end_calls), 1, "end_session должен быть вызван после успешной записи")
+            call = tracker.end_calls[0]
+            self.assertIn("duration_sec", call)
+            self.assertIn("confidence", call)
+        else:
+            # Silence/background guard fired — end_session not called (phase_e not reached)
+            self.assertEqual(len(tracker.end_calls), 0)
+
+    def test_end_session_payload_contains_expected_keys(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": False},
+        )
+        svc.handle_start_recording({})
+        result = svc.handle_stop_recording({})
+        if result.get("status") == "ok" and tracker.end_calls:
+            call = tracker.end_calls[0]
+            for key in ("duration_sec", "confidence", "had_diarization", "had_llm_rewrite", "paste_status"):
+                self.assertIn(key, call, f"Ключ {key!r} отсутствует в payload end_session")
+
+
+class TestSessionTrackerSkipsInPrivacyMode(unittest.TestCase):
+    """W948: SessionTracker calls are skipped when privacy_mode_enabled=True."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_start_session_not_called_in_privacy_mode(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": True},
+        )
+        svc.handle_start_recording({})
+        self.assertEqual(len(tracker.start_calls), 0, "start_session не должен вызываться в privacy mode")
+
+    def test_end_session_not_called_in_privacy_mode(self):
+        tracker = _TrackingSessionTracker()
+        svc = _make_service_with_tracker(
+            self._tmp, tracker,
+            settings_override={"privacy_mode_enabled": True},
+        )
+        svc.handle_start_recording({})
+        svc.handle_stop_recording({})
+        self.assertEqual(len(tracker.end_calls), 0, "end_session не должен вызываться в privacy mode")
+
+    def test_start_session_exception_does_not_abort_recording(self):
+        """A buggy SessionTracker must not interrupt the recording flow."""
+        class _BrokenTracker:
+            _active_session = None
+
+            def start_session(self, **kwargs):
+                raise RuntimeError("injected failure")
+
+        svc = _make_service_with_tracker(
+            self._tmp, _BrokenTracker(),
+            settings_override={"privacy_mode_enabled": False},
+        )
+        # Must not raise — soft-fail is expected
+        result = svc.handle_start_recording({})
+        self.assertEqual(result["status"], "recording")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
     def test_coerce_bool_false_values(self):
         for val in (False, 0, "0", "false", "off", "no"):
             self.assertFalse(RecordingCoreService._coerce_bool(val, default=True), f"failed for {val!r}")

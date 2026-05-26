@@ -29,7 +29,6 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
-from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -98,10 +97,6 @@ class RecordingCoreService:
         # Realtime partial transcriber state
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
-
-        # Realtime silence filter state (W1325 F1 HIGH wiring)
-        self._rsf: RealtimeSilenceFilter | None = None
-        self._last_silence_ranges: list[tuple[float, float]] = []
 
         # Async transcription jobs
         self._job_tracker = JobTracker()
@@ -194,19 +189,22 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
-        # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF via realtime_silence_filter_enabled)
-        self._rsf = None
-        if bool(settings.get("realtime_silence_filter_enabled", False)):
+
+        # W930 CRITICAL fix: wire SessionTracker start — skip in privacy mode
+        _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if not _privacy_mode:
             try:
-                self._rsf = RealtimeSilenceFilter(
-                    recorder=self.recorder,
-                    settings=settings,
-                    event_bus_emit=event_bus.emit,
+                _audio_device = str(settings.get("audio_device", ""))
+                _quality_profile = str(settings.get("quality_profile", "balanced"))
+                _stt_model = str(settings.get("stt_model", ""))
+                self._session_tracker.start_session(
+                    audio_device=_audio_device,
+                    quality_preset=_quality_profile,
+                    stt_model=_stt_model,
                 )
-                self._rsf.start()
             except Exception:
-                logger.exception("Не удалось запустить RealtimeSilenceFilter")
-                self._rsf = None
+                logger.warning("SessionTracker.start_session завершился с ошибкой (не критично)", exc_info=True)
+
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -750,7 +748,7 @@ class RecordingCoreService:
     def _stop_recording_phase_a(
         self, params: dict[str, Any], settings: dict[str, Any]
     ) -> dict[str, Any]:
-        """Stop preview worker, stop realtime partial, stop RSF, stop recorder."""
+        """Stop preview worker, stop realtime partial, stop recorder."""
         self._stop_preview_worker()
         rt_session_id = self._rt_session_id
         if self._rt_partial is not None:
@@ -760,17 +758,6 @@ class RecordingCoreService:
                 logger.exception("Ошибка при остановке RealtimePartialTranscriber")
             finally:
                 self._rt_partial = None
-        # W1325 F1 HIGH: stop RSF and capture silence_ranges
-        silence_ranges: list[tuple[float, float]] = []
-        if self._rsf is not None:
-            try:
-                silence_ranges = self._rsf.stop() or []
-            except Exception:
-                logger.exception("Ошибка при остановке RealtimeSilenceFilter")
-                silence_ranges = []
-            finally:
-                self._rsf = None
-        self._last_silence_ranges = silence_ranges
 
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
@@ -973,9 +960,6 @@ class RecordingCoreService:
             },
         )
 
-        # W1325 F1 HIGH: pass silence_ranges captured from RealtimeSilenceFilter
-        _silence_ranges = getattr(self, "_last_silence_ranges", None) or None
-
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -984,7 +968,6 @@ class RecordingCoreService:
             extra_vocabulary=user_vocabulary if user_vocabulary else None,
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
-            silence_ranges=_silence_ranges,
         )
 
         return {"transcribe_payload": transcribe_payload}
@@ -1135,72 +1118,26 @@ class RecordingCoreService:
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
 
-        try:
-            item = self.store.add_history_item(
-                text=display_text,
-                paste_status="failed",
-                source_text=text,
-                translated_text=translated_text,
-                translation_mode=translation.mode,
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-                translation_status=translation_status,
-                translation_engine=translation.engine,
-                cleaned_text=tp.get("cleaned_text", ""),
-                llm_applied=bool(tp.get("llm_applied", False)),
-                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-                diarization=diarization_data,
-                audio_duration_sec=duration_sec if duration_sec else None,
-                confidence=confidence if confidence else None,
-                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-            )
-        except OSError as _disk_exc:
-            import errno as _errno
-            _is_enospc = getattr(_disk_exc, "errno", None) == _errno.ENOSPC
-            _reason = "disk_full" if _is_enospc else "io_error"
-            logger.error(
-                "Phase E: не удалось сохранить историю — %s: %s",
-                _reason,
-                _disk_exc,
-                extra={"reason": _reason, "errno": getattr(_disk_exc, "errno", None)},
-            )
-            try:
-                from backend.error_codes import ERROR_REGISTRY
-                from datetime import datetime, timezone
-                _entry = ERROR_REGISTRY.get("history.write_fail", {})
-                event_bus.emit("krab.error", {
-                    "severity": _entry.get("severity", "critical"),
-                    "component": "history",
-                    "code": "history.write_fail",
-                    "message_user": _entry.get("user_msg_ru", "Не удалось сохранить транскрипт"),
-                    "message_debug": f"OSError errno={getattr(_disk_exc, 'errno', None)}: {_disk_exc}",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "context": {"reason": _reason},
-                })
-            except Exception:
-                pass
-            return {
-                "ok": False,
-                "status": "persist_failed",
-                "reason": _reason,
-                "transcript_text": text,
-                "duration_sec": duration_sec,
-                "quality_profile": sr["quality_profile"],
-                "cleanup_profile": sr["cleanup_profile"],
-                "translation_mode": sr["translation_mode"],
-                "translate_and_paste": sr["translate_and_paste"],
-                "translation_status": translation_status,
-                "source_lang": translation.source_lang,
-                "target_lang": translation.target_lang,
-                "translated_text": translated_text,
-                "history_id": None,
-                "stop_tail_trim_ms": stop_tail_trim_ms,
-                "silence_detected": silence_detected,
-                "silence_guard_enabled": silence_guard_enabled,
-                "background_guard_rejected": background_guard_rejected,
-            }
+        item = self.store.add_history_item(
+            text=display_text,
+            paste_status="failed",
+            source_text=text,
+            translated_text=translated_text,
+            translation_mode=translation.mode,
+            source_lang=translation.source_lang,
+            target_lang=translation.target_lang,
+            translation_status=translation_status,
+            translation_engine=translation.engine,
+            cleaned_text=tp.get("cleaned_text", ""),
+            llm_applied=bool(tp.get("llm_applied", False)),
+            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+            diarization=diarization_data,
+            audio_duration_sec=duration_sec if duration_sec else None,
+            confidence=confidence if confidence else None,
+            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+        )
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1308,6 +1245,25 @@ class RecordingCoreService:
                         result_payload["action_items_count"] = len(ai_result.action_items)
                 except Exception:
                     logger.exception("Авто-извлечение action items провалилось для %s", item.id)
+
+        # W930 CRITICAL fix: wire SessionTracker end — skip in privacy mode
+        _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if not _privacy_mode:
+            try:
+                self._session_tracker.end_session({
+                    "duration_sec": duration_sec,
+                    "stt_latency_ms": int(tp.get("stt_latency_ms", 0) or 0),
+                    "confidence": float(tp.get("confidence", 0.0) or 0.0),
+                    "text": display_text,
+                    "had_diarization": bool(diarization_data and isinstance(diarization_data, dict) and diarization_data.get("enabled")),
+                    "had_llm_rewrite": bool(tp.get("llm_applied", False)),
+                    "translation_status": translation_status,
+                    "paste_status": "pending",
+                    "stt_model": str(tp.get("engine", "") or ""),
+                    "quality_preset": sr.get("quality_profile", "balanced"),
+                })
+            except Exception:
+                logger.warning("SessionTracker.end_session завершился с ошибкой (не критично)", exc_info=True)
 
         return result_payload
 
