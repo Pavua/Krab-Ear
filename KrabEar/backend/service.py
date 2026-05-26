@@ -1118,9 +1118,9 @@ class BackendService:
         """Delegated to RecordingCoreService._stop_recording_phase_b."""
         return self._recording_core_svc._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
 
-    def _stop_recording_phase_c(self, audio, duration_sec, sr):
+    def _stop_recording_phase_c(self, audio, duration_sec, sr, silence_ranges=None):
         """Delegated to RecordingCoreService._stop_recording_phase_c."""
-        return self._recording_core_svc._stop_recording_phase_c(audio, duration_sec, sr)
+        return self._recording_core_svc._stop_recording_phase_c(audio, duration_sec, sr, silence_ranges=silence_ranges)
 
     def _stop_recording_phase_d(self, transcribe_payload, duration_sec, sr, stop_tail_trim_ms, silence_detected, silence_guard_enabled, background_guard_rejected):
         """Delegated to RecordingCoreService._stop_recording_phase_d."""

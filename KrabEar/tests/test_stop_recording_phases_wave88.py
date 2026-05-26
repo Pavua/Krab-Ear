@@ -89,7 +89,8 @@ class _FakeTranscriber:
 
     def transcribe(self, audio_data, quality_profile="balanced", cleanup_profile="soft",
                    extra_vocabulary=None, lang_hint=None, history_context=None,
-                   stt_hotwords=None):
+                   stt_hotwords=None, settings=None, diarize=None,
+                   skip_vad_prefilter=False, silence_ranges=None, domain="casual"):
         _FakeTranscriber.counter += 1
         return {"text": f"тест #{_FakeTranscriber.counter}", "confidence": 0.9, "engine": "fake"}
 

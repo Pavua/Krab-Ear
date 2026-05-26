@@ -72,7 +72,9 @@ class _FakeTranscriber:
 
     def transcribe(self, audio_data, quality_profile="balanced",
                    cleanup_profile="soft", domain="casual",
-                   extra_vocabulary=None, lang_hint=None):
+                   extra_vocabulary=None, lang_hint=None, history_context=None,
+                   stt_hotwords=None, settings=None, diarize=None,
+                   skip_vad_prefilter=False, silence_ranges=None):
         self.counter += 1
         return f"fake transcription #{self.counter}"
 
