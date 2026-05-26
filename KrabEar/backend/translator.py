@@ -25,6 +25,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 import re
+import threading
 from typing import Any
 
 # Profiler singleton — защищаемся от ImportError чтобы translator оставался standalone.
@@ -102,6 +103,10 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
+        # W926 F2 HIGH: per-key locks prevent concurrent _build_pipeline calls for the same
+        # language pair (double-init = double NLLB-200 ~2.4 GB RAM spike).
+        self._pipeline_locks: dict[tuple, threading.Lock] = {}
+        self._locks_mutex: threading.Lock = threading.Lock()
         # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
@@ -134,6 +139,17 @@ class Translator:
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
+
+    def _get_pipeline_lock(self, key: tuple) -> threading.Lock:
+        """Возвращает per-key Lock для ключа pipeline; создаёт если нет.
+
+        Используется для защиты check-then-build в _translate_with_model и
+        _try_nllb_fallback от конкурентного двойного построения одной модели.
+        """
+        with self._locks_mutex:
+            if key not in self._pipeline_locks:
+                self._pipeline_locks[key] = threading.Lock()
+            return self._pipeline_locks[key]
 
     def translate(
         self,
@@ -342,32 +358,39 @@ class Translator:
             )
 
         # Пробуем загрузить основную (специализированную) модель.
+        # Быстрый путь — модель уже в кэше, без блокировки.
         pipeline = self._pipelines.get(pipeline_key)
         if pipeline is None:
-            pipeline = self._build_pipeline(model_name=model_name, allow_network=allow_network)
-            if pipeline is None:
-                # Основная модель недоступна — пробуем NLLB-200 distilled как fallback.
-                nllb_result = self._try_nllb_fallback(
-                    text=text,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    allow_network=allow_network,
-                    translation_style=translation_style,
-                    return_mode=return_mode,
-                )
-                if nllb_result is not None:
-                    return nllb_result
-                # NLLB тоже недоступен — кэшируем недоступность основной и возвращаем статус.
-                self._unavailable.add(pipeline_key)
-                return TranslationResult(
-                    text="",
-                    status="model_unavailable_offline" if not allow_network else "model_unavailable_online",
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    mode=return_mode,
-                    engine="hf_marian",
-                )
-            self._pipelines[pipeline_key] = pipeline
+            # W926 F2: double-checked locking — берём per-key Lock, потом проверяем снова
+            # под ним, чтобы конкурентный поток не построил ту же модель дважды.
+            lock = self._get_pipeline_lock(pipeline_key)
+            with lock:
+                pipeline = self._pipelines.get(pipeline_key)
+                if pipeline is None:
+                    pipeline = self._build_pipeline(model_name=model_name, allow_network=allow_network)
+                    if pipeline is None:
+                        # Основная модель недоступна — пробуем NLLB-200 distilled как fallback.
+                        nllb_result = self._try_nllb_fallback(
+                            text=text,
+                            source_lang=source_lang,
+                            target_lang=target_lang,
+                            allow_network=allow_network,
+                            translation_style=translation_style,
+                            return_mode=return_mode,
+                        )
+                        if nllb_result is not None:
+                            return nllb_result
+                        # NLLB тоже недоступен — кэшируем недоступность основной и возвращаем статус.
+                        self._unavailable.add(pipeline_key)
+                        return TranslationResult(
+                            text="",
+                            status="model_unavailable_offline" if not allow_network else "model_unavailable_online",
+                            source_lang=source_lang,
+                            target_lang=target_lang,
+                            mode=return_mode,
+                            engine="hf_marian",
+                        )
+                    self._pipelines[pipeline_key] = pipeline
 
         try:
             translated = self._translate_text_chunks(pipeline=pipeline, text=text)
@@ -432,17 +455,23 @@ class Translator:
             return None
 
         # Ищем уже загруженный NLLB pipeline для этой пары языков.
+        # Быстрый путь без блокировки.
         pipeline = self._pipelines.get(nllb_key)
         if pipeline is None:
-            pipeline = self._build_nllb_pipeline(
-                src_lang=src_flores,
-                tgt_lang=tgt_flores,
-                allow_network=allow_network,
-            )
-            if pipeline is None:
-                self._unavailable.add(nllb_key)
-                return None
-            self._pipelines[nllb_key] = pipeline
+            # W926 F2: double-checked locking для NLLB (~2.4 GB), аналогично Marian выше.
+            lock = self._get_pipeline_lock(nllb_key)
+            with lock:
+                pipeline = self._pipelines.get(nllb_key)
+                if pipeline is None:
+                    pipeline = self._build_nllb_pipeline(
+                        src_lang=src_flores,
+                        tgt_lang=tgt_flores,
+                        allow_network=allow_network,
+                    )
+                    if pipeline is None:
+                        self._unavailable.add(nllb_key)
+                        return None
+                    self._pipelines[nllb_key] = pipeline
 
         try:
             translated = self._translate_text_chunks(pipeline=pipeline, text=text)
