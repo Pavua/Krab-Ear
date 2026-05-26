@@ -70,3 +70,4 @@ native/_tmp_bundle_test/
 docs/llm-bench-results-*.md
 docs/llm-bench-results-*.json
 /tmp/r*_bench.log
+worktrees/
