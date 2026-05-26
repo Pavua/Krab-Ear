@@ -40,6 +40,9 @@ class RealtimePartialTranscriber:
         event_bus: объект шины событий (должен иметь ``emit(type_str, dict)``).
         interval_sec: интервал между preview STT (секунды).
         buffer_sec: длина буфера для preview (секунды).
+        privacy_getter: callable() → bool; если возвращает True — emit пропускается.
+            Вызывается каждую итерацию цикла, что позволяет переключать privacy_mode
+            во время записи с задержкой ≤ interval_sec.
     """
 
     def __init__(
@@ -49,12 +52,15 @@ class RealtimePartialTranscriber:
         event_bus: Any,
         interval_sec: float = 3.0,
         buffer_sec: float = 8.0,
+        privacy_getter: Any = None,
     ) -> None:
         self._transcriber = transcriber
         self._recorder = recorder
         self._event_bus = event_bus
         self._interval_sec = max(0.1, float(interval_sec))
         self._buffer_sec = max(1.0, float(buffer_sec))
+        # callable() → bool; None means privacy mode is not tracked at this layer
+        self._privacy_getter = privacy_getter
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -164,6 +170,18 @@ class RealtimePartialTranscriber:
 
             last_transcribed_duration = duration_sec
             error_count = 0  # сбрасываем счётчик при успехе
+
+            # Privacy guard (re-read every iteration for mid-recording toggle support)
+            if self._privacy_getter is not None:
+                try:
+                    if self._privacy_getter():
+                        logger.debug(
+                            "RealtimePartialTranscriber: emit пропущен — privacy_mode активен (session=%s)",
+                            self._session_id,
+                        )
+                        continue
+                except Exception as exc:
+                    logger.debug("privacy_getter упал (session=%s): %s", self._session_id, exc)
 
             try:
                 self._event_bus.emit(

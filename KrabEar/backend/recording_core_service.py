@@ -105,6 +105,22 @@ class RecordingCoreService:
         self._list_audio_inputs = RecordingCoreService._list_audio_inputs_static
 
     # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _get_runtime_setting(self, key: str, default: Any) -> Any:
+        """Read a setting from the live cached_settings dict (runtime override aware).
+
+        Falls back to ``default`` if the settings service is unavailable.
+        Mirrors the Wave 58 pattern from BackendService — never read DEFAULT_SETTINGS
+        directly for user-overridable startup-time flags.
+        """
+        try:
+            return self._settings_svc.cached_settings().get(key, default)
+        except Exception:
+            return default
+
+    # ------------------------------------------------------------------ #
     # Public accessors (BackendService may read these for diagnostics)    #
     # ------------------------------------------------------------------ #
 
@@ -169,26 +185,47 @@ class RecordingCoreService:
             quality_profile = str(settings.get("quality_profile", "balanced"))
             self._start_preview_worker(quality_profile=quality_profile)
         if bool(settings.get("realtime_partial_enabled", True)):
-            import uuid as _uuid
-            self._rt_session_id = _uuid.uuid4().hex
-            _interval = float(settings.get("rt_partial_interval_sec", 3.0))
-            _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
-            _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
-            try:
-                self._rt_partial = RealtimePartialTranscriber(
-                    transcriber=self.transcriber,
-                    recorder=self.recorder,
-                    event_bus=event_bus,
-                    interval_sec=_interval,
-                    buffer_sec=_buffer,
+            # Privacy guard: do not start realtime partial transcriber when
+            # privacy_mode_enabled is True — transcript text must not leak via SSE.
+            if self._get_runtime_setting("privacy_mode_enabled", False):
+                logger.info(
+                    "RealtimePartialTranscriber не запущен: privacy_mode_enabled=True"
                 )
-                self._rt_partial.start(
-                    session_id=self._rt_session_id,
-                    sample_rate=_sample_rate,
-                )
-            except Exception:
-                logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                self._rt_partial = None
+            else:
+                import uuid as _uuid
+                self._rt_session_id = _uuid.uuid4().hex
+                _interval = float(settings.get("rt_partial_interval_sec", 3.0))
+                _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
+                _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
+                # privacy_getter re-reads setting each call so mid-recording toggle works
+                _settings_svc = self._settings_svc
+
+                def _privacy_getter() -> bool:
+                    try:
+                        return bool(
+                            _settings_svc.cached_settings().get(
+                                "privacy_mode_enabled", False
+                            )
+                        )
+                    except Exception:
+                        return False
+
+                try:
+                    self._rt_partial = RealtimePartialTranscriber(
+                        transcriber=self.transcriber,
+                        recorder=self.recorder,
+                        event_bus=event_bus,
+                        interval_sec=_interval,
+                        buffer_sec=_buffer,
+                        privacy_getter=_privacy_getter,
+                    )
+                    self._rt_partial.start(
+                        session_id=self._rt_session_id,
+                        sample_rate=_sample_rate,
+                    )
+                except Exception:
+                    logger.exception("Не удалось запустить RealtimePartialTranscriber")
+                    self._rt_partial = None
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
