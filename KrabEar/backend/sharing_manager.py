@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-import random
+import secrets
 import string
 import threading
 import time
@@ -102,8 +102,12 @@ class SharingManager:
     # ------------------------------------------------------------------
 
     def generate_share_id(self) -> str:
-        """Генерирует короткий уникальный ID (8 символов, base62)."""
-        return "".join(random.choices(_BASE62_CHARS, k=_SHARE_ID_LEN))
+        """Генерирует короткий уникальный ID (8 символов, base62, криптографически стойкий).
+
+        Использует secrets.choice вместо random.choices (Mersenne Twister) для
+        предотвращения предсказуемости токенов шаринга (W931 F1 MEDIUM).
+        """
+        return "".join(secrets.choice(_BASE62_CHARS) for _ in range(_SHARE_ID_LEN))
 
     def prepare_share(
         self,
