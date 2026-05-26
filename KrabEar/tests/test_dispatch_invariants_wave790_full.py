@@ -264,7 +264,7 @@ _EXPECTED = {
     "set_annotation": "self._history.handle_set_annotation",
     "set_feature_flag": "self._feature_flags.handle_set_feature_flag",
     "set_notification_preferences": "self._settings_svc.handle_set_notification_preferences",
-    "set_paste_status": "self._handle_set_paste_status",
+    "set_paste_status": "self._recording_core_svc.handle_set_paste_status",
     "set_speaker_alias": "self._speaker_manager.handle_set_speaker_alias",
     "set_translation_glossary_item": "self._translation.handle_set_translation_glossary_item",
     "start_call_assist": "self._call_assist.handle_start",
@@ -1555,9 +1555,9 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         self.assertEqual(_dispatch_rhs(self.block, "set_notification_preferences"), "self._settings_svc.handle_set_notification_preferences")
 
     def test_set_paste_status_dispatch_entry(self):
-        """'set_paste_status' must be in dispatch table mapping to self._handle_set_paste_status."""
+        """'set_paste_status' must be in dispatch table mapping to self._recording_core_svc.handle_set_paste_status."""
         self.assertIn("set_paste_status", self.keys)
-        self.assertEqual(_dispatch_rhs(self.block, "set_paste_status"), "self._handle_set_paste_status")
+        self.assertEqual(_dispatch_rhs(self.block, "set_paste_status"), "self._recording_core_svc.handle_set_paste_status")
 
     def test_set_speaker_alias_dispatch_entry(self):
         """'set_speaker_alias' must be in dispatch table mapping to self._speaker_manager.handle_set_speaker_alias."""
