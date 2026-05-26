@@ -8,6 +8,7 @@
     mark_done(job_id, items, errors)          # status -> "done"
     mark_failed(job_id, error)                # status -> "failed"
     cancel(job_id)                            # ставит флаг; worker читает get(...)['cancel_requested']
+                                              # И устанавливает cancel_event (threading.Event)
 
 Потокобезопасность:
     Все мутации под self._lock. Сохраняем время под блокировкой минимальным (<< 1ms) —
@@ -30,12 +31,15 @@ class JobTracker:
 
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
     def create_job(self, total_files: int) -> str:
         """Создаёт новую задачу в статусе 'queued'.
 
         Попутно выполняет prune() для удаления устаревших завершённых задач.
+        Каждая задача получает свой threading.Event для немедленной отмены
+        (доступен через get_cancel_event).
         """
         self.prune()
         job_id = f"j-{uuid.uuid4().hex[:8]}"
@@ -54,8 +58,10 @@ class JobTracker:
             "finished_at": None,
             "cancel_requested": False,
         }
+        cancel_event = threading.Event()
         with self._lock:
             self._jobs[job_id] = state
+            self._cancel_events[job_id] = cancel_event
         return job_id
 
     def update(self, job_id: str, **fields: Any) -> None:
@@ -123,6 +129,8 @@ class JobTracker:
 
         Возвращает True, если флаг установлен (задача существует и активна).
         Реальная смена статуса на 'cancelled' произойдёт в воркере между файлами.
+        Устанавливает cancel_event (threading.Event) для немедленного пробуждения
+        воркеров, ожидающих на event.wait().
         """
         with self._lock:
             job = self._jobs.get(job_id)
@@ -132,12 +140,28 @@ class JobTracker:
             if job.get("status") in ("done", "failed", "cancelled"):
                 return False
             job["cancel_requested"] = True
-            return True
+            event = self._cancel_events.get(job_id)
+        # Устанавливаем event вне блокировки — Event.set() потокобезопасен.
+        if event is not None:
+            event.set()
+        return True
+
+    def get_cancel_event(self, job_id: str) -> threading.Event | None:
+        """Возвращает threading.Event для задачи job_id, или None если задача не найдена.
+
+        Event устанавливается при вызове cancel(job_id). Воркеры могут использовать
+        event.is_set() для быстрой проверки без блокировки словаря.
+        Если задача была вытеснена из памяти (prune), возвращает None —
+        вызывающий код должен упасть обратно на dict-полинг через job_tracker.get().
+        """
+        with self._lock:
+            return self._cancel_events.get(job_id)
 
     def prune(self, max_age_sec: int = 3600) -> None:
         """Удаляет давно завершённые задачи (done/failed/cancelled старше max_age_sec).
 
         Вызывается автоматически из create_job(). Не требует фонового GC-потока.
+        Также очищает соответствующие cancel_events.
         """
         threshold = time.monotonic() - max_age_sec
         terminal = {"done", "failed", "cancelled"}
@@ -150,3 +174,4 @@ class JobTracker:
             ]
             for jid in stale:
                 self._jobs.pop(jid, None)
+                self._cancel_events.pop(jid, None)
