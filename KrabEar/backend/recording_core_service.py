@@ -66,6 +66,7 @@ class RecordingCoreService:
         action_items_extractor: Any,
         transcription_counter_ref: list,  # [int] mutable box so BackendService sees updates
         last_stt_engine_ref: list,        # [str|None] mutable box
+        auto_deduplicator: Any = None,    # W1247: AutoDeduplicator — None disables dedup
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -83,6 +84,10 @@ class RecordingCoreService:
         self._action_items_extractor = action_items_extractor
         self._transcription_counter_ref = transcription_counter_ref
         self._last_stt_engine_ref = last_stt_engine_ref
+        self._auto_deduplicator = auto_deduplicator
+
+        # W1247: lock that serialises dedup-check + persist to prevent concurrent-insert race
+        self._persist_lock = threading.Lock()
 
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
@@ -1102,26 +1107,57 @@ class RecordingCoreService:
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
 
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-        )
+        # W1247: auto-dedup guard — serialised under _persist_lock to prevent
+        # concurrent-insert race (W1243 F5).  Privacy check first (W1243 F4).
+        with self._persist_lock:
+            if (
+                self._auto_deduplicator is not None
+                and not settings.get("privacy_mode_enabled", False)
+                and settings.get("auto_dedup_enabled", False)
+            ):
+                _ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                try:
+                    dup_result = self._auto_deduplicator.check_duplicate(
+                        text=display_text,
+                        timestamp=_ts,
+                        store=self.store,
+                    )
+                    if dup_result.is_duplicate:
+                        logger.info(
+                            "auto_dedup: skipping near-duplicate item (sim=%.3f, original=%s)",
+                            dup_result.similarity,
+                            dup_result.duplicate_of,
+                        )
+                        return {
+                            "status": "ok",
+                            "skipped": "duplicate",
+                            "duplicate_of": dup_result.duplicate_of,
+                            "similarity": dup_result.similarity,
+                        }
+                except Exception:
+                    logger.exception("auto_dedup: check_duplicate raised — proceeding with persist")
+
+            item = self.store.add_history_item(
+                text=display_text,
+                paste_status="failed",
+                source_text=text,
+                translated_text=translated_text,
+                translation_mode=translation.mode,
+                source_lang=translation.source_lang,
+                target_lang=translation.target_lang,
+                translation_status=translation_status,
+                translation_engine=translation.engine,
+                cleaned_text=tp.get("cleaned_text", ""),
+                llm_applied=bool(tp.get("llm_applied", False)),
+                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+                diarization=diarization_data,
+                audio_duration_sec=duration_sec if duration_sec else None,
+                confidence=confidence if confidence else None,
+                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+            )
+        # _persist_lock released; item is now committed to store
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1337,37 +1373,71 @@ class RecordingCoreService:
                 final_text = translated_text if (translate_and_paste and translated_text) else text
                 display_text = self._format_text_with_speakers(final_text, diarization_data)
 
-                history_item = self.store.add_history_item(
-                    text=display_text,
-                    paste_status="failed",
-                    source_text=text,
-                    translated_text=translated_text,
-                    translation_mode=translation.mode,
-                    source_lang=translation.source_lang,
-                    target_lang=translation.target_lang,
-                    translation_status=translation.status,
-                    translation_engine=translation.engine,
-                    diarization=diarization_data,
-                    audio_duration_sec=audio_duration_sec,
-                    emotion=(
-                        transcribe_payload.get("emotion")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("emotion"), str)
-                        else None
-                    ),
-                    word_timestamps=(
-                        transcribe_payload.get("word_timestamps")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("word_timestamps"), list)
-                        else None
-                    ),
-                    speaker_turns=(
-                        transcribe_payload.get("speaker_turns")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("speaker_turns"), list)
-                        else None
-                    ),
-                )
+                # W1247: auto-dedup guard for batch import path — same constraints as
+                # _stop_recording_phase_e (privacy first, then enabled flag, then check).
+                _skip_dup = False
+                with self._persist_lock:
+                    if (
+                        self._auto_deduplicator is not None
+                        and not settings.get("privacy_mode_enabled", False)
+                        and settings.get("auto_dedup_enabled", False)
+                    ):
+                        _ts_import = time.strftime("%Y-%m-%dT%H:%M:%S")
+                        try:
+                            _dup_result = self._auto_deduplicator.check_duplicate(
+                                text=display_text,
+                                timestamp=_ts_import,
+                                store=self.store,
+                            )
+                            if _dup_result.is_duplicate:
+                                logger.info(
+                                    "auto_dedup: batch import skipping duplicate (sim=%.3f, path=%s)",
+                                    _dup_result.similarity,
+                                    audio_path,
+                                )
+                                _skip_dup = True
+                        except Exception:
+                            logger.exception(
+                                "auto_dedup: check_duplicate raised during batch import — proceeding"
+                            )
+
+                    if not _skip_dup:
+                        history_item = self.store.add_history_item(
+                            text=display_text,
+                            paste_status="failed",
+                            source_text=text,
+                            translated_text=translated_text,
+                            translation_mode=translation.mode,
+                            source_lang=translation.source_lang,
+                            target_lang=translation.target_lang,
+                            translation_status=translation.status,
+                            translation_engine=translation.engine,
+                            diarization=diarization_data,
+                            audio_duration_sec=audio_duration_sec,
+                            emotion=(
+                                transcribe_payload.get("emotion")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("emotion"), str)
+                                else None
+                            ),
+                            word_timestamps=(
+                                transcribe_payload.get("word_timestamps")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("word_timestamps"), list)
+                                else None
+                            ),
+                            speaker_turns=(
+                                transcribe_payload.get("speaker_turns")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("speaker_turns"), list)
+                                else None
+                            ),
+                        )
+                # _persist_lock released
+
+                if _skip_dup:
+                    self._safe_callback(on_file_done, file_index, None, "duplicate_skipped")
+                    continue
 
                 summary: str | None = None
                 if len(final_text) > 500:
