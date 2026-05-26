@@ -144,17 +144,56 @@ class Translator:
         glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         """Переводит текст согласно режиму и сетевой политике."""
+        import time as _time
+        _t0 = _time.monotonic()
         # Профилируем весь translate()-pipeline по режиму. Имя span'а нормализуется
         # до входа чтобы даже mode=""/неизвестный mode попадали в согласованную метку.
         normalized_mode = self._normalize_mode(mode)
-        with _profiler.start_span(f"translate_{normalized_mode}"):
-            return self._translate_impl(
-                text=text,
-                normalized_mode=normalized_mode,
-                network_mode=network_mode,
-                translation_style=translation_style,
-                glossary=glossary,
+        try:
+            from backend.observability import add_breadcrumb as _add_bc
+            _add_bc(
+                category="translation",
+                message="translate_start",
+                level="info",
+                data={"mode": normalized_mode, "network_mode": network_mode},
             )
+        except Exception:
+            pass  # telemetry must never break translation
+        _result: TranslationResult | None = None
+        _exc: Exception | None = None
+        try:
+            with _profiler.start_span(f"translate_{normalized_mode}"):
+                _result = self._translate_impl(
+                    text=text,
+                    normalized_mode=normalized_mode,
+                    network_mode=network_mode,
+                    translation_style=translation_style,
+                    glossary=glossary,
+                )
+            return _result
+        except Exception as exc:
+            _exc = exc
+            raise
+        finally:
+            try:
+                from backend.observability import add_breadcrumb as _add_bc
+                _duration_ms = int((_time.monotonic() - _t0) * 1000)
+                if _exc is not None:
+                    _add_bc(
+                        category="translation",
+                        message="translate_error",
+                        level="error",
+                        data={"ok": False, "duration_ms": _duration_ms, "error_type": type(_exc).__name__},
+                    )
+                elif _result is not None:
+                    _add_bc(
+                        category="translation",
+                        message="translate_finish",
+                        level="info",
+                        data={"ok": _result.ok, "duration_ms": _duration_ms, "engine": _result.engine, "mode": _result.mode},
+                    )
+            except Exception:
+                pass  # telemetry must never break translation
 
     def _translate_impl(
         self,
