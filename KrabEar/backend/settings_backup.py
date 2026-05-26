@@ -23,8 +23,11 @@ _log = logging.getLogger(__name__)
 
 MAX_BACKUPS: int = 10
 
-# Чувствительные поля — никогда не пишутся в бэкап
-_SENSITIVE: frozenset[str] = frozenset({
+# Чувствительные поля — никогда не пишутся в бэкап и не экспортируются.
+# W1173: публичный псевдоним SENSITIVE_FIELDS используется в settings_service
+# для единой точки истины (W1168 F1 CRIT — ранее settings_service имел
+# собственную копию без 5 полей, которые утекали в plaintext через export).
+SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "voice_gateway_api_key",
     "hf_token",
     "rest_api_key",
@@ -39,6 +42,9 @@ _SENSITIVE: frozenset[str] = frozenset({
     "sentry_dsn",
     "stt_gigaam_hf_token",
 })
+
+# Внутренний псевдоним для обратной совместимости с кодом внутри модуля.
+_SENSITIVE: frozenset[str] = SENSITIVE_FIELDS
 
 
 def _default_backup_dir() -> Path:

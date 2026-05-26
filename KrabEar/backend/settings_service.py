@@ -18,6 +18,7 @@ from typing import Any
 
 from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
+from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS_FROM_BACKUP
 from backend.settings_backup import SettingsBackup
 from backend.settings_validator import SettingsValidator
 
@@ -382,13 +383,12 @@ class SettingsService:
         self.invalidate_cache()
         return result
 
-    # Sensitive fields — никогда не экспортируются
-    _SENSITIVE_FIELDS: frozenset[str] = frozenset({
-        "voice_gateway_api_key",
-        "hf_token",
-        "rest_api_key",
-        "lm_studio_api_key",
-    })
+    # Sensitive fields — никогда не экспортируются.
+    # W1173: единая точка истины — импортируется из settings_backup.SENSITIVE_FIELDS.
+    # Ранее этот список не содержал 5 полей (telnyx_api_key, twilio_account_sid,
+    # twilio_auth_token, sentry_dsn, stt_gigaam_hf_token), которые утекали через
+    # handle_export_settings в plaintext (W1168 F1 CRIT).
+    _SENSITIVE_FIELDS: frozenset[str] = _SENSITIVE_FIELDS_FROM_BACKUP
 
     def handle_export_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует текущие настройки в JSON-файл, исключая чувствительные поля.
