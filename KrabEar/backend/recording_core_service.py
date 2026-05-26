@@ -35,6 +35,7 @@ from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 from backend.event_bus import bus as event_bus
 from backend.models import DEFAULT_SETTINGS
+from core.text_anonymizer import TextAnonymizer
 from core.utils import TextUtils
 
 logger = logging.getLogger("KrabEar.Backend.RecordingCore")
@@ -1282,6 +1283,13 @@ class RecordingCoreService:
 
         if self._semantic_searcher.is_enabled and _cfg_settings.SEMANTIC_SEARCH_AUTO_INDEX:
             _index_text = display_text or text
+            _cached = self._settings_svc.cached_settings()
+            _anonymize = bool(_cached.get("anonymize_enabled", DEFAULT_SETTINGS.get("anonymize_enabled", False)))
+            if _anonymize and _index_text:
+                try:
+                    _index_text = TextAnonymizer().anonymize(_index_text).anonymized_text
+                except Exception:
+                    pass  # fallback: index original text rather than crash
             _index_id = item.id
             threading.Thread(
                 target=self._semantic_searcher.index_item,

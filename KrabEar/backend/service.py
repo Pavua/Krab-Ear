@@ -975,6 +975,7 @@ class BackendService:
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
+            "purge_history": self._handle_purge_history,  # удаляет ВСЕ записи истории и очищает embeddings (privacy)
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
@@ -2358,6 +2359,40 @@ class BackendService:
         audit = get_privacy_audit_logger()
         audit.clear()
         return {"ok": True}
+
+    def _handle_purge_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет ВСЕ записи истории и очищает semantic-search embeddings.
+
+        Предназначен для операций полной очистки в privacy-режиме.
+        Гарантирует, что embeddings.npy и embeddings_index.json не содержат
+        личных данных после вызова.
+
+        Возвращает:
+            deleted (int): количество удалённых записей истории.
+            embeddings_cleared (bool): True если semantic-search индекс очищен.
+        """
+        deleted = 0
+        try:
+            with self.store._lock():
+                active = self.store._load_active_items_unlocked()
+                for item in active:
+                    self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
+                deleted = len(active)
+        except Exception as exc:
+            logger.warning("purge_history: ошибка при удалении истории: %s", exc)
+
+        embeddings_cleared = False
+        try:
+            self._semantic_searcher.purge_all()
+            embeddings_cleared = True
+        except Exception as exc:
+            logger.warning("purge_history: ошибка при очистке embeddings: %s", exc)
+
+        logger.info(
+            "purge_history: удалено %d записей, embeddings_cleared=%s",
+            deleted, embeddings_cleared,
+        )
+        return {"deleted": deleted, "embeddings_cleared": embeddings_cleared}
 
     # --- D.2.3: Scored STT routing decision ---
 

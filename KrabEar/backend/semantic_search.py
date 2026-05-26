@@ -208,13 +208,27 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
-    def remove(self, history_item_id: str) -> bool:
-        """Remove item from index by history_item_id.
+    def purge_all(self) -> None:
+        """Полностью очищает in-memory индекс и удаляет файлы embeddings с диска.
 
-        Alias for remove_item(), provided for the W1148 F1 spec interface.
-        Returns True if removed, False if not found.
+        Вызывается при purge_history для защиты PII — гарантирует, что
+        embeddings.npy и embeddings_index.json не содержат личных данных
+        после общей очистки истории.
         """
-        return self.remove_item(history_item_id)
+        with self._index_lock:
+            self._embeddings = None
+            self._index = []
+        try:
+            if self._embeddings_path.exists():
+                self._embeddings_path.unlink()
+        except Exception as exc:
+            logger.warning("semantic_search: не удалось удалить embeddings.npy: %s", exc)
+        try:
+            if self._index_path.exists():
+                self._index_path.unlink()
+        except Exception as exc:
+            logger.warning("semantic_search: не удалось удалить embeddings_index.json: %s", exc)
+        logger.info("semantic_search: индекс и файлы embeddings очищены (purge_all)")
 
     def remove_item(self, item_id: str) -> bool:
         """Remove item from index. Returns True if removed, False if not found.
