@@ -841,6 +841,41 @@ class AudioEngine:
             ):
                 audio_data = self._maybe_denoise(audio_data)
 
+            # 2.6 SmartSilenceSkipper — физически удаляет длинные внутренние паузы
+            # (>1 с) из аудио перед Whisper, сокращая время инференса и уменьшая
+            # галлюцинации на участках тишины.
+            #
+            # CRITICAL WARNING: удаление тишины физически сдвигает временные метки
+            # Whisper — SRT-экспорт и диаризация будут видеть сдвинутые timestamps.
+            # Вызывающий код НЕ ДОЛЖЕН использовать эту опцию там, где требуется
+            # точный вывод временных меток (SRT, diarization с выравниванием).
+            #
+            # MUTEX с VAD prefilter: оба трансформируют аудио через удаление/обнуление
+            # тишины. Если SmartSilenceSkipper активен — VAD prefilter пропускается,
+            # чтобы избежать двойного сдвига временных меток (W1096 F3).
+            _smart_silence_active = False
+            if (
+                settings.SMART_SILENCE_SKIP_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                try:
+                    from core.smart_silence_skipper import SmartSilenceSkipper as _SSS
+                    _sss_result = _SSS().process(audio_data, sample_rate=16000)
+                    audio_data = _sss_result.processed_audio
+                    _smart_silence_active = True
+                    logger.debug(
+                        "SmartSilenceSkipper: удалено %d сегментов, %.2f с (%.1f %%)",
+                        len(_sss_result.skipped_segments),
+                        _sss_result.time_saved_sec,
+                        _sss_result.time_saved_pct,
+                    )
+                except Exception:
+                    logger.warning(
+                        "SmartSilenceSkipper: ошибка обработки, используем исходное аудио",
+                        exc_info=True,
+                    )
+
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
 
@@ -850,9 +885,11 @@ class AudioEngine:
             # (например live_subs захватывает system audio с YouTube — VAD model
             # тренирована на mic input и speech_ratio=0.0 на компрессированном
             # потоке → STT никогда не вызывается).
+            # Пропускается также когда SmartSilenceSkipper активен (mutex, W1096 F3).
             if (
                 settings.STT_VAD_PREFILTER_ENABLED
                 and not skip_vad_prefilter
+                and not _smart_silence_active
                 and isinstance(audio_data, np.ndarray)
             ):
                 vad_result = self._apply_vad_prefilter(audio_data)
