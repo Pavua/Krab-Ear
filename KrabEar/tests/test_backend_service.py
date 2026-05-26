@@ -114,7 +114,8 @@ class FakeTranscriber:
 
     def transcribe(self, audio_data, quality_profile: str = "balanced", cleanup_profile: str = "soft",
                    domain: str = "casual", extra_vocabulary=None, lang_hint=None,
-                   history_context=None, stt_hotwords=None) -> str:
+                   history_context=None, stt_hotwords=None, settings=None,
+                   diarize=None, skip_vad_prefilter=False, silence_ranges=None) -> str:
         self.counter += 1
         return f"тестовая строка #{self.counter} ({quality_profile}/{cleanup_profile})"
 
@@ -1385,7 +1386,8 @@ class BackendServiceTestCase(unittest.TestCase):
             """FakeTranscriber, возвращающий словарь с engine полем."""
             def transcribe(self, audio_data, quality_profile="balanced", cleanup_profile="soft",
                            domain="casual", extra_vocabulary=None, lang_hint=None,
-                           history_context=None, stt_hotwords=None):
+                           history_context=None, stt_hotwords=None, settings=None,
+                           diarize=None, skip_vad_prefilter=False, silence_ranges=None):
                 self.counter += 1
                 return {
                     "text": f"тестовая строка #{self.counter}",
@@ -1483,10 +1485,12 @@ class VocabularyCapturingTranscriber(FakeTranscriber):
 
     def transcribe(self, audio_data, quality_profile: str = "balanced", cleanup_profile: str = "soft",
                    domain: str = "casual", extra_vocabulary=None, lang_hint=None,
-                   history_context=None, stt_hotwords=None) -> str:
+                   history_context=None, stt_hotwords=None, settings=None,
+                   diarize=None, skip_vad_prefilter=False, silence_ranges=None) -> str:
         self.last_extra_vocabulary = extra_vocabulary
         return super().transcribe(audio_data, quality_profile, cleanup_profile, domain, extra_vocabulary, lang_hint,
-                                  history_context=history_context, stt_hotwords=stt_hotwords)
+                                  history_context=history_context, stt_hotwords=stt_hotwords,
+                                  silence_ranges=silence_ranges)
 
 
 class VocabularySuggestionsTestCase(unittest.TestCase):

@@ -99,7 +99,8 @@ class FakeTranscriber:
     def transcribe(self, audio_data, quality_profile: str = "balanced",
                    cleanup_profile: str = "soft", domain: str = "casual",
                    extra_vocabulary=None, lang_hint=None,
-                   history_context=None, stt_hotwords=None) -> str:
+                   history_context=None, stt_hotwords=None, settings=None,
+                   diarize=None, skip_vad_prefilter=False, silence_ranges=None) -> str:
         self.counter += 1
         # Embed a searchable keyword so search tests always find this item.
         return f"workflow_session тестовая строка номер {self.counter}"
