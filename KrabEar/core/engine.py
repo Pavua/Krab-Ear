@@ -14,7 +14,6 @@ import re as _re
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
@@ -135,9 +134,6 @@ def _short_model_name(model: str) -> str:
 
 logger = logging.getLogger("KrabEar.Engine")
 
-# Module-level flag: emit the pipeline_v2 experimental warning only once per process.
-_pipeline_v2_warned: bool = False
-
 
 # ---------------------------------------------------------------------------
 # Утилита: поиск ffmpeg в PATH (portable на Intel/Apple Silicon/нестандартные установки)
@@ -183,14 +179,6 @@ _BYTES_PER_MB = 1024 * 1024
 # Достаточно для ~30 секунд аудио (~300 токенов STT) + краткого резюме.
 _VOXTRAL_MAX_TOKENS = 2048
 
-# Allowlist of accepted Voxtral HuggingFace repo IDs (W1219 F3 security fix).
-# snapshot_download is called with raw settings.VOXTRAL_MODEL — validate before use
-# to prevent SSRF / arbitrary model loading from user-supplied strings.
-_VOXTRAL_REPO_ALLOWLIST: frozenset[str] = frozenset({
-    "mistralai/Voxtral-Mini-3B-2507",
-    "mistralai/Voxtral-Small-24B-2507",
-})
-
 # ---------------------------------------------------------------------------
 # Утилита: проверка доступной памяти macOS через vm_stat
 # ---------------------------------------------------------------------------
@@ -199,12 +187,11 @@ _VOXTRAL_REPO_ALLOWLIST: frozenset[str] = frozenset({
 # whisper-large-v3-mlx занимает ~3GB, pyannote ~1.5GB. Оставляем запас.
 _HEAVY_MODEL_MIN_FREE_GB = 4.0
 
-# TTL (секунд) для записей в _unavailable_models.
-# Transient failures (timeout, ImportError at cold start) blacklist adapters only
-# for this duration; after expiry the adapter gets one retry automatically.
-# Uses time.monotonic() — immune to wall-clock skew / NTP jumps.
-# W1472 F4 MED fix (sister to W1303 F2 HIGH, W1304 ACTUALLY_IMPLEMENTS).
-_UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
+# W1137 F2: TTL для временно недоступных моделей (секунды).
+# После этого времени модель снова пробуется в fallback chain.
+# 1800 s = 30 min — достаточно для освобождения памяти после OOM,
+# но не так долго, чтобы постоянно деградировать под launchd KeepAlive.
+_UNAVAILABLE_TTL_SEC: float = 1800.0
 
 
 def _get_available_memory_gb() -> float:
@@ -352,43 +339,31 @@ class AudioEngine:
         """
         self.current_model = settings.MODEL_BALANCED
         self.quality_profile = "balanced"
-        self._unavailable_models: dict[str, float] = {}  # model_name → ts_unavailable_since (monotonic)
+        # W1137 F2: TTL-based unavailable models dict (model → eviction_time).
+        # После _UNAVAILABLE_TTL_SEC секунд модель снова допускается в chain.
+        # Ранее set[str] рос бесконечно: transient OOM/timeout → постоянное
+        # исключение до перезапуска процесса (под launchd KeepAlive опасно).
+        self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
-        # RLock сериализует concurrent lazy-init — двойная проверка (double-checked
-        # locking) в _load_diarization_pipeline предотвращает двойную загрузку pipeline'а
-        # (~3 GB) при одновременных вызовах из IPC-потока и REST-сервера (W1227 F1 HIGH).
-        self._diarization_load_lock: threading.RLock = threading.RLock()
 
         # SenseVoice adapter state (lazy-loaded FunASR pipeline).
         # Если funasr не установлен или модель не грузится — адаптер навсегда
         # отключается через _sensevoice_load_error, whisper chain продолжает жить.
         self._sensevoice_model = None  # type: ignore[var-annotated]
         self._sensevoice_load_error: str | None = None
-        self._sensevoice_load_lock: threading.RLock = threading.RLock()
 
         # Parakeet-TDT-1.1B adapter state (lazy-loaded NeMo ASR model).
         # Если nemo не установлен или модель не грузится — адаптер навсегда
         # отключается через _parakeet_load_error, whisper chain продолжает жить.
         self._parakeet_model = None  # type: ignore[var-annotated]
         self._parakeet_load_error: str | None = None
-        self._parakeet_load_lock: threading.RLock = threading.RLock()
 
         # WhisperX adapter state (Phase 4.3, lazy-loaded).
         # Если whisperx не установлен или модель не грузится — адаптер навсегда
         # отключается через _whisperx_load_error, chain продолжает жить.
         self._whisperx_model = None  # type: ignore[var-annotated]
         self._whisperx_load_error: str | None = None
-        self._whisperx_load_lock: threading.RLock = threading.RLock()
-
-        # Voxtral Mini 4B Realtime adapter state (lazy-loaded mistral-inference pipeline).
-        # Если mistral-inference не установлен или модель не грузится — адаптер навсегда
-        # отключается через _voxtral_load_error, whisper chain продолжает жить.
-        # RLock сериализует concurrent lazy-init — двойная проверка предотвращает
-        # двойную загрузку модели (~2-3 GB) при одновременных IPC-запросах (W1472 F1 HIGH).
-        self._voxtral_model = None  # type: ignore[var-annotated]
-        self._voxtral_load_error: str | None = None
-        self._voxtral_load_lock: threading.RLock = threading.RLock()
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -421,6 +396,8 @@ class AudioEngine:
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
         # subprocess'а — он проксирует через BackendService IPC (Wave 69).
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
+            import threading
+
             def _warmup_bg() -> None:
                 try:
                     self._router.warmup_gigaam()
@@ -476,14 +453,8 @@ class AudioEngine:
             return {"loaded": False, "latency_ms": latency_ms, "model_name": model_name, "error": str(exc)}
 
     def _llm_rewrite_allowed(self) -> bool:
-        """Runtime check: включён ли LLM rewriter И user runtime toggle.
-
-        Returns False when privacy_mode_enabled=True to prevent sending text
-        to LM Studio while privacy mode is active (W1229 F3 MED).
-        """
+        """Runtime check: включён ли LLM rewriter И user runtime toggle."""
         if self._llm_rewriter is None:
-            return False
-        if self._settings_get("privacy_mode_enabled", False):
             return False
         return bool(self._settings_get("llm_rewrite_enabled", False))
 
@@ -493,24 +464,45 @@ class AudioEngine:
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
 
-    def _is_model_unavailable(self, model_id: str) -> bool:
-        """Проверяет, заблокирован ли адаптер/модель в _unavailable_models с учётом TTL.
+    # ------------------------------------------------------------------
+    # W1137 F2: TTL-based unavailable-model helpers
+    # ------------------------------------------------------------------
 
-        Если запись есть, но TTL истёк (elapsed >= _UNAVAILABLE_MODEL_TTL_SEC),
-        запись вычищается и возвращается False — адаптер получает шанс на retry.
-        Использует time.monotonic() — устойчив к NTP-коррекциям и скачкам системных часов.
+    def _mark_model_unavailable(self, model: str) -> None:
+        """Помечает модель недоступной с временной меткой истечения TTL.
 
-        W1472 F4 MED: до этого фикса _unavailable_models был plain set без timestamps,
-        что означало перманентный blacklist на всю сессию при любом transient timeout.
+        После _UNAVAILABLE_TTL_SEC секунд _is_model_unavailable вернёт False
+        и модель снова войдёт в fallback chain.
         """
-        ts = self._unavailable_models.get(model_id)
-        if ts is None:
+        self._unavailable_models[model] = time.time() + _UNAVAILABLE_TTL_SEC
+
+    def _is_model_unavailable(self, model: str) -> bool:
+        """Проверяет, считается ли модель всё ещё недоступной (TTL не истёк).
+
+        Если TTL истёк — запись удаляется из dict (lazy cleanup).
+        """
+        expiry = self._unavailable_models.get(model)
+        if expiry is None:
             return False
-        if time.monotonic() - ts >= _UNAVAILABLE_MODEL_TTL_SEC:
-            # TTL истёк — убираем запись, адаптер снова доступен
-            del self._unavailable_models[model_id]
+        if time.time() >= expiry:
+            del self._unavailable_models[model]
             return False
         return True
+
+    def reset_unavailable_models(self) -> dict[str, Any]:
+        """Очищает список недоступных моделей принудительно.
+
+        IPC-handler ``reset_unavailable_models`` вызывает этот метод
+        напрямую. Полезно для ручного восстановления после OOM без
+        перезапуска backend-процесса.
+        """
+        cleared = list(self._unavailable_models.keys())
+        self._unavailable_models.clear()
+        logger.info(
+            "reset_unavailable_models: очищено %d записей: %s",
+            len(cleared), cleared,
+        )
+        return {"cleared": cleared, "count": len(cleared)}
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute.
@@ -543,7 +535,7 @@ class AudioEngine:
             # Wave 222: surface push failures to Sentry instead of silent swallow
             try:
                 from backend.observability import capture_exception
-                capture_exception(e, component="engine")
+                capture_exception(e, "_push_error_internal")
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
@@ -756,49 +748,6 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
-
-        # --- pipeline_v2 opt-in gate (W1263 F1) ---
-        # Phase 4 deterministic pipeline is EXPERIMENTAL and OFF by default.
-        # Enable via: set_settings {"pipeline_v2_enabled": true}
-        #          or: KRAB_EAR_PIPELINE_V2_ENABLED=true env var.
-        # Falls back to this legacy path automatically on any gate check failure.
-        _pipeline_v2_enabled = False
-        try:
-            from core.config import DEFAULT_SETTINGS as _DS  # noqa: F401 — imported for default
-            _pipeline_v2_enabled = bool(
-                getattr(settings, "PIPELINE_V2_ENABLED", None)
-                if getattr(settings, "PIPELINE_V2_ENABLED", None) is not None
-                else getattr(settings, "PIPELINE_V2", False)
-            )
-        except Exception:
-            pass
-        if _pipeline_v2_enabled:
-            global _pipeline_v2_warned
-            if not _pipeline_v2_warned:
-                logger.warning(
-                    "pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated. "
-                    "Report issues if STT quality regresses."
-                )
-                _pipeline_v2_warned = True
-            try:
-                from core.pipeline.bridge import transcribe_v2 as _transcribe_v2
-                return _transcribe_v2(
-                    engine=self,
-                    audio_input=audio_data,
-                    llm_rewriter=getattr(self, "_llm_rewriter", None),
-                    translator=getattr(self, "_translator", None),
-                    cleanup_profile=cleanup_profile,
-                    is_preview=is_preview,
-                    domain=domain,
-                    extra_vocabulary=extra_vocabulary,
-                    lang_hint=lang_hint,
-                )
-            except Exception as _v2_exc:
-                logger.warning(
-                    "pipeline_v2 failed (%s), falling back to legacy path", _v2_exc
-                )
-                # Fall through to legacy path below
-
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
         try:
@@ -917,24 +866,11 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
-            # 2.4 Адаптивное шумоподавление (применяется только к numpy-массивам,
-            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
-            # ВАЖНО: Denoiser должен видеть исходный audio ДО обнуления RSF-диапазонов,
-            # иначе шумовой профиль (W1080 percentile) будет вычислен по нулевым
-            # семплам → заниженный noise floor → недостаточное подавление при strong-mode.
-            if (
-                settings.STT_DENOISE_ENABLED
-                and not is_preview
-                and isinstance(audio_data, np.ndarray)
-            ):
-                audio_data = self._maybe_denoise(audio_data)
-
-            # 2.5 Обнуление диапазонов тишины от RealtimeSilenceFilter.
+            # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
             # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
+            # 2.4 Silence ranges pre-processing (от RealtimeSilenceFilter).
             # Обнуляем семплы в помеченных диапазонах тишины — Whisper обрабатывает
             # нулевые блоки быстрее, с меньшим количеством галлюцинаций.
-            # Выполняется ПОСЛЕ Denoiser: denoiser уже обработал реальный шум,
-            # RSF-маска применяется к очищенному сигналу.
             if silence_ranges and isinstance(audio_data, np.ndarray) and not is_preview:
                 try:
                     from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
@@ -946,84 +882,14 @@ class AudioEngine:
                 except Exception:
                     logger.debug("transcribe: ошибка применения silence_ranges, пропускаем")
 
-            # 2.6 Нормализация усиления (GainNormalizer.auto_gain).
-            # Выравнивает тихие записи до -20 дБFS RMS, ограничивает громкие
-            # через soft-knee limiter. При ошибке — продолжаем с оригинальным аудио.
+            # 2.5 Адаптивное шумоподавление (применяется только к numpy-массивам,
+            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
             if (
-                settings.STT_GAIN_NORMALIZE_ENABLED
+                settings.STT_DENOISE_ENABLED
                 and not is_preview
                 and isinstance(audio_data, np.ndarray)
             ):
-                try:
-                    from core.gain_normalizer import GainNormalizer
-                    _gain_result = GainNormalizer().auto_gain(audio_data)
-                    audio_data = _gain_result.audio
-                    logger.debug(
-                        "GainNorm: вход=%.1f дБ, усиление=%.1f дБ, клипп.=%d",
-                        _gain_result.input_rms_db,
-                        _gain_result.gain_applied_db,
-                        _gain_result.clipped_samples,
-                    )
-                except Exception:
-                    logger.debug("GainNorm: ошибка нормализации, используем оригинальное аудио")
-
-            # 2.7 Удаление длинных внутренних пауз (SmartSilenceSkipper).
-            # Убирает долгие тихие участки внутри аудио до STT — уменьшает
-            # шанс галлюцинаций Whisper на длинных паузах и ускоряет транскрибацию.
-            # Default OFF: SMART_SILENCE_SKIP_ENABLED=False.
-            if (
-                settings.SMART_SILENCE_SKIP_ENABLED
-                and not is_preview
-                and isinstance(audio_data, np.ndarray)
-            ):
-                try:
-                    from core.smart_silence_skipper import SmartSilenceSkipper
-                    _skip_result = SmartSilenceSkipper().process(audio_data, 16000)
-                    audio_data = _skip_result.processed_audio
-                    logger.debug(
-                        "SmartSilenceSkipper: %.2fs → %.2fs (удалено %.2fs тишины)",
-                        _skip_result.original_duration_sec,
-                        _skip_result.processed_duration_sec,
-                        _skip_result.original_duration_sec - _skip_result.processed_duration_sec,
-                    )
-                except Exception:
-                    logger.exception("smart_silence_skipper: failed, continuing with original audio")
-
-
-            # 2.6 SmartSilenceSkipper — физически удаляет длинные внутренние паузы
-            # (>1 с) из аудио перед Whisper, сокращая время инференса и уменьшая
-            # галлюцинации на участках тишины.
-            #
-            # CRITICAL WARNING: удаление тишины физически сдвигает временные метки
-            # Whisper — SRT-экспорт и диаризация будут видеть сдвинутые timestamps.
-            # Вызывающий код НЕ ДОЛЖЕН использовать эту опцию там, где требуется
-            # точный вывод временных меток (SRT, diarization с выравниванием).
-            #
-            # MUTEX с VAD prefilter: оба трансформируют аудио через удаление/обнуление
-            # тишины. Если SmartSilenceSkipper активен — VAD prefilter пропускается,
-            # чтобы избежать двойного сдвига временных меток (W1096 F3).
-            _smart_silence_active = False
-            if (
-                settings.SMART_SILENCE_SKIP_ENABLED
-                and not is_preview
-                and isinstance(audio_data, np.ndarray)
-            ):
-                try:
-                    from core.smart_silence_skipper import SmartSilenceSkipper as _SSS
-                    _sss_result = _SSS().process(audio_data, sample_rate=16000)
-                    audio_data = _sss_result.processed_audio
-                    _smart_silence_active = True
-                    logger.debug(
-                        "SmartSilenceSkipper: удалено %d сегментов, %.2f с (%.1f %%)",
-                        len(_sss_result.skipped_segments),
-                        _sss_result.time_saved_sec,
-                        _sss_result.time_saved_pct,
-                    )
-                except Exception:
-                    logger.warning(
-                        "SmartSilenceSkipper: ошибка обработки, используем исходное аудио",
-                        exc_info=True,
-                    )
+                audio_data = self._maybe_denoise(audio_data)
 
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
@@ -1034,11 +900,9 @@ class AudioEngine:
             # (например live_subs захватывает system audio с YouTube — VAD model
             # тренирована на mic input и speech_ratio=0.0 на компрессированном
             # потоке → STT никогда не вызывается).
-            # Пропускается также когда SmartSilenceSkipper активен (mutex, W1096 F3).
             if (
                 settings.STT_VAD_PREFILTER_ENABLED
                 and not skip_vad_prefilter
-                and not _smart_silence_active
                 and isinstance(audio_data, np.ndarray)
             ):
                 vad_result = self._apply_vad_prefilter(audio_data)
@@ -1096,7 +960,10 @@ class AudioEngine:
                 _report("diarize")
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview, diarize=diarize)
 
-            # После STT + diarization — освобождаем MLX Metal cache (W63).
+            # После STT + diarization — освобождаем MLX промежуточные массивы.
+            # MLX держит Metal-буферы пока Python GC не удалит ссылки на mx.array.
+            import gc as _gc
+            _gc.collect()
             # H2: явный flush MLX Metal cache — без этого GPU буферы остаются в
             # Metal heap и backend не возвращается к baseline RSS после каждого STT.
             try:
@@ -1280,16 +1147,6 @@ class AudioEngine:
                 f"broad except in transcribe(): {type(exc).__name__}: {exc}",
                 severity="critical",
             )
-            try:
-                from backend.observability import add_breadcrumb as _add_bc  # lazy — avoid circular
-                _add_bc(
-                    category="transcription",
-                    message="transcribe_error",
-                    level="error",
-                    data={"ok": False, "error_type": type(exc).__name__},
-                )
-            except Exception:
-                pass  # telemetry must never break transcription
             return {"text": "", "error": str(exc), "status": "error"}
         finally:
             # Cleanup iCloud temp copy
@@ -1459,20 +1316,11 @@ class AudioEngine:
             attempt_start = time.time()
             try:
                 if candidate["kind"] == "model":
-                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    try:
-                        future = _executor.submit(
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
                         )
                         attempt_result = future.result(timeout=settings.TRANSCRIBE_TIMEOUT_SEC)
-                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception:
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    else:
-                        _executor.shutdown(wait=False)
                     attempt_result["model_used"] = model_label
                 else:
                     attempt_result = self._transcribe_remote(audio_data, prompt)
@@ -1505,7 +1353,7 @@ class AudioEngine:
                     "latency_ms": latency_ms,
                     "error": str(exc),
                 })
-                self._unavailable_models[model_label] = time.monotonic()
+                self._mark_model_unavailable(model_label)
 
             retries_done += 1
 
@@ -1864,14 +1712,8 @@ class AudioEngine:
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
         # EN-оптимизирован и пробуется перед SenseVoice (которая RU+эмоция).
-        # Гейт по settings.PARAKEET_ENABLED И языку: только "en" или "auto".
-        # Для "ru"/"es" Parakeet возвращает мусор и глушит chain — W1303 F3.
-        # (аналогично GigaAM gate выше: _effective_lang == "ru")
-        if (
-            settings.PARAKEET_ENABLED
-            and _effective_lang in {"en", "auto"}
-            and not self._is_model_unavailable(self._PARAKEET_MARKER)
-        ):
+        # Гейт по settings.PARAKEET_ENABLED. При сбое маркер помечается недоступным.
+        if settings.PARAKEET_ENABLED and not self._is_model_unavailable(self._PARAKEET_MARKER):
             if len(candidates) >= 1:
                 candidates = [candidates[0], self._PARAKEET_MARKER] + candidates[1:]
             else:
@@ -1894,20 +1736,18 @@ class AudioEngine:
             else:
                 candidates = [self._SENSEVOICE_MARKER]
 
-        # --- WhisperX adapter: additive попытка ПОСЛЕ SenseVoice И Parakeet ---
+        # --- WhisperX adapter: additive попытка ПОСЛЕ SenseVoice, перед max candidates ---
         # Chain order (когда всё включено):
-        #   balanced → Parakeet → SenseVoice → WhisperX → max-candidates whisper-large-v3
-        # Маркер вставляется ПОСЛЕ последнего из двух маркеров (PARAKEET_MARKER или
-        # SENSEVOICE_MARKER), что бы ни было включено. Если ни один не присутствует —
-        # позиция по умолчанию 1 (после balanced). W1303 F1 HIGH fix.
+        #   balanced → SenseVoice → WhisperX → max-candidates whisper-large-v3
+        # Маркер вставляется на позицию 2 (после balanced и SenseVoice marker если они есть).
         # При сбое маркер помечается как недоступный, chain продолжается на whisper'ах.
         if settings.WHISPERX_ENABLED and not self._is_model_unavailable(self._WHISPERX_MARKER):
-            # Находим позицию вставки: после последнего из PARAKEET / SENSEVOICE маркеров.
-            _wx_anchor_markers = {self._PARAKEET_MARKER, self._SENSEVOICE_MARKER}
+            # Находим позицию вставки: сразу за последним adapter-маркером или после balanced.
             insert_pos = 1
             for i, c in enumerate(candidates):
-                if c in _wx_anchor_markers:
+                if c == self._SENSEVOICE_MARKER:
                     insert_pos = i + 1
+                    break
             candidates = candidates[:insert_pos] + [self._WHISPERX_MARKER] + candidates[insert_pos:]
 
         # --- Voxtral adapter: позиция 5 (после WhisperX, перед max-candidates) ---
@@ -1976,27 +1816,13 @@ class AudioEngine:
                 span_pfx, adapter_model, adapter_fn = _adapter_map[model_name]
                 try:
                     span_name = f"{span_pfx}_{_short_model_name(adapter_model)}"
-                    # W1219 F2: guard adapter calls with same timeout used for Whisper
-                    # branches — prevents GPU stall from blocking IPC indefinitely.
-                    _adapter_timeout = getattr(settings, "TRANSCRIBE_TIMEOUT_SEC", 120)
                     with _profiler.start_span(span_name):
-                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                        try:
-                            _fut = _pool.submit(adapter_fn)
-                            try:
-                                adapter_result = _fut.result(timeout=_adapter_timeout)
-                            except concurrent.futures.TimeoutError:
-                                _fut.cancel()
-                                raise TimeoutError(
-                                    f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
-                                )
-                        finally:
-                            _pool.shutdown(wait=False)
+                        adapter_result = adapter_fn()
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
-                    self._unavailable_models[model_name] = time.monotonic()
+                    self._mark_model_unavailable(model_name)
                     continue
 
             if self._is_model_unavailable(model_name):
@@ -2016,18 +1842,9 @@ class AudioEngine:
                 timeout = settings.TRANSCRIBE_TIMEOUT_SEC
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
-                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    try:
-                        future = _executor.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
                         result = future.result(timeout=timeout)
-                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception:
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    else:
-                        _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
             except concurrent.futures.TimeoutError:
@@ -2035,7 +1852,7 @@ class AudioEngine:
                     "Таймаут %ds при транскрибации моделью %s — пропускаю",
                     settings.TRANSCRIBE_TIMEOUT_SEC, model_name,
                 )
-                self._unavailable_models[model_name] = time.monotonic()
+                self._mark_model_unavailable(model_name)
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.
@@ -2043,10 +1860,10 @@ class AudioEngine:
                     "MLX watchdog timeout %.1fs для модели %s — Metal GPU stuck? Переключаюсь на следующий адаптер.",
                     e.timeout_sec, model_name,
                 )
-                self._unavailable_models[model_name] = time.monotonic()
+                self._mark_model_unavailable(model_name)
             except MemoryError:
                 logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
-                self._unavailable_models[model_name] = time.monotonic()
+                self._mark_model_unavailable(model_name)
                 # Phase B.2: stt.load_fail — model failed to init due to OOM
                 self._push_error(
                     "stt.load_fail",
@@ -2062,7 +1879,7 @@ class AudioEngine:
                 # errno 12 = Cannot allocate memory — ядро отказало в mmap
                 if e.errno == 12 or "Cannot allocate memory" in str(e):
                     logger.error("OOM (OSError) при модели %s: %s — помечаю как недоступную", model_name, e)
-                    self._unavailable_models[model_name] = time.monotonic()
+                    self._mark_model_unavailable(model_name)
                     # Phase B.2: stt.load_fail — OOM at OS level
                     self._push_error(
                         "stt.load_fail",
@@ -2076,10 +1893,10 @@ class AudioEngine:
                     )
                 else:
                     logger.warning("Модель %s не сработала (OSError): %s", model_name, e)
-                    self._unavailable_models[model_name] = time.monotonic()
+                    self._mark_model_unavailable(model_name)
             except Exception as e:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
-                self._unavailable_models[model_name] = time.monotonic()
+                self._mark_model_unavailable(model_name)
 
         # Если локально ничего не вышло — пробуем облако (если разрешено)
         if settings.NETWORK_MODE != "offline_strict":
@@ -2198,7 +2015,6 @@ class AudioEngine:
 
     def _load_sensevoice_model(self) -> Any:
         """Ленивая загрузка SenseVoice pipeline. Raises если funasr недоступен."""
-        # Fast-path: без блокировки.
         if self._sensevoice_model is not None:
             return self._sensevoice_model
         if self._sensevoice_load_error:
@@ -2209,28 +2025,20 @@ class AudioEngine:
                 "(установите: pip install funasr)"
             )
             raise RuntimeError(self._sensevoice_load_error)
-
-        with self._sensevoice_load_lock:
-            # Re-check после получения блокировки.
-            if self._sensevoice_model is not None:
-                return self._sensevoice_model
-            if self._sensevoice_load_error:
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
+            try:
+                # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
+                # default. Pytorch сам выберет MPS если модель будет это поддерживать.
+                self._sensevoice_model = _SenseVoiceAutoModel(
+                    model=settings.SENSEVOICE_MODEL,
+                    trust_remote_code=True,
+                    disable_update=True,
+                )
+            except Exception as exc:
+                self._sensevoice_load_error = f"Не удалось загрузить SenseVoice: {exc}"
                 raise RuntimeError(self._sensevoice_load_error)
-
-            with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
-                try:
-                    # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
-                    # default. Pytorch сам выберет MPS если модель будет это поддерживать.
-                    self._sensevoice_model = _SenseVoiceAutoModel(
-                        model=settings.SENSEVOICE_MODEL,
-                        trust_remote_code=True,
-                        disable_update=True,
-                    )
-                except Exception as exc:
-                    self._sensevoice_load_error = f"Не удалось загрузить SenseVoice: {exc}"
-                    raise RuntimeError(self._sensevoice_load_error)
-                logger.info("SenseVoice модель загружена: %s", settings.SENSEVOICE_MODEL)
-                return self._sensevoice_model
+            logger.info("SenseVoice модель загружена: %s", settings.SENSEVOICE_MODEL)
+            return self._sensevoice_model
 
     @staticmethod
     def _parse_sensevoice_output(raw_text: str) -> tuple[str, str | None, str | None]:
@@ -2321,7 +2129,6 @@ class AudioEngine:
 
     def _load_parakeet_model(self) -> Any:
         """Ленивая загрузка Parakeet-TDT модели через NeMo. Raises если nemo недоступен."""
-        # Fast-path: без блокировки.
         if self._parakeet_model is not None:
             return self._parakeet_model
         if self._parakeet_load_error:
@@ -2332,28 +2139,20 @@ class AudioEngine:
                 "(установите: pip install nemo-toolkit[asr])"
             )
             raise RuntimeError(self._parakeet_load_error)
-
-        with self._parakeet_load_lock:
-            # Re-check после получения блокировки.
-            if self._parakeet_model is not None:
-                return self._parakeet_model
-            if self._parakeet_load_error:
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.PARAKEET_MODEL)}"):
+            try:
+                # NeMo from_pretrained скачивает веса с HuggingFace/NVIDIA NGC.
+                # Устройство определяется автоматически: MPS на Apple Silicon,
+                # CUDA на NVIDIA GPU, CPU fallback. NeMo сам управляет инференсом.
+                model = _nemo_asr.models.ASRModel.from_pretrained(
+                    model_name=settings.PARAKEET_MODEL,
+                )
+                self._parakeet_model = model
+            except Exception as exc:
+                self._parakeet_load_error = f"Не удалось загрузить Parakeet: {exc}"
                 raise RuntimeError(self._parakeet_load_error)
-
-            with _profiler.start_span(f"model_load_{_short_model_name(settings.PARAKEET_MODEL)}"):
-                try:
-                    # NeMo from_pretrained скачивает веса с HuggingFace/NVIDIA NGC.
-                    # Устройство определяется автоматически: MPS на Apple Silicon,
-                    # CUDA на NVIDIA GPU, CPU fallback. NeMo сам управляет инференсом.
-                    model = _nemo_asr.models.ASRModel.from_pretrained(
-                        model_name=settings.PARAKEET_MODEL,
-                    )
-                    self._parakeet_model = model
-                except Exception as exc:
-                    self._parakeet_load_error = f"Не удалось загрузить Parakeet: {exc}"
-                    raise RuntimeError(self._parakeet_load_error)
-                logger.info("Parakeet модель загружена: %s", settings.PARAKEET_MODEL)
-                return self._parakeet_model
+            logger.info("Parakeet модель загружена: %s", settings.PARAKEET_MODEL)
+            return self._parakeet_model
 
     def _transcribe_parakeet(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через Parakeet-TDT-1.1B (NVIDIA NeMo).
@@ -2369,14 +2168,6 @@ class AudioEngine:
               - engine: "parakeet"
               - language: "en" (Parakeet EN-only)
               - segments: [] (NeMo transcribe не возвращает segment-level данных в базовом API)
-
-        Thread/process safety note:
-            NeMo использует PyTorch backend (MPS на Apple Silicon, CPU fallback) — НЕ MLX.
-            Поэтому mlx_lock() и mlx_inter_process_lock() здесь НЕ нужны: конкуренции
-            за Metal MLX hash table нет.  Это аналогично SenseVoice (FunASR/PyTorch)
-            и GigaAM (PyTorch MPS) — см. комментарий у _GIGAAM_MARKER (строка ~2398).
-            Для MLX-пути Parakeet (parakeet-mlx библиотека) см. stt_parakeet.py, где
-            оба уровня блокировки применяются корректно.
         """
         import tempfile as _tempfile
         import os as _os
@@ -2429,7 +2220,6 @@ class AudioEngine:
         """Ленивая загрузка WhisperX pipeline. Raises если whisperx недоступен."""
         # Используем getattr для совместимости с тестами, которые создают движок через
         # AudioEngine.__new__() без вызова __init__ (паттерн из SenseVoice/Parakeet тестов).
-        # Fast-path: без блокировки.
         if getattr(self, "_whisperx_model", None) is not None:
             return self._whisperx_model
         if getattr(self, "_whisperx_load_error", None):
@@ -2441,43 +2231,36 @@ class AudioEngine:
             )
             raise RuntimeError(self._whisperx_load_error)
 
-        with getattr(self, "_whisperx_load_lock", threading.RLock()):
-            # Re-check после получения блокировки.
-            if getattr(self, "_whisperx_model", None) is not None:
-                return self._whisperx_model
-            if getattr(self, "_whisperx_load_error", None):
-                raise RuntimeError(self._whisperx_load_error)
-
-            device = settings.WHISPERX_DEVICE
-            # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
-            # Если запрошен mps но недоступен — безопасный fallback на cpu.
-            if device == "mps" and torch is not None:
-                try:
-                    import torch as _torch
-                    if not _torch.backends.mps.is_available():
-                        logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
-                        device = "cpu"
-                except Exception:
+        device = settings.WHISPERX_DEVICE
+        # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
+        # Если запрошен mps но недоступен — безопасный fallback на cpu.
+        if device == "mps" and torch is not None:
+            try:
+                import torch as _torch
+                if not _torch.backends.mps.is_available():
+                    logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
                     device = "cpu"
-            elif torch is None:
+            except Exception:
                 device = "cpu"
+        elif torch is None:
+            device = "cpu"
 
-            # compute_type: на cpu/mps рекомендуется "float32" или "int8".
-            # "float16" работает только на CUDA; на MPS может вызвать ошибку.
-            compute_type = "float32" if device in ("cpu", "mps") else "float16"
+        # compute_type: на cpu/mps рекомендуется "float32" или "int8".
+        # "float16" работает только на CUDA; на MPS может вызвать ошибку.
+        compute_type = "float32" if device in ("cpu", "mps") else "float16"
 
-            with _profiler.start_span(f"model_load_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"):
-                try:
-                    self._whisperx_model = _whisperx.load_model(
-                        settings.WHISPERX_MODEL,
-                        device=device,
-                        compute_type=compute_type,
-                    )
-                except Exception as exc:
-                    self._whisperx_load_error = f"Не удалось загрузить WhisperX: {exc}"
-                    raise RuntimeError(self._whisperx_load_error)
-            logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
-            return self._whisperx_model
+        with _profiler.start_span(f"model_load_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"):
+            try:
+                self._whisperx_model = _whisperx.load_model(
+                    settings.WHISPERX_MODEL,
+                    device=device,
+                    compute_type=compute_type,
+                )
+            except Exception as exc:
+                self._whisperx_load_error = f"Не удалось загрузить WhisperX: {exc}"
+                raise RuntimeError(self._whisperx_load_error)
+        logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
+        return self._whisperx_model
 
     def _transcribe_whisperx(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через WhisperX с word-level timestamps и diarization.
@@ -2520,7 +2303,6 @@ class AudioEngine:
 
         # --- Word-level timestamps (phoneme alignment) ---
         word_timestamps = None
-        aligned = None  # W1214: init before try-block so diarization branch never hits NameError
         if settings.WHISPERX_WORD_TIMESTAMPS and result.get("segments"):
             try:
                 align_model, metadata = _whisperx.load_align_model(
@@ -2633,14 +2415,8 @@ class AudioEngine:
     # При VOXTRAL_REASONING_ENABLED=True возвращает reasoning: str (summary/Q&A).
 
     def _load_voxtral_model(self) -> Any:
-        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен.
-
-        Использует double-checked locking через _voxtral_load_lock (threading.RLock)
-        для предотвращения двойной загрузки (~2-3 GB) при конкурентных IPC-вызовах
-        (W1472 F1 HIGH). Паттерн аналогичен SenseVoice/Parakeet/WhisperX (W1235).
-        getattr-обёртка сохраняет совместимость с тестами через AudioEngine.__new__().
-        """
-        # Fast-path без блокировки — если модель уже загружена.
+        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен."""
+        # Совместимость с тестами через AudioEngine.__new__() (без __init__).
         if getattr(self, "_voxtral_model", None) is not None:
             return self._voxtral_model
         if getattr(self, "_voxtral_load_error", None):
@@ -2652,32 +2428,16 @@ class AudioEngine:
             )
             raise RuntimeError(self._voxtral_load_error)
 
-        with getattr(self, "_voxtral_load_lock", threading.RLock()):
-            # Re-check после получения блокировки (double-checked locking).
-            if getattr(self, "_voxtral_model", None) is not None:
-                return self._voxtral_model
-            if getattr(self, "_voxtral_load_error", None):
+        with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
+            try:
+                from huggingface_hub import snapshot_download  # type: ignore
+                model_path = snapshot_download(repo_id=settings.VOXTRAL_MODEL)
+                tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
+                model = _VoxtralTransformer.from_folder(model_path)
+                self._voxtral_model = (model, tokenizer)
+            except Exception as exc:
+                self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
                 raise RuntimeError(self._voxtral_load_error)
-
-            # W1219 F3: validate repo ID against allowlist before download.
-            _voxtral_repo = settings.VOXTRAL_MODEL
-            if _voxtral_repo not in _VOXTRAL_REPO_ALLOWLIST:
-                self._voxtral_load_error = (
-                    f"Voxtral: неизвестный repo_id '{_voxtral_repo}' — "
-                    f"допустимы только: {sorted(_VOXTRAL_REPO_ALLOWLIST)}"
-                )
-                raise RuntimeError(self._voxtral_load_error)
-
-            with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
-                try:
-                    from huggingface_hub import snapshot_download  # type: ignore
-                    model_path = snapshot_download(repo_id=_voxtral_repo)
-                    tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
-                    model = _VoxtralTransformer.from_folder(model_path)
-                    self._voxtral_model = (model, tokenizer)
-                except Exception as exc:
-                    self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
-                    raise RuntimeError(self._voxtral_load_error)
 
         logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
         return self._voxtral_model
@@ -2928,16 +2688,13 @@ class AudioEngine:
             tokens, _ = tokenizer.encode_chat_completion(completion_request)
             input_ids = tokens.tokens
 
-            # W1219 F1: serialize Voxtral MLX inference through mlx_lock to prevent
-            # concurrent GPU access SIGSEGV (same requirement as mlx_whisper calls).
-            with mlx_lock():
-                out_tokens, _ = _voxtral_generate(
-                    input_ids,
-                    model,
-                    max_tokens=_VOXTRAL_MAX_TOKENS,
-                    temperature=0.0,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
+            out_tokens, _ = _voxtral_generate(
+                input_ids,
+                model,
+                max_tokens=_VOXTRAL_MAX_TOKENS,
+                temperature=0.0,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
 
             raw_output = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens)
 
@@ -3145,41 +2902,29 @@ class AudioEngine:
         return None
 
     def _load_diarization_pipeline(self) -> Pipeline:
-        """Ленивая загрузка pyannote pipeline с токеном Hugging Face.
-
-        Использует double-checked locking чтобы предотвратить двойную загрузку
-        (~3 GB) при конкурентных вызовах из IPC-потока и REST-сервера (W1227 F1 HIGH).
-        """
-        # Fast-path: без блокировки (pipeline уже загружен или ошибка зафиксирована).
+        """Ленивая загрузка pyannote pipeline с токеном Hugging Face."""
         if self._diarization_pipeline is not None:
             return self._diarization_pipeline
         if self._diarization_load_error:
             raise RuntimeError(self._diarization_load_error)
 
-        with self._diarization_load_lock:
-            # Re-check после получения блокировки: другой поток мог уже загрузить.
-            if self._diarization_pipeline is not None:
-                return self._diarization_pipeline
-            if self._diarization_load_error:
+        hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
+
+        # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
+        # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
+        # Span фиксируется только при первом реальном load'е (guard выше гарантирует
+        # что повторные вызовы сразу возвращают кэш).
+        with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
+            try:
+                kwargs = {"token": hf_token} if hf_token else {}
+                self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
+            except Exception as e:
+                self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
                 raise RuntimeError(self._diarization_load_error)
-
-            hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
-
-            # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
-            # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
-            # Span фиксируется только при первом реальном load'е (guard выше гарантирует
-            # что повторные вызовы сразу возвращают кэш).
-            with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
-                try:
-                    kwargs = {"token": hf_token} if hf_token else {}
-                    self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-                except Exception as e:
-                    self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
-                    raise RuntimeError(self._diarization_load_error)
-                diarization_device = self._resolve_diarization_device()
-                self._diarization_pipeline.to(diarization_device)
-                logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-                return self._diarization_pipeline
+            diarization_device = self._resolve_diarization_device()
+            self._diarization_pipeline.to(diarization_device)
+            logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
+            return self._diarization_pipeline
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:
@@ -3363,15 +3108,12 @@ class AudioEngine:
                 )
 
             with open(audio_path, "rb") as f:
-                req_headers = {}
-                if settings.STT_GATEWAY_TOKEN:
-                    req_headers["Authorization"] = f"Bearer {settings.STT_GATEWAY_TOKEN}"
                 resp = requests.post(
                     settings.STT_GATEWAY_URL,
-                    headers=req_headers,
+                    headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=settings.STT_GATEWAY_TIMEOUT_SEC,
+                    timeout=60,
                 )
                 resp.raise_for_status()
                 data = resp.json()

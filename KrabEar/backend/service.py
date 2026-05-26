@@ -1118,6 +1118,7 @@ class BackendService:
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
             "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
+            "reset_unavailable_models": self._handle_reset_unavailable_models,  # W1141: очистить TTL-список недоступных STT-моделей вручную
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
             # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
@@ -3581,6 +3582,18 @@ end tell'''
             "estimated_latency_ms": sel.estimated_latency_ms,
             "quality_tier": sel.quality_tier,
         }
+
+    def _handle_reset_unavailable_models(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: reset_unavailable_models — очистить TTL-список недоступных STT-моделей.
+
+        W1137 F2 (W1141): принудительно сбрасывает список временно недоступных моделей
+        (тех, что были evicted из chain из-за OOM/timeout) без перезапуска backend-процесса.
+        Модели снова войдут в fallback chain при следующей транскрибации.
+
+        Возвращает:
+            {cleared: [список моделей], count: int}
+        """
+        return self.engine.reset_unavailable_models()
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
