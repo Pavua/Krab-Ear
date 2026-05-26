@@ -8,6 +8,11 @@ After this file, combined coverage spans all 281 real dispatch keys
 in ``BackendService.handle_request``.
 
 W801 update: removed 8 confirmed-dead handler tests per W786 audit.
+W875 update: added 11 previously uncovered keys found in ipc_dispatch.py
+(add_history_item, check_integrity, compare_periods, export_glossary_csv,
+extract_action_items, get_activity_calendar, get_last_llm_diff,
+get_stt_routing_decision, probe_llm_http, replace_word_in_last_transcript,
+score_transcription). Combined coverage now spans all 286 dispatch keys.
 """
 
 import os
@@ -285,6 +290,18 @@ _EXPECTED = {
     "warmup_rewriter": "svc._handle_warmup_rewriter",
     "warmup_stt": "svc._stt_mgmt_svc.handle_warmup_stt",
     "word_frequency_analysis": "svc._history.handle_word_frequency_analysis",
+    # W875: 11 keys present in ipc_dispatch.py but previously uncovered
+    "add_history_item": "svc._history.handle_add_history_item",
+    "check_integrity": "svc._handle_check_integrity",
+    "compare_periods": "svc._handle_compare_periods",
+    "export_glossary_csv": "svc._glossary_svc.handle_export_glossary_csv",
+    "extract_action_items": "svc._handle_extract_action_items",
+    "get_activity_calendar": "svc._handle_get_activity_calendar",
+    "get_last_llm_diff": "svc._llm_ops_svc.handle_get_last_llm_diff",
+    "get_stt_routing_decision": "svc._stt_mgmt_svc.handle_get_stt_routing_decision",
+    "probe_llm_http": "svc._handle_probe_llm_http",
+    "replace_word_in_last_transcript": "svc._llm_ops_svc.handle_replace_word_in_last_transcript",
+    "score_transcription": "svc._handle_score_transcription",
 }
 
 
@@ -337,6 +354,7 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
     source-grep assertion.
 
     W828: dispatch table source is now ipc_dispatch.py; ``self.`` → ``svc.`` prefix.
+    W875: added 11 previously uncovered keys; _EXPECTED now spans all 286 entries.
     """
 
     @classmethod
@@ -1654,6 +1672,68 @@ class TestWave790FullDispatchCoverage(unittest.TestCase):
         """'word_frequency_analysis' must be in dispatch table mapping to self._history.handle_word_frequency_analysis."""
         self.assertIn("word_frequency_analysis", self.keys)
         self.assertEqual(_dispatch_rhs(self.block, "word_frequency_analysis"), "svc._history.handle_word_frequency_analysis")
+
+    # ------------------------------------------------------------------
+    # W875: 11 previously uncovered keys in ipc_dispatch.py
+    # ------------------------------------------------------------------
+
+    def test_add_history_item_dispatch_entry(self):
+        """'add_history_item' must be in dispatch table mapping to svc._history.handle_add_history_item."""
+        self.assertIn("add_history_item", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "add_history_item"), "svc._history.handle_add_history_item")
+
+    def test_check_integrity_dispatch_entry(self):
+        """'check_integrity' must be in dispatch table mapping to svc._handle_check_integrity."""
+        self.assertIn("check_integrity", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "check_integrity"), "svc._handle_check_integrity")
+
+    def test_compare_periods_dispatch_entry(self):
+        """'compare_periods' must be in dispatch table mapping to svc._handle_compare_periods."""
+        self.assertIn("compare_periods", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "compare_periods"), "svc._handle_compare_periods")
+
+    def test_export_glossary_csv_dispatch_entry(self):
+        """'export_glossary_csv' must be in dispatch table mapping to svc._glossary_svc.handle_export_glossary_csv."""
+        self.assertIn("export_glossary_csv", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "export_glossary_csv"), "svc._glossary_svc.handle_export_glossary_csv")
+
+    def test_extract_action_items_dispatch_entry(self):
+        """'extract_action_items' must be in dispatch table mapping to svc._handle_extract_action_items."""
+        self.assertIn("extract_action_items", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "extract_action_items"), "svc._handle_extract_action_items")
+
+    def test_get_activity_calendar_dispatch_entry(self):
+        """'get_activity_calendar' must be in dispatch table mapping to svc._handle_get_activity_calendar."""
+        self.assertIn("get_activity_calendar", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "get_activity_calendar"), "svc._handle_get_activity_calendar")
+
+    def test_get_last_llm_diff_dispatch_entry(self):
+        """'get_last_llm_diff' must be in dispatch table mapping to svc._llm_ops_svc.handle_get_last_llm_diff (W783 LLMOpsService)."""
+        self.assertIn("get_last_llm_diff", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "get_last_llm_diff"), "svc._llm_ops_svc.handle_get_last_llm_diff")
+
+    def test_get_stt_routing_decision_dispatch_entry(self):
+        """'get_stt_routing_decision' must be in dispatch table mapping to svc._stt_mgmt_svc.handle_get_stt_routing_decision."""
+        self.assertIn("get_stt_routing_decision", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "get_stt_routing_decision"), "svc._stt_mgmt_svc.handle_get_stt_routing_decision")
+
+    def test_probe_llm_http_dispatch_entry(self):
+        """'probe_llm_http' must be in dispatch table mapping to svc._handle_probe_llm_http."""
+        self.assertIn("probe_llm_http", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "probe_llm_http"), "svc._handle_probe_llm_http")
+
+    def test_replace_word_in_last_transcript_dispatch_entry(self):
+        """'replace_word_in_last_transcript' must be in dispatch table mapping to svc._llm_ops_svc.handle_replace_word_in_last_transcript (W783)."""
+        self.assertIn("replace_word_in_last_transcript", self.keys)
+        self.assertEqual(
+            _dispatch_rhs(self.block, "replace_word_in_last_transcript"),
+            "svc._llm_ops_svc.handle_replace_word_in_last_transcript",
+        )
+
+    def test_score_transcription_dispatch_entry(self):
+        """'score_transcription' must be in dispatch table mapping to svc._handle_score_transcription."""
+        self.assertIn("score_transcription", self.keys)
+        self.assertEqual(_dispatch_rhs(self.block, "score_transcription"), "svc._handle_score_transcription")
 
 
 if __name__ == "__main__":
