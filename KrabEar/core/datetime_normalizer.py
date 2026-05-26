@@ -231,7 +231,8 @@ def _apply_time_marker(hour: int, marker: str) -> int:
         if hour < 6:
             return hour
         if hour < 12:
-            return hour
+            # e.g. «восемь часов ночи» → 08 + 12 = 20:00
+            return hour + 12
         return hour
     elif marker == "noon":
         return 12
@@ -363,7 +364,7 @@ class DateTimeNormalizer:
 
         full_pat = (
             rf"(?<!\d)({day_ordinals_pat})"
-            rf"\s+({months_pat})"
+            rf"\s+({months_pat})(?!\w)"
             rf"(?:\s+({year_words_pat}))?"
         )
 
@@ -389,7 +390,7 @@ class DateTimeNormalizer:
         # Цифровой день + месяц словом
         digit_day_pat = (
             rf"(?<!\d)(\d{{1,2}})"
-            rf"\s+({months_pat})"
+            rf"\s+({months_pat})(?!\w)"
             rf"(?:\s+(\d{{4}})\s+года?)?"
         )
 
@@ -480,13 +481,17 @@ class DateTimeNormalizer:
             re.escape(mk) for mk in sorted(_ES_TIME_MARKERS.keys(), key=len, reverse=True)
         )
 
-        # Pattern 1: word-hour + optional half + optional marker
-        # «nueve de la mañana», «tres y media», «ocho y cuarto de la tarde»
+        # Pattern 1: word-hour + REQUIRED anchor (half, time marker, or «las» prefix).
+        # Bare «una persona» / «dos cosas» must NOT be converted.
+        # Anchors: «las/la» prefix, «y media/cuarto», or a time-of-day marker phrase.
         word_hour_pat = (
-            rf"(?<!\w)({hour_words_pat})"
-            rf"(?:\s+y\s+(\w+))?"  # cuarto, media
-            rf"(?:\s+({markers_pat}))?"
-            rf"(?!\w)"
+            rf"(?:(?:las?\s+)({hour_words_pat})"  # «las diez», «la una» (prefixed)
+            rf"(?:\s+y\s+(\w+)(?:\s+({markers_pat}))?)?(?:\s+({markers_pat}))?)"
+            rf"|(?:(?<!\w)({hour_words_pat})"  # un-prefixed word-hour with mandatory anchor
+            rf"(?:"
+            rf"(?:\s+y\s+(\w+)(?:\s+({markers_pat}))?)"  # y media/cuarto [marker]
+            rf"|(?:\s+({markers_pat}))"  # standalone marker
+            rf")(?!\w))"
         )
 
         # Pattern 2: "a las N" (requires «a las» prefix) → digit hour
@@ -496,39 +501,70 @@ class DateTimeNormalizer:
             rf"(?:\s+({markers_pat}))?"
         )
 
-        def _make_repl(digit_only: bool):
-            def _repl_time(m: re.Match) -> str:
-                hour_str = m.group(1).strip().lower()
-                half_str = (m.group(2) or "").strip().lower()
-                marker_raw = (m.group(3) or "").strip().lower()
+        def _repl_word_time(m: re.Match) -> str:
+            # Groups for word_hour_pat (two alternation branches, 8 groups):
+            #   Branch A (las-prefixed): 1=hour, 2=half, 3=marker-after-half, 4=trailing-marker
+            #   Branch B (un-prefixed):  5=hour, 6=half, 7=marker-after-half, 8=standalone-marker
+            hour_str = (m.group(1) or m.group(5) or "").strip().lower()
+            half_str = (m.group(2) or m.group(6) or "").strip().lower()
+            marker_raw = (
+                m.group(3) or m.group(4) or m.group(7) or m.group(8) or ""
+            ).strip().lower()
 
-                hour = _ES_HOUR_WORDS.get(hour_str)
-                if hour is None:
-                    try:
-                        hour = int(hour_str)
-                    except ValueError:
-                        return m.group(0)
+            hour = _ES_HOUR_WORDS.get(hour_str)
+            if hour is None:
+                try:
+                    hour = int(hour_str)
+                except ValueError:
+                    return m.group(0)
 
-                minute = 0
-                if half_str == "media":
-                    minute = 30
-                elif half_str == "cuarto":
-                    minute = 15
+            minute = 0
+            if half_str == "media":
+                minute = 30
+            elif half_str == "cuarto":
+                minute = 15
 
-                marker_key = None
-                for mk in sorted(_ES_TIME_MARKERS.keys(), key=len, reverse=True):
-                    if mk in marker_raw:
-                        marker_key = _ES_TIME_MARKERS[mk]
-                        break
+            marker_key = None
+            for mk in sorted(_ES_TIME_MARKERS.keys(), key=len, reverse=True):
+                if mk in marker_raw:
+                    marker_key = _ES_TIME_MARKERS[mk]
+                    break
 
-                if marker_key:
-                    hour = _apply_time_marker(hour, marker_key)
+            if marker_key:
+                hour = _apply_time_marker(hour, marker_key)
 
-                return f"{hour:02d}:{minute:02d}"
-            return _repl_time
+            return f"{hour:02d}:{minute:02d}"
 
-        text = re.sub(word_hour_pat, _make_repl(False), text, flags=re.IGNORECASE)
-        text = re.sub(alas_pat, _make_repl(True), text, flags=re.IGNORECASE)
+        def _repl_alas_time(m: re.Match) -> str:
+            # Groups for alas_pat (3 groups): 1: digit hour, 2: half, 3: marker
+            hour_str = m.group(1).strip().lower()
+            half_str = (m.group(2) or "").strip().lower()
+            marker_raw = (m.group(3) or "").strip().lower()
+
+            try:
+                hour = int(hour_str)
+            except ValueError:
+                return m.group(0)
+
+            minute = 0
+            if half_str == "media":
+                minute = 30
+            elif half_str == "cuarto":
+                minute = 15
+
+            marker_key = None
+            for mk in sorted(_ES_TIME_MARKERS.keys(), key=len, reverse=True):
+                if mk in marker_raw:
+                    marker_key = _ES_TIME_MARKERS[mk]
+                    break
+
+            if marker_key:
+                hour = _apply_time_marker(hour, marker_key)
+
+            return f"{hour:02d}:{minute:02d}"
+
+        text = re.sub(word_hour_pat, _repl_word_time, text, flags=re.IGNORECASE)
+        text = re.sub(alas_pat, _repl_alas_time, text, flags=re.IGNORECASE)
         return text
 
     def _normalize_date_es(self, text: str) -> str:
@@ -581,12 +617,17 @@ class DateTimeNormalizer:
             re.escape(mk) for mk in sorted(_EN_TIME_MARKERS.keys(), key=len, reverse=True)
         )
 
-        # Pattern 1: word-hour (never matches bare digits) + optional marker
-        # «nine in the morning», «twelve noon»
+        # Pattern 1: word-hour + REQUIRED time anchor (marker or :MM).
+        # Bare cardinals like «two people» must NOT be converted.
+        # Anchors accepted: «o'clock», am/pm, or any time-of-day marker phrase.
+        oclock_anchor = r"o'?clock"
         word_hour_pat = (
             rf"(?<!\w)({hour_words_pat})"
-            rf"(?::(\d{{2}}))?"  # optional :MM
-            rf"(?:\s+({markers_pat}))?"
+            rf"(?:"
+            rf"(?::(\d{{2}})\s*({markers_pat})?)"  # :MM [marker]
+            rf"|(?:\s+({oclock_anchor})(?:\s+({markers_pat}))?)"  # o'clock [marker]
+            rf"|(?:\s+({markers_pat}))"  # standalone marker (in the morning / pm / etc.)
+            rf")"
             rf"(?!\w)"
         )
 
@@ -600,10 +641,17 @@ class DateTimeNormalizer:
             rf"(?!\w)"
         )
 
-        def _repl_time(m: re.Match) -> str:
+        def _repl_word_time(m: re.Match) -> str:
+            # Groups for word_hour_pat (anchored variant, 6 groups):
+            #   1: hour word
+            #   2: :MM digits  (branch 1)
+            #   3: marker after :MM  (branch 1)
+            #   4: o'clock keyword  (branch 2)
+            #   5: marker after o'clock  (branch 2)
+            #   6: standalone marker  (branch 3)
             hour_str = m.group(1).strip().lower()
             min_str = m.group(2) or "00"
-            marker_raw = (m.group(3) or "").strip().lower()
+            marker_raw = (m.group(3) or m.group(5) or m.group(6) or "").strip().lower()
 
             hour = _EN_HOUR_WORDS.get(hour_str)
             if hour is None:
@@ -628,8 +676,36 @@ class DateTimeNormalizer:
 
             return f"{hour:02d}:{minute:02d}"
 
-        text = re.sub(word_hour_pat, _repl_time, text, flags=re.IGNORECASE)
-        text = re.sub(digit_ampm_pat, _repl_time, text, flags=re.IGNORECASE)
+        def _repl_digit_time(m: re.Match) -> str:
+            # Groups for digit_ampm_pat (3 groups):
+            #   1: digit hour, 2: :MM digits, 3: am/pm marker
+            hour_str = m.group(1).strip().lower()
+            min_str = m.group(2) or "00"
+            marker_raw = (m.group(3) or "").strip().lower()
+
+            try:
+                hour = int(hour_str)
+            except ValueError:
+                return m.group(0)
+
+            try:
+                minute = int(min_str)
+            except ValueError:
+                minute = 0
+
+            marker_key = None
+            for mk in sorted(_EN_TIME_MARKERS.keys(), key=len, reverse=True):
+                if mk in marker_raw:
+                    marker_key = _EN_TIME_MARKERS[mk]
+                    break
+
+            if marker_key:
+                hour = _apply_time_marker(hour, marker_key)
+
+            return f"{hour:02d}:{minute:02d}"
+
+        text = re.sub(word_hour_pat, _repl_word_time, text, flags=re.IGNORECASE)
+        text = re.sub(digit_ampm_pat, _repl_digit_time, text, flags=re.IGNORECASE)
         return text
 
     def _normalize_date_en(self, text: str) -> str:
