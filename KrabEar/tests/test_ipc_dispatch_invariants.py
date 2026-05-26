@@ -329,8 +329,9 @@ class TestIPCDispatchInvariants(unittest.TestCase):
             # Defined at line ~4551. 'get_recording_insights' in dispatch points
             # to _handle_get_recording_stats instead (alias / naming inconsistency).
             "_handle_get_recording_insights",
-            # Wave 65 batch 3: _handle_get_calendar_link and
-            # _handle_search_by_calendar_event deleted (dead code, no callers).
+            # NOTE: _handle_get_calendar_link and _handle_search_by_calendar_event
+            # were deleted in Wave 65 batch 3, then re-added and wired in W1030.
+            # They are no longer orphans — see test_calendar_link_handlers_wired_wave1030.
         }
 
         new_orphans = [m for m in orphan_private if m not in known_orphans_wave55]
@@ -348,21 +349,43 @@ class TestIPCDispatchInvariants(unittest.TestCase):
             # This branch is expected — orphans not yet fixed
             pass  # documented, not an error here; see test_get_recording_insights_alias_consistency
 
-    def test_calendar_handlers_deleted_wave65(self):
-        """Wave 65 batch 3: _handle_get_calendar_link and _handle_search_by_calendar_event
-        were deleted as dead code (no callers). Regression guard: these methods must
-        NOT be present in service.py anymore.
+    def test_calendar_link_handlers_wired_wave1030(self):
+        """W1030 fix: _handle_link_to_calendar_event, _handle_get_calendar_link,
+        and _handle_search_by_calendar_event were re-added and wired into the
+        dispatch table (W947 claimed to wire them but left them absent — W1028 F1
+        CRITICAL finding).  This test verifies all three are present AND dispatched.
+
+        History: Wave 65 batch 3 deleted earlier versions as dead code; W947
+        added StateStore backing (update_history_item_calendar etc.) but forgot
+        the IPC layer; W1030 completed the wiring.
         """
         service_path = os.path.join(KRAB_EAR_ROOT, "backend", "service.py")
         with open(service_path, encoding="utf-8") as f:
             source = f.read()
 
-        deleted_handlers = ["_handle_get_calendar_link", "_handle_search_by_calendar_event"]
-        for handler in deleted_handlers:
-            self.assertNotIn(
+        required_handlers = [
+            "_handle_link_to_calendar_event",
+            "_handle_get_calendar_link",
+            "_handle_search_by_calendar_event",
+        ]
+        for handler in required_handlers:
+            self.assertIn(
                 f"def {handler}",
                 source,
-                f"{handler} was deleted in Wave 65 batch 3 but has reappeared — revert or update this test.",
+                f"{handler} must be defined in service.py (W1030 wiring)",
+            )
+
+        # Also verify dispatch table entries
+        required_dispatch_keys = [
+            "link_to_calendar_event",
+            "get_calendar_link",
+            "search_by_calendar_event",
+        ]
+        for key in required_dispatch_keys:
+            self.assertIn(
+                f'"{key}"',
+                source,
+                f'Dispatch key "{key}" must be in the handle_request lookup table (W1030)',
             )
 
     def test_session_speaker_handlers_deleted_wave65_batch4(self):

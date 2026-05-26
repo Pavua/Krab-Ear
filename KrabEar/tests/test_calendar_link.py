@@ -405,5 +405,64 @@ class TestLinkReturnsEventId(_DarwinPatchedTestCase):
         self.assertNotIn("_start_epoch", result)
 
 
+class TestCalendarIPCDispatchWiringW1030(unittest.TestCase):
+    """W1030: Verify link_to_calendar_event / get_calendar_link / search_by_calendar_event
+    are actually in the service.py dispatch table (W1028 F1 CRITICAL regression guard).
+
+    W947 claimed to wire these handlers but only added StateStore methods.
+    W1030 completes the IPC layer. This test is a permanent regression guard.
+    """
+
+    REQUIRED_IPC_KEYS = [
+        "link_to_calendar_event",
+        "get_calendar_link",
+        "search_by_calendar_event",
+    ]
+    REQUIRED_HANDLER_DEFS = [
+        "_handle_link_to_calendar_event",
+        "_handle_get_calendar_link",
+        "_handle_search_by_calendar_event",
+    ]
+
+    def _read_service_source(self) -> str:
+        service_path = Path(__file__).resolve().parent.parent / "backend" / "service.py"
+        with open(service_path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_dispatch_keys_present_in_service(self):
+        """All 3 calendar IPC dispatch keys must appear in service.py dispatch table."""
+        source = self._read_service_source()
+        for key in self.REQUIRED_IPC_KEYS:
+            self.assertIn(
+                f'"{key}"',
+                source,
+                f'Dispatch key "{key}" missing from service.py — W1030 regression!',
+            )
+
+    def test_handler_methods_defined_in_service(self):
+        """All 3 calendar _handle_* methods must be defined in service.py."""
+        source = self._read_service_source()
+        for handler in self.REQUIRED_HANDLER_DEFS:
+            self.assertIn(
+                f"def {handler}",
+                source,
+                f"Handler method {handler} missing from service.py — W1030 regression!",
+            )
+
+    def test_dispatch_keys_in_dispatch_block(self):
+        """All 3 dispatch keys must appear inside the handlers dict block (not just comments)."""
+        import re
+        source = self._read_service_source()
+        start = source.index("handlers: dict[str, Callable")
+        end = source.index("\n        handler = handlers.get(method)")
+        dispatch_block = source[start:end]
+        for key in self.REQUIRED_IPC_KEYS:
+            self.assertIn(
+                f'"{key}"',
+                dispatch_block,
+                f'"{key}" not in dispatch block — W1030 regression!',
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
