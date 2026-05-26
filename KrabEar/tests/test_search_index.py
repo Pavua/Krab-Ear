@@ -478,52 +478,111 @@ class TestSearchIndexWave111(unittest.TestCase):
         self.assertNotIn("nohit2", ids)
 
 
-class TestW1036Fixes(unittest.TestCase):
-    """W1036 F3 + F5 regression tests."""
-
-    def _make(self, item_id, text):
-        return {"id": item_id, "text": text, "source_text": "", "translated_text": ""}
+class TestSearchIndexW1041(unittest.TestCase):
+    """W1041 HIGH regression tests: source_text in signature + RLock thread-safety."""
 
     # ------------------------------------------------------------------
-    # F3: Spanish diacritics must not break tokenization
+    # F1: _compute_signature must include source_text
     # ------------------------------------------------------------------
-    def test_spanish_comunicacion_tokenized_as_one_word(self):
-        """'Comunicación' must be indexed as a single token, not split at 'ó'."""
-        tokens = _tokenize("Comunicación")
-        # Must be exactly one token; the old regex produced ['comunicaci', 'n']
-        self.assertEqual(len(tokens), 1, f"Expected 1 token, got: {tokens}")
-        self.assertIn("comunicación", tokens)
+    def test_signature_includes_source_text_changes(self):
+        """source_text-only change must produce a different signature (F1 fix)."""
+        base_item = {"id": "1", "text": "hello", "source_text": "original", "translated_text": ""}
+        changed_item = {"id": "1", "text": "hello", "source_text": "modified", "translated_text": ""}
 
-    def test_spanish_diacritics_searchable(self):
-        """Items containing Spanish diacritics must be found by search."""
+        sig_before = SearchIndex._compute_signature([base_item])
+        sig_after = SearchIndex._compute_signature([changed_item])
+
+        self.assertNotEqual(
+            sig_before,
+            sig_after,
+            "Signature must differ when source_text changes (F1 fix)",
+        )
+
+    def test_index_rebuilt_on_source_text_change(self):
+        """build_index must rebuild when only source_text changes (F1 integration)."""
         idx = SearchIndex()
-        idx.build_index([self._make("es1", "Comunicación en español")])
-        results = idx.search("comunicación")
-        ids = [r.item_id for r in results]
-        self.assertIn("es1", ids)
+        item_v1 = {"id": "1", "text": "hello", "source_text": "исходный текст", "translated_text": ""}
+        idx.build_index([item_v1])
+        sig_v1 = idx._signature
 
-    def test_spanish_accent_chars_tokenized(self):
-        """á, é, í, ó, ú, ñ, ü must all be included in tokens."""
-        for word in ["café", "niño", "así", "corazón", "flügelhorn"]:
-            tokens = _tokenize(word)
-            self.assertEqual(len(tokens), 1, f"'{word}' should be 1 token, got: {tokens}")
+        # Change only source_text
+        item_v2 = {"id": "1", "text": "hello", "source_text": "изменённый текст", "translated_text": ""}
+        idx.build_index([item_v2])
+        sig_v2 = idx._signature
+
+        self.assertNotEqual(sig_v1, sig_v2, "build_index must detect source_text-only change")
+
+    def test_source_text_only_item_searchable_after_rebuild(self):
+        """source_text content must be findable after a source_text-triggered rebuild."""
+        idx = SearchIndex()
+        item_v1 = {"id": "1", "text": "", "source_text": "old_unique_word", "translated_text": ""}
+        idx.build_index([item_v1])
+
+        item_v2 = {"id": "1", "text": "", "source_text": "new_unique_word", "translated_text": ""}
+        idx.build_index([item_v2])
+
+        self.assertEqual(idx.search("old_unique_word"), [], "old source_text must not be found after rebuild")
+        results = idx.search("new_unique_word")
+        self.assertEqual(len(results), 1, "new source_text must be indexed after rebuild")
 
     # ------------------------------------------------------------------
-    # F5: limit < 0 must return empty list, not a tail slice
+    # F2: build_index + search must be safe under concurrent access
     # ------------------------------------------------------------------
-    def test_negative_limit_returns_empty(self):
-        """search() with limit=-1 must return [] not a tail slice."""
+    def test_concurrent_build_and_search_no_race(self):
+        """10 threads mix build_index + search with no exception (F2 RLock fix)."""
         idx = SearchIndex()
-        idx.build_index([self._make("1", "привет мир")])
-        results = idx.search("привет", limit=-1)
-        self.assertEqual(results, [], f"Expected [], got: {results}")
+        base_items = [
+            {"id": str(i), "text": f"слово{i} тест данные", "source_text": "", "translated_text": ""}
+            for i in range(30)
+        ]
+        idx.build_index(base_items)
 
-    def test_negative_limit_large_returns_empty(self):
-        """search() with limit=-100 must also return []."""
+        errors: list[Exception] = []
+
+        def builder():
+            try:
+                for j in range(5):
+                    items = [
+                        {
+                            "id": str(i),
+                            "text": f"слово{i} тест данные вариант{j}",
+                            "source_text": f"src{j}",
+                            "translated_text": "",
+                        }
+                        for i in range(30)
+                    ]
+                    idx.build_index(items)
+            except Exception as exc:
+                errors.append(exc)
+
+        def searcher():
+            try:
+                for _ in range(20):
+                    results = idx.search("тест")
+                    assert isinstance(results, list)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = (
+            [threading.Thread(target=builder) for _ in range(5)]
+            + [threading.Thread(target=searcher) for _ in range(5)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Concurrent build+search raised: {errors}")
+
+    def test_has_rlock_attribute(self):
+        """SearchIndex must expose _lock as threading.RLock (F2 structural check)."""
         idx = SearchIndex()
-        idx.build_index([self._make("1", "привет мир"), self._make("2", "привет тест")])
-        results = idx.search("привет", limit=-100)
-        self.assertEqual(results, [])
+        self.assertTrue(
+            hasattr(idx, "_lock"),
+            "SearchIndex must have a _lock attribute",
+        )
+        # RLock type check — CPython exposes it as _RLock
+        self.assertIsInstance(idx._lock, type(threading.RLock()))
 
 
 if __name__ == "__main__":

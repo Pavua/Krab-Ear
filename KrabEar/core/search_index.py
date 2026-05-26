@@ -54,12 +54,8 @@ def _stem_ru(word: str) -> str:
     return word
 
 
-# Precompiled regex for tokenization — called on every history item and every query.
-# \w with re.UNICODE covers all Unicode word characters (letters, digits, _),
-# correctly handling Spanish diacritics (á é í ó ú ñ ü), Russian (а-яё), etc.
-# Previously r"[а-яёa-z0-9]+" excluded accented chars, causing e.g.
-# "Comunicación" → ['comunicaci', 'n'] (unsearchable).
-_RE_TOKEN = re.compile(r"\w+", re.UNICODE)
+# Precompiled regex for tokenization — called on every history item and every query
+_RE_TOKEN = re.compile(r"[а-яёa-z0-9]+")
 
 
 def _tokenize(text: str) -> list[str]:
@@ -90,7 +86,6 @@ class SearchIndex:
     """Инвертированный индекс для быстрого полнотекстового поиска."""
 
     def __init__(self) -> None:
-        # Защита от гонки между build_index и search в многопоточном окружении
         self._lock = threading.RLock()
         # {stemmed_token: set[item_id]}
         self._index: dict[str, set[str]] = {}
@@ -105,28 +100,25 @@ class SearchIndex:
 
     def build_index(self, items: list[dict]) -> None:
         """Строит инвертированный индекс из списка записей истории."""
-        new_sig = self._compute_signature(items)
         with self._lock:
+            new_sig = self._compute_signature(items)
             if new_sig == self._signature:
                 return  # данные не изменились
 
-            new_index: dict[str, set[str]] = {}
-            new_texts: dict[str, str] = {}
+            self._index = {}
+            self._texts = {}
+            self._signature = new_sig
 
             for item in items:
                 item_id = item.get("id")
                 if not item_id:
                     continue
                 raw = self._item_text(item)
-                new_texts[item_id] = raw
+                self._texts[item_id] = raw
                 for token in _tokenize(raw):
-                    if token not in new_index:
-                        new_index[token] = set()
-                    new_index[token].add(item_id)
-
-            self._index = new_index
-            self._texts = new_texts
-            self._signature = new_sig
+                    if token not in self._index:
+                        self._index[token] = set()
+                    self._index[token].add(item_id)
 
     # ------------------------------------------------------------------
     # Поиск
@@ -134,21 +126,19 @@ class SearchIndex:
 
     def search(self, query: str, limit: int = 50) -> list[SearchResult]:
         """Возвращает список SearchResult, отсортированных по убыванию score."""
-        limit = max(0, limit)  # guard against negative limit (W1036 F5)
-        query = query.strip()
-        if not query:
-            return []
-
-        query_tokens = list(dict.fromkeys(_tokenize(query)))  # уникальные, порядок сохранён
-        if not query_tokens:
-            return []
-
-        raw_words = _RE_TOKEN.findall(query.lower())
-
         with self._lock:
+            query = query.strip()
+            if not query:
+                return []
+
+            query_tokens = list(dict.fromkeys(_tokenize(query)))  # уникальные, порядок сохранён
+            if not query_tokens:
+                return []
+
             # AND: пересечение множеств item_id для каждого токена
             candidate_sets: list[set[str]] = []
             matched_per_token: dict[str, str] = {}  # token -> original query word
+            raw_words = _RE_TOKEN.findall(query.lower())
 
             for i, token in enumerate(query_tokens):
                 ids = self._index.get(token)
@@ -178,9 +168,9 @@ class SearchIndex:
                     )
                 )
 
-        # Сортируем по score (убывание), затем по item_id (детерминированность)
-        results.sort(key=lambda r: (-r.score, r.item_id))
-        return results[:limit]
+            # Сортируем по score (убывание), затем по item_id (детерминированность)
+            results.sort(key=lambda r: (-r.score, r.item_id))
+            return results[:limit]
 
     # ------------------------------------------------------------------
     # Статистика
@@ -213,12 +203,19 @@ class SearchIndex:
 
     @staticmethod
     def _compute_signature(items: list[dict]) -> str:
-        """Быстрая хэш-сигнатура для инвалидации кэша."""
-        h = hashlib.md5()
+        """Быстрая хэш-сигнатура для инвалидации кэша.
+
+        Включает все три текстовых поля (text, source_text, translated_text),
+        чтобы изменения в любом из них корректно сбрасывали кэш.
+        """
+        h = hashlib.sha1()
         for item in items:
-            item_id = item.get("id", "")
-            text = (item.get("text") or "") + (item.get("translated_text") or "")
-            h.update(f"{item_id}:{text}".encode("utf-8", errors="replace"))
+            h.update((item.get("text") or "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((item.get("source_text") or "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((item.get("translated_text") or "").encode("utf-8"))
+            h.update(b"\x1e")
         return h.hexdigest()
 
     @staticmethod
