@@ -9,8 +9,10 @@ __all__ = ["BackendService", "IPCServer"]
 
 
 def __getattr__(name: str):
-    if name in {"BackendService", "IPCServer"}:
-        from .service import BackendService, IPCServer
-
-        return {"BackendService": BackendService, "IPCServer": IPCServer}[name]
+    if name == "BackendService":
+        from .service import BackendService
+        return BackendService
+    if name == "IPCServer":
+        from .ipc_server import IPCServer
+        return IPCServer
     raise AttributeError(name)
