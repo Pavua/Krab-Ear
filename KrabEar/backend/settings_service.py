@@ -453,15 +453,24 @@ class SettingsService:
                 continue
             merged[key] = value
 
-        # Validate the merged result
+        # Validate the merged result — mirror handle_set_settings: raise on hard errors
         vr = self._validator.validate(merged)
         if not vr.valid:
-            errors.extend(vr.errors)
+            raise ValueError(
+                f"Импорт отклонён — настройки содержат ошибки: {'; '.join(vr.errors)}"
+            )
         if vr.warnings:
             for w in vr.warnings:
                 _log.warning("import_settings: %s", w)
             errors.extend(vr.warnings)
         merged = vr.fixed
+
+        # Pre-import auto-backup of current settings
+        old_settings = self.cached_settings()
+        try:
+            self._backup.create_backup(old_settings, reason="before_import")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("import_settings: pre-import backup failed: %s", exc)
 
         imported = len(incoming) - skipped
         self.store.save_settings(merged)
@@ -527,9 +536,53 @@ class SettingsService:
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
 
+        # Pre-restore: snapshot current settings so we can roll back on failure
+        old_settings = self.cached_settings()
+        try:
+            self._backup.create_backup(old_settings, reason="before_restore")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("handle_restore_settings_backup: pre-restore backup failed: %s", exc)
+
         restored = self._backup.restore_backup(backup_id)
+
+        # Validate restored data — reject and roll back on hard validation errors
+        vr = self._validator.validate(restored)
+        if not vr.valid:
+            # Roll back to the settings that were active before the restore attempt
+            try:
+                self.store.save_settings(old_settings)
+                self.invalidate_cache()
+            except Exception as rollback_exc:  # noqa: BLE001
+                _log.error(
+                    "handle_restore_settings_backup: rollback failed: %s", rollback_exc
+                )
+            raise ValueError(
+                f"Восстановление отклонено — бэкап содержит невалидные настройки: "
+                f"{'; '.join(vr.errors)}"
+            )
+        if vr.warnings:
+            for w in vr.warnings:
+                _log.warning("handle_restore_settings_backup: %s", w)
+        restored = vr.fixed
+
         self.store.save_settings(restored)
         self.invalidate_cache()
+
+        # Hot-reload pydantic Settings singleton from the written file
+        try:
+            from core.config import reload_settings_from_json
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("restore_settings_backup: hot-reloaded %d pydantic fields", updated)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("restore_settings_backup: hot-reload failed: %s", exc)
+
+        # Notify registered hooks (e.g. propagate api_key to live LLMRewriter)
+        for hook in self._after_save_hooks:
+            try:
+                hook(old_settings, restored)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("restore_settings_backup: after_save_hook failed: %s", exc)
 
         _log.info("handle_restore_settings_backup: restored from %s", backup_id)
         return {"restored_settings": restored, "backup_id": backup_id}
