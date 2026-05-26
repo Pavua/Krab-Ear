@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -50,24 +51,53 @@ def _load_silero(model_id: str) -> Any | None:
 
     Returns tuple (model, symbols, sample_rate, example_text, apply_tts, device) или None.
     """
-    try:
-        import torch  # type: ignore[import-untyped]
-        device = torch.device("cpu")
-        model, symbols, sample_rate, example_text, apply_tts = torch.hub.load(
-            repo_or_dir="snakers4/silero-models",
-            model="silero_tts",
-            language="ru",
-            speaker=model_id,
+    _LOAD_TIMEOUT = 30  # seconds — slow network / cold HuggingFace hub must not block forever
+    result_box: list[Any] = []
+    exc_box: list[BaseException] = []
+
+    def _do_load() -> None:
+        try:
+            import torch  # type: ignore[import-untyped]
+            _device = torch.device("cpu")
+            _model, _symbols, _sample_rate, _example_text, _apply_tts = torch.hub.load(
+                repo_or_dir="snakers4/silero-models",
+                model="silero_tts",
+                language="ru",
+                speaker=model_id,
+            )
+            _model = _model.to(_device)
+            result_box.append((_model, _symbols, _sample_rate, _example_text, _apply_tts, _device))
+        except ImportError:
+            exc_box.append(ImportError("torch не установлен"))
+        except Exception as _exc:  # noqa: BLE001
+            exc_box.append(_exc)
+
+    loader = threading.Thread(target=_do_load, daemon=True, name="silero-hub-load")
+    loader.start()
+    loader.join(timeout=_LOAD_TIMEOUT)
+
+    if loader.is_alive():
+        # Thread still running — hub download is stalled; fall through to Kokoro/say
+        logger.warning(
+            "Silero TTS загрузка превысила %ds (медленная сеть?) — переходим на fallback",
+            _LOAD_TIMEOUT,
         )
-        model = model.to(device)
+        return None
+
+    if exc_box:
+        exc = exc_box[0]
+        if isinstance(exc, ImportError):
+            logger.debug("torch не установлен -- Silero TTS недоступен")
+        else:
+            logger.warning("Silero TTS загрузка провалилась: %s", exc)
+        return None
+
+    if result_box:
+        model, symbols, sample_rate, example_text, apply_tts, device = result_box[0]
         logger.info("Silero TTS загружен: model=%s sample_rate=%s", model_id, sample_rate)
         return model, symbols, sample_rate, example_text, apply_tts, device
-    except ImportError:
-        logger.debug("torch не установлен -- Silero TTS недоступен")
-        return None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Silero TTS загрузка провалилась: %s", exc)
-        return None
+
+    return None
 
 
 # Lazy loader: Kokoro
@@ -117,16 +147,14 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
             capture_output=True,
         )
 
-        import os as _os
-        if _os.path.exists(wav_path) and _os.path.getsize(wav_path) > 0:
+        if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
             with open(wav_path, "rb") as f:
                 return f.read()
         return b""
     finally:
-        import os as _os
         for p in (aiff_path, wav_path):
             try:
-                _os.unlink(p)
+                os.unlink(p)
             except OSError:
                 pass
 
