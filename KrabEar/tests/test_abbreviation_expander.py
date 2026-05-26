@@ -572,5 +572,56 @@ class TestAmbiguousAbbreviations(unittest.TestCase):
         self.assertFalse(tn_items[0]["ambiguous"])
 
 
+class TestW1068MultiSenseAbbreviationsRemoved(unittest.TestCase):
+    """W1060 F2+F3 — многозначные аббревиатуры удалены из _BUILTIN_RU (W1068).
+
+    гл./ред./д./св. удалены как грамматически небезопасные.
+    обл. получила флаг no_after_digit.
+    """
+
+    def setUp(self):
+        self.expander = AbbreviationExpander()
+
+    # ── F2: многозначные аббревиатуры НЕ раскрываются ─────────────────────────
+
+    def test_gl_not_expanded_after_W1068(self):
+        """гл. больше не раскрывается автоматически (было → 'глава', неверно в падежах)."""
+        result = self.expander.expand("гл. 5 посвящена теме", language="ru")
+        self.assertNotIn("глава", result)
+        self.assertIn("гл.", result)
+
+    def test_red_not_expanded_after_W1068(self):
+        """ред. больше не раскрывается автоматически (было → 'редактор', неверно в юридическом тексте)."""
+        result = self.expander.expand("в новой ред. закона", language="ru")
+        self.assertNotIn("редактор", result)
+        self.assertIn("ред.", result)
+
+    def test_d_not_expanded_after_W1068(self):
+        """д. больше не раскрывается автоматически (было → 'дом', неверно для отчества д. Петрова)."""
+        result = self.expander.expand("д. Петрова была права", language="ru")
+        self.assertNotIn("дом", result)
+        self.assertIn("д.", result)
+
+    def test_sv_not_expanded_after_W1068(self):
+        """св. больше не раскрывается автоматически (было → 'святой', неверно в 'по св. данным')."""
+        result = self.expander.expand("по св. данным", language="ru")
+        self.assertNotIn("святой", result)
+        self.assertIn("св.", result)
+
+    # ── F3: обл. с флагом no_after_digit ──────────────────────────────────────
+
+    def test_77_obl_not_expanded(self):
+        """обл. НЕ раскрывается после цифры (77 обл. = номер региона)."""
+        result = self.expander.expand("регион 77 обл.", language="ru")
+        self.assertNotIn("область", result)
+        self.assertIn("обл.", result)
+
+    def test_obl_expanded_after_text(self):
+        """обл. раскрывается как 'область' в текстовом контексте."""
+        result = self.expander.expand("Московская обл. известна", language="ru")
+        self.assertIn("область", result)
+        self.assertNotIn("обл.", result)
+
+
 if __name__ == "__main__":
     unittest.main()
