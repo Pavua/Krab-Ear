@@ -467,109 +467,55 @@ class TestAbbreviationExpanderUnicode(unittest.TestCase):
         self.assertIn("eñora", result)  # проверяем ядро слова независимо от регистра
 
 
-class TestAmbiguousAbbreviations(unittest.TestCase):
-    """Tests for W1060 F2 HIGH — ambiguous abbreviation defaults.
+class TestW1068MultiSenseAbbreviationsRemoved(unittest.TestCase):
+    """W1060 F2+F3 — многозначные аббревиатуры удалены из _BUILTIN_RU (W1068).
 
-    Key invariants:
-      * гл. is NOT expanded by default (ambiguous: глава vs главный врач).
-      * т.е. IS still expanded by default (unambiguous).
-      * expand_ambiguous=True opt-in restores legacy behaviour.
+    гл./ред./д./св. удалены как грамматически небезопасные.
+    обл. получила флаг no_after_digit.
     """
 
     def setUp(self):
         self.expander = AbbreviationExpander()
 
-    # ── default (safe) mode ──────────────────────────────────────────────────
+    # ── F2: многозначные аббревиатуры НЕ раскрываются ─────────────────────────
 
-    def test_gl_dot_not_expanded_by_default(self):
-        """гл. is NOT expanded by default (W1060 F2 fix)."""
-        result = self.expander.expand("гл. врач принял решение", language="ru")
-        self.assertIn("гл.", result)
+    def test_gl_not_expanded_after_W1068(self):
+        """гл. больше не раскрывается автоматически (было → 'глава', неверно в падежах)."""
+        result = self.expander.expand("гл. 5 посвящена теме", language="ru")
         self.assertNotIn("глава", result)
-
-    def test_gl_dot_context_glavred_not_expanded(self):
-        """гл.редактор pattern stays intact by default."""
-        result = self.expander.expand("Решение принял гл. редактор", language="ru")
         self.assertIn("гл.", result)
-        self.assertNotIn("глава", result)
 
-    def test_sv_not_expanded_by_default(self):
-        """св. is NOT expanded by default (святой vs свежий)."""
-        result = self.expander.expand("ул. св. Михаила", language="ru")
-        self.assertIn("св.", result)
+    def test_red_not_expanded_after_W1068(self):
+        """ред. больше не раскрывается автоматически (было → 'редактор', неверно в юридическом тексте)."""
+        result = self.expander.expand("в новой ред. закона", language="ru")
+        self.assertNotIn("редактор", result)
+        self.assertIn("ред.", result)
+
+    def test_d_not_expanded_after_W1068(self):
+        """д. больше не раскрывается автоматически (было → 'дом', неверно для отчества д. Петрова)."""
+        result = self.expander.expand("д. Петрова была права", language="ru")
+        self.assertNotIn("дом", result)
+        self.assertIn("д.", result)
+
+    def test_sv_not_expanded_after_W1068(self):
+        """св. больше не раскрывается автоматически (было → 'святой', неверно в 'по св. данным')."""
+        result = self.expander.expand("по св. данным", language="ru")
         self.assertNotIn("святой", result)
+        self.assertIn("св.", result)
 
-    def test_te_dot_still_expanded_by_default(self):
-        """Unambiguous т.е. is still expanded even without expand_ambiguous."""
-        result = self.expander.expand("Это важно, т.е. нужно запомнить", language="ru")
-        self.assertIn("то есть", result)
-        self.assertNotIn("т.е.", result)
+    # ── F3: обл. с флагом no_after_digit ──────────────────────────────────────
 
-    def test_napr_still_expanded_by_default(self):
-        """напр. (unambiguous) stays in default active set."""
-        result = self.expander.expand("напр. вот этот вариант", language="ru")
-        self.assertIn("например", result)
+    def test_77_obl_not_expanded(self):
+        """обл. НЕ раскрывается после цифры (77 обл. = номер региона)."""
+        result = self.expander.expand("регион 77 обл.", language="ru")
+        self.assertNotIn("область", result)
+        self.assertIn("обл.", result)
 
-    # ── opt-in (legacy) mode ─────────────────────────────────────────────────
-
-    def test_expand_ambiguous_init_flag_expands_gl(self):
-        """expand_ambiguous=True at __init__ causes гл. to expand."""
-        expander = AbbreviationExpander(expand_ambiguous=True)
-        result = expander.expand("гл. врач принял решение", language="ru")
-        self.assertIn("глава", result)
-        self.assertNotIn("гл.", result)
-
-    def test_expand_ambiguous_per_call_flag(self):
-        """expand_ambiguous=True per call overrides instance default."""
-        result = self.expander.expand(
-            "гл. врач принял решение", language="ru", expand_ambiguous=True
-        )
-        self.assertIn("глава", result)
-        self.assertNotIn("гл.", result)
-
-    def test_expand_not_ambiguous_per_call_false_overrides_instance_true(self):
-        """expand_ambiguous=False per call overrides instance expand_ambiguous=True."""
-        expander = AbbreviationExpander(expand_ambiguous=True)
-        result = expander.expand(
-            "гл. врач принял решение", language="ru", expand_ambiguous=False
-        )
-        self.assertIn("гл.", result)
-        self.assertNotIn("глава", result)
-
-    # ── list_abbreviations shows ambiguous field ─────────────────────────────
-
-    def test_list_abbreviations_has_ambiguous_field(self):
-        """list_abbreviations includes ambiguous key in each entry."""
-        items = self.expander.list_abbreviations(language="ru")
-        for item in items:
-            self.assertIn("ambiguous", item, f"Missing 'ambiguous' key for {item['abbr']}")
-
-    def test_gl_dot_listed_as_ambiguous(self):
-        """гл. is present in list_abbreviations with ambiguous=True."""
-        items = self.expander.list_abbreviations(language="ru")
-        gl_items = [i for i in items if i["abbr"] == "гл."]
-        self.assertEqual(len(gl_items), 1, "гл. should appear in list_abbreviations")
-        self.assertTrue(
-            gl_items[0]["ambiguous"],
-            "гл. should be marked ambiguous=True",
-        )
-
-    def test_te_dot_listed_as_unambiguous(self):
-        """т.е. is present in list_abbreviations with ambiguous=False."""
-        items = self.expander.list_abbreviations(language="ru")
-        te_items = [i for i in items if i["abbr"] == "т.е."]
-        self.assertEqual(len(te_items), 1)
-        self.assertFalse(te_items[0]["ambiguous"])
-
-    # ── user-added abbreviations are never ambiguous ─────────────────────────
-
-    def test_custom_abbreviation_is_not_ambiguous(self):
-        """User-added abbreviations are always non-ambiguous."""
-        self.expander.add_abbreviation("т.н.", "так называемый", language="ru")
-        items = self.expander.list_abbreviations(language="ru")
-        tn_items = [i for i in items if i["abbr"] == "т.н."]
-        self.assertEqual(len(tn_items), 1)
-        self.assertFalse(tn_items[0]["ambiguous"])
+    def test_obl_expanded_after_text(self):
+        """обл. раскрывается как 'область' в текстовом контексте."""
+        result = self.expander.expand("Московская обл. известна", language="ru")
+        self.assertIn("область", result)
+        self.assertNotIn("обл.", result)
 
 
 if __name__ == "__main__":
