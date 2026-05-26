@@ -2118,6 +2118,14 @@ class AudioEngine:
               - engine: "parakeet"
               - language: "en" (Parakeet EN-only)
               - segments: [] (NeMo transcribe не возвращает segment-level данных в базовом API)
+
+        Thread/process safety note:
+            NeMo использует PyTorch backend (MPS на Apple Silicon, CPU fallback) — НЕ MLX.
+            Поэтому mlx_lock() и mlx_inter_process_lock() здесь НЕ нужны: конкуренции
+            за Metal MLX hash table нет.  Это аналогично SenseVoice (FunASR/PyTorch)
+            и GigaAM (PyTorch MPS) — см. комментарий у _GIGAAM_MARKER (строка ~2398).
+            Для MLX-пути Parakeet (parakeet-mlx библиотека) см. stt_parakeet.py, где
+            оба уровня блокировки применяются корректно.
         """
         import tempfile as _tempfile
         import os as _os
