@@ -995,7 +995,7 @@ class BackendService:
             "get_tags": self._history.handle_get_tags,
             "search_by_tag": self._history.handle_search_by_tag,
             "list_all_tags": self._history.handle_list_all_tags,
-            "get_recording_stats": self._handle_get_recording_stats,  # recording metadata statistics
+            "get_recording_stats": self._analytics_svc.handle_get_recording_stats,  # recording metadata statistics (W773: delegated to AnalyticsService)
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._text_processing_svc.handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._text_processing_svc.handle_summarize_item,  # LLM summary для элемента истории по ID
@@ -2063,76 +2063,8 @@ class BackendService:
         return stats
 
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает кумулятивную статистику записей: длительность, языки, LLM, диаризация.
-
-        Сканирует всю активную историю через store и агрегирует метаданные.
-        """
-        active = self.store._load_active_items_with_lock()
-
-        now = datetime.now()
-        today_iso = now.date().isoformat()
-        week_start = (now - timedelta(days=now.weekday())).date().isoformat()
-
-        total_count = 0
-        total_duration_sec = 0.0
-        today_count = 0
-        today_duration_sec = 0.0
-        week_count = 0
-        week_duration_sec = 0.0
-        llm_applied_count = 0
-        diarization_used_count = 0
-        lang_counts: dict[str, int] = {}
-
-        for item in active:
-            total_count += 1
-            dur = item.audio_duration_sec or 0.0
-            total_duration_sec += dur
-
-            day_str = item.ts[:10]  # "YYYY-MM-DD"
-            if day_str == today_iso:
-                today_count += 1
-                today_duration_sec += dur
-            if day_str >= week_start:
-                week_count += 1
-                week_duration_sec += dur
-
-            if item.llm_applied:
-                llm_applied_count += 1
-
-            if item.diarization is not None and isinstance(item.diarization, dict):
-                if item.diarization.get("enabled"):
-                    diarization_used_count += 1
-
-            lang = item.source_lang.strip()
-            if lang:
-                lang_counts[lang] = lang_counts.get(lang, 0) + 1
-
-        avg_duration = round(total_duration_sec / total_count, 2) if total_count else 0.0
-        llm_rate = round(llm_applied_count / total_count, 4) if total_count else 0.0
-        diarization_rate = round(diarization_used_count / total_count, 4) if total_count else 0.0
-
-        most_used_lang = ""
-        if lang_counts:
-            most_used_lang = max(lang_counts, key=lambda k: lang_counts[k])
-
-        return {
-            "total_count": total_count,
-            "total_duration_sec": round(total_duration_sec, 2),
-            "today_count": today_count,
-            "today_duration_sec": round(today_duration_sec, 2),
-            "week_count": week_count,
-            "week_duration_sec": round(week_duration_sec, 2),
-            "avg_duration_sec": avg_duration,
-            "most_used_lang": most_used_lang,
-            "lang_distribution": [
-                {"lang": lang, "count": cnt}
-                for lang, cnt in sorted(lang_counts.items(), key=lambda p: p[1], reverse=True)[:10]
-            ],
-            "llm_applied_count": llm_applied_count,
-            "llm_correction_rate": llm_rate,
-            "diarization_used_count": diarization_used_count,
-            "diarization_usage_rate": diarization_rate,
-        }
+        """Delegated to AnalyticsService (W773 extraction)."""
+        return self._analytics_svc.handle_get_recording_stats(params)
 
     def _handle_get_metrics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
         """Снимок метрик реального времени: сессия, LLM, call_assist, конфиг."""
