@@ -290,8 +290,9 @@ def check_wave_references(content: str) -> List[Tuple[int, str]]:
         if not data:
             return []
         latest_pr = data[0]["number"]
-        # Rough heuristic: each wave ships ~5-8 PRs; add generous buffer
-        max_wave = (latest_pr // 5) + 10
+        # Rough heuristic: many waves ship 0-1 PRs (docs/tests only);
+        # use latest_pr as a lower bound but allow waves up to 3× PR count.
+        max_wave = max(latest_pr * 3, 700)
     except Exception:
         return []
 

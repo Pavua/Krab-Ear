@@ -703,5 +703,194 @@ class MultiBundleTestCase(unittest.TestCase):
         self.assertGreater(pkg_multi.size_bytes, pkg_single.size_bytes)
 
 
+class Wave98RequiredTestCase(unittest.TestCase):
+    """Wave 98 — spec-required тесты per task brief."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = SharingManager(store=self._store)
+
+    # test_create_share_link_for_history_item
+    def test_create_share_link_for_history_item(self) -> None:
+        """prepare_share создаёт пакет и возвращает share_id (ссылку) для history item."""
+        self._store.add_fake_item("h1", "Расшариваем этот текст")
+        pkg = self._mgr.prepare_share(["h1"])
+        self.assertTrue(pkg.share_id)
+        self.assertEqual(len(pkg.share_id), 8)
+        self.assertIn("Расшариваем этот текст", pkg.content)
+        # Ссылка должна быть в индексе
+        found = self._mgr.get_shared(pkg.share_id)
+        self.assertIsNotNone(found)
+
+    # test_link_expiration — SharingManager не имеет TTL; тест документирует это
+    def test_link_no_expiration_24h(self) -> None:
+        """SharingManager не имеет 24h TTL — пакет бессрочен."""
+        self._store.add_fake_item("exp1", "текст без TTL")
+        pkg = self._mgr.prepare_share(["exp1"])
+        d = pkg.to_dict()
+        # Нет поля expires_at или ttl_sec — бессрочное хранение
+        self.assertNotIn("expires_at", d)
+        self.assertNotIn("ttl_sec", d)
+        self.assertNotIn("expiry", d)
+        # Пакет остаётся доступным (simulate passing time via reload)
+        mgr2 = SharingManager(store=self._store)
+        self.assertIsNotNone(mgr2.get_shared(pkg.share_id))
+
+    def test_link_no_expiration_7d(self) -> None:
+        """SharingManager не имеет 7d TTL — пакет существует после перезагрузки."""
+        self._store.add_fake_item("exp7", "семидневный текст")
+        pkg = self._mgr.prepare_share(["exp7"])
+        # Симулируем N перезагрузок менеджера (эквивалент 7 дней)
+        for _ in range(3):
+            mgr = SharingManager(store=self._store)
+            found = mgr.get_shared(pkg.share_id)
+            self.assertIsNotNone(found, "Пакет должен быть доступен без TTL")
+            self.assertEqual(found.share_id, pkg.share_id)
+
+    # test_revoke_share_link — нет метода revoke; тест документирует поведение
+    def test_revoke_share_link_not_supported(self) -> None:
+        """SharingManager не предоставляет revoke API — нет метода revoke_share."""
+        self._store.add_fake_item("rev1", "текст для revoke")
+        self._mgr.prepare_share(["rev1"])
+        # Нет публичного API для отзыва ссылок
+        self.assertFalse(hasattr(self._mgr, "revoke_share"))
+        self.assertFalse(hasattr(self._mgr, "revoke_shared"))
+        self.assertFalse(hasattr(self._mgr, "delete_share"))
+
+    # test_get_share_package_by_token
+    def test_get_share_package_by_token(self) -> None:
+        """get_shared возвращает полный пакет по share_id (токен)."""
+        self._store.add_fake_item("tok1", "токен-текст", ts="2024-03-10T08:00:00+00:00")
+        pkg = self._mgr.prepare_share(["tok1"])
+        token = pkg.share_id
+
+        retrieved = self._mgr.get_shared(token)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.share_id, token)
+        self.assertIn("токен-текст", retrieved.content)
+        self.assertEqual(retrieved.filename, pkg.filename)
+        self.assertEqual(retrieved.size_bytes, pkg.size_bytes)
+
+    def test_get_share_package_unknown_token_returns_none(self) -> None:
+        """get_shared с несуществующим токеном возвращает None (не бросает)."""
+        result = self._mgr.get_shared("DEADBEEF")
+        self.assertIsNone(result)
+
+    # test_share_includes_diarization_optional
+    def test_share_includes_diarization_in_json_when_present(self) -> None:
+        """Если history item содержит diarization, оно попадает в JSON-пакет."""
+
+        class FakeDiarizedItem(FakeHistoryItem):
+            def to_dict(self) -> dict[str, Any]:
+                d = super().to_dict()
+                d["diarization"] = [
+                    {"speaker": "SPEAKER_00", "start": 0.0, "end": 2.5, "text": "Привет"},
+                    {"speaker": "SPEAKER_01", "start": 2.6, "end": 5.0, "text": "Здравствуй"},
+                ]
+                return d
+
+        item = FakeDiarizedItem("diar1", "Привет Здравствуй")
+        self._store._items["diar1"] = item
+
+        pkg = self._mgr.prepare_share(["diar1"], format="json")
+        data = json.loads(pkg.content)
+        self.assertIn("diarization", data[0])
+        self.assertEqual(len(data[0]["diarization"]), 2)
+        self.assertEqual(data[0]["diarization"][0]["speaker"], "SPEAKER_00")
+
+    def test_share_without_diarization_field_ok(self) -> None:
+        """История без diarization поля работает без ошибок."""
+        self._store.add_fake_item("nodiar", "обычный текст без диаризации")
+        pkg = self._mgr.prepare_share(["nodiar"], format="json")
+        data = json.loads(pkg.content)
+        self.assertEqual(data[0]["id"], "nodiar")
+        self.assertNotIn("diarization", data[0])
+
+    def test_share_diarization_excluded_from_text_format(self) -> None:
+        """Text-формат не содержит сырую diarization структуру."""
+
+        class FakeDiarizedItem2(FakeHistoryItem):
+            def to_dict(self) -> dict[str, Any]:
+                d = super().to_dict()
+                d["diarization"] = [{"speaker": "S0", "text": "тест"}]
+                return d
+
+        item = FakeDiarizedItem2("diar2", "текст с диаризацией")
+        self._store._items["diar2"] = item
+
+        pkg = self._mgr.prepare_share(["diar2"], format="text")
+        # text формат рендерит только text/translated_text, не сырую структуру
+        self.assertNotIn("SPEAKER_", pkg.content)
+        self.assertIn("текст с диаризацией", pkg.content)
+
+    # test_concurrent_create_unique_tokens (no collisions)
+    def test_concurrent_create_unique_tokens(self) -> None:
+        """Параллельные вызовы prepare_share всегда получают уникальные share_id."""
+        import threading
+
+        for i in range(20):
+            self._store.add_fake_item(f"concur_{i}", f"текст {i}")
+
+        results: list[str] = []
+        lock = threading.Lock()
+        errors: list[Exception] = []
+
+        def create_share(i: int) -> None:
+            try:
+                pkg = self._mgr.prepare_share([f"concur_{i}"])
+                with lock:
+                    results.append(pkg.share_id)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=create_share, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [], f"Ошибки при параллельном создании: {errors}")
+        self.assertEqual(len(results), 20, "Не все потоки создали пакет")
+        # Нет коллизий токенов
+        self.assertEqual(len(set(results)), 20, "Обнаружены коллизии share_id!")
+
+    # test_unicode_text_in_share_package
+    def test_unicode_text_in_share_package_markdown(self) -> None:
+        """Unicode в тексте корректно кодируется в Markdown-пакете."""
+        unicode_texts = [
+            "Привет мир",
+            "中文内容",
+            "العربية النص",
+            "日本語テキスト",
+            "emoji 🎙️🔊🚀",
+            "Ñoño español con tildes: áéíóú",
+        ]
+        for text in unicode_texts:
+            with self.subTest(text=text[:20]):
+                self._store.add_fake_item(f"uni_{hash(text)}", text)
+                pkg = self._mgr.prepare_share([f"uni_{hash(text)}"], format="markdown")
+                self.assertIn(text, pkg.content)
+
+    def test_unicode_text_in_share_package_json(self) -> None:
+        """Unicode в тексте корректно сериализуется в JSON-пакете."""
+        text = "Русский 中文 العربية 🎙️"
+        self._store.add_fake_item("uni_json", text)
+        pkg = self._mgr.prepare_share(["uni_json"], format="json")
+        data = json.loads(pkg.content)
+        self.assertEqual(data[0]["text"], text)
+
+    def test_unicode_text_roundtrip_disk(self) -> None:
+        """Unicode-контент корректно сохраняется на диск и читается обратно."""
+        text = "Тест: Ñoño 中文 🚀"
+        self._store.add_fake_item("uni_disk", text)
+        pkg = self._mgr.prepare_share(["uni_disk"])
+        file_path = Path(self._tmpdir) / "shares" / pkg.filename
+        disk_content = file_path.read_text(encoding="utf-8")
+        self.assertEqual(disk_content, pkg.content)
+        self.assertIn(text, disk_content)
+
+
 if __name__ == "__main__":
     unittest.main()

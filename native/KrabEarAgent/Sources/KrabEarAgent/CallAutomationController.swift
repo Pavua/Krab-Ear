@@ -139,13 +139,13 @@ final class CallAutomationController: NSViewController {
         return sc
     }()
 
-    private let providerStatusDot: NSTextField = {
-        let l = NSTextField(labelWithString: "●")
-        l.font = .systemFont(ofSize: 11)
-        l.textColor = .systemGray
-        l.toolTip = "API key и from-number не настроены"
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
+    private let providerStatusDot: NSImageView = {
+        let img = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "статус провайдера")
+        let iv = NSImageView(image: img ?? NSImage())
+        iv.contentTintColor = .systemGray
+        iv.toolTip = "API key и from-number не настроены"
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        return iv
     }()
 
     // MARK: - UI: Input
@@ -208,7 +208,7 @@ final class CallAutomationController: NSViewController {
         return v
     }()
     private let statusBadgeLabel: NSTextField = {
-        let l = NSTextField(labelWithString: "●  Ожидание")
+        let l = NSTextField(labelWithString: "Ожидание")
         l.font = KrabEarTheme.Typography.captionMedium
         l.textColor = .secondaryLabelColor
         return l
@@ -819,7 +819,7 @@ final class CallAutomationController: NSViewController {
             let from = (settings["twilio_from_number"] as? String) ?? ""
             isConfigured = !sid.isEmpty && !tok.isEmpty && !from.isEmpty
         }
-        providerStatusDot.textColor = isConfigured ? .systemGreen : .systemGray
+        providerStatusDot.contentTintColor = isConfigured ? NSColor.systemGreen : NSColor.systemGray
         providerStatusDot.toolTip   = isConfigured
             ? "\(provider.capitalized) настроен"
             : "\(provider.capitalized): API key или from-number не задан в Настройках"

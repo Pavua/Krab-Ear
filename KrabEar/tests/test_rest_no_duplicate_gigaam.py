@@ -246,5 +246,120 @@ class TestNoDuplicateWorkerArchitecture(unittest.TestCase):
         )
 
 
+class TestWave525SkipGigaamFlag(unittest.TestCase):
+    """Wave 525: _skip_gigaam instance attr prevents on-demand adapter creation.
+
+    Wave 69 only blocked the startup warmup *thread* — but when a transcription
+    request arrived the chain-builder still called get_gigaam_adapter(), which
+    spawned a second gigaam_worker subprocess.  Wave 525 adds self._skip_gigaam
+    and guards both the chain-builder call site and _transcribe_gigaam.
+    """
+
+    def test_skip_gigaam_attr_stored_true(self):
+        """AudioEngine stores _skip_gigaam=True when flag passed."""
+        with patch("core.engine.mlx_whisper", None), \
+                patch("core.stt_router.STTRouter") as MockRouter:
+            MockRouter.return_value = MagicMock()
+            import importlib
+            import core.engine
+            importlib.reload(core.engine)
+            eng = core.engine.AudioEngine(skip_gigaam_warmup=True)
+        self.assertTrue(
+            getattr(eng, "_skip_gigaam", None),
+            "AudioEngine with skip_gigaam_warmup=True must have _skip_gigaam=True",
+        )
+
+    def test_skip_gigaam_attr_stored_false(self):
+        """AudioEngine stores _skip_gigaam=False when flag not passed (default)."""
+        with patch("core.engine.mlx_whisper", None), \
+                patch("core.stt_router.STTRouter") as MockRouter:
+            MockRouter.return_value = MagicMock()
+            import importlib
+            import core.engine
+            importlib.reload(core.engine)
+            eng = core.engine.AudioEngine(skip_gigaam_warmup=False)
+        self.assertFalse(
+            getattr(eng, "_skip_gigaam", True),
+            "AudioEngine with skip_gigaam_warmup=False must have _skip_gigaam=False",
+        )
+
+    def test_transcribe_gigaam_raises_when_skip_flag_set(self):
+        """_transcribe_gigaam raises RuntimeError when _skip_gigaam=True (REST engine)."""
+        with patch("core.engine.mlx_whisper", None), \
+                patch("core.stt_router.STTRouter") as MockRouter:
+            MockRouter.return_value = MagicMock()
+            import importlib
+            import core.engine
+            importlib.reload(core.engine)
+            eng = core.engine.AudioEngine(skip_gigaam_warmup=True)
+        # _transcribe_gigaam must bail out fast with RuntimeError
+        with self.assertRaises(RuntimeError) as ctx:
+            eng._transcribe_gigaam(b"dummy_audio")
+        self.assertIn("skip_gigaam", str(ctx.exception).lower())
+
+    def test_get_gigaam_adapter_not_called_in_chain_when_skip_set(self):
+        """_build_candidate_chain skips get_gigaam_adapter when _skip_gigaam=True."""
+        with patch("core.engine.mlx_whisper", None), \
+                patch("core.stt_router.STTRouter") as MockRouter:
+            mock_router = MagicMock()
+            mock_router.get_gigaam_adapter.return_value = MagicMock()
+            MockRouter.return_value = mock_router
+            from core.config import settings as _settings
+            with patch.object(_settings, "STT_GIGAAM_ENABLED", True):
+                import importlib
+                import core.engine
+                importlib.reload(core.engine)
+                eng = core.engine.AudioEngine(skip_gigaam_warmup=True)
+                eng._router = mock_router  # ensure same mock after init
+        # Call chain-build with Russian audio hint
+        import numpy as np
+        try:
+            eng._build_candidate_chain(
+                np.zeros(16000, dtype=np.float32),
+                16000,
+                hint_language="ru",
+            )
+        except Exception:
+            pass  # may fail due to stubbed deps — we only care about the call count
+        mock_router.get_gigaam_adapter.assert_not_called()
+
+    def test_engine_py_source_has_skip_gigaam_instance_attr(self):
+        """engine.py must store self._skip_gigaam (Wave 525 regression guard)."""
+        engine_path = Path(__file__).parent.parent / "core" / "engine.py"
+        source = engine_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "self._skip_gigaam",
+            source,
+            "engine.py must store self._skip_gigaam attribute (Wave 525 fix)",
+        )
+
+    def test_engine_py_chain_builder_guards_skip_gigaam(self):
+        """Chain-builder in engine.py must check _skip_gigaam before calling router."""
+        engine_path = Path(__file__).parent.parent / "core" / "engine.py"
+        source = engine_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "_skip_gigaam",
+            source,
+            "engine.py chain-builder must guard on _skip_gigaam (Wave 525)",
+        )
+
+    def test_gigaam_worker_has_singleton_guard(self):
+        """gigaam_worker.py must have a singleton guard preventing duplicate processes."""
+        worker_path = (
+            Path(__file__).parent.parent / "core" / "workers" / "gigaam_worker.py"
+        )
+        source = worker_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "_acquire_singleton_lock",
+            source,
+            "gigaam_worker.py must call _acquire_singleton_lock() (Wave 525 singleton guard)",
+        )
+        self.assertIn(
+            "fcntl.LOCK_EX",
+            source,
+            "gigaam_worker.py singleton guard must use fcntl exclusive lock",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

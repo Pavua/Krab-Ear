@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock
 
@@ -419,6 +420,218 @@ class AutoDedupConstantsTestCase(unittest.TestCase):
         from core.config import DEFAULT_SETTINGS
         self.assertIn("auto_dedup_threshold", DEFAULT_SETTINGS)
         self.assertEqual(DEFAULT_SETTINGS["auto_dedup_threshold"], 0.9)
+
+
+class NearDuplicateThresholdTestCase(unittest.TestCase):
+    """Tests for threshold tuning, near-duplicates, unicode, concurrency, time window."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = _make_store(Path(self.tmp.name))
+        self.deduplicator = AutoDeduplicator()
+
+    # ------------------------------------------------------------------
+    # test_near_duplicate_above_threshold
+    # ------------------------------------------------------------------
+    def test_near_duplicate_above_threshold(self) -> None:
+        """Text that is very similar (above threshold) is flagged as duplicate."""
+        original = "Это длинное предложение для проверки механизма дедупликации записей"
+        similar = "Это длинное предложение для проверки механизма дедупликации записей!"
+        self.store.add_history_item(text=original, paste_status="ok")
+
+        result = self.deduplicator.check_duplicate(
+            text=similar,
+            timestamp=_now_iso(),
+            store=self.store,
+            threshold=0.85,
+        )
+        # Both texts are nearly identical — should be detected as duplicate.
+        self.assertTrue(result.is_duplicate)
+        self.assertIsNotNone(result.duplicate_of)
+        self.assertGreaterEqual(result.similarity, 0.85)
+
+    # ------------------------------------------------------------------
+    # test_threshold_adjustable
+    # ------------------------------------------------------------------
+    def test_threshold_adjustable(self) -> None:
+        """Lowering threshold makes more texts qualify as duplicates."""
+        text_a = "Транскрипция встречи по вопросам разработки продукта"
+        text_b = "Транскрипция встречи по вопросам разработки проекта"
+        self.store.add_history_item(text=text_a, paste_status="ok")
+
+        # High threshold — not a duplicate
+        result_strict = self.deduplicator.check_duplicate(
+            text=text_b,
+            timestamp=_now_iso(),
+            store=self.store,
+            threshold=0.99,
+        )
+        # Low threshold — should detect near-duplicate
+        result_lax = self.deduplicator.check_duplicate(
+            text=text_b,
+            timestamp=_now_iso(),
+            store=self.store,
+            threshold=0.7,
+        )
+        # Lax threshold should find duplicate; strict should not
+        self.assertFalse(result_strict.is_duplicate)
+        self.assertTrue(result_lax.is_duplicate)
+
+    # ------------------------------------------------------------------
+    # test_no_action_below_threshold
+    # ------------------------------------------------------------------
+    def test_no_action_below_threshold(self) -> None:
+        """Texts below similarity threshold → action_taken = 'kept', not duplicate."""
+        self.store.add_history_item(
+            text="Сводка бюджетного комитета на квартал", paste_status="ok"
+        )
+        result = self.deduplicator.check_duplicate(
+            text="Погода сегодня хорошая и солнечная",
+            timestamp=_now_iso(),
+            store=self.store,
+            threshold=DEFAULT_DEDUP_THRESHOLD,
+        )
+        self.assertFalse(result.is_duplicate)
+        self.assertIsNone(result.duplicate_of)
+        self.assertEqual(result.action_taken, "kept")
+
+    # ------------------------------------------------------------------
+    # test_handles_unicode_text
+    # ------------------------------------------------------------------
+    def test_handles_unicode_text(self) -> None:
+        """Unicode text (Cyrillic, emoji, mixed scripts) is handled without error."""
+        unicode_texts = [
+            "Привет! 🎤 Тест записи голоса на кириллице.",
+            "¡Hola! Prueba de transcripción en español con ñoño.",
+            "Mixed: Привет world こんにちは 🌍 test",
+            "Эмодзи: 🔥🚀💡 и кириллица вместе с ASCII",
+        ]
+        for text in unicode_texts:
+            with self.subTest(text=text[:30]):
+                result = self.deduplicator.check_duplicate(
+                    text=text,
+                    timestamp=_now_iso(),
+                    store=self.store,
+                )
+                # Must not raise; result must have valid action
+                self.assertIn(result.action_taken, ("kept", "skipped", "merged"))
+                self.assertIsInstance(result.similarity, float)
+
+    def test_handles_unicode_identical_duplicate(self) -> None:
+        """Identical unicode text is correctly flagged as duplicate."""
+        unicode_text = "Транскрипция 🎙️ встречи: итоги квартала — продажи выросли на 15%"
+        self.store.add_history_item(text=unicode_text, paste_status="ok")
+        result = self.deduplicator.check_duplicate(
+            text=unicode_text,
+            timestamp=_now_iso(),
+            store=self.store,
+        )
+        self.assertTrue(result.is_duplicate)
+
+    # ------------------------------------------------------------------
+    # test_concurrent_dedup
+    # ------------------------------------------------------------------
+    def test_concurrent_dedup(self) -> None:
+        """AutoDeduplicator is thread-safe under concurrent check_duplicate calls."""
+        self.store.add_history_item(
+            text="Параллельный тест дедупликации нескольких потоков", paste_status="ok"
+        )
+        errors: list[Exception] = []
+        results: list[DedupResult] = []
+        lock = threading.Lock()
+
+        def worker(text: str) -> None:
+            try:
+                r = self.deduplicator.check_duplicate(
+                    text=text,
+                    timestamp=_now_iso(),
+                    store=self.store,
+                )
+                with lock:
+                    results.append(r)
+            except Exception as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(
+                target=worker,
+                args=(f"Уникальный текст для потока номер {i}",),
+            )
+            for i in range(10)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        self.assertEqual(len(results), 10)
+        # All threads completed, stats are consistent
+        stats = self.deduplicator.get_dedup_stats()
+        self.assertGreaterEqual(stats["total_checked"], 10)
+
+    # ------------------------------------------------------------------
+    # test_skip_old_items_outside_window
+    # ------------------------------------------------------------------
+    def test_skip_old_items_outside_window(self) -> None:
+        """Items with timestamps outside the 60-second window are not matched as duplicates."""
+        old_ts = "2020-01-01T00:00:00+00:00"
+        recent_ts = _now_iso()
+
+        # Simulate store returning one old item
+        old_item = {
+            "id": "old-001",
+            "text": "Транскрипция из далёкого прошлого",
+            "ts": old_ts,
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([old_item], None)
+
+        # Check same text but recent timestamp — outside 60s window → not duplicate
+        result = self.deduplicator.check_duplicate(
+            text="Транскрипция из далёкого прошлого",
+            timestamp=recent_ts,
+            store=mock_store,
+        )
+        # Because the old item is >60s away from now, it should NOT match
+        self.assertFalse(result.is_duplicate)
+        self.assertEqual(result.action_taken, "kept")
+
+    def test_identical_items_within_window_marked_duplicate(self) -> None:
+        """Same text with timestamps within 60s window IS marked as duplicate."""
+        text = "Транскрипция в пределах временного окна"
+        # Use mock store with item that has 'now' timestamp
+        now_ts = _now_iso()
+        existing_item = {
+            "id": "recent-001",
+            "text": text,
+            "ts": now_ts,
+        }
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([existing_item], None)
+
+        result = self.deduplicator.check_duplicate(
+            text=text,
+            timestamp=now_ts,
+            store=mock_store,
+        )
+        self.assertTrue(result.is_duplicate)
+        self.assertEqual(result.duplicate_of, "recent-001")
+
+    def test_identical_items_marked_duplicate(self) -> None:
+        """Identical text items in store are correctly identified as duplicates."""
+        text = "Идентичный текст для проверки маркировки дубликатов"
+        self.store.add_history_item(text=text, paste_status="ok")
+
+        result = self.deduplicator.check_duplicate(
+            text=text,
+            timestamp=_now_iso(),
+            store=self.store,
+        )
+        self.assertTrue(result.is_duplicate)
+        self.assertIn(result.action_taken, ("skipped", "merged"))
 
 
 if __name__ == "__main__":

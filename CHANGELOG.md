@@ -4,6 +4,28 @@ All notable changes to Krab Ear are documented in this file.
 
 **Note (2026-04-18):** Root CHANGELOG consolidated from `/docs/CHANGELOG.md` (archived). For Krab Core (Telegram userbot) architecture, see `PRD-KRAB-CORE.md` and `ARCHITECTURE-KRAB-CORE.md`. For Krab Ear Native documentation, see `docs/PRD-KRAB-EAR.md` and `docs/ARCHITECTURE-KRAB-EAR.md`.
 
+## [2026-05-26] v2.0.5 — Singleton GigaAM lock + Sentry release tag fix
+
+Full notes: [`docs/RELEASE_NOTES_v2.0.5.md`](docs/RELEASE_NOTES_v2.0.5.md). 105 commits since v2.0.4.
+
+### Critical fixes
+- **W525 (PR #619)** — permanent `fcntl`-based singleton lock for `gigaam_worker` eliminates the duplicate-worker memory leak (~1.5 GB per dup). Cron workaround `scripts/kill_dup_gigaam.command` can be retired after deploy.
+- **W704 / W701 (this release)** — Sentry release tag was stuck on `"2.0.0"` because `backend/service.py` read hardcoded `__version__.py`. Replaced with `get_release_string()` priority chain: `KRAB_EAR_RELEASE` env → `Info.plist` CFBundleShortVersionString → `__version__.py`. Plist is now the source of truth for production builds.
+
+### New modules / services
+- **W734** — `stt_management_service.py`, `apple_integration_service.py`.
+- **W392 / W404 / W423 / W172** — `AnalyticsService`, `TextScoringService`, `HealthCheckService`, `RecordingCoreService` extractions. Total **11 extracted services**, 318 active handlers.
+
+### Tests & infra
+- ~3000+ new unit tests across 35+ modules (waves 71–164).
+- Wave 732 (PR #661) — `pytest-xdist group` fix for `test_full_workflow.py` race condition.
+- 8 new tests for `get_release_string()` priority chain (regression guard against the 2.0.0 trap).
+
+### Migration
+- **No breaking changes.** Backend restart recommended after install for Sentry tag refresh.
+
+---
+
 ## [2026-04-18] Session III — Crash Recovery + Tech Debt
 
 **Session overview:** 24 merged PRs (19 main round + 5 follow-up). Critical MLX thread-safety SIGSEGV fix (concurrent GPU access serialization). Phase 3 Call Automation design (7 ADR). 112 new unit tests (translator, llm_rewriter.summarize, history_service). Test suite expanded to 4944 tests passing.

@@ -395,5 +395,74 @@ class TestThresholdFiltering(unittest.TestCase):
         self.assertEqual(len(lower_words), len(set(lower_words)))
 
 
+class TestRequiredScenarios(unittest.TestCase):
+    """Явные тесты с именами из задания Wave 99."""
+
+    def setUp(self) -> None:
+        self.builder = SmartVocabularyBuilder()
+
+    def test_suggest_words_from_recent_history(self) -> None:
+        """get_vocabulary_suggestions возвращает слова из истории."""
+        items = [_make_item(f"Используем метод MachineLearning в задаче {i}") for i in range(4)]
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=3)
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertIn("machinelearning", words_lower)
+
+    def test_dedup_existing_vocabulary(self) -> None:
+        """Слова уже в словаре не предлагаются снова."""
+        items = [_make_item("Метод MachineLearning применяется") for _ in range(5)]
+        existing = ["MachineLearning", "machinelearning"]
+        suggestions = self.builder.get_vocabulary_suggestions(
+            items, existing=existing, min_frequency=2
+        )
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertNotIn("machinelearning", words_lower)
+
+    def test_unicode_words_handled(self) -> None:
+        """Кириллица и акцентированные символы обрабатываются корректно."""
+        items = [
+            _make_item("Доктор Гарсíа провёл анализ данных"),
+            _make_item("Доктор Гарсíа снова в базе данных"),
+            _make_item("Результаты Гарсíа опубликованы"),
+        ]
+        # Не должно бросать исключение — unicode обрабатывается
+        update = self.builder.build_vocabulary(items, min_frequency=1)
+        self.assertIsInstance(update.new_words, list)
+        self.assertIsInstance(update.sources, dict)
+
+    def test_min_frequency_threshold(self) -> None:
+        """Слово с частотой ниже порога не попадает в словарь."""
+        items = [_make_item("Используем MachineLearning для анализа")]  # 1 раз
+        suggestions = self.builder.get_vocabulary_suggestions(items, existing=[], min_frequency=3)
+        words_lower = [s["word"].lower() for s in suggestions]
+        self.assertNotIn("machinelearning", words_lower)
+
+    def test_pattern_detect_proper_nouns(self) -> None:
+        """Имена собственные определяются через паттерн заглавной буквы в середине."""
+        items = [
+            _make_item("Сегодня Кузнецов выступал на конференции"),
+            _make_item("Доклад Кузнецова был очень интересным"),
+            _make_item("Мнение Кузнецова важно учитывать"),
+        ]
+        update = self.builder.build_vocabulary(items, min_frequency=2)
+        self.assertIn("proper_nouns", update.sources)
+
+    def test_auto_update_via_handler(self) -> None:
+        """auto_update корректно обновляет словарь через store + vocab_store."""
+        items = [
+            _make_item(f"Интеграция MachineLearning в пайплайн {i}") for i in range(4)
+        ]
+        store = FakeStore(items=items)
+        vocab = FakeVocabStore(initial=[])
+        update = self.builder.auto_update(store, vocab, min_frequency=3)
+        self.assertIsInstance(update, VocabularyUpdate)
+        self.assertIsInstance(update.new_words, list)
+
+    def test_empty_history_no_suggestions(self) -> None:
+        """Пустая история → нет предложений."""
+        suggestions = self.builder.get_vocabulary_suggestions([], existing=[])
+        self.assertEqual(suggestions, [])
+
+
 if __name__ == "__main__":
     unittest.main()

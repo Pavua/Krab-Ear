@@ -17,6 +17,13 @@
  Auto-hide policy:
  - op="idle" → скрыть немедленно
  - нет событий >12s → скрыть (heartbeat lost / op finished без emit'а idle)
+
+ Wave 523 — AGENT-J sister fix:
+ Replaced NSTextField + Unicode glyphs (▶ ⇄ ◉ •) with NSImageView + SF Symbols.
+ Root cause identical to AGENT-J (● in StatusIndicatorView, Wave 67 PR #412):
+ NSTextField with non-BMP / uncommon Unicode triggers CoreText glyph-metrics build
+ on main thread during ColorSync callback → AppHang. SF Symbols bypass CoreText,
+ rendered via Metal/CoreGraphics path instead.
 */
 
 import AppKit
@@ -38,12 +45,14 @@ final class GlobalStatusBar: NSView {
         return v
     }()
 
-    private let iconLabel: NSTextField = {
-        let l = NSTextField(labelWithString: "")
-        l.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        l.textColor = NSColor.secondaryLabelColor
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
+    /// SF Symbol icon view replacing the old Unicode-glyph NSTextField (Wave 523, AGENT-J sister).
+    /// NSTextField with Unicode glyphs (▶ ⇄ ◉ •) triggered CoreText fallback AppHang —
+    /// identical root cause to AGENT-J (● in StatusIndicatorView, fixed Wave 67 PR #412).
+    private let iconImageView: NSImageView = {
+        let v = NSImageView()
+        v.imageScaling = .scaleProportionallyDown
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
     }()
 
     private let textLabel: NSTextField = {
@@ -107,7 +116,7 @@ final class GlobalStatusBar: NSView {
     private func setupViews() {
         translatesAutoresizingMaskIntoConstraints = false
         addSubview(backgroundView)
-        backgroundView.addSubview(iconLabel)
+        backgroundView.addSubview(iconImageView)
         backgroundView.addSubview(textLabel)
         backgroundView.addSubview(progressBar)
 
@@ -117,10 +126,12 @@ final class GlobalStatusBar: NSView {
             backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
             backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            iconLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 10),
-            iconLabel.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
+            iconImageView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 10),
+            iconImageView.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
+            iconImageView.widthAnchor.constraint(equalToConstant: 14),
+            iconImageView.heightAnchor.constraint(equalToConstant: 14),
 
-            textLabel.leadingAnchor.constraint(equalTo: iconLabel.trailingAnchor, constant: 8),
+            textLabel.leadingAnchor.constraint(equalTo: iconImageView.trailingAnchor, constant: 8),
             textLabel.centerYAnchor.constraint(equalTo: backgroundView.centerYAnchor),
             textLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressBar.leadingAnchor, constant: -8),
 
@@ -224,7 +235,7 @@ final class GlobalStatusBar: NSView {
         }
 
         textLabel.stringValue = parts.joined(separator: " · ")
-        iconLabel.stringValue = iconForOp(op)
+        iconImageView.image = imageForOp(op)
         if progress >= 0 {
             progressBar.isHidden = false
             progressBar.doubleValue = max(0, min(1.0, progress))
@@ -246,13 +257,37 @@ final class GlobalStatusBar: NSView {
         }
     }
 
-    private func iconForOp(_ op: String) -> String {
+    /// Returns an SF Symbol image for the given operation type.
+    ///
+    /// Replaces the old Unicode-glyph string (▶ ⇄ ◉ •) approach that caused CoreText
+    /// fallback → AppHang (same AGENT-J root cause as ● in StatusIndicatorView).
+    /// SF Symbols are rendered via Metal/CoreGraphics, bypassing CoreText glyph lookup.
+    ///
+    /// - "transcribe_job"  → `waveform`  (audio waveform — transcription in progress)
+    /// - "obsidian_sync"   → `arrow.triangle.2.circlepath`  (sync arrows)
+    /// - "mlx_inference"   → `cpu`  (compute/inference)
+    /// - default           → `circle.fill`  (generic activity indicator)
+    func imageForOp(_ op: String) -> NSImage? {
+        let symbolName: String
+        let tintColor: NSColor
         switch op {
-        case "transcribe_job":  return "▶"
-        case "obsidian_sync":   return "⇄"
-        case "mlx_inference":   return "◉"
-        default:                return "•"
+        case "transcribe_job":
+            symbolName = "waveform"
+            tintColor = .systemBlue
+        case "obsidian_sync":
+            symbolName = "arrow.triangle.2.circlepath"
+            tintColor = .systemGreen
+        case "mlx_inference":
+            symbolName = "cpu"
+            tintColor = .systemOrange
+        default:
+            symbolName = "circle.fill"
+            tintColor = .secondaryLabelColor
         }
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [tintColor]))
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: op)?
+            .withSymbolConfiguration(config)
     }
 
     /// Перевод stage в русские слова. Stage'и из backend:

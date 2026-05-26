@@ -21,13 +21,13 @@ _sentry_initialized = False
 def _read_version_from_plist() -> str | None:
     """Read CFBundleShortVersionString from the app bundle's Info.plist.
 
-    Searches relative to this file's location to find the .app bundle.
-    Returns None if the plist cannot be found or read.
+    Production source of truth for the release version — set at bundle build
+    time and read by both Swift (Bundle.main) and Python here.
+
+    Returns None if the plist cannot be found or read (dev / test runs).
     """
-    # This file lives at: <repo>/KrabEar/backend/observability.py
-    # Info.plist lives at: <repo>/Krab Ear.app/Contents/Info.plist
     here = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(os.path.dirname(here))  # up 2 levels: backend → KrabEar → repo
+    repo_root = os.path.dirname(os.path.dirname(here))
     plist_path = os.path.join(repo_root, "Krab Ear.app", "Contents", "Info.plist")
     if not os.path.isfile(plist_path):
         return None
@@ -41,15 +41,18 @@ def _read_version_from_plist() -> str | None:
 
 
 def get_release_string() -> str:
-    """Return the canonical Sentry release string for the Python backend.
+    """Return the canonical Sentry release string ``krab-ear@<version>``.
 
     Priority:
-      1. ``KRAB_EAR_RELEASE`` environment variable (CI / staging override).
+      1. ``KRAB_EAR_RELEASE`` env var (CI / staging override; passes verbatim
+         when it already starts with ``krab-ear@``).
       2. ``CFBundleShortVersionString`` from ``Krab Ear.app/Contents/Info.plist``
-         (single source of truth for production builds — set at bundle build time).
+         (production source of truth).
       3. ``__version__`` from ``KrabEar/__version__.py`` (dev / test fallback).
 
-    Returns a string of the form ``krab-ear@<version>``.
+    Wave 704 fix (W701): replaces inline ``f"krab-ear@{APP_VERSION}"`` so that
+    Sentry release tag tracks the actual shipped Info.plist version instead of
+    the (historically stale) hardcoded ``__version__.py``.
     """
     env_ver = os.environ.get("KRAB_EAR_RELEASE", "").strip()
     if env_ver:
@@ -60,10 +63,14 @@ def get_release_string() -> str:
         return f"krab-ear@{plist_ver}"
 
     try:
-        from __version__ import __version__ as _ver  # noqa: PLC0415
+        from KrabEar.__version__ import __version__ as _ver  # noqa: PLC0415
         return f"krab-ear@{_ver}"
-    except Exception:  # noqa: BLE001
-        return "krab-ear@unknown"
+    except ImportError:
+        try:
+            from __version__ import __version__ as _ver  # noqa: PLC0415
+            return f"krab-ear@{_ver}"
+        except ImportError:
+            return "krab-ear@unknown"
 
 
 def release_from_git() -> str:

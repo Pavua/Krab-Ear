@@ -586,6 +586,28 @@ class _GigaAMSubprocessSession:
                         worker использует cached token (~/.cache/huggingface/token).
         """
         if not self.is_loaded():
+            # Wave 77: push stt.gigaam_worker_crashed (3829 occurrences in production logs)
+            _error_bus = getattr(self, "_error_bus", None)
+            if _error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("stt.gigaam_worker_crashed", {})
+                    _err = KrabError(
+                        severity=_entry.get("severity", "error"),
+                        component="stt",
+                        code="stt.gigaam_worker_crashed",
+                        message_user=_entry.get("user_msg_ru", "GigaAM STT прервано"),
+                        message_debug="transcribe() called while is_loaded()==False",
+                        timestamp=datetime.now(timezone.utc),
+                        context={},
+                        actionable=False,
+                        action_id=None,
+                    )
+                    _error_bus.push(_err)
+                except Exception:
+                    pass
             raise RuntimeError("_GigaAMSubprocessSession: worker not started or crashed")
         # Longform может занять 5-10× больше времени чем обычный transcribe — увеличиваем timeout.
         timeout = _SUBPROCESS_TRANSCRIBE_TIMEOUT_SEC * (8 if longform else 1)

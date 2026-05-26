@@ -108,15 +108,19 @@ class ModelCacheManager:
             model_id: Имя модели 'owner/repo' или точное имя папки.
 
         Returns:
-            True, если модель была удалена; False, если не найдена.
+            True если ЭТОТ вызов удалил директорию;
+            False если модель не найдена ИЛИ параллельный вызов успел удалить её первым (гонка).
         """
         import shutil
 
         folder = self._model_folder_name(model_id)
         model_path = self._cache_dir / folder
         if model_path.exists():
-            shutil.rmtree(model_path, ignore_errors=True)
-            return True
+            try:
+                shutil.rmtree(model_path)
+                return True
+            except FileNotFoundError:
+                return False  # Уже удалено параллельным вызовом
         return False
 
     def is_over_size_limit(self) -> bool:

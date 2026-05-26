@@ -86,6 +86,11 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             "mlx.semaphore_leak",
             "stt.empty_audio_warning",
             "system.malloc_env_leak",
+            # Added Wave 77 — 3 production-critical codes from Wave 151 log audit:
+            # gigaam worker crashed (×3829) / IPC rate limit (×2779) / critical STT error (×68)
+            "stt.gigaam_worker_crashed",
+            "ipc.rate_limit_exceeded",
+            "stt.critical_recognition_error",
             # Added Wave 78 (Wave 205) — 5 production-discovered codes from Wave 202 audit:
             # gigaam HF cache miss / rewriter model unloaded / output ratio fallback
             # / MLX watchdog hang / audio device poll flood

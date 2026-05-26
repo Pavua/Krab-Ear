@@ -6,6 +6,7 @@
 3. Аутентификация включена — защищённые эндпоинты работают с правильным токеном.
 """
 
+import hmac
 import sys
 import os
 import types
@@ -22,6 +23,9 @@ engine_mod = types.ModuleType("core.engine")
 
 class _FakeEngine:
     quality_profile = "balanced"
+
+    def __init__(self, *a, **kw):
+        pass
 
     def normalize_audio(self, *a, **kw):
         pass
@@ -233,7 +237,7 @@ class TestAuthDisabled(unittest.TestCase):
 class TestAuthEnabled401(unittest.TestCase):
     """Когда REST_API_KEY задан — защищённые эндпоинты возвращают 401 без токена."""
 
-    _TEST_KEY = "test-secret-key-abc"
+    _TEST_KEY = "test-fake-restkey-abc"
 
     def setUp(self):
         self._orig_key = settings.REST_API_KEY
@@ -268,7 +272,7 @@ class TestAuthEnabled401(unittest.TestCase):
 class TestAuthEnabledCorrectKey(unittest.TestCase):
     """Когда REST_API_KEY задан — защищённые эндпоинты работают с правильным токеном."""
 
-    _TEST_KEY = "test-secret-key-abc"
+    _TEST_KEY = "test-fake-restkey-abc"
 
     def setUp(self):
         self._orig_key = settings.REST_API_KEY
@@ -341,6 +345,101 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
             with app.test_request_context("/metrics", headers={"Authorization": "Bearer mykey"}):
                 view()
             self.assertTrue(called)
+        finally:
+            settings.REST_API_KEY = orig
+
+
+class TestLegacyConstantTimeCompare(unittest.TestCase):
+    """Wave 187: Mode 2 legacy path uses constant-time compare (timing attack fix)."""
+
+    def test_legacy_mode_uses_constant_time_compare(self):
+        """Correct token returns 200; wrong-but-same-length token returns 401.
+        Both code paths exercised — behaviour is correct after hmac fix."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "test-fake-key-32ch-aabbccddeeff"
+        client = app.test_client()
+        try:
+            # Correct token
+            good = client.get("/metrics", headers={"Authorization": "Bearer test-fake-key-32ch-aabbccddeeff"})
+            self.assertNotEqual(good.status_code, 401)
+            # Wrong token of identical length (would leak timing with plain ==)
+            bad = client.get("/metrics", headers={"Authorization": "Bearer test-WRONG-key-32ch-aabbccddee"})
+            self.assertEqual(bad.status_code, 401)
+        finally:
+            settings.REST_API_KEY = orig
+
+    def test_legacy_token_compare_uses_hmac_compare_digest(self):
+        """hmac.compare_digest is actually invoked for Mode 2 comparisons."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "mylegacykey"
+        try:
+            calls = []
+            real_compare = hmac.compare_digest
+
+            def spy(a, b):
+                calls.append((a, b))
+                return real_compare(a, b)
+
+            @require_api_key
+            def view():
+                return "ok", 200
+
+            with patch("backend.rest_server.hmac.compare_digest", side_effect=spy):
+                with app.test_request_context(
+                    "/metrics", headers={"Authorization": "Bearer mylegacykey"}
+                ):
+                    view()
+            self.assertTrue(len(calls) >= 1, "hmac.compare_digest was not called")
+            # Bytes are passed after .encode("utf-8")
+            self.assertIn((b"mylegacykey", b"mylegacykey"), calls)
+        finally:
+            settings.REST_API_KEY = orig
+
+    def test_empty_token_safely_compared(self):
+        """Empty or None token does not raise — treated as empty string."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "somekey"
+        try:
+            @require_api_key
+            def view():
+                return "ok", 200
+
+            # No Authorization header → empty token path via missing Bearer prefix
+            with app.test_request_context("/metrics"):
+                resp, code = view()
+            self.assertEqual(code, 401)
+        finally:
+            settings.REST_API_KEY = orig
+
+    def test_unicode_token_compared(self):
+        """Unicode characters in token/key do not raise — bytes encoding path handles them."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "unicode-key-тест"
+        try:
+            @require_api_key
+            def view():
+                return "ok", 200
+
+            # Correct unicode key must pass
+            with app.test_request_context(
+                "/metrics",
+                headers={"Authorization": "Bearer unicode-key-тест"},
+            ):
+                result = view()
+            # Must not raise; correct key passes through
+            self.assertIsNotNone(result)
+
+            # Wrong unicode key must return 401
+            @require_api_key
+            def view2():
+                return "ok", 200
+
+            with app.test_request_context(
+                "/metrics",
+                headers={"Authorization": "Bearer unicode-key-WRONG"},
+            ):
+                resp, code = view2()
+            self.assertEqual(code, 401)
         finally:
             settings.REST_API_KEY = orig
 

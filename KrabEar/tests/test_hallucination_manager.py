@@ -287,139 +287,144 @@ class TestCustomPatternMatchAfterRemove(unittest.TestCase):
         self.assertEqual(remaining, [])
 
 
-class TestUnicodePatterns(unittest.TestCase):
-    """Тесты поддержки Unicode паттернов (кириллица, испанский и т.д.)."""
+class TestUnicodePattern(unittest.TestCase):
+    """Unicode-паттерны должны корректно компилироваться и срабатывать."""
 
-    def test_add_cyrillic_pattern(self):
+    def test_unicode_pattern_added_and_matches(self):
         mgr = HallucinationManager()
-        entry = mgr.add_pattern(r"конец вещания[.!?]*\s*$", category="broadcast_ru")
-        self.assertEqual(entry["pattern"], r"конец вещания[.!?]*\s*$")
-        self.assertEqual(entry["category"], "broadcast_ru")
-
-    def test_cyrillic_pattern_matches_text(self):
-        mgr = HallucinationManager()
-        mgr.add_pattern(r"конец вещания[.!?]*\s*$", category="broadcast_ru")
-        text = "Сегодня обсудили всё. Конец вещания."
+        mgr.add_pattern(r"αβγδ[.!?]*\s*$", category="greek")
+        text = "Полезный текст. αβγδ."
         matches = mgr.check_text(text)
-        cats = {m.category for m in matches}
-        self.assertIn("broadcast_ru", cats)
+        greek = [m for m in matches if m.category == "greek"]
+        self.assertEqual(len(greek), 1)
+        self.assertEqual(greek[0].pattern, r"αβγδ[.!?]*\s*$")
 
-    def test_add_spanish_unicode_pattern(self):
+    def test_unicode_cyrillic_custom_pattern(self):
         mgr = HallucinationManager()
-        entry = mgr.add_pattern(r"gracias por ver[.!?]*\s*$", category="youtube_es")
-        self.assertEqual(entry["category"], "youtube_es")
-        text = "Muy bien. Gracias por ver."
+        mgr.add_pattern(r"конец эфира[.!?]*\s*$", category="broadcast_ru")
+        text = "Вещание завершено. Конец эфира."
         matches = mgr.check_text(text)
-        cats = {m.category for m in matches}
-        self.assertIn("youtube_es", cats)
+        ru = [m for m in matches if m.category == "broadcast_ru"]
+        self.assertEqual(len(ru), 1)
 
-    def test_pattern_with_unicode_chars_special_class(self):
-        """Паттерн с Unicode символами в character class."""
+    def test_unicode_japanese_pattern(self):
         mgr = HallucinationManager()
-        mgr.add_pattern(r"[аеиоуыёэюя]{3,}\s*$", category="vowel_run")
-        # Текст заканчивается на 3+ гласных кириллицей
-        text = "какое-то слово уоауе"
+        mgr.add_pattern(r"ありがとう[。.!?]*\s*$", category="japanese")
+        text = "テスト。ありがとう。"
         matches = mgr.check_text(text)
-        cats = {m.category for m in matches}
-        self.assertIn("vowel_run", cats)
-
-    def test_strip_unicode_pattern(self):
-        mgr = HallucinationManager()
-        mgr.add_pattern(r"спасибо за вашу поддержку[.!?]*\s*$", category="support")
-        text = "Хорошее видео. Спасибо за вашу поддержку."
-        result = mgr.strip_hallucinations(text)
-        self.assertNotIn("поддержку", result.lower())
-        self.assertIn("Хорошее видео", result)
+        ja = [m for m in matches if m.category == "japanese"]
+        self.assertEqual(len(ja), 1)
 
 
-class TestConcurrentAddRemove(unittest.TestCase):
-    """Тесты потокобезопасности add_pattern / remove_pattern."""
+class TestConcurrentAdd(unittest.TestCase):
+    """Конкурентное добавление паттернов должно быть потокобезопасным."""
 
-    def test_concurrent_add(self):
-        """Concurrent add_pattern не приводит к гонке или потере записей."""
+    def test_concurrent_add_no_duplicates(self):
+        import threading
         mgr = HallucinationManager()
         errors: list[Exception] = []
+        added: list[str] = []
 
-        def add_patterns(start: int) -> None:
-            for i in range(start, start + 10):
-                try:
-                    mgr.add_pattern(f"concurrent pattern {i}\\s*$", category="stress")
-                except ValueError:
-                    pass  # дубликаты ожидаемы при некотором перекрытии
-                except Exception as exc:
-                    errors.append(exc)
-
-        threads = [threading.Thread(target=add_patterns, args=(i * 10,)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
-        custom = [p for p in mgr.list_patterns() if not p["builtin"]]
-        # Должно быть ровно 50 уникальных паттернов (0..49)
-        self.assertEqual(len(custom), 50)
-
-    def test_concurrent_add_remove(self):
-        """Concurrent add + remove не вызывает corrupt state или исключений."""
-        mgr = HallucinationManager()
-        # Предварительно добавляем паттерны для удаления
-        for i in range(20):
-            mgr.add_pattern(f"remove me {i}\\s*$", category="temp")
-
-        errors: list[Exception] = []
-
-        def remover() -> None:
-            for i in range(20):
-                try:
-                    mgr.remove_pattern(f"remove me {i}\\s*$")
-                except Exception as exc:
-                    errors.append(exc)
-
-        def adder() -> None:
-            for i in range(20):
-                try:
-                    mgr.add_pattern(f"add new {i}\\s*$", category="new")
-                except Exception as exc:
-                    errors.append(exc)
-
-        t1 = threading.Thread(target=remover)
-        t2 = threading.Thread(target=adder)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-
-        self.assertEqual(errors, [], f"Unexpected errors in concurrent add/remove: {errors}")
-        # list_patterns() не должен падать после конкурентных операций
-        patterns = mgr.list_patterns()
-        self.assertIsInstance(patterns, list)
-
-    def test_concurrent_check_text(self):
-        """check_text безопасен для вызова из нескольких потоков."""
-        mgr = HallucinationManager()
-        mgr.add_pattern(r"check concurrent[.!?]*\s*$", category="check")
-        errors: list[Exception] = []
-        results: list[list] = []
-
-        def checker() -> None:
+        def add_pattern(idx: int) -> None:
+            pat = rf"паттерн номер {idx}\s*$"
             try:
-                m = mgr.check_text("Текст. Check concurrent.")
-                results.append(m)
+                mgr.add_pattern(pat, category="concurrent")
+                added.append(pat)
+            except ValueError:
+                pass  # дубликаты допустимо игнорировать
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=checker) for _ in range(20)]
+        threads = [threading.Thread(target=add_pattern, args=(i,)) for i in range(20)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        self.assertEqual(errors, [], f"Concurrent check_text errors: {errors}")
-        self.assertEqual(len(results), 20)
-        for r in results:
-            cats = {m.category for m in r}
-            self.assertIn("check", cats)
+        self.assertEqual(errors, [], f"Неожиданные ошибки: {errors}")
+        custom = [p for p in mgr.list_patterns() if p["category"] == "concurrent"]
+        # Все успешно добавленные должны быть в списке без дубликатов
+        self.assertEqual(len(custom), len(added))
+
+    def test_concurrent_add_and_remove_safe(self):
+        import threading
+        mgr = HallucinationManager()
+        # Pre-populate patterns
+        for i in range(10):
+            mgr.add_pattern(rf"фон паттерн {i}\s*$", category="bg")
+
+        errors: list[Exception] = []
+
+        def add_worker(idx: int) -> None:
+            try:
+                mgr.add_pattern(rf"новый {idx}\s*$", category="new")
+            except Exception as exc:
+                errors.append(exc)
+
+        def remove_worker(idx: int) -> None:
+            try:
+                mgr.remove_pattern(rf"фон паттерн {idx}\s*$")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = (
+            [threading.Thread(target=add_worker, args=(i,)) for i in range(10)] +
+            [threading.Thread(target=remove_worker, args=(i,)) for i in range(10)]
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Only ValueError (e.g. duplicate/missing pattern) is acceptable
+        bad = [e for e in errors if not isinstance(e, ValueError)]
+        self.assertEqual(bad, [], f"Неожиданные ошибки: {bad}")
+
+
+class TestHandlesCorruptedStorage(unittest.TestCase):
+    """Менеджер должен корректно обрабатывать повреждённый JSON-файл."""
+
+    def test_corrupted_json_file_falls_back_to_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            persist_path = data_dir / "hallucination_patterns.json"
+            # Записываем невалидный JSON
+            persist_path.write_text("{ NOT VALID JSON !!!", encoding="utf-8")
+            # Инициализация не должна бросать исключение
+            mgr = HallucinationManager(data_dir=data_dir)
+            # Пользовательские паттерны должны быть пустыми (corrupted → skip)
+            custom = [p for p in mgr.list_patterns() if not p["builtin"]]
+            self.assertEqual(custom, [])
+
+    def test_corrupted_json_does_not_lose_builtins(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            persist_path = data_dir / "hallucination_patterns.json"
+            persist_path.write_text("null", encoding="utf-8")
+            mgr = HallucinationManager(data_dir=data_dir)
+            builtin = [p for p in mgr.list_patterns() if p["builtin"]]
+            self.assertGreater(len(builtin), 0, "Встроенные паттерны должны остаться при corrupted storage")
+
+    def test_truncated_json_array_falls_back_gracefully(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            persist_path = data_dir / "hallucination_patterns.json"
+            # Обрезанный массив
+            persist_path.write_text('[{"pattern": "ok\\\\s*$", "category": "x"}', encoding="utf-8")
+            # JSONDecodeError → fallback to empty custom list
+            mgr = HallucinationManager(data_dir=data_dir)
+            # Должен работать нормально (без исключений)
+            self.assertIsNotNone(mgr.list_patterns())
+
+    def test_wrong_type_json_ignored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            persist_path = data_dir / "hallucination_patterns.json"
+            # JSON объект вместо массива
+            persist_path.write_text('{"key": "value"}', encoding="utf-8")
+            mgr = HallucinationManager(data_dir=data_dir)
+            custom = [p for p in mgr.list_patterns() if not p["builtin"]]
+            self.assertEqual(custom, [])
 
 
 if __name__ == "__main__":

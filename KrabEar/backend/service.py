@@ -42,7 +42,6 @@ from core.auto_title import AutoTitleGenerator
 from core.context_memory import ContextMemory
 from backend.transcript_versioning import TranscriptVersionManager
 from backend.sharing_manager import SharingManager
-from backend.realtime_partial import RealtimePartialTranscriber
 from backend.semantic_search import SemanticSearcher, keyword_fallback_search
 from core.word_timing import WordTimingAnalyzer
 from core.speech_pace import SpeechPaceAnalyzer
@@ -60,7 +59,6 @@ from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
 from backend.period_comparison import compare_periods as _compare_periods_fn
-from core.utils import TextUtils
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
 from core.config import settings
@@ -71,9 +69,6 @@ from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
 from backend.recorder import AudioRecorder
-from contracts.translation_events import TranslationCompleted, TranslationFailed
-from contracts.registry import EventType
-from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from backend.models import DEFAULT_SETTINGS
 from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
@@ -81,14 +76,11 @@ from backend.system_monitor import SystemMonitor
 from backend.translation_service import TranslationService
 from backend.glossary_auto_learn import GlossaryAutoLearnService
 from backend.settings_service import SettingsService
-from backend.transcript_writer import TranscriptWriter
 from backend.cost_estimator import CostEstimator
 from backend.usage_tracker import UsageTracker
 from backend.session_tracker import SessionTracker
 from backend.speaker_manager import SpeakerManager
 from backend.history_service import HistoryService
-from backend.stt_management_service import STTManagementService
-from backend.apple_integration_service import AppleIntegrationService
 from backend.error_reporter import ErrorReporter
 from backend.recording_scheduler import RecordingScheduler
 from backend.recording_merger import RecordingMerger
@@ -98,7 +90,7 @@ from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
-from backend.text_processing_service import TextProcessingService
+from backend.recording_core_service import RecordingCoreService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -108,7 +100,6 @@ from backend.ipc_constants import (
     IPC_SOCKET_BACKLOG,
     IPC_SOCKET_TIMEOUT_SEC,
     IPC_MAX_MESSAGE_BYTES,
-    IPC_PREVIEW_THREAD_TIMEOUT_SEC,
     IPC_SOCKET_PERMISSIONS,
 )
 from backend.export_scheduler import ExportScheduler
@@ -119,7 +110,6 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
-from backend.job_tracker import JobTracker
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
@@ -137,7 +127,6 @@ from backend.privacy_audit import get_privacy_audit_logger
 import argparse
 from datetime import datetime, timedelta
 import json
-import tempfile
 import logging
 import os
 from pathlib import Path
@@ -150,8 +139,6 @@ import sys
 import threading
 import time
 from typing import Any, Callable, Optional
-
-import numpy as np
 
 # Обеспечиваем корректный импорт модулей KrabEar при запуске как standalone скрипта.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -182,7 +169,9 @@ class BackendService:
             """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
             event_bus.emit("recording.audio_level", {"rms": rms})
 
-        self.recorder = recorder or AudioRecorder(on_audio_level=_emit_audio_level)
+        # Use staging attr during init; after _recording_core_svc is created,
+        # the 'recorder' property will proxy through to RecordingCoreService.
+        object.__setattr__(self, "_recorder_init", recorder or AudioRecorder(on_audio_level=_emit_audio_level))
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
@@ -217,10 +206,6 @@ class BackendService:
         self.translator = translator or Translator()
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
-        self._stt_mgmt_svc = STTManagementService(
-            settings_svc=self._settings_svc,
-            transcriber=self.transcriber,
-        )
         # Hot-propagate api_key changes to the running LLMRewriter without restart.
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:
@@ -303,14 +288,6 @@ class BackendService:
             self._check_binary_drift_on_startup()
 
         self._system_monitor = SystemMonitor()
-        self._preview_lock = threading.Lock()
-        self._preview_thread: threading.Thread | None = None
-        self._preview_stop_event = threading.Event()
-        self._preview_text = ""
-        self._preview_duration_sec = 0.0
-        self._preview_updated_at = 0.0
-        self._preview_error_count: int = 0
-        self._preview_error_last_reset_ts: float | None = None
         self._clipboard_history: list[dict] = []
         self._collections = CollectionManager(store=self.store)
         self._norm_profiles = NormalizationProfileRegistry(data_dir=self.store.data_dir)
@@ -326,8 +303,8 @@ class BackendService:
             store=self.store,
             recorder=self.recorder,
             transcriber=self.transcriber,
-            reset_preview_fn=self._reset_preview_state,
-            start_preview_fn=lambda qp: self._start_preview_worker(quality_profile=qp),
+            reset_preview_fn=lambda: self._recording_core_svc.reset_preview_state(),
+            start_preview_fn=lambda qp: self._recording_core_svc.start_preview_worker(qp),
         )
         self._call_cost_estimator = CallCostEstimator()
         self._call_silence_probe = CallSilenceProbe()
@@ -377,7 +354,8 @@ class BackendService:
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
         self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
-        self._transcription_counter: int = 0
+        # Note: _transcription_counter is now a property that proxies to
+        # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
         # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting)
@@ -502,21 +480,30 @@ class BackendService:
             circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
             circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
         )
-        # Apple integration service (Telegram bridge + osascript integrations).
-        self._apple_integration_svc = AppleIntegrationService(
-            telegram_bridge=self._telegram_bridge,
-        )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
-        # Realtime partial transcription (запускается при start_recording).
-        self._rt_partial: RealtimePartialTranscriber | None = None
-        self._rt_session_id: str = ""
-
-        # Кэш последнего использованного STT движка (заполняется в _handle_stop_recording).
-        self._last_stt_engine: str | None = None
-
-        # Реестр асинхронных задач транскрибации (transcribe_paths_async).
-        self._job_tracker = JobTracker()
+        # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
+        # transcription pipeline, and async job tracking.
+        self._transcription_counter_ref: list[int] = [0]
+        self._last_stt_engine_ref: list = [None]
+        self._recording_core_svc = RecordingCoreService(
+            recorder=self.recorder,
+            transcriber=self.transcriber,
+            translator=self.translator,
+            store=self.store,
+            vocabulary=self.vocabulary,
+            settings_svc=self._settings_svc,
+            llm_rewriter=self._llm_rewriter,
+            auto_glossary=self._auto_glossary,
+            semantic_searcher=self._semantic_searcher,
+            context_memory=self._context_memory,
+            clipboard_history=self._clipboard_history,
+            auto_backup=self._auto_backup,
+            session_tracker=self._session_tracker,
+            action_items_extractor=self._action_items_extractor,
+            transcription_counter_ref=self._transcription_counter_ref,
+            last_stt_engine_ref=self._last_stt_engine_ref,
+        )
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
@@ -747,6 +734,156 @@ class BackendService:
             except Exception:
                 logger.exception("LLMHttpProbe.stop() raised during close()")
 
+    # ------------------------------------------------------------------ #
+    # Backwards-compatible proxy properties for Wave 172 migration         #
+    # Tests and any code that read/write these attrs on BackendService     #
+    # are routed through to the RecordingCoreService.                     #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def recorder(self):  # type: ignore[override]
+        """Proxy recorder through RecordingCoreService so test monkey-patches propagate."""
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            return svc.recorder
+        return self.__dict__.get("_recorder_init")
+
+    @recorder.setter
+    def recorder(self, value):
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            svc.recorder = value
+        object.__setattr__(self, "_recorder_init", value)
+
+    @property
+    def _clipboard_history(self) -> list:
+        svc = object.__getattribute__(self, "_recording_core_svc") if "_recording_core_svc" in self.__dict__ else None
+        if svc is not None:
+            return svc._clipboard_history
+        return object.__getattribute__(self, "_clipboard_history_init")
+
+    @_clipboard_history.setter
+    def _clipboard_history(self, value: list):
+        # During init, _recording_core_svc doesn't exist yet — store in staging attr.
+        svc = self.__dict__.get("_recording_core_svc")
+        if svc is not None:
+            # Propagate: clear and extend so the service list stays the same object.
+            svc_list = svc._clipboard_history
+            svc_list.clear()
+            svc_list.extend(value)
+        else:
+            # Pre-init: store in staging attr, will be passed to RecordingCoreService.
+            object.__setattr__(self, "_clipboard_history_init", value)
+
+    @property
+    def _rt_partial(self):
+        return self._recording_core_svc._rt_partial
+
+    @_rt_partial.setter
+    def _rt_partial(self, value):
+        self._recording_core_svc._rt_partial = value
+
+    @property
+    def _rt_session_id(self) -> str:
+        return self._recording_core_svc._rt_session_id
+
+    @_rt_session_id.setter
+    def _rt_session_id(self, value: str):
+        self._recording_core_svc._rt_session_id = value
+
+    @property
+    def _transcription_counter(self) -> int:
+        return self._transcription_counter_ref[0]
+
+    @_transcription_counter.setter
+    def _transcription_counter(self, value: int):
+        self._transcription_counter_ref[0] = value
+
+    @property
+    def _last_stt_engine(self):
+        return self._last_stt_engine_ref[0]
+
+    @_last_stt_engine.setter
+    def _last_stt_engine(self, value):
+        self._last_stt_engine_ref[0] = value
+
+    @property
+    def _preview_updated_at(self) -> float:
+        return self._recording_core_svc._preview_updated_at
+
+    @_preview_updated_at.setter
+    def _preview_updated_at(self, value: float):
+        self._recording_core_svc._preview_updated_at = value
+
+    @property
+    def _preview_lock(self):
+        return self._recording_core_svc._preview_lock
+
+    @property
+    def _preview_error_count(self) -> int:
+        return self._recording_core_svc._preview_error_count
+
+    @_preview_error_count.setter
+    def _preview_error_count(self, value: int):
+        self._recording_core_svc._preview_error_count = value
+
+    @property
+    def _preview_error_last_reset_ts(self) -> float | None:
+        return self._recording_core_svc._preview_error_last_reset_ts
+
+    @_preview_error_last_reset_ts.setter
+    def _preview_error_last_reset_ts(self, value: float | None):
+        self._recording_core_svc._preview_error_last_reset_ts = value
+
+    @property
+    def _list_audio_inputs(self):  # type: ignore[override]
+        return self._recording_core_svc._list_audio_inputs
+
+    @_list_audio_inputs.setter
+    def _list_audio_inputs(self, value):
+        self._recording_core_svc._list_audio_inputs = value
+
+    # ------------------------------------------------------------------
+    # Critical static helpers used directly in handle_request and
+    # elsewhere in service.py. Removed from monolith during Wave 172
+    # extraction — re-added here so service.py remains self-consistent.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _error(request_id: Any, code: str, message: str) -> dict[str, Any]:
+        return {
+            "id": request_id,
+            "ok": False,
+            "error": {"code": code, "message": message},
+        }
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool) -> bool:
+        """Нормализует bool-поля из UI/JSON с поддержкой строковых значений."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "on", "yes"}:
+                return True
+            if normalized in {"0", "false", "off", "no"}:
+                return False
+        return default
+
+    @staticmethod
+    def _coerce_bounded(value: Any, default: "int | float", min_value: "int | float", max_value: "int | float") -> "int | float":
+        """Нормализует числовое значение в допустимый диапазон. Тип определяется default."""
+        coerce = int if isinstance(default, int) else float
+        try:
+            parsed = coerce(value)
+        except (TypeError, ValueError):
+            parsed = coerce(default)
+        return max(min_value, min(parsed, max_value))
+
     def handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Обрабатывает один JSON-запрос и возвращает JSON-ответ."""
         request_id = payload.get("id")
@@ -878,7 +1015,7 @@ class BackendService:
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
-            "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
+            "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
             "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
@@ -976,7 +1113,7 @@ class BackendService:
             "post_process_text": self._text_processing_svc.handle_post_process_text,
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
-            "select_model": self._stt_mgmt_svc.handle_select_model,  # умный выбор STT-модели на основе условий записи
+            "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
             # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
@@ -1044,13 +1181,17 @@ class BackendService:
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
-            # --- Apple / Telegram integrations (AppleIntegrationService) ---
-            "send_to_telegram": self._apple_integration_svc.handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
-            "create_apple_note": self._apple_integration_svc.handle_create_apple_note,  # создать заметку в Apple Notes через osascript
-            "create_apple_reminder": self._apple_integration_svc.handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
-            "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
-            "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
-            "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
+            # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
+            "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            # --- Apple Notes integration (Phase D.4) ---
+            "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
+            # --- Apple Reminders integration (Phase D.4) ---
+            "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
+            # --- Apple Calendar integration (Phase D.4) ---
+            "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- iMessage integration (Phase D.4) ---
+            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
+            "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._call_session_service.handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._call_session_service.handle_call_session_get,  # получить сессию по id
@@ -1059,9 +1200,9 @@ class BackendService:
             "call_session_add_transcript": self._call_session_service.handle_call_session_add_transcript,  # добавить реплику в транскрипт
             "call_session_end": self._call_session_service.handle_call_session_end,  # завершить сессию: compute duration, total_cost
             # --- STT hotwords (initial_prompt boost) ---
-            "add_stt_hotword": self._stt_mgmt_svc.handle_add_stt_hotword,  # добавить термин в STT hotwords список
-            "remove_stt_hotword": self._stt_mgmt_svc.handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
-            "list_stt_hotwords": self._stt_mgmt_svc.handle_list_stt_hotwords,  # получить весь список STT hotwords
+            "add_stt_hotword": self._handle_add_stt_hotword,  # добавить термин в STT hotwords список
+            "remove_stt_hotword": self._handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
+            "list_stt_hotwords": self._handle_list_stt_hotwords,  # получить весь список STT hotwords
             # --- Recording bookmarks (Cmd+Shift+B) ---
             "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
             "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
@@ -1080,7 +1221,7 @@ class BackendService:
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
             # --- D.2.3: Scored STT routing decision ---
-            "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
+            "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
         }
 
@@ -1113,6 +1254,25 @@ class BackendService:
             if not self._ipc_throttle.check_rate(method):
                 wait_sec = self._ipc_throttle.get_wait_time(method)
                 logger.warning("IPC rate limit exceeded: method=%s wait=%.2fs", method, wait_sec)
+                # Wave 77: push ipc.rate_limit_exceeded (2779 occurrences in production logs)
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _entry = ERROR_REGISTRY.get("ipc.rate_limit_exceeded", {})
+                    self._error_bus.push(KrabError(
+                        severity=_entry.get("severity", "warn"),
+                        component="ipc",
+                        code="ipc.rate_limit_exceeded",
+                        message_user=_entry.get("user_msg_ru", "Превышен лимит запросов IPC"),
+                        message_debug=f"rate limit hit: method={method!r} wait={wait_sec:.2f}s",
+                        timestamp=datetime.now(timezone.utc),
+                        context={"method": method, "wait_sec": wait_sec},
+                        actionable=False,
+                        action_id=None,
+                    ))
+                except Exception:
+                    pass
                 return self._error(
                     request_id,
                     "rate_limit_exceeded",
@@ -1228,803 +1388,53 @@ class BackendService:
         }
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        started = self.recorder.start()
-        if not started:
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
-            # Идемпотентный контракт: повторный start не считается ошибкой.
-            return {
-                "status": "already_recording",
-                "is_recording": True,
-                "duration_sec": preview_duration,
-                "preview_text": preview_text,
-            }
-        self._reset_preview_state()
-        settings = self._cached_settings()
-        # LM Studio brain unload: освобождаем ~19 GB unified memory под Whisper+pyannote.
-        # Fire-and-forget, не блокирует start_recording flow (timeout 1.5 сек).
-        # См. backend/lm_studio_lifecycle.py.
-        try:
-            brain_model = str(settings.get("llm_brain_model", "")).strip()
-            unload_enabled = bool(settings.get("llm_brain_unload_on_recording", True))
-            if brain_model and unload_enabled:
-                from backend.lm_studio_lifecycle import unload_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                unload_model_async(base_url, brain_model)
-        except Exception as exc:
-            logger.debug("LM Studio brain unload hook failed: %s", exc)
-        add_breadcrumb(
-            category="recording",
-            message="started",
-            level="info",
-            data={"quality_profile": str(settings.get("quality_profile", "balanced"))},
-        )
-        if bool(settings.get("realtime_preview_enabled", True)):
-            quality_profile = str(settings.get("quality_profile", "balanced"))
-            self._start_preview_worker(quality_profile=quality_profile)
-        if bool(settings.get("realtime_partial_enabled", True)):
-            import uuid as _uuid
-            self._rt_session_id = _uuid.uuid4().hex
-            _interval = float(settings.get("rt_partial_interval_sec", 3.0))
-            _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
-            _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
-            try:
-                self._rt_partial = RealtimePartialTranscriber(
-                    transcriber=self.transcriber,
-                    recorder=self.recorder,
-                    event_bus=event_bus,
-                    interval_sec=_interval,
-                    buffer_sec=_buffer,
-                )
-                self._rt_partial.start(
-                    session_id=self._rt_session_id,
-                    sample_rate=_sample_rate,
-                )
-            except Exception:
-                logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                self._rt_partial = None
-        return {"status": "recording"}
+        return self._recording_core_svc.handle_start_recording(params)
 
     @staticmethod
     def _safe_callback(fn: Callable | None, *args: Any) -> None:
-        """Вызывает опциональный callback, подавляя исключения (не должны ломать основной поток)."""
-        if fn is not None:
-            try:
-                fn(*args)
-            except Exception:
-                logger.exception("Callback %s упал с аргументами %s", fn, args[:1])
+        """Delegated to RecordingCoreService._safe_callback."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        _RCS._safe_callback(fn, *args)
 
-    def _build_empty_audio_response(
-        self,
-        duration_sec: float,
-        quality_profile: str,
-        cleanup_profile: str,
-        translation_mode: str,
-        translate_and_paste: bool,
-        stop_tail_trim_ms: int,
-        silence_detected: bool = False,
-        silence_guard_enabled: bool = False,
-        background_guard_rejected: bool = False,
-    ) -> dict[str, Any]:
-        """Helper to build canonical empty_audio response dict."""
-        return {
-            "status": "empty_audio",
-            "duration_sec": duration_sec,
-            "quality_profile": quality_profile,
-            "cleanup_profile": cleanup_profile,
-            "translation_mode": translation_mode,
-            "translate_and_paste": translate_and_paste,
-            "text": "",
-            "original_text": "",
-            "translated_text": "",
-            "translation_status": "not_requested",
-            "history_id": None,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "silence_detected": silence_detected,
-            "silence_guard_enabled": silence_guard_enabled,
-            "background_guard_rejected": background_guard_rejected,
-        }
+    def _build_empty_audio_response(self, duration_sec, quality_profile, cleanup_profile, translation_mode, translate_and_paste, stop_tail_trim_ms, silence_detected=False, silence_guard_enabled=False, background_guard_rejected=False):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc._build_empty_audio_response(duration_sec=duration_sec, quality_profile=quality_profile, cleanup_profile=cleanup_profile, translation_mode=translation_mode, translate_and_paste=translate_and_paste, stop_tail_trim_ms=stop_tail_trim_ms, silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled, background_guard_rejected=background_guard_rejected)
 
-    def _load_stop_recording_settings(
-        self, params: dict[str, Any], settings: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Читает и нормализует все параметры stop_recording из params + settings."""
-        return {
-            "quality_profile": str(params.get("quality_profile") or settings.get("quality_profile", "balanced")),
-            "cleanup_profile": str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft")),
-            "lang_hint": params.get("lang_hint") or None,
-            "translation_mode": str(params.get("translation_mode") or settings.get("translation_mode", "off")),
-            "translation_style": str(params.get("translation_style") or settings.get("translation_style", "neutral")),
-            "translation_glossary": settings.get("translation_glossary", {}),
-            "translate_and_paste": bool(
-                params.get("translate_and_paste")
-                if "translate_and_paste" in params
-                else settings.get("translate_and_paste", False)
-            ),
-            "network_mode": str(settings.get("network_mode", "offline_default")),
-            "silence_guard_enabled": self._coerce_bool(settings.get("silence_guard_enabled", True), default=True),
-            "silence_rms_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_rms_threshold", 0.0020),
-                default=0.0020, min_value=0.0003, max_value=0.05,
-            ),
-            "silence_peak_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_peak_threshold", 0.0120),
-                default=0.0120, min_value=0.001, max_value=0.2,
-            ),
-            "silence_active_ratio_threshold": self._coerce_bounded(
-                value=settings.get("silence_guard_active_ratio_threshold", 0.015),
-                default=0.015, min_value=0.001, max_value=0.30,
-            ),
-            "background_guard_enabled": self._coerce_bool(settings.get("background_guard_enabled", True), default=True),
-            "background_guard_min_peak": self._coerce_bounded(
-                value=settings.get("background_guard_min_peak", 0.025),
-                default=0.025, min_value=0.003, max_value=0.25,
-            ),
-            "background_guard_min_rms": self._coerce_bounded(
-                value=settings.get("background_guard_min_rms", 0.0040),
-                default=0.0040, min_value=0.0008, max_value=0.08,
-            ),
-            "background_guard_uniform_frame_threshold": self._coerce_bounded(
-                value=settings.get("background_guard_uniform_frame_threshold", 0.0060),
-                default=0.0060, min_value=0.001, max_value=0.20,
-            ),
-            "background_guard_max_uniform_active_ratio": self._coerce_bounded(
-                value=settings.get("background_guard_max_uniform_active_ratio", 0.92),
-                default=0.92, min_value=0.40, max_value=0.99,
-            ),
-            "sample_rate": self._coerce_bounded(
-                value=getattr(self.recorder, "sample_rate", 16000),
-                default=16000, min_value=8000, max_value=192000,
-            ),
-        }
+    def _load_stop_recording_settings(self, params, settings):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc._load_stop_recording_settings(params, settings)
 
     # ------------------------------------------------------------------ #
-    #   _handle_stop_recording — thin orchestrator                        #
-    #   Delegates to 5 phase helpers; each is independently testable.     #
+    #   _handle_stop_recording — delegates to RecordingCoreService         #
     # ------------------------------------------------------------------ #
 
-    def _handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Orchestrate the stop-recording pipeline via 5 phase helpers."""
-        settings = self._cached_settings()
+    def _handle_stop_recording(self, params):
+        """Delegated to RecordingCoreService.handle_stop_recording."""
+        return self._recording_core_svc.handle_stop_recording(params)
 
-        # Phase A: finalize audio capture
-        phase_a = self._stop_recording_phase_a(params, settings)
-        if "early_return" in phase_a:
-            return phase_a["early_return"]
+    def _stop_recording_phase_a(self, params, settings):
+        """Delegated to RecordingCoreService._stop_recording_phase_a."""
+        return self._recording_core_svc._stop_recording_phase_a(params, settings)
 
-        audio = phase_a["audio"]
-        duration_sec = phase_a["duration_sec"]
-        stop_tail_trim_ms = phase_a["stop_tail_trim_ms"]
-        _rt_session_id = phase_a["rt_session_id"]
-        sr = phase_a["sr"]
+    def _stop_recording_phase_b(self, audio, duration_sec, stop_tail_trim_ms, sr):
+        """Delegated to RecordingCoreService._stop_recording_phase_b."""
+        return self._recording_core_svc._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
 
-        # Phase B: audio quality guards (silence + background)
-        phase_b = self._stop_recording_phase_b(audio, duration_sec, stop_tail_trim_ms, sr)
-        if "early_return" in phase_b:
-            return phase_b["early_return"]
+    def _stop_recording_phase_c(self, audio, duration_sec, sr):
+        """Delegated to RecordingCoreService._stop_recording_phase_c."""
+        return self._recording_core_svc._stop_recording_phase_c(audio, duration_sec, sr)
 
-        silence_detected = phase_b["silence_detected"]
-        background_guard_rejected = phase_b["background_guard_rejected"]
+    def _stop_recording_phase_d(self, transcribe_payload, duration_sec, sr, stop_tail_trim_ms, silence_detected, silence_guard_enabled, background_guard_rejected):
+        """Delegated to RecordingCoreService._stop_recording_phase_d."""
+        return self._recording_core_svc._stop_recording_phase_d(transcribe_payload=transcribe_payload, duration_sec=duration_sec, sr=sr, stop_tail_trim_ms=stop_tail_trim_ms, silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled, background_guard_rejected=background_guard_rejected)
 
-        # Phase C: STT execution
-        phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
-        transcribe_payload = phase_c["transcribe_payload"]
+    def _stop_recording_phase_e(self, phase_d, sr, duration_sec, stop_tail_trim_ms, silence_detected, silence_guard_enabled, background_guard_rejected, rt_session_id, settings):
+        """Delegated to RecordingCoreService._stop_recording_phase_e."""
+        return self._recording_core_svc._stop_recording_phase_e(phase_d=phase_d, sr=sr, duration_sec=duration_sec, stop_tail_trim_ms=stop_tail_trim_ms, silence_detected=silence_detected, silence_guard_enabled=silence_guard_enabled, background_guard_rejected=background_guard_rejected, rt_session_id=rt_session_id, settings=settings)
 
-        # Phase D: post-processing (text extraction, retry, translation, diarization)
-        phase_d = self._stop_recording_phase_d(
-            transcribe_payload=transcribe_payload,
-            duration_sec=duration_sec,
-            sr=sr,
-            stop_tail_trim_ms=stop_tail_trim_ms,
-            silence_detected=silence_detected,
-            silence_guard_enabled=sr["silence_guard_enabled"],
-            background_guard_rejected=background_guard_rejected,
-        )
-        if "early_return" in phase_d:
-            return phase_d["early_return"]
-
-        # Phase E: history persistence + response assembly
-        return self._stop_recording_phase_e(
-            phase_d=phase_d,
-            sr=sr,
-            duration_sec=duration_sec,
-            stop_tail_trim_ms=stop_tail_trim_ms,
-            silence_detected=silence_detected,
-            silence_guard_enabled=sr["silence_guard_enabled"],
-            background_guard_rejected=background_guard_rejected,
-            rt_session_id=_rt_session_id,
-            settings=settings,
-        )
-
-    # ------------------------------------------------------------------ #
-    #   Phase A — audio capture finalization                              #
-    # ------------------------------------------------------------------ #
-
-    def _stop_recording_phase_a(
-        self, params: dict[str, Any], settings: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Stop preview worker, stop realtime partial, stop recorder.
-
-        Returns a dict that always contains either:
-          - ``{"early_return": <response dict>}`` — caller should return immediately, OR
-          - keys: audio, duration_sec, stop_tail_trim_ms, rt_session_id, sr
-        """
-        self._stop_preview_worker()
-        rt_session_id = self._rt_session_id
-        if self._rt_partial is not None:
-            try:
-                self._rt_partial.stop()
-            except Exception:
-                logger.exception("Ошибка при остановке RealtimePartialTranscriber")
-            finally:
-                self._rt_partial = None
-
-        stop_tail_trim_ms = self._coerce_bounded(
-            value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
-            default=180,
-            min_value=0,
-            max_value=1200,
-        )
-        stopped = self._stop_recorder_guarded(stop_tail_trim_ms=stop_tail_trim_ms)
-        if stopped is None:
-            # Идемпотентный контракт: повторный stop не считается ошибкой.
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
-            return {
-                "early_return": {
-                    "status": "already_stopped",
-                    "is_recording": False,
-                    "duration_sec": preview_duration,
-                    "preview_text": preview_text,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                }
-            }
-
-        audio, duration_sec = stopped
-        add_breadcrumb(
-            category="recording",
-            message="stopped",
-            level="info",
-            data={"duration_sec": round(float(duration_sec), 2)},
-        )
-
-        # LM Studio brain pre-load: pre-warm к моменту когда user может открыть VA.
-        # Fire-and-forget, не блокирует stop flow.
-        try:
-            brain_model = str(settings.get("llm_brain_model", "")).strip()
-            preload_enabled = bool(settings.get("llm_brain_preload_on_stop", True))
-            if brain_model and preload_enabled:
-                from backend.lm_studio_lifecycle import load_model_async
-                base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                load_model_async(base_url, brain_model)
-        except Exception as exc:
-            logger.debug("LM Studio brain preload hook failed: %s", exc)
-
-        sr = self._load_stop_recording_settings(params, settings)
-
-        if getattr(audio, "size", 0) == 0:
-            return {
-                "early_return": self._build_empty_audio_response(
-                    duration_sec=duration_sec,
-                    quality_profile=sr["quality_profile"],
-                    cleanup_profile=sr["cleanup_profile"],
-                    translation_mode=sr["translation_mode"],
-                    translate_and_paste=sr["translate_and_paste"],
-                    stop_tail_trim_ms=stop_tail_trim_ms,
-                )
-            }
-
-        return {
-            "audio": audio,
-            "duration_sec": duration_sec,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "rt_session_id": rt_session_id,
-            "sr": sr,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase B — audio quality guards                                    #
-    # ------------------------------------------------------------------ #
-
-    def _stop_recording_phase_b(
-        self,
-        audio: Any,
-        duration_sec: float,
-        stop_tail_trim_ms: int,
-        sr: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Run silence guard and background guard.
-
-        Returns a dict with either ``{"early_return": ...}`` or guard results.
-        """
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-        translation_mode = sr["translation_mode"]
-        translate_and_paste = sr["translate_and_paste"]
-        sample_rate = sr["sample_rate"]
-
-        silence_detected = False
-        if sr["silence_guard_enabled"]:
-            silence_detected = self._looks_like_silence_audio(
-                audio=audio,
-                sample_rate=sample_rate,
-                rms_threshold=sr["silence_rms_threshold"],
-                peak_threshold=sr["silence_peak_threshold"],
-                active_ratio_threshold=sr["silence_active_ratio_threshold"],
-            )
-            if silence_detected:
-                logger.info(
-                    "Silence guard: stop_recording классифицирован как тишина, STT пропущен",
-                    extra={
-                        "duration_sec": round(float(duration_sec), 3),
-                        "rms_threshold": sr["silence_rms_threshold"],
-                        "peak_threshold": sr["silence_peak_threshold"],
-                        "active_ratio_threshold": sr["silence_active_ratio_threshold"],
-                    },
-                )
-                return {
-                    "early_return": self._build_empty_audio_response(
-                        duration_sec=duration_sec,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        translation_mode=translation_mode,
-                        translate_and_paste=translate_and_paste,
-                        stop_tail_trim_ms=stop_tail_trim_ms,
-                        silence_detected=True,
-                        silence_guard_enabled=True,
-                    )
-                }
-
-        background_guard_rejected = False
-        if sr["background_guard_enabled"]:
-            background_guard_rejected = self._looks_like_distant_background_speech(
-                audio=audio,
-                sample_rate=sample_rate,
-                min_peak=sr["background_guard_min_peak"],
-                min_rms=sr["background_guard_min_rms"],
-                uniform_frame_threshold=sr["background_guard_uniform_frame_threshold"],
-                max_uniform_active_ratio=sr["background_guard_max_uniform_active_ratio"],
-            )
-            if background_guard_rejected:
-                logger.info(
-                    "Background guard: stop_recording отклонен как фоновая речь",
-                    extra={
-                        "duration_sec": round(float(duration_sec), 3),
-                        "min_peak": sr["background_guard_min_peak"],
-                        "min_rms": sr["background_guard_min_rms"],
-                        "uniform_frame_threshold": sr["background_guard_uniform_frame_threshold"],
-                        "max_uniform_active_ratio": sr["background_guard_max_uniform_active_ratio"],
-                    },
-                )
-                return {
-                    "early_return": self._build_empty_audio_response(
-                        duration_sec=duration_sec,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        translation_mode=translation_mode,
-                        translate_and_paste=translate_and_paste,
-                        stop_tail_trim_ms=stop_tail_trim_ms,
-                        silence_guard_enabled=sr["silence_guard_enabled"],
-                        background_guard_rejected=True,
-                    )
-                }
-
-        return {
-            "silence_detected": silence_detected,
-            "background_guard_rejected": background_guard_rejected,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase C — STT execution                                           #
-    # ------------------------------------------------------------------ #
-
-    def _stop_recording_phase_c(
-        self,
-        audio: Any,
-        duration_sec: float,
-        sr: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Load vocabulary/context/glossary and run the transcriber.
-
-        Returns ``{"transcribe_payload": <raw transcriber result>}``.
-        """
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-        lang_hint: str | None = sr["lang_hint"]
-
-        # Загружаем пользовательский vocabulary для подсказок Whisper
-        user_vocabulary = self.vocabulary.load() or []
-
-        # Загружаем контекст из последних 10 записей истории и STT hotwords.
-        # Контекст передаётся в AudioEngine для построения initial_prompt Whisper
-        # (точность непрерывной диктовки +10-15%).
-        _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
-        _cached_settings_hw = self._settings_svc.cached_settings()
-        _stt_hotwords_enabled = bool(_cached_settings_hw.get("stt_hotwords_enabled", True))
-        _stt_hotwords: list[str] = (
-            _cached_settings_hw.get("stt_hotwords", []) if _stt_hotwords_enabled else []
-        )
-
-        # Авто-глоссарий из истории: обогащаем initial_prompt именами и терминами.
-        # Результат кэшируется 6 часов; при disabled — пустой список.
-        _auto_glossary_terms: list[str] = []
-        _cached_settings_ag = self._settings_svc.cached_settings()
-        _ag_window_days = int(_cached_settings_ag.get("auto_glossary_window_days", DEFAULT_SETTINGS.get("auto_glossary_window_days", 7)))
-        _ag_top_n = int(_cached_settings_ag.get("auto_glossary_top_n", DEFAULT_SETTINGS.get("auto_glossary_top_n", 30)))
-        if _cached_settings_ag.get("auto_glossary_enabled", DEFAULT_SETTINGS.get("auto_glossary_enabled", True)):
-            try:
-                _auto_glossary_terms = self._auto_glossary.build(
-                    window_days=_ag_window_days, top_n=_ag_top_n
-                )
-            except Exception as _ag_exc:
-                logger.warning("auto_glossary: ошибка при построении глоссария: %s", _ag_exc)
-
-        # Объединяем пользовательские hotwords и авто-глоссарий с дедупликацией.
-        _combined_hotwords: list[str] | None = None
-        if _stt_hotwords or _auto_glossary_terms:
-            _seen_hw: set[str] = set()
-            _combined_hw: list[str] = []
-            for _w in list(_stt_hotwords) + list(_auto_glossary_terms):
-                _w = _w.strip()
-                if _w and _w.lower() not in _seen_hw:
-                    _seen_hw.add(_w.lower())
-                    _combined_hw.append(_w)
-            _combined_hotwords = _combined_hw if _combined_hw else None
-
-        add_breadcrumb(
-            category="transcription",
-            message="transcribe_start",
-            level="info",
-            data={
-                "quality_profile": quality_profile,
-                "audio_len_sec": round(float(duration_sec), 2),
-                "lang_hint": lang_hint or "auto",
-                "auto_glossary_terms": len(_auto_glossary_terms),
-            },
-        )
-
-        transcribe_payload = self.transcriber.transcribe(
-            audio,
-            quality_profile=quality_profile,
-            cleanup_profile=cleanup_profile,
-            lang_hint=lang_hint,
-            extra_vocabulary=user_vocabulary if user_vocabulary else None,
-            history_context=_recent_history if _recent_history else None,
-            stt_hotwords=_combined_hotwords,
-        )
-
-        return {"transcribe_payload": transcribe_payload}
-
-    # ------------------------------------------------------------------ #
-    #   Phase D — post-processing pipeline                                #
-    # ------------------------------------------------------------------ #
-
-    def _stop_recording_phase_d(
-        self,
-        transcribe_payload: Any,
-        duration_sec: float,
-        sr: dict[str, Any],
-        stop_tail_trim_ms: int,
-        silence_detected: bool,
-        silence_guard_enabled: bool,
-        background_guard_rejected: bool,
-    ) -> dict[str, Any]:
-        """Extract text, apply soft-cleanup retry, translate, diarize.
-
-        Returns either ``{"early_return": ...}`` (empty_text) or a dict with
-        processed text/translation/diarization fields ready for Phase E.
-        """
-        translation_mode = sr["translation_mode"]
-        translation_style = sr["translation_style"]
-        translation_glossary = sr["translation_glossary"]
-        translate_and_paste = sr["translate_and_paste"]
-        network_mode = sr["network_mode"]
-        quality_profile = sr["quality_profile"]
-        cleanup_profile = sr["cleanup_profile"]
-
-        text = self._postprocess_transcribed_text(self._extract_transcribed_text(transcribe_payload))
-        transcription_error = self._extract_transcribed_error(transcribe_payload)
-
-        # Retry с soft cleanup если текст обнулился post-processing'ом, но raw STT
-        # был не пустой и confidence высокий. На длинных записях (>20s, >100 chars
-        # raw) postprocess может ошибочно срабатывать как looping/echo фильтр.
-        # См. backend.log 2026-04-26 18:04:12: STT confidence 0.87, но empty_text
-        # → fallback в preview взял только последние 12s (начало срезалось).
-        if not text and not transcription_error:
-            raw_text = str(self._extract_transcribed_text(transcribe_payload) or "").strip()
-            if len(raw_text) >= 30 and duration_sec >= 8.0:
-                logger.warning(
-                    "Retry transcribe с soft cleanup: raw_text len=%d, duration=%.1fs (post-process drop'нул весь текст)",
-                    len(raw_text), duration_sec,
-                )
-                # Возврат raw text без postprocess фильтров, минимальный cleanup.
-                text = TextUtils.normalize_phrase(raw_text).strip()
-                # Лёгкая нормализация пунктуации/пробелов без drop-условий.
-                text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-                text = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", text)
-                text = re.sub(r"\s+", " ", text).strip()
-                if text:
-                    first_alpha = next((i for i, c in enumerate(text) if c.isalpha()), -1)
-                    if first_alpha >= 0:
-                        text = text[:first_alpha] + text[first_alpha].upper() + text[first_alpha + 1:]
-                    if not re.search(r"[.!?…]$", text):
-                        text = f"{text}."
-
-        if not text:
-            if transcription_error:
-                event_bus.emit_typed(EventType.STT_FAILED, SttFailed(reason=transcription_error, duration_sec=duration_sec))
-            return {
-                "early_return": {
-                    "status": "empty_text",
-                    "duration_sec": duration_sec,
-                    "quality_profile": quality_profile,
-                    "cleanup_profile": cleanup_profile,
-                    "translation_mode": translation_mode,
-                    "translate_and_paste": translate_and_paste,
-                    "text": "",
-                    "original_text": "",
-                    "translated_text": "",
-                    "translation_status": "not_requested",
-                    "history_id": None,
-                    "transcription_error": transcription_error,
-                    "stop_tail_trim_ms": stop_tail_trim_ms,
-                    "silence_detected": silence_detected,
-                    "silence_guard_enabled": silence_guard_enabled,
-                    "background_guard_rejected": background_guard_rejected,
-                }
-            }
-
-        translation = self.translator.translate(
-            text=text,
-            mode=translation_mode,
-            network_mode=network_mode,
-            translation_style=translation_style,
-            glossary=translation_glossary,
-        )
-        translated_text = translation.text.strip() if translation.ok else ""
-        final_text = translated_text if (translate_and_paste and translated_text) else text
-        translation_status = translation.status
-        if translation.ok and translated_text:
-            event_bus.emit_typed(EventType.TRANSLATION_COMPLETED, TranslationCompleted(
-                history_id="",  # будет обновлено ниже после сохранения в store
-                source_text=text,
-                translated_text=translated_text,
-                source_lang=translation.source_lang or "",
-                target_lang=translation.target_lang or "",
-                engine=translation.engine or "",
-                mode=translation.mode or "",
-            ))
-        elif not translation.ok and translation_status not in ("not_requested", "off"):
-            event_bus.emit_typed(EventType.TRANSLATION_FAILED, TranslationFailed(
-                history_id=None,
-                source_text=text,
-                reason=translation.status or "unknown",
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-            ))
-
-        tp = transcribe_payload if isinstance(transcribe_payload, dict) else {}
-        # Кэшируем движок, использованный в этой транскрибации (для отображения в UI).
-        if tp.get("engine"):
-            self._last_stt_engine = str(tp["engine"])
-        confidence = tp.get("confidence", 0.0)
-        add_breadcrumb(
-            category="transcription",
-            message="transcribe_complete",
-            level="info",
-            data={
-                "confidence": round(float(confidence), 3),
-                "word_count": len(text.split()) if text else 0,
-            },
-        )
-        if confidence < 0.4 and text:
-            logger.warning("Низкая уверенность STT: %.2f — возможна ошибка распознавания", confidence)
-        diarization_data = tp.get("diarization")
-
-        # Format text with speaker labels if diarization produced multiple speakers
-        display_text = self._format_text_with_speakers(final_text, diarization_data)
-
-        return {
-            "text": text,
-            "display_text": display_text,
-            "translated_text": translated_text,
-            "final_text": final_text,
-            "translation": translation,
-            "translation_status": translation_status,
-            "confidence": confidence,
-            "diarization_data": diarization_data,
-            "tp": tp,
-        }
-
-    # ------------------------------------------------------------------ #
-    #   Phase E — history persistence + response assembly                 #
-    # ------------------------------------------------------------------ #
-
-    def _stop_recording_phase_e(
-        self,
-        phase_d: dict[str, Any],
-        sr: dict[str, Any],
-        duration_sec: float,
-        stop_tail_trim_ms: int,
-        silence_detected: bool,
-        silence_guard_enabled: bool,
-        background_guard_rejected: bool,
-        rt_session_id: str | None,
-        settings: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Persist history item, update side-caches, build final result dict."""
-        text = phase_d["text"]
-        display_text = phase_d["display_text"]
-        translated_text = phase_d["translated_text"]
-        final_text = phase_d["final_text"]
-        translation = phase_d["translation"]
-        translation_status = phase_d["translation_status"]
-        confidence = phase_d["confidence"]
-        diarization_data = phase_d["diarization_data"]
-        tp = phase_d["tp"]
-
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-        )
-        self._clipboard_history.append({
-            "text": final_text,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "history_id": item.id,
-        })
-        if len(self._clipboard_history) > 20:
-            self._clipboard_history = self._clipboard_history[-20:]
-
-        # Обновляем контекстную память для улучшения следующего STT
-        try:
-            self._context_memory.update(text)
-        except Exception:
-            pass
-
-        # Авто-индексация для семантического поиска (фоновый поток, opt-in)
-        if self._semantic_searcher.is_enabled and settings.SEMANTIC_SEARCH_AUTO_INDEX:
-            _index_text = display_text or text
-            _index_id = item.id
-            threading.Thread(
-                target=self._semantic_searcher.index_item,
-                args=(_index_id, _index_text),
-                daemon=True,
-                name="semantic-index",
-            ).start()
-
-        # Авто-бэкап каждые 100 транскрибаций
-        self._transcription_counter += 1
-        if self._transcription_counter % 100 == 0:
-            try:
-                self._auto_backup.check_and_backup()
-            except Exception:
-                pass
-
-        result_payload = {
-            "status": "ok",
-            "duration_sec": duration_sec,
-            "quality_profile": sr["quality_profile"],
-            "cleanup_profile": sr["cleanup_profile"],
-            "translation_mode": translation.mode,
-            "translation_style": sr["translation_style"],
-            "translate_and_paste": sr["translate_and_paste"],
-            "translation_status": translation_status,
-            "source_lang": translation.source_lang,
-            "target_lang": translation.target_lang,
-            "translation_engine": translation.engine,
-            "text": display_text,
-            "original_text": text,
-            "translated_text": translated_text,
-            "history_id": item.id,
-            "ts": item.ts,
-            "stop_tail_trim_ms": stop_tail_trim_ms,
-            "silence_detected": silence_detected,
-            "silence_guard_enabled": silence_guard_enabled,
-            "background_guard_rejected": background_guard_rejected,
-        }
-        event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
-            history_id=item.id,
-            text=final_text,
-            duration_sec=duration_sec,
-            language=tp.get("language"),
-            confidence=tp.get("confidence"),
-        ))
-        if rt_session_id:
-            try:
-                event_bus.emit(
-                    "realtime.final_transcript",
-                    {
-                        "session_id": rt_session_id,
-                        "text": final_text,
-                        "is_partial": False,
-                        "ts": time.time(),
-                    },
-                )
-            except Exception:
-                logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
-
-        # Автосохранение транскрибации в .md файл
-        if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
-            try:
-                transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                item_dict = {
-                    "text": display_text,
-                    "ts": item.ts,
-                    "audio_duration_sec": duration_sec,
-                    "confidence": tp.get("confidence"),
-                    "translated_text": translated_text,
-                    "translation_status": translation_status,
-                    "diarization": diarization_data,
-                }
-                saved_path = TranscriptWriter.write_transcript(item_dict, transcripts_dir)
-                result_payload["transcript_file"] = str(saved_path)
-            except Exception:
-                logger.exception("Не удалось автосохранить транскрибацию в .md")
-
-        # Авто-извлечение задач/решений/вопросов (opt-in, только для длинных записей)
-        if self._coerce_bool(settings.get("action_items_auto_extract", False), default=False):
-            min_dur = float(settings.get("action_items_min_duration_sec", 60.0))
-            if self._action_items_extractor is not None and (duration_sec or 0.0) >= min_dur:
-                try:
-                    lang = str(tp.get("language", "ru") or "ru").lower()[:2]
-                    ai_result = self._action_items_extractor.extract(display_text, language=lang)
-                    if ai_result.ok:
-                        self.store.update_history_item_action_items(
-                            item_id=item.id,
-                            action_items=[ai.to_dict() for ai in ai_result.action_items],
-                            decisions=ai_result.decisions,
-                            questions=ai_result.questions,
-                        )
-                        result_payload["action_items_extracted"] = True
-                        result_payload["action_items_count"] = len(ai_result.action_items)
-                except Exception:
-                    logger.exception("Авто-извлечение action items провалилось для %s", item.id)
-
-        return result_payload
-
-    def _handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
-        with self._preview_lock:
-            preview_text = self._preview_text
-            preview_duration = self._preview_duration_sec
-        audio_rms = (
-            self.recorder.snapshot_rms()
-            if hasattr(self.recorder, "snapshot_rms")
-            else 0.0
-        )
-        active_session = self._session_tracker._active_session
-        session_id = (active_session.get("session_id", "__live__") if active_session else "__live__")
-        elapsed_sec = 0.0
-        if hasattr(self.recorder, "get_duration_sec"):
-            try:
-                elapsed_sec = float(self.recorder.get_duration_sec() or 0.0)
-            except Exception:
-                elapsed_sec = preview_duration or 0.0
-        return {
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
-            "duration_sec": preview_duration,
-            "preview_text": preview_text,
-            "audio_rms": audio_rms,
-            "elapsed_sec": elapsed_sec,
-            "session_id": session_id,
-        }
+    def _handle_get_recording_state(self, params):
+        """Delegated to RecordingCoreService.handle_get_recording_state."""
+        return self._recording_core_svc.handle_get_recording_state(params)
 
     def _handle_get_usage_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает ежедневную статистику использования: записи, длительность, слова."""
@@ -2109,40 +1519,6 @@ class BackendService:
             "modes_missing_offline": missing,
             "any_ready": bool(cached),
         }
-
-    @staticmethod
-    def _format_text_with_speakers(text: str, diarization: dict | None) -> str:
-        """Форматирует текст с метками спикеров из diarization speaker_turns.
-
-        Если diarization неактивен или менее 2 спикеров — возвращает исходный текст.
-        Использует speaker_turns (склеенные реплики) для читаемого вывода.
-        """
-        if not diarization or not isinstance(diarization, dict):
-            return text
-        if not diarization.get("enabled"):
-            return text
-        turns = diarization.get("speaker_turns", [])
-        if not turns or len(turns) < 2:
-            return text
-        # Check that there are actually multiple speakers
-        speakers = {t.get("speaker") for t in turns if t.get("speaker")}
-        if len(speakers) < 2:
-            return text
-        parts: list[str] = []
-        current_speaker = None
-        for turn in turns:
-            speaker = turn.get("speaker", "?")
-            turn_text = str(turn.get("text", "")).strip()
-            if not turn_text:
-                continue
-            if speaker != current_speaker:
-                current_speaker = speaker
-                parts.append(f"\n[{speaker}]: {turn_text}")
-            else:
-                parts.append(f" {turn_text}")
-        if parts:
-            return "".join(parts).strip()
-        return text
 
     @staticmethod
     def _build_readiness_report_static() -> dict[str, Any]:
@@ -2314,7 +1690,7 @@ class BackendService:
                 "current_model": self.transcriber.engine.current_model,
                 "diarization_enabled": settings.DIARIZATION_ENABLED,
                 "diarization_device": diarization_device,
-                "last_engine": self._last_stt_engine,
+                "last_engine": self._last_stt_engine_ref[0],
             },
             "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
             "history": {
@@ -2670,6 +2046,25 @@ class BackendService:
             "model": getattr(self._llm_rewriter, "_model", None),
         }
 
+    def _handle_warmup_stt(self, params: dict) -> dict:
+        """Ручной запуск STT warmup — полезен после смены профиля или модели.
+
+        Загружает текущую активную Whisper-модель через tiny (1s silent) inference.
+        Блокирующий вызов — выполняется в потоке IPC handler'а, возвращает
+        результат только после завершения warmup (или ошибки).
+
+        Returns:
+            {
+              "loaded": bool,      # True если warmup inference прошёл без ошибок
+              "latency_ms": int,   # время inference в мс
+              "model_name": str,   # имя прогретой модели
+              "error": str | None  # сообщение об ошибке (None если loaded=True)
+            }
+        """
+        if not hasattr(self.transcriber, "engine"):
+            return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
+        return self.transcriber.engine.warmup()
+
     def _handle_warmup_rewriter(self, params: dict) -> dict:
         """Ручной запуск LLM rewriter warmup probe.
 
@@ -2798,18 +2193,18 @@ class BackendService:
         settings = self._cached_settings()
 
         # Active session info
-        preview_active = self._preview_thread is not None and self._preview_thread.is_alive()
+        preview_active = self._recording_core_svc.preview_thread_alive
 
         return {
             "session": {
                 "recording_active": bool(getattr(self.recorder, 'is_recording', False)),
                 "preview_active": preview_active,
-                "preview_text_length": len(self._preview_text),
-                "preview_duration_sec": self._preview_duration_sec,
+                "preview_text_length": len(self._recording_core_svc.preview_text),
+                "preview_duration_sec": self._recording_core_svc.preview_duration_sec,
             },
             "preview_loop": {
-                "error_count": self._preview_error_count,
-                "last_reset_ts": self._preview_error_last_reset_ts,
+                "error_count": self._recording_core_svc.preview_error_count,
+                "last_reset_ts": self._recording_core_svc.preview_error_last_reset_ts,
             },
             "llm": {
                 "enabled": settings.get("llm_rewrite_enabled", False),
@@ -2962,6 +2357,115 @@ class BackendService:
         audit.clear()
         return {"ok": True}
 
+    # --- D.2.3: Scored STT routing decision ---
+
+    def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает результат scored STT adapter selection для отладки.
+
+        Параметры:
+            language         — ISO 639-1 код языка (например «ru», «en», «zh»).
+            audio_duration_s — длительность аудио в секундах (float, опционально).
+
+        Возвращает:
+            selected_engine — имя выбранного адаптера или null.
+            scores          — dict {engine_name: score} для всех доступных адаптеров.
+            language        — нормализованный код языка.
+            audio_duration_s — длительность из params или null.
+        """
+        from core.stt_router import score_adapters, select_adapter_scored
+
+        language = str(params.get("language", "")).strip().lower() or "und"
+        raw_dur = params.get("audio_duration_s")
+        audio_duration_s: Optional[float] = float(raw_dur) if raw_dur is not None else None
+
+        # Собираем доступные адаптеры из AudioEngine (если есть)
+        # Используем duck-typed stubs на основе настроек — без реального импорта адаптеров.
+        adapters = self._build_virtual_adapters_for_routing()
+        scores = score_adapters(adapters, language, audio_duration_s)
+        best = select_adapter_scored(language, audio_duration_s, adapters)
+        selected_name: Optional[str] = getattr(best, "name", None) if best is not None else None
+
+        return {
+            "selected_engine": selected_name,
+            "scores": scores,
+            "language": language,
+            "audio_duration_s": audio_duration_s,
+        }
+
+    def _build_virtual_adapters_for_routing(self) -> "list[Any]":
+        """Создаёт список виртуальных адаптеров для scored selection.
+
+        Не загружает реальные модели — только описывает возможности каждого
+        адаптера на основе настроек. Используется в IPC для отладки routing.
+        """
+        from types import SimpleNamespace
+
+        def _make(name: str, languages: "set[str]", enabled: bool) -> "Any":
+            ns = SimpleNamespace(
+                name=name,
+                supported_languages=languages,
+            )
+            ns.is_available = lambda: enabled  # type: ignore[attr-defined]
+            return ns
+
+        adapters = []
+
+        # GigaAM — RU-only specialist
+        gigaam_enabled = getattr(settings, "STT_GIGAAM_ENABLED", False)
+        adapters.append(_make("gigaam", {"ru", "uk"}, bool(gigaam_enabled)))
+
+        # Parakeet — EN-only specialist
+        parakeet_enabled = getattr(settings, "PARAKEET_ENABLED", False)
+        adapters.append(_make("parakeet", {"en"}, bool(parakeet_enabled)))
+
+        # SenseVoice — ZH/JA/KO/YUE specialist + decent EN/RU
+        sensevoice_enabled = getattr(settings, "SENSEVOICE_ENABLED", False)
+        adapters.append(_make("sensevoice", {"zh", "ja", "ko", "yue", "en", "ru"}, bool(sensevoice_enabled)))
+
+        # Whisper-MLX — multilingual generalist (empty set = multilingual)
+        adapters.append(_make("whisper-mlx", set(), True))
+
+        return adapters
+
+    def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Генерирует LLM-summary для элемента истории по ID."""
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            raise RuntimeError("Параметр id обязателен")
+
+        # Найти элемент в истории
+        with self.store._lock():
+            items = self.store._load_active_items_unlocked()
+        target = None
+        for item in items:
+            if item.id == item_id:
+                target = item
+                break
+        if target is None:
+            raise RuntimeError(f"Элемент не найден: {item_id}")
+
+        text = target.text or ""
+        if len(text) < 50:
+            raise RuntimeError("Текст слишком короткий для summary")
+
+        summary = self._generate_summary(text)
+        if summary is None:
+            # Fallback на локальный summary
+            local = self._summarize_text_locally(text, mode="summary_short", max_points=3)
+            return {
+                "id": item_id,
+                "summary": local["summary"],
+                "llm": False,
+                "source_chars": len(text),
+            }
+
+        return {
+            "id": item_id,
+            "summary": summary,
+            "llm": True,
+            "source_chars": len(text),
+        }
+
     def _handle_extract_action_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """Извлекает задачи/решения/вопросы из транскрипта по item_id через LLM."""
         item_id = str(params.get("id", "")).strip()
@@ -3088,69 +2592,152 @@ class BackendService:
             },
         }
 
-    def _handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список доступных входных аудиоустройств."""
-        # Poll-flood detection: >10 calls/sec → push ipc.audio_device_poll_flood breadcrumb.
-        # Uses a simple sliding 1-second window tracked via _audio_device_call_times deque.
-        _now = time.monotonic()
-        _call_times = getattr(self, "_audio_device_call_times", None)
-        if _call_times is None:
-            import collections  # noqa: PLC0415
-            _call_times = collections.deque()
-            self._audio_device_call_times: "collections.deque[float]" = _call_times
-        _call_times.append(_now)
-        # Drop entries older than 1 second
-        while _call_times and (_now - _call_times[0]) > 1.0:
-            _call_times.popleft()
-        if len(_call_times) > 10:
-            _bus = getattr(self, "_error_bus", None)
-            if _bus is not None:
-                try:
-                    from backend.error_bus import KrabError  # noqa: PLC0415
-                    from backend.error_codes import ERROR_REGISTRY  # noqa: PLC0415
-                    from datetime import datetime, timezone  # noqa: PLC0415
-                    _entry = ERROR_REGISTRY.get("ipc.audio_device_poll_flood", {})
-                    _err = KrabError(
-                        severity=_entry.get("severity", "warn"),
-                        component="ipc",
-                        code="ipc.audio_device_poll_flood",
-                        message_user=_entry.get("user_msg_ru", "IPC: audio device poll flood"),
-                        message_debug=(
-                            f"list_audio_inputs called {len(_call_times)}× in last 1s "
-                            "(poll flood — check Swift audio device picker refresh rate)"
-                        ),
-                        timestamp=datetime.now(timezone.utc),
-                        context={"calls_per_sec": len(_call_times)},
-                        actionable=_entry.get("actionable", False),
-                        action_id=_entry.get("action_id"),
-                    )
-                    _bus.push(_err)
-                except Exception:  # noqa: BLE001
-                    pass
-        items = self._list_audio_inputs()
-        default_input_id = None
-        for item in items:
-            if item.get("is_default"):
-                default_input_id = item.get("id")
-                break
-        return {
-            "items": items,
-            "count": len(items),
-            "default_input_id": default_input_id,
-        }
+    def _handle_list_audio_inputs(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_list_audio_inputs(params)
 
-    def _handle_get_audio_devices(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает список доступных входных аудиоустройств (обёртка для GUI)."""
-        return {"devices": self._list_audio_inputs()}
+    def _handle_get_audio_devices(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_get_audio_devices(params)
+
+    def _handle_transcribe_paths(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_transcribe_paths(params)
+
+    def _transcribe_paths_core(self, params, *, progress_callback=None, cancel_check=None, on_file_start=None, on_file_done=None):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc._transcribe_paths_core(params, progress_callback=progress_callback, cancel_check=cancel_check, on_file_start=on_file_start, on_file_done=on_file_done)
+
+    def _handle_transcribe_paths_async(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_transcribe_paths_async(params)
+
+    def _handle_get_transcribe_progress(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_get_transcribe_progress(params)
+
+    def _handle_cancel_transcribe_job(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_cancel_transcribe_job(params)
+
+    def _handle_preview_transcribe_paths(self, params):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc.handle_preview_transcribe_paths(params)
+
+    @staticmethod
+    def _collect_audio_paths(paths):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._collect_audio_paths(paths)
+
+    def _start_preview_worker(self, quality_profile: str) -> None:
+        """Delegated to RecordingCoreService."""
+        self._recording_core_svc._start_preview_worker(quality_profile=quality_profile)
+
+    def _stop_preview_worker(self) -> None:
+        """Delegated to RecordingCoreService."""
+        self._recording_core_svc._stop_preview_worker()
+
+    def _reset_preview_state(self) -> None:
+        """Delegated to RecordingCoreService."""
+        self._recording_core_svc.reset_preview_state()
+
+    def _preview_loop(self, quality_profile: str) -> None:
+        """Delegated to RecordingCoreService."""
+        self._recording_core_svc._preview_loop(quality_profile)
+
+    def _stop_recorder_guarded(self, stop_tail_trim_ms: int):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc._stop_recorder_guarded(stop_tail_trim_ms)
+
+    @staticmethod
+    def _looks_like_silence_audio(audio, sample_rate, rms_threshold, peak_threshold, active_ratio_threshold):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._looks_like_silence_audio(audio=audio, sample_rate=sample_rate, rms_threshold=rms_threshold, peak_threshold=peak_threshold, active_ratio_threshold=active_ratio_threshold)
+
+    @staticmethod
+    def _looks_like_distant_background_speech(audio, sample_rate, min_peak, min_rms, uniform_frame_threshold, max_uniform_active_ratio):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._looks_like_distant_background_speech(audio=audio, sample_rate=sample_rate, min_peak=min_peak, min_rms=min_rms, uniform_frame_threshold=uniform_frame_threshold, max_uniform_active_ratio=max_uniform_active_ratio)
+
+    @staticmethod
+    def _is_known_prompt_echo(normalized_text):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._is_known_prompt_echo(normalized_text)
+
+    @staticmethod
+    def _contains_repeated_chunk(words, min_repeats=3):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._contains_repeated_chunk(words, min_repeats)
+
+    @staticmethod
+    def _looks_like_looping_artifact(words, min_words, min_bigram_hits):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._looks_like_looping_artifact(words, min_words, min_bigram_hits)
+
+    @staticmethod
+    def _postprocess_transcribed_text(text):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._postprocess_transcribed_text(text)
+
+    @staticmethod
+    def _collapse_immediate_duplicate_phrase(normalized_text):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._collapse_immediate_duplicate_phrase(normalized_text)
+
+    @staticmethod
+    def _postprocess_preview_text(text):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._postprocess_preview_text(text)
+
+    @staticmethod
+    def _extract_transcribed_text(payload):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._extract_transcribed_text(payload)
+
+    @staticmethod
+    def _extract_transcribed_error(payload):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._extract_transcribed_error(payload)
+
+    def _generate_summary(self, text):
+        """Delegated to RecordingCoreService."""
+        return self._recording_core_svc._generate_summary(text)
+
+    @staticmethod
+    def _format_text_with_speakers(text, diarization):
+        """Delegated to RecordingCoreService."""
+        from backend.recording_core_service import RecordingCoreService as _RCS
+        return _RCS._format_text_with_speakers(text, diarization)
+
+    # ------------------------------------------------------------------
+    # Handlers: Disk status, storage breakdown, microphone test
+    # ------------------------------------------------------------------
+
+    def _handle_get_disk_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий статус дискового пространства (немедленная проверка)."""
+        return self._disk_monitor.check_now()
+
+    def _handle_get_storage_breakdown(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает разбивку использования диска по компонентам."""
+        return self.store.get_storage_breakdown()
 
     def _handle_test_microphone(self, params: dict[str, Any]) -> dict[str, Any]:
         """Записывает короткий фрагмент аудио и возвращает RMS/peak уровни."""
         import numpy as np
-
         duration = min(float(params.get("duration_sec", 2.0)), 5.0)
         try:
             import sounddevice as sd  # type: ignore
-
             sample_rate = 16000
             frames = int(duration * sample_rate)
             audio_data = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
@@ -3163,1128 +2750,15 @@ class BackendService:
                 "duration_sec": duration,
                 "rms": round(rms, 6),
                 "peak": round(peak, 6),
-                "devices": self._list_audio_inputs(),
+                "devices": self._recording_core_svc._list_audio_inputs(),
             }
         except Exception as exc:
             logger.warning("test_microphone: ошибка записи — %s", exc)
             return {
                 "ok": False,
                 "error": str(exc),
-                "devices": self._list_audio_inputs(),
+                "devices": self._recording_core_svc._list_audio_inputs(),
             }
-
-    def _handle_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Синхронная транскрибация списка файлов (CLI/legacy путь).
-
-        Делегирует в `_transcribe_paths_core` без progress/cancel коллбеков.
-        """
-        return self._transcribe_paths_core(params)
-
-    def _transcribe_paths_core(
-        self,
-        params: dict[str, Any],
-        *,
-        progress_callback: Callable[[str], None] | None = None,
-        cancel_check: Callable[[], bool] | None = None,
-        on_file_start: Callable[[int, str], None] | None = None,
-        on_file_done: Callable[[int, dict[str, Any] | None, str | None], None] | None = None,
-    ) -> dict[str, Any]:
-        """Общее ядро синхронной и асинхронной транскрибации.
-
-        Args:
-            params: параметры IPC (paths, quality_profile, ...).
-            progress_callback: вызывается движком STT с именем стадии
-                (audio_load/normalize/stt/cleanup/diarize/...). Передаётся в
-                `AudioEngine.transcribe(progress_callback=...)`.
-            cancel_check: предикат — если возвращает True между файлами, цикл
-                прекращается (мид-файл не прерываем, чтобы не оставить STT
-                в неопределённом состоянии).
-            on_file_start: вызывается перед обработкой файла index (0-based) с путём.
-            on_file_done: вызывается после файла — (index, item_dict|None, err|None).
-        """
-        raw_paths = params.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raise RuntimeError("Параметр paths должен быть массивом")
-
-        settings = self._cached_settings()
-        quality_profile = str(params.get("quality_profile") or settings.get("quality_profile", "balanced"))
-        cleanup_profile = str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft"))
-        lang_hint: str | None = params.get("lang_hint") or None
-        translation_mode = str(params.get("translation_mode") or settings.get("translation_mode", "off"))
-        translation_style = str(params.get("translation_style") or settings.get("translation_style", "neutral"))
-        translation_glossary = settings.get("translation_glossary", {})
-        translate_and_paste = bool(
-            params.get("translate_and_paste")
-            if "translate_and_paste" in params
-            else settings.get("translate_and_paste", False)
-        )
-        network_mode = str(settings.get("network_mode", "offline_default"))
-
-        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
-        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
-        selected: list[str] = []
-        for p in selected_raw:
-            resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
-                selected.append(str(resolved))
-            else:
-                return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
-        audio_paths = self._collect_audio_paths(selected)
-        if not audio_paths:
-            return {"items": [], "processed": 0, "errors": ["Не найдено аудиофайлов для транскрибации"]}
-
-        # Загружаем пользовательский vocabulary для подсказок Whisper
-        user_vocabulary = self.vocabulary.load() or []
-
-        items: list[dict[str, Any]] = []
-        errors: list[str] = []
-        for file_index, audio_path in enumerate(audio_paths):
-            # Cancel-between-files: если запрошена отмена, ровно прерываем цикл.
-            if cancel_check is not None and cancel_check():
-                break
-            self._safe_callback(on_file_start, file_index, audio_path)
-            started_at = time.monotonic()
-            try:
-                # Determine audio file duration before transcription
-                audio_duration_sec: float | None = None
-                try:
-                    import soundfile as sf
-                    sf_info = sf.info(audio_path)
-                    audio_duration_sec = round(sf_info.duration, 3)
-                except Exception:
-                    pass  # Non-critical: duration is informational
-
-                # For file imports, default to auto-detect if no explicit hint
-                import_lang_hint = lang_hint if lang_hint else "auto"
-                # Если есть progress_callback — идём напрямую через engine, чтобы
-                # передать kwarg. Иначе используем стабильный путь через Transcriber.
-                if progress_callback is not None:
-                    self.transcriber.engine.set_quality_profile(quality_profile)
-                    transcribe_payload = self.transcriber.engine.transcribe(
-                        audio_path,
-                        cleanup_profile=cleanup_profile,
-                        is_preview=False,
-                        domain="casual",
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                        lang_hint=import_lang_hint,
-                        progress_callback=progress_callback,
-                    )
-                else:
-                    transcribe_payload = self.transcriber.transcribe(
-                        audio_path,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        lang_hint=import_lang_hint,
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                    )
-                text = self._extract_transcribed_text(transcribe_payload)
-                elapsed = round(time.monotonic() - started_at, 3)
-                if not text:
-                    err = self._extract_transcribed_error(transcribe_payload)
-                    err_line = f"{audio_path}: {err}" if err else f"{audio_path}: пустой результат"
-                    errors.append(err_line)
-                    self._safe_callback(on_file_done, file_index, None, err_line)
-                    continue
-                diarization_data = transcribe_payload.get("diarization") if isinstance(transcribe_payload, dict) else None
-                detected_lang = transcribe_payload.get("language", "?") if isinstance(transcribe_payload, dict) else "?"
-
-                translation = self.translator.translate(
-                    text=text,
-                    mode=translation_mode,
-                    network_mode=network_mode,
-                    translation_style=translation_style,
-                    glossary=translation_glossary,
-                )
-                translated_text = translation.text.strip() if translation.ok else ""
-                final_text = translated_text if (translate_and_paste and translated_text) else text
-
-                # Format text with speaker labels if diarization produced multiple speakers
-                display_text = self._format_text_with_speakers(final_text, diarization_data)
-
-                history_item = self.store.add_history_item(
-                    text=display_text,
-                    paste_status="failed",
-                    source_text=text,
-                    translated_text=translated_text,
-                    translation_mode=translation.mode,
-                    source_lang=translation.source_lang,
-                    target_lang=translation.target_lang,
-                    translation_status=translation.status,
-                    translation_engine=translation.engine,
-                    diarization=diarization_data,
-                    audio_duration_sec=audio_duration_sec,
-                    emotion=(
-                        transcribe_payload.get("emotion")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("emotion"), str)
-                        else None
-                    ),
-                    word_timestamps=(
-                        transcribe_payload.get("word_timestamps")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("word_timestamps"), list)
-                        else None
-                    ),
-                    speaker_turns=(
-                        transcribe_payload.get("speaker_turns")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("speaker_turns"), list)
-                        else None
-                    ),
-                )
-
-                # Auto-summary для длинных транскрипций (>500 символов)
-                summary: str | None = None
-                if len(final_text) > 500:
-                    summary = self._generate_summary(final_text)
-
-                # Save transcript to file
-                try:
-                    transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                    transcripts_dir.mkdir(exist_ok=True)
-                    source_name = Path(audio_path).stem
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    transcript_filename = f"{timestamp}_{source_name}.md"
-                    transcript_path = transcripts_dir / transcript_filename
-                    with open(transcript_path, "w", encoding="utf-8") as f:
-                        f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")
-                        f.write(f"- Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        if audio_duration_sec is not None:
-                            _mins = int(audio_duration_sec) // 60
-                            _secs = audio_duration_sec - _mins * 60
-                            f.write(f"- Аудио: {_mins}м {_secs:.1f}с\n")
-                        f.write(f"- Обработка: {elapsed:.1f}с\n")
-                        f.write(f"- Источник: {audio_path}\n")
-                        f.write(f"- Язык: {detected_lang}\n")
-                        diar_info = transcribe_payload.get("diarization", {}) if isinstance(transcribe_payload, dict) else {}
-                        if diar_info and diar_info.get("enabled"):
-                            speakers = diar_info.get("speaker_turns", [])
-                            unique_speakers = len(set(t.get("speaker") for t in speakers))
-                            f.write(f"- Спикеры: {unique_speakers}\n")
-                        if summary:
-                            f.write(f"\n## Краткое содержание\n\n{summary}\n")
-                        # Use speaker-labeled text if diarization is active
-                        if diar_info and diar_info.get("enabled") and diar_info.get("speaker_turns"):
-                            f.write(f"\n## Диалог\n\n{display_text}\n")
-                        else:
-                            f.write(f"\n## Текст\n\n{final_text}\n")
-                        if translated_text:
-                            f.write(f"\n## Перевод ({translation.mode})\n\n{translated_text}\n")
-                except Exception as exc:
-                    logger.warning("Не удалось сохранить транскрипт в файл: %s", exc)
-
-                item_result: dict[str, Any] = {
-                    "path": audio_path,
-                    "text": display_text,
-                    "original_text": text,
-                    "translated_text": translated_text,
-                    "translation_mode": translation.mode,
-                    "translation_style": translation_style,
-                    "translation_status": translation.status,
-                    "source_lang": translation.source_lang,
-                    "target_lang": translation.target_lang,
-                    "history_id": history_item.id,
-                    "duration_sec": elapsed,
-                    "audio_duration_sec": audio_duration_sec,
-                    "language": detected_lang,
-                }
-                if summary:
-                    item_result["summary"] = summary
-                items.append(item_result)
-                self._safe_callback(on_file_done, file_index, item_result, None)
-            except Exception as exc:
-                err_msg = str(exc)
-                file_name = Path(audio_path).name
-                if "Resource deadlock" in err_msg or "errno 11" in err_msg or "[Errno 11]" in err_msg or "[Errno 35]" in err_msg:
-                    err_msg = f"Файл заблокирован (возможно iCloud): {file_name}"
-                elif "timeout" in err_msg.lower():
-                    err_msg = f"Превышено время транскрибации: {file_name}"
-                elif "No such file" in err_msg:
-                    err_msg = f"Файл не найден: {file_name}"
-                elif "Permission denied" in err_msg:
-                    err_msg = f"Нет доступа к файлу: {file_name}"
-                elif (
-                    "too large" in err_msg.lower()
-                    or "MAX_AUDIO_MB" in err_msg
-                    or "слишком большой" in err_msg.lower()
-                ):
-                    err_msg = f"{file_name}: {err_msg}"
-                elif "Unsupported" in err_msg or "codec" in err_msg.lower():
-                    err_msg = f"Неподдерживаемый формат аудио: {file_name}"
-                else:
-                    err_msg = f"{file_name}: {err_msg}"
-                errors.append(err_msg)
-                self._safe_callback(on_file_done, file_index, None, err_msg)
-
-        return {
-            "items": items,
-            "processed": len(items),
-            "errors": errors,
-        }
-
-    def _handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу.
-
-        Запускает фоновый worker-поток, прогресс доступен через
-        `get_transcribe_progress(job_id)`. Отмена — `cancel_transcribe_job`.
-        Полный контракт — см. /tmp/krab-ear-async/API_CONTRACT.md.
-        """
-        raw_paths = params.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raise RuntimeError("Параметр paths должен быть массивом")
-        # Валидируем/предсчитываем список аудио-путей заранее, чтобы
-        # total_files в прогрессе соответствовал реально обрабатываемым файлам.
-        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
-        allowed_roots = [
-            r.resolve()
-            for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
-        ]
-        selected: list[str] = []
-        for p in selected_raw:
-            resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
-                selected.append(str(resolved))
-        try:
-            audio_paths = self._collect_audio_paths(selected) if selected else []
-        except Exception:
-            audio_paths = []
-        total_files = len(audio_paths)
-
-        job_id = self._job_tracker.create_job(total_files=total_files)
-
-        # Копия параметров (params mutable — защищаемся от побочных мутаций).
-        job_params = dict(params)
-
-        def _emit_status(
-            op: str,
-            stage: str = "",
-            progress: float | None = None,
-            current_file: str | None = None,
-            file_index: int | None = None,
-        ) -> None:
-            payload: dict[str, Any] = {
-                "op": op,
-                "stage": stage,
-                "total_files": total_files,
-                "ts": time.time(),
-            }
-            if progress is not None:
-                payload["progress"] = progress
-            if current_file is not None:
-                payload["current_file"] = current_file
-            if file_index is not None:
-                payload["file_index"] = file_index
-            event_bus.emit("app.status", payload)
-
-        def _on_file_start(index: int, audio_path: str) -> None:
-            self._job_tracker.update(
-                job_id,
-                status="running",
-                current_file=Path(audio_path).name,
-                current_stage="idle",
-                file_index=index + 1,
-            )
-            _emit_status(
-                "transcribe_job",
-                stage="idle",
-                progress=index / total_files if total_files else 0.0,
-                current_file=Path(audio_path).name,
-                file_index=index + 1,
-            )
-
-        def _on_file_done(
-            index: int,
-            item: dict[str, Any] | None,
-            err: str | None,
-        ) -> None:
-            state = self._job_tracker.get(job_id) or {}
-            new_items = list(state.get("items") or [])
-            new_errors = list(state.get("errors") or [])
-            if item is not None:
-                new_items.append(item)
-            if err is not None:
-                new_errors.append(err)
-            self._job_tracker.update(
-                job_id,
-                items=new_items,
-                errors=new_errors,
-                processed=len(new_items),
-            )
-            _emit_status(
-                "transcribe_job",
-                stage="idle",
-                progress=(index + 1) / total_files if total_files else 1.0,
-                file_index=index + 1,
-            )
-
-        def _progress_callback(stage: str) -> None:
-            self._job_tracker.update(job_id, current_stage=str(stage))
-            state = self._job_tracker.get(job_id) or {}
-            fi = state.get("file_index") or 0
-            _emit_status(
-                "transcribe_job",
-                stage=str(stage),
-                progress=max(0, fi - 1) / total_files if total_files else 0.0,
-                file_index=fi,
-            )
-
-        def _cancel_check() -> bool:
-            state = self._job_tracker.get(job_id)
-            return bool(state and state.get("cancel_requested"))
-
-        def _worker() -> None:
-            try:
-                self._job_tracker.update(job_id, status="running")
-                _emit_status("transcribe_job", stage="started", progress=0.0)
-                result = self._transcribe_paths_core(
-                    job_params,
-                    progress_callback=_progress_callback,
-                    cancel_check=_cancel_check,
-                    on_file_start=_on_file_start,
-                    on_file_done=_on_file_done,
-                )
-                # Финальное состояние: cancelled | done.
-                state = self._job_tracker.get(job_id) or {}
-                if state.get("cancel_requested"):
-                    _emit_status("idle", stage="", progress=1.0)
-                    self._job_tracker.update(
-                        job_id,
-                        status="cancelled",
-                        items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
-                        processed=len(result.get("items") or []),
-                        current_stage="idle",
-                        finished_at=time.monotonic(),
-                    )
-                else:
-                    _emit_status("idle", stage="", progress=1.0)
-                    self._job_tracker.mark_done(
-                        job_id,
-                        items=list(result.get("items") or []),
-                        errors=list(result.get("errors") or []),
-                    )
-            except Exception as exc:
-                logger.exception("Async transcribe job %s упал", job_id)
-                _emit_status("idle", stage="", progress=1.0)
-                self._job_tracker.mark_failed(job_id, str(exc))
-
-        thread = threading.Thread(
-            target=_worker,
-            name=f"transcribe-{job_id}",
-            daemon=True,
-        )
-        thread.start()
-        return {"job_id": job_id}
-
-    def _handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает текущее состояние async-job'а.
-
-        См. схему ответа в API_CONTRACT.md. Поле `items` заполнено только
-        после `status == "done"`, но private-накопление ведётся по мере обработки.
-        """
-        job_id = str(params.get("job_id") or "").strip()
-        if not job_id:
-            raise RuntimeError("Параметр job_id обязателен")
-        state = self._job_tracker.get(job_id)
-        if state is None:
-            raise RuntimeError(f"Неизвестный job_id: {job_id}")
-
-        status = str(state.get("status") or "queued")
-        items_raw = list(state.get("items") or [])
-        # Контракт: items отдаём только когда job завершён.
-        items_out = items_raw if status in ("done", "failed", "cancelled") else []
-
-        # ETA: грубая оценка при наличии audio_duration_sec у последнего item'а
-        # (при отсутствии движковой метрики). 10× реалтайм для max-профиля.
-        elapsed_sec = float(state.get("elapsed_sec") or 0.0)
-        eta_sec: float | None = None
-        total_audio = 0.0
-        for it in items_raw:
-            dur = it.get("audio_duration_sec") if isinstance(it, dict) else None
-            if isinstance(dur, (int, float)):
-                total_audio += float(dur)
-        if total_audio > 0:
-            eta_sec = max(0.0, total_audio * 10.0 - elapsed_sec)
-
-        return {
-            "status": status,
-            "current_file": str(state.get("current_file") or ""),
-            "current_stage": str(state.get("current_stage") or "idle"),
-            "file_index": int(state.get("file_index") or 0),
-            "total_files": int(state.get("total_files") or 0),
-            "elapsed_sec": round(elapsed_sec, 3),
-            "eta_sec": round(eta_sec, 3) if eta_sec is not None else None,
-            "processed": int(state.get("processed") or 0),
-            "errors": list(state.get("errors") or []),
-            "items": items_out,
-        }
-
-    def _handle_cancel_transcribe_job(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сигнализирует воркеру об отмене job'а.
-
-        Статус реально меняется на 'cancelled' после завершения текущего файла —
-        мид-файл прерываний не делаем, чтобы STT не оставался в inconsistent state.
-        """
-        job_id = str(params.get("job_id") or "").strip()
-        if not job_id:
-            raise RuntimeError("Параметр job_id обязателен")
-        cancelled = self._job_tracker.cancel(job_id)
-        return {"cancelled": bool(cancelled)}
-
-    def _handle_preview_transcribe_paths(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Быстрый предпросмотр импорта: считает аудиофайлы без транскрибации."""
-        raw_paths = params.get("paths", [])
-        if not isinstance(raw_paths, list):
-            raise RuntimeError("Параметр paths должен быть массивом")
-
-        selected_raw = [str(item).strip() for item in raw_paths if str(item).strip()]
-        allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
-        selected: list[str] = []
-        for p in selected_raw:
-            resolved = Path(p).expanduser().resolve()
-            if any(str(resolved).startswith(str(root)) for root in allowed_roots):
-                selected.append(str(resolved))
-            else:
-                return {"items": [], "processed": 0, "errors": [f"Path outside allowed directories: {resolved}"]}
-        audio_paths = self._collect_audio_paths(selected)
-        sample_limit = int(params.get("sample_limit", 5) or 5)
-        safe_sample_limit = max(1, min(sample_limit, 50))
-        by_ext: dict[str, int] = {}
-        total_bytes = 0
-        # Группировка по родительской папке для отображения структуры.
-        by_folder: dict[str, int] = {}
-        for audio_path in audio_paths:
-            suffix = Path(audio_path).suffix.lower() or "<none>"
-            by_ext[suffix] = by_ext.get(suffix, 0) + 1
-            folder = str(Path(audio_path).parent)
-            by_folder[folder] = by_folder.get(folder, 0) + 1
-            try:
-                total_bytes += Path(audio_path).stat().st_size
-            except FileNotFoundError:
-                continue
-        return {
-            "input_count": len(selected),
-            "audio_count": len(audio_paths),
-            "folder_count": len(by_folder),
-            "by_folder": by_folder,
-            "sample": audio_paths[:safe_sample_limit],
-            "by_ext": by_ext,
-            "total_bytes": total_bytes,
-        }
-
-    @staticmethod
-    def _collect_audio_paths(paths: list[str]) -> list[str]:
-        audio_ext = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".mp4", ".m4b", ".aif", ".aiff"}
-        result: list[str] = []
-
-        for raw in paths:
-            path = Path(raw).expanduser()
-            if not path.exists():
-                continue
-
-            if path.is_file():
-                if path.suffix.lower() in audio_ext:
-                    result.append(str(path.resolve()))
-                continue
-
-            if path.is_dir():
-                # Сортируем по пути, чтобы части записей звонков
-                # (part1.m4a, part2.m4a, ...) шли в правильном порядке.
-                candidates = sorted(
-                    (c for c in path.rglob("*") if c.is_file() and c.suffix.lower() in audio_ext),
-                    key=lambda c: str(c),
-                )
-                result.extend(str(c.resolve()) for c in candidates)
-
-        # Убираем дубликаты, сохраняем порядок.
-        unique: list[str] = []
-        seen: set[str] = set()
-        for item in result:
-            if item in seen:
-                continue
-            seen.add(item)
-            unique.append(item)
-        return unique
-
-    def _start_preview_worker(self, quality_profile: str) -> None:
-        self._stop_preview_worker()
-        # Defensive guard: если используемый Transcriber не имеет метода
-        # transcribe_preview (например, _FakeTranscriber в тестах) — НЕ запускаем
-        # preview thread. Иначе цикл будет ловить AttributeError каждые ~1.5с
-        # и спамить логи (на CI приводило к 10-min job timeout).
-        if not callable(getattr(self.transcriber, "transcribe_preview", None)):
-            logger.info(
-                "Realtime preview disabled: transcriber %s не имеет метода transcribe_preview",
-                type(self.transcriber).__name__,
-            )
-            return
-        self._preview_stop_event.clear()
-        self._preview_thread = threading.Thread(
-            target=self._preview_loop,
-            args=(quality_profile,),
-            daemon=True,
-        )
-        self._preview_thread.start()
-
-    def _stop_preview_worker(self) -> None:
-        self._preview_stop_event.set()
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=IPC_PREVIEW_THREAD_TIMEOUT_SEC)
-        self._preview_thread = None
-
-    def _reset_preview_state(self) -> None:
-        with self._preview_lock:
-            self._preview_text = ""
-            self._preview_duration_sec = 0.0
-            self._preview_updated_at = 0.0
-
-    def _preview_loop(self, quality_profile: str) -> None:
-        snapshot_audio = getattr(self.recorder, "snapshot_audio", None)
-        min_samples = int(getattr(self.recorder, "sample_rate", 16000) * 0.8)
-        last_refresh_duration = 0.0
-        # Adaptive backoff: увеличивается при пустых результатах, сбрасывается при речи.
-        poll_interval = 0.35
-        _POLL_MIN = 0.35
-        _POLL_MAX = 1.5
-        _POLL_BACKOFF = 1.5
-
-        while not self._preview_stop_event.is_set():
-            if not bool(getattr(self.recorder, "is_recording", False)):
-                break
-
-            if not callable(snapshot_audio):
-                self._preview_stop_event.wait(poll_interval)
-                continue
-
-            try:
-                audio_data, duration_sec = snapshot_audio(max_duration_sec=12.0)
-            except Exception:
-                self._preview_error_count += 1
-                logger.exception("Realtime preview: ошибка snapshot_audio")
-                if self._preview_error_count > 10:
-                    logger.warning(
-                        "Realtime preview: %d ошибок подряд, возможна системная проблема",
-                        self._preview_error_count,
-                    )
-                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
-                continue
-
-            with self._preview_lock:
-                self._preview_duration_sec = float(duration_sec)
-
-            current_size = int(getattr(audio_data, "size", 0))
-            if current_size < min_samples:
-                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
-                continue
-            # Важный нюанс: после достижения лимита snapshot-а размер буфера стабилизируется.
-            # Поэтому ориентируемся на прогресс времени записи, а не на size.
-            if duration_sec - last_refresh_duration < 0.9:
-                self._preview_stop_event.wait(_POLL_MIN)
-                continue
-
-            try:
-                preview_payload = self.transcriber.transcribe_preview(
-                    audio_data,
-                    quality_profile=quality_profile,
-                )
-                preview_text = self._extract_transcribed_text(preview_payload)
-                preview_text = self._postprocess_preview_text(preview_text)
-            except Exception:
-                self._preview_error_count += 1
-                logger.exception("Realtime preview: ошибка transcribe_preview")
-                if self._preview_error_count > 10:
-                    logger.warning(
-                        "Realtime preview: %d ошибок подряд, возможна системная проблема",
-                        self._preview_error_count,
-                    )
-                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-                self._preview_stop_event.wait(poll_interval)
-                continue
-
-            if self._preview_error_count > 0:
-                self._preview_error_last_reset_ts = time.time()
-            self._preview_error_count = 0
-            if preview_text:
-                with self._preview_lock:
-                    self._preview_text = preview_text[-900:]
-                    self._preview_updated_at = float(duration_sec)
-                event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                    text=preview_text[-900:],
-                    duration_sec=float(duration_sec),
-                ))
-                poll_interval = _POLL_MIN
-            else:
-                with self._preview_lock:
-                    self._preview_text = ""
-                    self._preview_updated_at = float(duration_sec)
-                poll_interval = min(poll_interval * _POLL_BACKOFF, _POLL_MAX)
-            last_refresh_duration = float(duration_sec)
-            self._preview_stop_event.wait(poll_interval)
-
-    @staticmethod
-    def _list_audio_inputs() -> list[dict[str, Any]]:
-        """Пытается безопасно получить список входных аудиоустройств."""
-        try:
-            import sounddevice as sd  # type: ignore
-        except Exception as exc:
-            logger.warning("Failed to list audio inputs: %s", exc)
-            return []
-
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            logger.exception("Не удалось получить список аудиоустройств")
-            return []
-
-        hostapis: list[str] = []
-        try:
-            hostapi_payload = sd.query_hostapis()
-            hostapis = [str(item.get("name", "")) for item in hostapi_payload]
-        except Exception:
-            hostapis = []
-
-        default_input_idx = None
-        try:
-            default_device = sd.default.device
-            if isinstance(default_device, (list, tuple)) and default_device:
-                default_input_idx = int(default_device[0])
-        except Exception:
-            default_input_idx = None
-
-        results: list[dict[str, Any]] = []
-        for index, device in enumerate(devices):
-            try:
-                max_input_channels = int(device.get("max_input_channels", 0))
-            except Exception:
-                max_input_channels = 0
-            if max_input_channels <= 0:
-                continue
-            hostapi_index = int(device.get("hostapi", -1))
-            hostapi_name = hostapis[hostapi_index] if 0 <= hostapi_index < len(hostapis) else ""
-            name = str(device.get("name", f"Input {index}")).strip()
-            lowered = name.lower()
-            tags: list[str] = []
-            if "blackhole" in lowered:
-                tags.append("loopback")
-            if "shure" in lowered or "mic" in lowered or "microphone" in lowered:
-                tags.append("mic")
-            if "loopback" in lowered and "loopback" not in tags:
-                tags.append("loopback")
-            results.append(
-                {
-                    "id": index,
-                    "name": name,
-                    "hostapi": hostapi_name,
-                    "max_input_channels": max_input_channels,
-                    "default_samplerate": int(float(device.get("default_samplerate", 0) or 0)),
-                    "is_default": bool(default_input_idx == index),
-                    "tags": tags,
-                }
-            )
-        return results
-
-    @staticmethod
-    def _error(request_id: Any, code: str, message: str) -> dict[str, Any]:
-        return {
-            "id": request_id,
-            "ok": False,
-            "error": {"code": code, "message": message},
-        }
-
-    @staticmethod
-    def _coerce_bool(value: Any, default: bool) -> bool:
-        """Нормализует bool-поля из UI/JSON с поддержкой строковых значений."""
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return default
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "on", "yes"}:
-                return True
-            if normalized in {"0", "false", "off", "no"}:
-                return False
-        return default
-
-    @staticmethod
-    def _coerce_bounded(value: Any, default: int | float, min_value: int | float, max_value: int | float) -> int | float:
-        """Нормализует числовое значение в допустимый диапазон. Тип определяется default."""
-        coerce = int if isinstance(default, int) else float
-        try:
-            parsed = coerce(value)
-        except (TypeError, ValueError):
-            parsed = coerce(default)
-        return max(min_value, min(parsed, max_value))
-
-    def _stop_recorder_guarded(self, stop_tail_trim_ms: int) -> tuple[Any, float] | None:
-        """
-        Останавливает рекордер с поддержкой старых сигнатур stop().
-
-        Нужен для совместимости фейков/старых реализаций, где метод `stop`
-        ещё не принимает `trim_tail_ms`.
-        """
-        stop_callable = getattr(self.recorder, "stop", None)
-        if not callable(stop_callable):
-            raise RuntimeError("Рекордер не поддерживает stop()")
-        try:
-            return stop_callable(trim_tail_ms=stop_tail_trim_ms)
-        except TypeError:
-            return stop_callable()
-
-    @staticmethod
-    def _looks_like_silence_audio(
-        audio: Any,
-        sample_rate: int,
-        rms_threshold: float,
-        peak_threshold: float,
-        active_ratio_threshold: float,
-    ) -> bool:
-        """
-        Эвристически определяет, есть ли в буфере реальная речь.
-
-        Логика:
-        - очень низкие peak/rms -> считаем тишиной;
-        - иначе считаем долю «активных» 20мс фреймов и отсекаем фоновой шум.
-        """
-        try:
-            data = np.asarray(audio, dtype=np.float32).reshape(-1)
-        except Exception:
-            return False
-        if data.size == 0:
-            return True
-
-        abs_data = np.abs(data)
-        peak = float(abs_data.max(initial=0.0))
-        rms = float(np.sqrt(np.mean(np.square(data), dtype=np.float64)))
-        if peak <= peak_threshold and rms <= rms_threshold:
-            return True
-
-        frame_size = max(1, int(sample_rate * 0.02))  # 20мс
-        frame_count = int(data.size // frame_size)
-        if frame_count <= 0:
-            return peak <= (peak_threshold * 1.2) and rms <= (rms_threshold * 1.4)
-
-        shaped = data[: frame_count * frame_size].reshape(frame_count, frame_size)
-        frame_rms = np.sqrt(np.mean(np.square(shaped), axis=1, dtype=np.float64))
-        activity_threshold = max(rms_threshold * 2.0, 0.0035)
-        active_ratio = float(np.mean(frame_rms >= activity_threshold))
-
-        return active_ratio < active_ratio_threshold and peak <= (peak_threshold * 1.5)
-
-    @staticmethod
-    def _looks_like_distant_background_speech(
-        audio: Any,
-        sample_rate: int,
-        min_peak: float,
-        min_rms: float,
-        uniform_frame_threshold: float,
-        max_uniform_active_ratio: float,
-    ) -> bool:
-        """
-        Эвристика "дальняя фоновая речь", чтобы не коммитить ТВ/видео вместо диктовки.
-
-        Идея:
-        - если уровень слишком низкий (нет близкой речи);
-        - и при этом энергия распределена почти равномерно без естественных пауз,
-          что характерно для далёкого источника/фона.
-        """
-        try:
-            data = np.asarray(audio, dtype=np.float32).reshape(-1)
-        except Exception:
-            return False
-        if data.size == 0:
-            return False
-
-        abs_data = np.abs(data)
-        peak = float(abs_data.max(initial=0.0))
-        rms = float(np.sqrt(np.mean(np.square(data), dtype=np.float64)))
-        low_level = peak < min_peak and rms < min_rms
-
-        frame_size = max(1, int(sample_rate * 0.02))  # 20мс
-        frame_count = int(data.size // frame_size)
-        if frame_count <= 0:
-            return low_level
-
-        shaped = data[: frame_count * frame_size].reshape(frame_count, frame_size)
-        frame_rms = np.sqrt(np.mean(np.square(shaped), axis=1, dtype=np.float64))
-        mean_rms = float(np.mean(frame_rms))
-        std_rms = float(np.std(frame_rms))
-        variation_coeff = std_rms / max(mean_rms, 1e-8)
-        duration_sec = float(data.size) / max(float(sample_rate), 1.0)
-
-        # Для тихих сигналов опускаем порог активности, иначе равномерный фон
-        # может казаться "неактивным" и проскальзывать мимо фильтра.
-        dynamic_uniform_threshold = max(0.0012, min(uniform_frame_threshold, max(min_rms * 0.35, 0.0012)))
-        active_ratio = float(np.mean(frame_rms >= dynamic_uniform_threshold))
-
-        # Равномерный плотный поток без естественных пауз считаем фоном даже при чуть
-        # более высоком уровне: это типичный паттерн "ролик на фоне".
-        background_pattern = active_ratio >= max_uniform_active_ratio and variation_coeff < 0.35
-        very_uniform = active_ratio >= 0.96 and variation_coeff < 0.18
-        return background_pattern and (low_level or (very_uniform and duration_sec >= 4.0))
-
-    @staticmethod
-    def _is_known_prompt_echo(normalized_text: str) -> bool:
-        """
-        Отлавливает типовые фразы-артефакты, которые не должны попадать в финальный текст.
-
-        Проверяем как точные совпадения, так и вхождения фрагментов: в реальности
-        артефакт часто приходит с обрывами или повтором одной и той же инструкции.
-        """
-        normalized = str(normalized_text or "").strip()
-        if not normalized:
-            return True
-
-        blocked_fragments = (
-            "продолжение следует",
-            "to be continued",
-            "сохраняй смысл ставь корректную пунктуац",
-            "сохраняй смысл ставь корректную пункту",
-            "ставь корректную пунктуац",
-            "ставь корректную пункту",
-        )
-        if any(fragment in normalized for fragment in blocked_fragments):
-            return True
-
-        words = normalized.split()
-        compact = " ".join(words)
-        if (
-            "сохраняй" in words
-            and "смысл" in words
-            and any(token.startswith("корр") for token in words)
-            and any(token.startswith("пункт") for token in words)
-        ):
-            return True
-
-        return bool(re.search(r"сохраняй\s+смысл.*корр\w*.*пункт\w*", compact))
-
-    @staticmethod
-    def _contains_repeated_chunk(words: list[str], min_repeats: int = 3) -> bool:
-        """
-        Ищет подряд повторяющиеся куски фразы (типичный зацикленный артефакт модели).
-        """
-        total = len(words)
-        if total < 6:
-            return False
-
-        max_chunk = min(7, total // min_repeats)
-        for chunk_size in range(2, max_chunk + 1):
-            start = 0
-            while start + (chunk_size * min_repeats) <= total:
-                chunk = words[start: start + chunk_size]
-                repeats = 1
-                while start + (chunk_size * (repeats + 1)) <= total:
-                    next_chunk = words[
-                        start + (chunk_size * repeats): start + (chunk_size * (repeats + 1))
-                    ]
-                    if next_chunk != chunk:
-                        break
-                    repeats += 1
-                if repeats >= min_repeats:
-                    return True
-                start += 1
-        return False
-
-    @staticmethod
-    def _looks_like_looping_artifact(words: list[str], min_words: int, min_bigram_hits: int) -> bool:
-        """
-        Детектирует «петли» и низкоинформативные повторы в транскрибе.
-        """
-        if len(words) < min_words:
-            return False
-
-        counts: dict[str, int] = {}
-        for token in words:
-            counts[token] = counts.get(token, 0) + 1
-
-        unique_ratio = len(counts) / max(1, len(words))
-        max_freq = max(counts.values()) if counts else 0
-        if unique_ratio <= 0.42 and max_freq >= max(3, int(len(words) * 0.34)):
-            return True
-
-        if len(counts) <= 2 and len(words) >= 5 and max_freq >= 4:
-            return True
-
-        bigram_counts: dict[tuple[str, str], int] = {}
-        for idx in range(len(words) - 1):
-            key = (words[idx], words[idx + 1])
-            bigram_counts[key] = bigram_counts.get(key, 0) + 1
-        top_bigram_freq = max(bigram_counts.values()) if bigram_counts else 0
-        if top_bigram_freq >= max(min_bigram_hits, len(words) // 5):
-            return True
-
-        return BackendService._contains_repeated_chunk(words)
-
-    @staticmethod
-    def _postprocess_transcribed_text(text: str) -> str:
-        """
-        Дополнительная фильтрация и базовая нормализация пунктуации.
-
-        Цель: уменьшить артефакты на пустом/шумовом вводе и чуть улучшить читаемость.
-
-        ВАЖНО: каждый из 3-х путей возврата `""` логируется на WARNING уровне
-        с сэмплом первых 80 символов raw text — иначе debugging "почему текст
-        обнулился при confidence=0.87" невозможен.
-        """
-        logger = logging.getLogger("KrabEar.Backend.Service")
-        clean = str(text or "").strip()
-        if not clean:
-            return ""
-
-        lowered = clean.lower()
-        # Явные тех-артефакты инструментального вывода.
-        if "<begin_of_box>" in lowered or "<end_of_box>" in lowered or "\"action\":" in lowered:
-            logger.warning(
-                "postprocess: drop reason=tech_artifact, len=%d, sample=%r",
-                len(clean), clean[:80],
-            )
-            return ""
-
-        normalized = TextUtils.normalize_phrase(clean)
-        if BackendService._is_known_prompt_echo(normalized):
-            logger.warning(
-                "postprocess: drop reason=known_prompt_echo, len=%d, sample=%r",
-                len(clean), clean[:80],
-            )
-            return ""
-
-        collapsed_duplicate = BackendService._collapse_immediate_duplicate_phrase(normalized)
-        if collapsed_duplicate:
-            clean = collapsed_duplicate
-            normalized = TextUtils.normalize_phrase(clean)
-
-        words = re.findall(r"[A-Za-zА-Яа-я0-9'-]+", clean.lower())
-        if BackendService._looks_like_looping_artifact(words, min_words=8, min_bigram_hits=4):
-            logger.warning(
-                "postprocess: drop reason=looping_artifact, len=%d, sample=%r",
-                len(clean), clean[:80],
-            )
-            return ""
-
-        clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
-        clean = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", clean)
-        clean = re.sub(r"\s+", " ", clean).strip()
-
-        first_alpha_idx = next((idx for idx, char in enumerate(clean) if char.isalpha()), -1)
-        if first_alpha_idx >= 0:
-            clean = clean[:first_alpha_idx] + clean[first_alpha_idx].upper() + clean[first_alpha_idx + 1:]
-
-        if not re.search(r"[.!?…]$", clean):
-            if len(words) >= 4:
-                clean = f"{clean}."
-
-        return clean.strip()
-
-    @staticmethod
-    def _collapse_immediate_duplicate_phrase(normalized_text: str) -> str:
-        """
-        Схлопывает паттерн «одна и та же фраза подряд два раза».
-
-        Пример:
-        «ну он просто два раза теперь пишет ну он просто два раза теперь пишет»
-        -> «Ну он просто два раза теперь пишет.»
-        """
-        normalized = str(normalized_text or "").strip()
-        if not normalized:
-            return ""
-
-        words = normalized.split()
-        total = len(words)
-        if total < 8:
-            return ""
-
-        # Базовый сценарий: точное дублирование 1-в-1.
-        if total % 2 == 0:
-            half = total // 2
-            if words[:half] == words[half:]:
-                collapsed = " ".join(words[:half]).strip()
-                if not collapsed:
-                    return ""
-                return f"{collapsed[0].upper()}{collapsed[1:]}."
-
-        # Допуск ±1 токен на хвосте (из-за пунктуации/обрезки).
-        for shift in (-1, 1):
-            left = total // 2
-            right = total - left
-            if abs(left - right) != 1:
-                continue
-            if shift < 0 and left > right:
-                if words[:right] == words[left:]:
-                    collapsed = " ".join(words[:right]).strip()
-                    if collapsed:
-                        return f"{collapsed[0].upper()}{collapsed[1:]}."
-            if shift > 0 and right > left:
-                if words[:left] == words[right:]:
-                    collapsed = " ".join(words[:left]).strip()
-                    if collapsed:
-                        return f"{collapsed[0].upper()}{collapsed[1:]}."
-
-        return ""
-
-    @staticmethod
-    def _postprocess_preview_text(text: str) -> str:
-        """
-        Лёгкая фильтрация realtime-preview без агрессивной пунктуации.
-
-        Нужна, чтобы в live-subtitles не проскакивали тех-артефакты/промпт-эхо.
-        """
-        clean = str(text or "").strip()
-        if not clean:
-            return ""
-
-        lowered = clean.lower()
-        if "<begin_of_box>" in lowered or "<end_of_box>" in lowered or "\"action\":" in lowered:
-            return ""
-
-        normalized = TextUtils.normalize_phrase(clean)
-        if BackendService._is_known_prompt_echo(normalized):
-            return ""
-
-        words = re.findall(r"[A-Za-zА-Яа-я0-9'-]+", clean.lower())
-        if BackendService._looks_like_looping_artifact(words, min_words=6, min_bigram_hits=3):
-            return ""
-
-        clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
-        clean = re.sub(r"([,.;:!?])([^\s])", r"\1 \2", clean)
-        clean = re.sub(r"\s+", " ", clean).strip()
-        return clean
-
-    @staticmethod
-    def _extract_transcribed_text(payload: Any) -> str:
-        """
-        Нормализует результат транскрибации в строку.
-
-        Исторически backend получал `str`, но текущий Transcriber отдает `dict`.
-        Метод поддерживает оба контракта, чтобы не ломать stop/preview pipelines.
-        """
-        if payload is None:
-            return ""
-        if isinstance(payload, str):
-            return payload.strip()
-        if isinstance(payload, dict):
-            direct_text = payload.get("text")
-            if direct_text is not None:
-                return str(direct_text).strip()
-            nested = payload.get("result")
-            if isinstance(nested, dict):
-                nested_text = nested.get("text")
-                if nested_text is not None:
-                    return str(nested_text).strip()
-            return ""
-        return str(payload).strip()
-
-    @staticmethod
-    def _extract_transcribed_error(payload: Any) -> str:
-        """Извлекает текст ошибки из payload транскрибации, если он присутствует."""
-        if isinstance(payload, dict):
-            error = payload.get("error")
-            if error is not None:
-                return str(error).strip()
-        return ""
 
     # ------------------------------------------------------------------
     # Handlers: ActivityCalendar
@@ -4509,33 +2983,370 @@ class BackendService:
 
     # ── Telegram Bridge ──────────────────────────────────────────────────────
 
-    # ── Apple / Telegram integrations — delegated to AppleIntegrationService ──
-
     def _handle_send_to_telegram(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_send_to_telegram(params)
+        """Отправляет текст в Telegram через main Krab userbot.
+
+        Параметры:
+          - text: str — текст сообщения (обязательный, не пустой).
+          - chat_id: int | str — ID или username чата Telegram (обязательный).
+          - reply_to: int | None — ID сообщения для цитирования (опционально).
+
+        Возвращает:
+          {message_id, sent_at, chat_title}
+
+        Ошибки:
+          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
+          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
+          - "circuit_open" — если circuit breaker разомкнут после 3 ошибок подряд.
+        """
+        if not settings.TELEGRAM_BRIDGE_ENABLED:
+            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
+
+        text = str(params.get("text") or "").strip()
+        if not text:
+            raise ValueError("Параметр 'text' обязателен и не может быть пустым")
+
+        raw_chat_id = params.get("chat_id")
+        if raw_chat_id is None or str(raw_chat_id).strip() == "":
+            raise ValueError("Параметр 'chat_id' обязателен")
+        chat_id: int | str
+        try:
+            chat_id = int(raw_chat_id)
+        except (ValueError, TypeError):
+            chat_id = str(raw_chat_id).strip()
+
+        reply_to_raw = params.get("reply_to")
+        reply_to: int | None = None
+        if reply_to_raw is not None:
+            try:
+                reply_to = int(reply_to_raw)
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            result = self._telegram_bridge.send_message(
+                text=text,
+                chat_id=chat_id,
+                reply_to=reply_to,
+            )
+        except CircuitBreakerOpen as exc:
+            raise RuntimeError(f"circuit_open: {exc}") from exc
+        except (Exception,) as exc:
+            msg = str(exc)
+            if "krab_unavailable" in msg or "krab_error" in msg:
+                raise RuntimeError(msg) from exc
+            # ConnectionError, Timeout и др. — оборачиваем в понятный код
+            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+
+        return result
+
+    # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
 
     def _handle_create_apple_note(self, params: dict) -> dict:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_create_apple_note(params)
+        """Create Apple Note from text via osascript.
+
+        params: {"title": str, "body": str, "folder": str | None}
+        Returns: {"ok": bool, "note_id": str | None, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "Krab Ear note").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
+        folder = params.get("folder", "") or ""
+
+        if folder:
+            folder_escaped = folder.replace('"', '\\"')
+            script = f'''
+tell application "Notes"
+    tell account "iCloud"
+        set targetFolder to folder "{folder_escaped}"
+        make new note at targetFolder with properties {{name:"{title}", body:"{body}"}}
+    end tell
+end tell
+'''
+        else:
+            script = f'''
+tell application "Notes"
+    make new note with properties {{name:"{title}", body:"{body}"}}
+end tell
+'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "note_id": result.stdout.strip(), "error": None}
+            return {"ok": False, "note_id": None, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "note_id": None, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "note_id": None, "error": str(exc)}
 
     def _handle_create_apple_reminder(self, params: dict) -> dict:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_create_apple_reminder(params)
+        """Create Apple Reminder from text via osascript.
+
+        params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
+        body = params.get("body", "").replace('"', '\\"')
+        list_name = params.get("list_name") or None
+        due_date = params.get("due_date") or None
+
+        # Build properties clause
+        properties = f'name:"{title}"'
+        if body:
+            properties += f', body:"{body}"'
+        if due_date:
+            due_date_escaped = due_date.replace('"', '\\"')
+            properties += f', due date:date "{due_date_escaped}"'
+
+        if list_name:
+            list_name_escaped = list_name.replace('"', '\\"')
+            script = f'''
+tell application "Reminders"
+    tell list "{list_name_escaped}"
+        make new reminder with properties {{{properties}}}
+    end tell
+end tell
+'''
+        else:
+            script = f'''
+tell application "Reminders"
+    make new reminder with properties {{{properties}}}
+end tell
+'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
 
     def _handle_create_calendar_event(self, params: dict) -> dict:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_create_calendar_event(params)
+        """Create Apple Calendar event via osascript.
+
+        params:
+          title: str (required)
+          notes: str (optional, default "")
+          start_date: str (required, ISO 8601 or AppleScript-parseable date string)
+          duration_minutes: int (optional, default 30)
+          calendar_name: str | None (optional, default first writable calendar)
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        title = params.get("title", "").strip()
+        if not title:
+            return {"ok": False, "error": "title is required"}
+
+        title_esc = title.replace('"', '\\"')
+        notes = params.get("notes", "") or ""
+        notes_esc = notes.replace('"', '\\"')
+        start_date = str(params.get("start_date", "")).strip()
+        if not start_date:
+            return {"ok": False, "error": "start_date is required"}
+        start_date_esc = start_date.replace('"', '\\"')
+        duration_minutes = int(params.get("duration_minutes", 30) or 30)
+        calendar_name = params.get("calendar_name") or None
+
+        event_block = f'''
+        set startDate to date "{start_date_esc}"
+        set endDate to startDate + ({duration_minutes} * minutes)
+        make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
+
+        if calendar_name:
+            cal_esc = calendar_name.replace('"', '\\"')
+            script = f'''tell application "Calendar"
+    tell calendar "{cal_esc}"{event_block}
+    end tell
+end tell'''
+        else:
+            script = f'''tell application "Calendar"
+    tell (first calendar whose writable is true){event_block}
+    end tell
+end tell'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── iMessage integration (Phase D.4) ────────────────────────────────────
 
     def _handle_send_imessage(self, params: dict) -> dict:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_send_imessage(params)
+        """Send iMessage/SMS via Messages.app using osascript.
+
+        params:
+          recipient: str (required) — phone number, email, or contact name
+          body: str (required) — message text
+          service: str (optional, default "iMessage") — "iMessage" | "SMS"
+        Returns: {"ok": bool, "error": str | None}
+        """
+        import subprocess
+
+        recipient = params.get("recipient", "").strip()
+        if not recipient:
+            return {"ok": False, "error": "recipient is required"}
+
+        body = params.get("body", "").strip()
+        if not body:
+            return {"ok": False, "error": "body is required"}
+
+        service_name = params.get("service", "iMessage") or "iMessage"
+        if service_name not in ("iMessage", "SMS"):
+            service_name = "iMessage"
+
+        # Map service name to AppleScript service type constant
+        service_type = "iMessage" if service_name == "iMessage" else "SMS"
+
+        # Escape double quotes to prevent AppleScript injection
+        recipient_esc = recipient.replace('"', '\\"')
+        body_esc = body.replace('"', '\\"')
+
+        script = f'''tell application "Messages"
+    set targetService to 1st service whose service type = {service_type}
+    set targetBuddy to buddy "{recipient_esc}" of targetService
+    send "{body_esc}" to targetBuddy
+end tell'''
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return {"ok": True, "error": None}
+            return {"ok": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "osascript timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Делегирует к AppleIntegrationService (backward-compat для тестов)."""
-        return self._apple_integration_svc.handle_list_telegram_chats(params)
+        """Возвращает список доступных чатов через main Krab userbot.
+
+        Параметры: нет.
+
+        Возвращает:
+          {chats: [{id, title, type}, ...]}
+
+        Ошибки:
+          - "bridge_disabled" — если TELEGRAM_BRIDGE_ENABLED=false.
+          - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
+          - "circuit_open" — если circuit breaker разомкнут.
+        """
+        if not settings.TELEGRAM_BRIDGE_ENABLED:
+            raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
+
+        try:
+            chats = self._telegram_bridge.get_chats()
+        except CircuitBreakerOpen as exc:
+            raise RuntimeError(f"circuit_open: {exc}") from exc
+        except Exception as exc:
+            msg = str(exc)
+            if "krab_unavailable" in msg or "krab_error" in msg:
+                raise RuntimeError(msg) from exc
+            raise RuntimeError(f"krab_unavailable: {msg}") from exc
+
+        return {"chats": chats}
 
     # ── Phase 3: Call Session CRUD ───────────────────────────────────────────
+
+    # ------------------------------------------------------------------
+    # STT hotwords (initial_prompt boost)
+    # ------------------------------------------------------------------
+
+    # Whisper initial_prompt hard limit: ~224 tokens ≈ ~170 avg words.
+    # We cap hotwords at 100 entries (≈ safe budget) to avoid prompt overflow.
+    # When the list exceeds this limit, oldest entries are dropped (FIFO).
+    _STT_HOTWORDS_MAX: int = 100
+
+    def _handle_add_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Добавляет термин в список STT hotwords.
+
+        Параметры:
+          - word: str — термин для добавления (имя, бренд, технический термин).
+
+        Возвращает: {hotwords: list[str], truncated: bool} — обновлённый список.
+          truncated=True если список обрезан до _STT_HOTWORDS_MAX.
+        """
+        word = str(params.get("word") or "").strip()
+        if not word:
+            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
+        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
+        if not isinstance(current, list):
+            current = []
+        truncated = False
+        if word not in current:
+            current = current + [word]
+            # Enforce per-IPC budget: drop oldest entries when limit exceeded.
+            if len(current) > self._STT_HOTWORDS_MAX:
+                excess = len(current) - self._STT_HOTWORDS_MAX
+                logger.warning(
+                    "stt_hotwords: список превышает лимит %d — удаляем %d старых записей",
+                    self._STT_HOTWORDS_MAX, excess,
+                )
+                current = current[excess:]
+                truncated = True
+            self._settings_svc.handle_set_settings({"stt_hotwords": current})
+        return {"hotwords": current, "truncated": truncated}
+
+    def _handle_remove_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Удаляет термин из списка STT hotwords.
+
+        Параметры:
+          - word: str — термин для удаления.
+
+        Возвращает: {hotwords: list[str]} — обновлённый список.
+        """
+        word = str(params.get("word") or "").strip()
+        if not word:
+            raise ValueError("Параметр 'word' обязателен и не может быть пустым")
+        current: list[str] = self._settings_svc.cached_settings().get("stt_hotwords", [])
+        if not isinstance(current, list):
+            current = []
+        updated = [w for w in current if w != word]
+        if len(updated) != len(current):
+            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
+        return {"hotwords": updated}
+
+    def _handle_list_stt_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий список STT hotwords.
+
+        Учитывает флаг stt_hotwords_enabled: если False — возвращает пустой список.
+
+        Возвращает: {hotwords: list[str], enabled: bool}
+        """
+        s = self._settings_svc.cached_settings()
+        enabled = bool(s.get("stt_hotwords_enabled", True))
+        if not enabled:
+            return {"hotwords": [], "enabled": False}
+        current: list[str] = s.get("stt_hotwords", [])
+        if not isinstance(current, list):
+            current = []
+        return {"hotwords": sorted(current), "enabled": True}
 
     # ── Timeline view ────────────────────────────────────────────────────────
 
@@ -4691,6 +3502,47 @@ class BackendService:
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
+
+    def _handle_select_model(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: select_model — умный выбор STT-модели на основе условий.
+
+        Параметры:
+            duration_sec  — длительность аудио в секундах (float, обязательный).
+            quality       — "balanced" | "max" (строка, опциональный, по умолчанию "balanced").
+            is_preview    — True если это превью-транскрибация (bool, опциональный).
+            system_load   — нагрузка CPU 0.0–1.0 (float, опциональный, по умолчанию 0).
+
+        Возвращает:
+            {model_name, reason, estimated_latency_ms, quality_tier}
+        """
+        from core.model_selector import SmartModelSelector
+
+        try:
+            duration_sec = float(params.get("duration_sec", 0.0))
+        except (TypeError, ValueError):
+            raise ValueError("Параметр 'duration_sec' должен быть числом")
+
+        quality = str(params.get("quality", "balanced")).strip()
+        is_preview = bool(params.get("is_preview", False))
+
+        try:
+            system_load = float(params.get("system_load", 0.0))
+        except (TypeError, ValueError):
+            system_load = 0.0
+
+        selector = SmartModelSelector()
+        sel = selector.select_model(
+            duration_sec=duration_sec,
+            quality=quality,
+            is_preview=is_preview,
+            system_load=system_load,
+        )
+        return {
+            "model_name": sel.model_name,
+            "reason": sel.reason,
+            "estimated_latency_ms": sel.estimated_latency_ms,
+            "quality_tier": sel.quality_tier,
+        }
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
@@ -4912,15 +3764,9 @@ def configure_logging(data_dir: Path) -> None:
     else:
         formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
-    from logging.handlers import RotatingFileHandler as _RotatingFileHandler
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        _RotatingFileHandler(
-            log_path,
-            maxBytes=5 * 1024 * 1024,  # 5 MB
-            backupCount=3,
-            encoding="utf-8",
-        ),
+        logging.FileHandler(log_path, encoding="utf-8"),
     ]
     for h in handlers:
         h.setFormatter(formatter)
@@ -4984,7 +3830,9 @@ def main() -> None:
 
     configure_logging(data_dir)
 
-    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан)
+    # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
+    # W704: release string читается из Info.plist через get_release_string()
+    # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
     sentry_ok = init_sentry(
         dsn=settings.SENTRY_DSN or None,
         environment=settings.SENTRY_ENVIRONMENT,

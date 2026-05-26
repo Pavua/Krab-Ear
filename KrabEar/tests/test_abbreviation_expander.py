@@ -9,6 +9,7 @@ import sys
 import os
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -361,6 +362,109 @@ class TestExpandDefaultLanguage(unittest.TestCase):
         builtin_items = [i for i in items if i["abbr"] == "т.е."]
         self.assertEqual(len(builtin_items), 1)
         self.assertTrue(builtin_items[0]["builtin"])
+
+
+class TestAbbreviationExpanderConcurrent(unittest.TestCase):
+    """Тест параллельного выполнения expand()."""
+
+    def setUp(self):
+        self.expander = AbbreviationExpander()
+
+    def test_concurrent_expand(self) -> None:
+        """Параллельный вызов expand() из 20 потоков не вызывает ошибок."""
+        tasks = [
+            ("Это важно, т.е. нужно запомнить", "ru"),
+            ("Use tools, e.g. a hammer", "en"),
+            ("Usa herramientas, p.ej. un martillo", "es"),
+            ("Книги, тетради и т.д.", "ru"),
+            ("Обычный текст без аббревиатур.", "ru"),
+        ] * 4  # 20 задач
+
+        results: list = [None] * len(tasks)
+        errors: list = []
+
+        def worker(idx: int, text: str, lang: str) -> None:
+            try:
+                results[idx] = self.expander.expand(text, language=lang)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(i, t, l))
+            for i, (t, l) in enumerate(tasks)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        self.assertEqual(errors, [], f"Errors in concurrent expand: {errors}")
+        for i, result in enumerate(results):
+            self.assertIsNotNone(result, f"Result {i} is None")
+            self.assertIsInstance(result, str)
+
+    def test_concurrent_expand_unicode_texts(self) -> None:
+        """Параллельный expand со строками, содержащими Unicode."""
+        texts_langs = [
+            ("Привет 😊, т.е. это тест", "ru"),
+            ("你好, use e.g. this tool", "en"),
+            ("مرحبا, т.к. это важно", "ru"),
+        ] * 6  # 18 задач
+
+        results: list = [None] * len(texts_langs)
+        errors: list = []
+
+        def worker(idx: int, text: str, lang: str) -> None:
+            try:
+                results[idx] = self.expander.expand(text, language=lang)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(i, t, l))
+            for i, (t, l) in enumerate(texts_langs)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        self.assertEqual(errors, [], f"Unicode concurrent errors: {errors}")
+        for result in results:
+            self.assertIsInstance(result, str)
+
+
+class TestAbbreviationExpanderUnicode(unittest.TestCase):
+    """Тесты обработки Unicode в AbbreviationExpander."""
+
+    def setUp(self):
+        self.expander = AbbreviationExpander()
+
+    def test_unicode_chars_preserved_around_abbreviation(self) -> None:
+        """Unicode-символы вокруг аббревиатуры сохраняются."""
+        text = "你好 т.е. это тест 😊"
+        result = self.expander.expand(text, language="ru")
+        self.assertIn("то есть", result)
+        self.assertIn("你好", result)
+        self.assertIn("😊", result)
+
+    def test_unicode_arabic_text_unchanged(self) -> None:
+        """Арабский текст не содержит аббревиатур → возвращается без изменений."""
+        text = "مرحبا بالعالم"
+        result = self.expander.expand(text, language="ru")
+        self.assertEqual(text, result)
+
+    def test_unicode_es_accented_abbreviations(self) -> None:
+        """Испанские аббревиатуры с диакритикой раскрываются корректно."""
+        result = self.expander.expand("Número de pág. 5", language="es")
+        self.assertIn("página", result)
+        self.assertNotIn("pág.", result)
+
+    def test_unicode_es_senora_expanded(self) -> None:
+        """Sra. → señora/Señora (содержит ñ; case matched от оригинала Sra.)."""
+        result = self.expander.expand("Buenos días, Sra. García", language="es")
+        # Sra. начинается с заглавной → _match_case даёт Señora
+        self.assertIn("eñora", result)  # проверяем ядро слова независимо от регистра
 
 
 if __name__ == "__main__":

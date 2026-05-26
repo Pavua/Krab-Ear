@@ -506,6 +506,45 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # Added Wave 77 — 3 production-critical codes from Wave 151 log audit
+    # (stt_gigaam.py:589 × 3829, service.py:1093 × 2779, engine.py:1046 × 68).
+
+    # stt.gigaam_worker_crashed — _GigaAMSubprocessSession.transcribe() called while
+    # is_loaded()==False (worker exited / OOM / crash). 3829 occurrences per production
+    # log. Dedupe 300s — high-frequency, one toast per crash window.
+    "stt.gigaam_worker_crashed": {
+        "user_msg_ru": "Распознавание речи GigaAM прервано — переключение на Whisper",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "error",
+        "dedupe_seconds": 300,
+    },
+
+    # ipc.rate_limit_exceeded — IPCThrottle token-bucket rejected a method call.
+    # 2779 occurrences. Sentry breadcrumb only (do not flood Sentry event stream).
+    # Dedupe 60s — short window, reset fast when burst subsides.
+    "ipc.rate_limit_exceeded": {
+        "user_msg_ru": "Превышен лимит запросов IPC",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 60,
+    },
+
+    # stt.critical_recognition_error — broad except in AudioEngine.transcribe()
+    # catches unexpected crash during STT (68 occurrences). Critical severity —
+    # always generates a Sentry event. Dedupe 180s to avoid cascades.
+    "stt.critical_recognition_error": {
+        "user_msg_ru": "Критическая ошибка распознавания речи — обратитесь к разработчику",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "critical",
+        "dedupe_seconds": 180,
+    },
+
     # ── Wave 78 (Wave 205): 5 production-discovered codes ────────────────────
 
     # stt.gigaam_hf_cache_miss — GigaAM longform path requires pyannote/segmentation-3.0

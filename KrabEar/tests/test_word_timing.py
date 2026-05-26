@@ -415,5 +415,53 @@ class TestWordTimingIPCHandler(unittest.TestCase):
         self.assertGreater(result["longest_pause_sec"], 0.5)
 
 
+class TestConcurrentAnalyze(unittest.TestCase):
+    """WordTimingAnalyzer потокобезопасен при параллельном вызове analyze()."""
+
+    def test_concurrent_analyze(self):
+        """Несколько потоков вызывают analyze() одновременно — нет гонок/сбоев."""
+        import threading
+
+        analyzer = WordTimingAnalyzer()
+        errors: list[Exception] = []
+        results: list[dict] = []
+        lock = threading.Lock()
+
+        # Different segment sets for each thread
+        segment_sets = [
+            _make_segments_with_words([("раз", 0.0, 0.2), ("два", 0.4, 0.6)]),
+            _make_segments_with_words([("hello", 0.0, 0.4), ("world", 0.5, 0.9)]),
+            _make_segments_with_words([("uno", 0.0, 0.3), ("dos", 0.6, 0.9), ("tres", 1.0, 1.4)]),
+            _make_bare_segments([("segment one", 0.0, 1.0), ("segment two", 1.5, 2.5)]),
+            [],  # edge case: empty
+        ]
+
+        def worker(segs):
+            try:
+                report = analyzer.analyze(segs)
+                with lock:
+                    results.append(report.as_dict())
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(s,)) for s in segment_sets]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=5.0)
+
+        self.assertEqual(errors, [], msg=f"Exceptions in threads: {errors}")
+        self.assertEqual(len(results), len(segment_sets))
+        # All results must be valid dicts with the required keys
+        required_keys = {
+            "avg_word_duration_ms", "avg_pause_duration_ms",
+            "total_pause_time_sec", "speaking_rate_consistency",
+            "longest_pause_sec", "hesitation_count",
+        }
+        for res in results:
+            self.assertEqual(set(res.keys()), required_keys)
+
+
 if __name__ == "__main__":
     unittest.main()
