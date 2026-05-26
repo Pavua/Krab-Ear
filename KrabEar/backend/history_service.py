@@ -36,7 +36,7 @@ class HistoryService:
         store: "StateStore",
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
-        semantic_searcher: Any = None,
+        semantic_searcher: "Any | None" = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -44,8 +44,7 @@ class HistoryService:
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
         # LLMRewriter для авто-резюмирования пакетов транскрипций (опционально).
         self._llm_rewriter = llm_rewriter
-        # SemanticSearcher — синхронизируем удаление из индекса при delete_history_item.
-        # W1172: fix W1163 broken wiring (was .remove() → AttributeError silently swallowed).
+        # SemanticSearcher для синхронного удаления embeddings при delete_history_item (W1148 F1).
         self._semantic_searcher = semantic_searcher
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
@@ -249,16 +248,14 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
-        # W1163/W1172: remove embedding from semantic index when history item is deleted.
-        # Use .remove_item() — the canonical method name on SemanticSearcher.
+        # W1148 F1: remove from semantic search index so stale ids are never returned.
         if self._semantic_searcher is not None:
             try:
-                self._semantic_searcher.remove_item(item_id)
-            except Exception as _exc:
+                self._semantic_searcher.remove(item_id)
+            except Exception as _exc:  # pragma: no cover
                 logger.warning(
-                    "handle_delete_history_item: не удалось удалить embedding %s: %s",
-                    item_id,
-                    _exc,
+                    "semantic_search: ошибка удаления %s из индекса: %s",
+                    item_id, _exc,
                 )
         add_breadcrumb(
             category="history",
@@ -279,7 +276,7 @@ class HistoryService:
             raise RuntimeError("path обязателен")
         resolved = Path(raw_path).expanduser().resolve()
         allowed_roots = [r.resolve() for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))]
-        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
             return {"error": {"message": f"Path outside allowed directories: {resolved}"}}
         _t0 = _time.monotonic()
         result = self.store.import_history_ndjson(resolved)
@@ -1295,18 +1292,11 @@ class HistoryService:
             raise RuntimeError("older_than_days должен быть положительным числом")
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-        cutoff_ts = cutoff.timestamp()
-
-        def _item_ts(ts_str: str) -> float:
-            """Parse item.ts to a UTC POSIX timestamp; return inf on parse failure."""
-            try:
-                return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
-            except (ValueError, AttributeError):
-                return float("inf")
+        cutoff_iso = cutoff.isoformat()
 
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
-            to_delete = [item for item in active if _item_ts(item.ts) < cutoff_ts]
+            to_delete = [item for item in active if item.ts < cutoff_iso]
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)

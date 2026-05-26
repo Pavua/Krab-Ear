@@ -208,25 +208,13 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
-    def reset_model_error(self) -> dict:
-        """Сбрасывает зафиксированную ошибку загрузки модели, позволяя повторную попытку.
+    def remove(self, history_item_id: str) -> bool:
+        """Remove item from index by history_item_id.
 
-        Очищает ``_model_error`` и ``_model``/``_model_loaded``, так что следующий
-        вызов ``_get_model()`` попытается загрузить модель заново.  Полезно после
-        временных сбоев (сеть, HuggingFace недоступен, недостаточно RAM и т.п.).
-
-        Returns:
-            {"reset": True, "previous_error": str|None}
+        Alias for remove_item(), provided for the W1148 F1 spec interface.
+        Returns True if removed, False if not found.
         """
-        with self._model_lock:
-            previous = self._model_error
-            self._model_error = None
-            self._model = None
-            self._model_loaded = False
-        logger.info(
-            "semantic_search: сброс ошибки модели, предыдущая: %s", previous or "—"
-        )
-        return {"reset": True, "previous_error": previous}
+        return self.remove_item(history_item_id)
 
     def remove_item(self, item_id: str) -> bool:
         """Remove item from index. Returns True if removed, False if not found.
@@ -321,14 +309,6 @@ class SemanticSearcher:
                 embeddings = np.load(str(self._embeddings_path))
                 with open(self._index_path, encoding="utf-8") as f:
                     index = json.load(f)
-                if embeddings.shape[0] != len(index):
-                    logger.error(
-                        "semantic_search: несоответствие размеров при загрузке с диска "
-                        "(embeddings=%d, index=%d) — пропускаем загрузку, сброс к пустому индексу",
-                        embeddings.shape[0],
-                        len(index),
-                    )
-                    return
                 with self._index_lock:
                     self._embeddings = embeddings
                     self._index = index
@@ -349,11 +329,6 @@ class SemanticSearcher:
                 json.dump(self._index, f, ensure_ascii=False)
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
-
-    # Alias so callers can use either .remove(item_id) or .remove_item(item_id).
-    # W1172: fixes W1163 call-site bug where history_service called .remove() which
-    # didn't exist, causing AttributeError silently swallowed → embeddings never removed.
-    remove = remove_item
 
 
 def keyword_fallback_search(
