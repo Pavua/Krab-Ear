@@ -256,6 +256,15 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func completeStartupAfterBackendReady() {
         ipcClient = IPCClient(socketPath: backendSupervisor.socketPath)
+
+        // W798 fix: perform handshake once the socket is confirmed reachable.
+        // Pass the real bundle version so backend can log version mismatches.
+        let handshakeClient = ipcClient
+        let agentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        Task.detached {
+            await handshakeClient.performHandshake(swiftAgentVersion: agentVersion)
+        }
+
         settings = loadSettings()
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
         logger.info(
