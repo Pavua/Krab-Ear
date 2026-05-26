@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from core.silence_detector import SILENCE_THRESHOLD_AMP
+
 logger = logging.getLogger("KrabEar.NoiseProfiler")
 
 # ---------------------------------------------------------------------------
@@ -21,7 +23,8 @@ logger = logging.getLogger("KrabEar.NoiseProfiler")
 
 _FRAME_SIZE = 2048          # размер фрейма в семплах
 _QUIET_PERCENTILE = 10      # нижний процентиль RMS считается «тихими» фреймами
-_SILENCE_RMS_THRESHOLD = 0.001  # RMS ниже порога → тишина
+# Единый порог тишины — импортируется из silence_detector (SSOT, -40 дБ).
+_SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP  # RMS ниже порога → тишина
 _SNR_STT_THRESHOLD = 15.0   # минимальный SNR для корректной работы STT (dB)
 _REF_AMPLITUDE = 1.0        # референсная амплитуда для перевода в dBFS
 
