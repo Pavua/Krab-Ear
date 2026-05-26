@@ -19,7 +19,7 @@ from typing import Any
 from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
 from backend.settings_backup import SettingsBackup
-from backend.settings_validator import SettingsValidator
+from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
 
 _log = logging.getLogger(__name__)
 
@@ -92,6 +92,8 @@ class SettingsService:
         if self._cache is not None and (now - self._cache_ts) < self._cache_ttl:
             return dict(self._cache)
         raw = self.store.load_settings()
+        # Migrate schema if needed — compare before/after to avoid spurious writes
+        raw = self._maybe_migrate(raw)
         # Validate and auto-fix on load — warnings only, no hard errors
         result_v = self._validator.validate(raw)
         if result_v.warnings:
@@ -100,6 +102,40 @@ class SettingsService:
         self._cache = result_v.fixed
         self._cache_ts = now
         return dict(self._cache)
+
+    def _maybe_migrate(self, raw: dict) -> dict:
+        """Applies schema migration if raw settings are on an older schema version.
+
+        Compares the dict before and after migration; writes back to disk only when
+        the dict actually changed (avoids spurious writes on every load).
+        Returns the (possibly migrated) dict.
+        """
+        stored_version = str(raw.get("schema_version", "1.0"))
+        if stored_version == CURRENT_SCHEMA_VERSION:
+            return raw
+        try:
+            migrated = self._validator.migrate(raw, stored_version, CURRENT_SCHEMA_VERSION)
+        except ValueError as exc:
+            _log.warning(
+                "settings migration %s→%s failed, using raw settings: %s",
+                stored_version,
+                CURRENT_SCHEMA_VERSION,
+                exc,
+            )
+            return raw
+        # Stamp the new schema version so subsequent loads skip migration
+        migrated["schema_version"] = CURRENT_SCHEMA_VERSION
+        if migrated != raw:
+            _log.info(
+                "settings_service: migrated schema %s→%s, writing back to disk",
+                stored_version,
+                CURRENT_SCHEMA_VERSION,
+            )
+            try:
+                self.store.save_settings(migrated)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("settings_service: migration write-back failed: %s", exc)
+        return migrated
 
     def invalidate_cache(self) -> None:
         """Сбрасывает кэш настроек (вызывать после save_settings)."""

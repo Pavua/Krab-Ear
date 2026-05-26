@@ -609,5 +609,161 @@ class TestBreadcrumbs(unittest.TestCase):
         self.assertGreater(len(keys_changed), 0)
 
 
+class TestMigrationRunsAtLoadTime(unittest.TestCase):
+    """W928 F2: SettingsValidator.migrate() должен вызываться при загрузке настроек.
+
+    Проверяет, что cached_settings() автоматически мигрирует v1.0 → v2.0:
+    - history_limit переименовывается в history_policy
+    - старый ключ удаляется из настроек
+    - изменения записываются на диск (write-back)
+    - повторная загрузка уже на v2.0 — migrate() не нужен (write-back не вызывается)
+    """
+
+    def _make_v1_store(self) -> MagicMock:
+        """Создаёт store с v1.0 настройками (history_limit вместо history_policy)."""
+        store = MagicMock()
+        v1_settings = {
+            "schema_version": "1.0",
+            "quality_profile": "balanced",
+            "cleanup_profile": "soft",
+            "translation_mode": "off",
+            "auto_paste": True,
+            "realtime_preview_enabled": True,
+            "mode": "headless",
+            "translation_style": "neutral",
+            "clipboard_mode": "always_copy",
+            "update_channel": "stable",
+            "translation_glossary": {},
+            "text_templates": {},
+            "network_mode": "offline_default",
+            "hotkey_profile": "default",
+            "history_limit": "unlimited",  # v1.0 field name
+            "history_text_density": "normal",
+            "capture_source_mode": "mic",
+            "ui_last_tab": "history",
+            "auto_start_enabled": False,
+            "show_dock_icon": True,
+            "play_start_sound": True,
+            "audio_ducking_enabled": True,
+            "silence_guard_enabled": True,
+            "background_guard_enabled": True,
+            "call_notify_default": True,
+            "call_auto_summary": True,
+            "history_focus_mode": True,
+            "voice_gateway_url": "http://127.0.0.1:8090",
+            "voice_gateway_api_key": "",
+            "history_page_size": 50,
+            "audio_ducking_percent": 50,
+            "stop_tail_trim_ms": 180,
+            "silence_guard_rms_threshold": 0.0020,
+            "silence_guard_peak_threshold": 0.0120,
+            "silence_guard_active_ratio_threshold": 0.015,
+            "background_guard_min_peak": 0.025,
+            "background_guard_min_rms": 0.0040,
+            "background_guard_uniform_frame_threshold": 0.0060,
+            "background_guard_max_uniform_active_ratio": 0.92,
+            "overlay_opacity_percent": 45,
+            "notifications_enabled": True,
+            "notify_on_low_confidence": True,
+            "notify_confidence_threshold": 0.5,
+            "notify_on_llm_failure": True,
+            "notify_on_import_complete": True,
+            "notify_sound_enabled": True,
+        }
+        store.load_settings.return_value = dict(v1_settings)
+
+        saved: list[dict] = []
+
+        def _save(s: dict) -> dict:
+            store.load_settings.return_value = dict(s)
+            saved.clear()
+            saved.append(dict(s))
+            return dict(s)
+
+        store.save_settings.side_effect = _save
+        store._saved = saved
+        return store
+
+    def test_migration_runs_at_load_time_history_policy_present(self):
+        """cached_settings() должен вернуть history_policy после миграции из v1.0."""
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        result = svc.cached_settings()
+
+        self.assertIn("history_policy", result,
+                      "history_policy должен появиться после миграции v1.0→v2.0")
+
+    def test_migration_runs_at_load_time_old_key_removed(self):
+        """cached_settings() после миграции не должен содержать history_limit."""
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        result = svc.cached_settings()
+
+        self.assertNotIn("history_limit", result,
+                         "history_limit должен быть удалён после миграции v1.0→v2.0")
+
+    def test_migration_writes_back_to_disk_on_change(self):
+        """После миграции v1.0→v2.0 settings_service должен записать изменения на диск."""
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        svc.cached_settings()
+
+        store.save_settings.assert_called_once()
+        saved = store._saved[0]
+        self.assertIn("history_policy", saved)
+        self.assertNotIn("history_limit", saved)
+
+    def test_migration_stamps_schema_version_on_disk(self):
+        """После миграции на диске должна быть schema_version='2.0'."""
+        from backend.settings_validator import CURRENT_SCHEMA_VERSION
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        svc.cached_settings()
+
+        saved = store._saved[0]
+        self.assertEqual(saved.get("schema_version"), CURRENT_SCHEMA_VERSION)
+
+    def test_no_write_back_when_already_v2(self):
+        """Для уже мигрированных настроек (v2.0) save_settings не вызывается при load."""
+        store = _make_store()  # default store has no schema_version → treated as v1.0-absent
+        # Override with explicit 2.0 settings
+        v2_settings = dict(store._current)
+        v2_settings["schema_version"] = "2.0"
+        store.load_settings.return_value = dict(v2_settings)
+        svc = SettingsService(store=store)
+
+        svc.cached_settings()
+
+        # save_settings should NOT have been called (no migration needed)
+        store.save_settings.assert_not_called()
+
+    def test_migration_history_policy_value_preserved(self):
+        """Значение history_limit='unlimited' должно перейти в history_policy='unlimited'."""
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        result = svc.cached_settings()
+
+        self.assertEqual(result.get("history_policy"), "unlimited")
+
+    def test_migration_failure_does_not_raise(self):
+        """Если migrate() падает с ValueError, cached_settings() не должен выбросить исключение."""
+        store = self._make_v1_store()
+        # Force an unknown version to trigger ValueError in migrate()
+        bad_v = {"schema_version": "99.0", "quality_profile": "balanced"}
+        store.load_settings.return_value = dict(bad_v)
+        svc = SettingsService(store=store)
+
+        # Should not raise
+        try:
+            svc.cached_settings()
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"cached_settings() raised unexpectedly: {exc}")
+
+
 if __name__ == "__main__":
     unittest.main()
