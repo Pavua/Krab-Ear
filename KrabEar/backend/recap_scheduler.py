@@ -225,7 +225,12 @@ class RecapScheduler:
     # ------------------------------------------------------------------
 
     def _should_send(self, now: datetime) -> bool:
-        """Возвращает True если нужно отправить дайджест прямо сейчас."""
+        """Возвращает True если нужно отправить дайджест прямо сейчас.
+
+        Примечание: вызывающий код обязан держать self._lock при вызове
+        этого метода, если проверка используется для принятия решения об
+        отправке (иначе возможен TOCTOU).
+        """
         if not self.enabled:
             return False
         if not self.recap_email_to:
@@ -234,10 +239,29 @@ class RecapScheduler:
             return False
         today_str = now.date().isoformat()
         state = self._load_state()
-        return state.get("last_sent_date") != today_str
+        if state.get("last_sent_date") == today_str:
+            return False
+        # Проверяем маркер «в процессе отправки» — исключает параллельный TOCTOU
+        if state.get("_sending_date") == today_str:
+            return False
+        return True
 
     def send_recap(self, target_date: Optional[str] = None) -> dict:
         """Генерирует и отправляет дайджест.
+
+        Thread-safe: использует двухфазную блокировку чтобы исключить
+        TOCTOU-гонку при одновременном вызове из scheduler-цикла и
+        IPC-обработчика.
+
+        Алгоритм:
+          1. Под lock: проверить _should_send + записать "_sending_date"
+             (атомарный tentative-маркер). Конкурирующий вызов увидит
+             маркер и выйдет без отправки.
+          2. Без lock: выполнить SMTP (долгая IO-операция).
+          3. Под lock: заменить "_sending_date" на "last_sent_date",
+             увеличить счётчик, сохранить состояние.
+          4. При ошибке SMTP: под lock очистить "_sending_date" (разрешить
+             повторную попытку).
 
         Args:
             target_date: Дата в формате YYYY-MM-DD или None (сегодня).
@@ -248,6 +272,19 @@ class RecapScheduler:
         now = self._clock_fn()
         date_str = target_date or now.date().isoformat()
 
+        # --- Фаза 1: атомарно зарезервировать отправку ---
+        with self._lock:
+            state = self._load_state()
+            # Быстрая проверка: уже отправлено или другой поток начал отправку?
+            if state.get("last_sent_date") == date_str:
+                return {"sent": False, "date": date_str, "error": None}
+            if state.get("_sending_date") == date_str:
+                return {"sent": False, "date": date_str, "error": None}
+            # Записываем tentative-маркер до освобождения блокировки
+            state["_sending_date"] = date_str
+            self._save_state(state)
+
+        # --- Фаза 2: генерация дайджеста (без lock) ---
         try:
             digest = self.digest_generator.generate_digest(
                 date_str=date_str,
@@ -255,12 +292,19 @@ class RecapScheduler:
             )
         except Exception as exc:
             logger.exception("Ошибка генерации дайджеста за %s", date_str)
+            # Очищаем маркер, чтобы следующая попытка могла пройти
+            with self._lock:
+                state = self._load_state()
+                if state.get("_sending_date") == date_str:
+                    state.pop("_sending_date", None)
+                    self._save_state(state)
             return {"sent": False, "date": date_str, "error": f"digest_error: {exc}"}
 
         subject = f"Krab Ear — дайджест за {date_str} ({digest.total_recordings} записей)"
         body_html = _build_html(digest)
         body_text = digest.formatted_markdown
 
+        # --- Фаза 3: отправка email (без lock, долгая IO) ---
         try:
             self.email_sender.send(
                 to=self.recap_email_to,
@@ -270,11 +314,18 @@ class RecapScheduler:
             )
         except Exception as exc:
             logger.exception("Ошибка отправки дайджеста за %s", date_str)
+            # Очищаем маркер, чтобы следующая попытка могла пройти
+            with self._lock:
+                state = self._load_state()
+                if state.get("_sending_date") == date_str:
+                    state.pop("_sending_date", None)
+                    self._save_state(state)
             return {"sent": False, "date": date_str, "error": f"send_error: {exc}"}
 
-        # Обновляем состояние
+        # --- Фаза 4: зафиксировать успех под lock ---
         with self._lock:
             state = self._load_state()
+            state.pop("_sending_date", None)
             state["last_sent_date"] = date_str
             state["send_count"] = state.get("send_count", 0) + 1
             state["last_sent_ts"] = now.isoformat()
