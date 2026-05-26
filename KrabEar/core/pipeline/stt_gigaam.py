@@ -108,6 +108,10 @@ class GigaAMAdapter:
         # Optional OOM callback: callable(name: str, rc: int, stderr: str)
         # Set by engine.py after adapter creation to forward OOM events to ErrorBus.
         self._oom_callback: Optional[object] = None
+        # W1216 F2 fix: adapter-level spawn lock prevents concurrent transcribe() calls
+        # from both passing the `_subprocess is None` guard and double-spawning workers.
+        # Distinct from _GigaAMSubprocessSession._lock (which serialises IPC sends).
+        self._spawn_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -285,37 +289,78 @@ class GigaAMAdapter:
         return text, engine
 
     def _get_subprocess_session(self) -> "_GigaAMSubprocessSession":
-        """Lazy spawn subprocess worker. Idempotent."""
+        """Lazy spawn subprocess worker. Idempotent and race-safe.
+
+        W1216 F1 fix: if the existing session is dead (e.g. after _timeout_kill fired),
+        clear self._subprocess BEFORE the spawn-guard check so re-spawn runs correctly.
+        Previously, a timed-out session left self._subprocess pointing to a dead object;
+        the next call returned that dead session, causing is_loaded()==False → immediate
+        RuntimeError, permanently disabling GigaAM for the adapter lifetime.
+
+        W1216 F2 fix: serialize the entire spawn path through self._spawn_lock.
+        Without this lock, two concurrent transcribe() calls with self._subprocess is None
+        both pass the None guard, both spawn separate workers, and the flock in the worker
+        kills the second — but the parent threads race to assign self._subprocess,
+        potentially leaving it pointing to the dead second session.
+        """
+        # F1: clear dead session before the guard check so spawn is retried.
+        if self._subprocess is not None and not self._subprocess.is_loaded():
+            logger.debug(
+                "GigaAMAdapter: dead subprocess session detected — clearing for re-spawn "
+                "(W1216 F1)"
+            )
+            try:
+                self._subprocess.close()
+            except Exception:
+                pass
+            self._subprocess = None
+
+        # Fast path: already live, no lock needed.
         if self._subprocess is not None:
             return self._subprocess
 
-        if not os.path.exists(self._venv_python_path):
-            raise RuntimeError(
-                f"GigaAMAdapter[subprocess]: venv Python не найден: {self._venv_python_path}\n"
-                "Запусти scripts/install_gigaam_venv.command чтобы создать venv_gigaam, "
-                "либо передай явный venv_python_path в GigaAMAdapter(...)."
-            )
+        # F2: serialize spawn through adapter-level lock; re-check inside to handle the
+        # case where a concurrent caller already completed spawn while we waited.
+        with self._spawn_lock:
+            # F1 re-check inside lock: another thread may have cleared + re-spawned
+            # a session that already died again between the outer check and lock acquire.
+            if self._subprocess is not None and not self._subprocess.is_loaded():
+                try:
+                    self._subprocess.close()
+                except Exception:
+                    pass
+                self._subprocess = None
 
-        worker_path = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "..", "workers", "gigaam_worker.py")
-        )
-        if not os.path.exists(worker_path):
-            raise RuntimeError(
-                f"GigaAMAdapter[subprocess]: worker script не найден: {worker_path}"
-            )
+            if self._subprocess is not None:
+                return self._subprocess
 
-        session = _GigaAMSubprocessSession(
-            venv_python=self._venv_python_path,
-            worker_path=worker_path,
-            mode=self._mode,
-            device=self._device,
-        )
-        # Forward OOM callback to session so crash events reach the ErrorBus.
-        if self._oom_callback is not None:
-            session.oom_callback = self._oom_callback
-        session.start()  # spawn + load model
-        self._subprocess = session
-        return session
+            if not os.path.exists(self._venv_python_path):
+                raise RuntimeError(
+                    f"GigaAMAdapter[subprocess]: venv Python не найден: {self._venv_python_path}\n"
+                    "Запусти scripts/install_gigaam_venv.command чтобы создать venv_gigaam, "
+                    "либо передай явный venv_python_path в GigaAMAdapter(...)."
+                )
+
+            worker_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "workers", "gigaam_worker.py")
+            )
+            if not os.path.exists(worker_path):
+                raise RuntimeError(
+                    f"GigaAMAdapter[subprocess]: worker script не найден: {worker_path}"
+                )
+
+            session = _GigaAMSubprocessSession(
+                venv_python=self._venv_python_path,
+                worker_path=worker_path,
+                mode=self._mode,
+                device=self._device,
+            )
+            # Forward OOM callback to session so crash events reach the ErrorBus.
+            if self._oom_callback is not None:
+                session.oom_callback = self._oom_callback
+            session.start()  # spawn + load model
+            self._subprocess = session
+            return session
 
     # ------------------------------------------------------------------
     # Внутренние методы
