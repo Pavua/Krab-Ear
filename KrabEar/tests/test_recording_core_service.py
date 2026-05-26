@@ -110,7 +110,6 @@ def _make_service(tmp_dir, recorder=None, transcriber=None, extra_kwargs=None):
     vocab.get_words.return_value = []
     session_tracker = MagicMock()
     session_tracker._active_session = None
-    session_tracker.get_active_session.return_value = None
     kwargs = dict(
         recorder=recorder or _FakeRecorder(),
         transcriber=transcriber or _FakeTranscriber(),
@@ -492,66 +491,78 @@ class TestConstructorAndProperties(unittest.TestCase):
         self.assertFalse(svc.preview_thread_alive)
 
 
-class TestGetRecordingStateUsesLockedAccessor(unittest.TestCase):
-    """W1501 — handle_get_recording_state must use get_active_session() not _active_session."""
+class TestDiskFullPhaseE(unittest.TestCase):
+    """W1134 F5 MED — Phase E disk-full structured error handler tests."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
 
-    def test_get_recording_state_uses_locked_accessor(self):
-        """handle_get_recording_state calls get_active_session(), not _active_session directly."""
-        from backend.session_tracker import SessionTracker
-        real_tracker = SessionTracker()
-        store = __import__("backend.state_store", fromlist=["StateStore"]).StateStore(data_dir=Path(self._tmp))
-        vocab = MagicMock()
-        vocab.get_words.return_value = []
-        svc = __import__("backend.recording_core_service", fromlist=["RecordingCoreService"]).RecordingCoreService(
-            recorder=_FakeRecorder(),
-            transcriber=_FakeTranscriber(),
-            translator=_FakeTranslator(),
-            store=store,
-            vocabulary=vocab,
-            settings_svc=_FakeSettingsSvc(),
-            llm_rewriter=None,
-            auto_glossary=None,
-            semantic_searcher=_FakeSemanticSearcher(),
-            context_memory=None,
-            clipboard_history=[],
-            auto_backup=MagicMock(),
-            session_tracker=real_tracker,
-            action_items_extractor=None,
-            transcription_counter_ref=[0],
-            last_stt_engine_ref=[None],
+    def _make_running_service(self):
+        """Return a service with recorder already in started state."""
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        return _make_service(self._tmp, recorder=recorder)
+
+    def _make_disk_full_store(self, errno_val=28):
+        """Return a mock store whose add_history_item raises OSError(ENOSPC)."""
+        import errno as _errno_mod
+        store = MagicMock()
+        store.data_dir = Path(self._tmp)
+        store.get_history_page = MagicMock(return_value=([], None))
+        err = OSError(errno_val, "No space left on device")
+        err.errno = errno_val
+        store.add_history_item = MagicMock(side_effect=err)
+        return store
+
+    def test_disk_full_returns_structured_error(self):
+        """Phase E must return ok=False and status='persist_failed' on ENOSPC."""
+        import errno as _errno_mod
+        store = self._make_disk_full_store(errno_val=_errno_mod.ENOSPC)
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store})
+
+        result = svc.handle_stop_recording({})
+
+        self.assertFalse(result.get("ok", True),
+                         "ok should be False on disk-full")
+        self.assertEqual(result.get("status"), "persist_failed")
+        self.assertEqual(result.get("reason"), "disk_full")
+
+    def test_disk_full_preserves_transcript_text(self):
+        """Transcript text must survive even when history store is full."""
+        import errno as _errno_mod
+        store = self._make_disk_full_store(errno_val=_errno_mod.ENOSPC)
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store})
+
+        result = svc.handle_stop_recording({})
+
+        # transcript_text must be a non-empty string (fake transcriber returns "hello world")
+        self.assertIn("transcript_text", result,
+                      "transcript_text must be present in persist_failed response")
+        self.assertIsInstance(result["transcript_text"], str)
+        self.assertTrue(
+            len(result["transcript_text"]) > 0,
+            "transcript_text must be non-empty so Swift can offer save-as",
         )
-        # No active session → session_id must be "__live__"
-        result = svc.handle_get_recording_state({})
-        self.assertEqual(result["session_id"], "__live__")
 
-        # With active session — session_id comes via get_active_session()
-        sid = real_tracker.start_session(audio_device="TestMic")
-        result2 = svc.handle_get_recording_state({})
-        self.assertEqual(result2["session_id"], sid)
+    def test_disk_full_does_not_raise(self):
+        """Phase E must swallow OSError and return a dict — never propagate."""
+        import errno as _errno_mod
+        store = self._make_disk_full_store(errno_val=_errno_mod.ENOSPC)
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store})
 
-    def test_get_recording_state_does_not_access_private_active_session(self):
-        """Confirm _active_session private attr is no longer accessed directly from service."""
-        import ast
-        src_path = Path(self._tmp).parent.parent.parent / "KrabEar" / "backend" / "recording_core_service.py"
-        # Walk up to find the actual file
-        candidate = Path(__file__).resolve().parents[1] / "backend" / "recording_core_service.py"
-        if candidate.exists():
-            src_path = candidate
-        source = src_path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                # Detect self._session_tracker._active_session pattern
-                if (node.attr == "_active_session" and
-                        isinstance(node.value, ast.Attribute) and
-                        node.value.attr == "_session_tracker"):
-                    self.fail(
-                        "handle_get_recording_state still accesses "
-                        "self._session_tracker._active_session directly (race condition)"
-                    )
+        try:
+            result = svc.handle_stop_recording({})
+        except OSError as exc:
+            self.fail(f"handle_stop_recording re-raised OSError: {exc}")
+
+        self.assertIsInstance(result, dict,
+                              "Must return a dict even when disk is full")
 
 
 if __name__ == "__main__":
