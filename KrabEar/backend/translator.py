@@ -25,7 +25,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 import re
-import threading
 from typing import Any
 
 # Profiler singleton — защищаемся от ImportError чтобы translator оставался standalone.
@@ -103,38 +102,12 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
-        # W1145 F1 HIGH — RLock для thread-safe доступа к _cache (OrderedDict не потокобезопасен
-        # для concurrent read+move_to_end из live_subs background thread).
-        self._cache_lock = threading.RLock()
-        # W1145 F2 HIGH — отслеживаем предыдущее состояние privacy_mode чтобы сбрасывать кэш
-        # при переходе. None = «ещё не инициализировано» (нет сброса на первом вызове).
-        self._last_privacy_mode: bool | None = None
-        # W926 F2 HIGH: per-key locks prevent concurrent _build_pipeline calls for the same
-        # language pair (double-init = double NLLB-200 ~2.4 GB RAM spike).
-        self._pipeline_locks: dict[tuple, threading.Lock] = {}
-        self._locks_mutex: threading.Lock = threading.Lock()
-        # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
-        # W1190/W1429 — _translation_cache late-injection (set by BackendService after init).
-        # Когда задан, успешные переводы персистируются на диск и переживают перезапуск.
+        # Персистентный LRU-кэш переводов — поздняя инжекция из BackendService.__init__.
+        # Когда задан, результаты успешных переводов сохраняются на диск и переживают
+        # перезапуск процесса. Ключ: hash(text, source_lang, target_lang, engine).
+        # Используется ТОЛЬКО для успешных (status="ok") результатов с непустым text.
         self._translation_cache: Any | None = None  # type: TranslationCache | None
-        # W1492 F3 HIGH — _settings_getter late-injection (set by BackendService after init).
-        # Callable[[str, Any], Any] that reads runtime settings; used by
-        # _check_privacy_mode_changed() on every translate() call to detect privacy-mode
-        # transitions. When None (e.g. unit-test stubs that don't inject), the check is
-        # a no-op — safe but privacy transitions will not be detected.
-        self._settings_getter: Any | None = None  # type: Callable[[str, Any], Any] | None
-        # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
-
-    def clear_cache(self) -> None:
-        """Очищает LRU-кэш переводов и сбрасывает список недоступных моделей.
-
-        Вызывается при переходе privacy_mode → True, чтобы стёртые RAM-переводы
-        не «утекали» в следующие запросы (W1145 F2).
-        """
-        with self._cache_lock:
-            self._cache.clear()
-            self._unavailable.clear()
-        logger.debug("Translator cache cleared (privacy_mode transition)")
+        # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -162,79 +135,10 @@ class Translator:
             # Wave 222: surface push failures to Sentry instead of silent swallow
             try:
                 from backend.observability import capture_exception
-                capture_exception(e, component="translator")
+                capture_exception(e, "_push_error_internal")
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
-
-    def clear_cache(self) -> None:
-        """Очищает оба слоя кэша: in-memory LRU и персистентный диск-кэш.
-
-        W1313 F2 / W1429: thread-safe через _cache_lock. Если _translation_cache
-        не инжектирован — пропускаем без ошибки (late-injection pattern).
-        """
-        with self._cache_lock:
-            self._cache.clear()
-        logger.debug("Translator: in-memory translation cache cleared")
-        # Очистить disk-persistent layer (late-injected, may be None).
-        tc = self._translation_cache
-        if tc is not None:
-            try:
-                tc.clear()
-                logger.debug("Translator: disk translation_cache cleared")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
-
-    def _check_privacy_mode_changed(self, privacy_mode_enabled: bool | None = None) -> None:
-        """Определяет переход privacy_mode и сбрасывает оба слоя кэша.
-
-        W1313 F2 / W1429: поддерживает два режима вызова:
-        - Без аргумента (из translate()): читает текущее значение через
-          _settings_getter (late-injected). Если getter не задан — no-op.
-        - С bool аргументом (из тестов/BackendService): использует переданное значение.
-          Первый вызов с новым значением только инициализирует трекинг без сброса.
-        """
-        if privacy_mode_enabled is None:
-            # Режим без аргумента: читаем из runtime-настроек через _settings_getter.
-            getter = getattr(self, "_settings_getter", None)
-            if getter is None:
-                return
-            try:
-                current = bool(getter("privacy_mode_enabled", False))
-            except Exception:
-                return
-            last = self._last_privacy_mode
-            self._last_privacy_mode = current
-            if last is None:
-                return  # первый вызов — только инициализация
-            if current and not last:
-                # Переход False→True: сбрасываем накопленные переводы.
-                self.clear_cache()
-                logger.info("Translator cache cleared on privacy_mode enable")
-        else:
-            # Режим с явным аргументом: W1313 F2 паттерн с first-call guard.
-            last = getattr(self, "_last_privacy_mode", None)
-            self._last_privacy_mode = privacy_mode_enabled
-            if last is None:
-                return  # первый вызов — только инициализация
-            if last != privacy_mode_enabled:
-                logger.info(
-                    "Translator: privacy_mode transition %s→%s — wiping both cache layers",
-                    last,
-                    privacy_mode_enabled,
-                )
-                self.clear_cache()
-
-    def _get_pipeline_lock(self, key: tuple) -> threading.Lock:
-        """Возвращает per-key Lock для ключа pipeline; создаёт если нет.
-
-        Используется для защиты check-then-build в _translate_with_model и
-        _try_nllb_fallback от конкурентного двойного построения одной модели.
-        """
-        with self._locks_mutex:
-            if key not in self._pipeline_locks:
-                self._pipeline_locks[key] = threading.Lock()
-            return self._pipeline_locks[key]
 
     def translate(
         self,
@@ -245,58 +149,17 @@ class Translator:
         glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         """Переводит текст согласно режиму и сетевой политике."""
-        # W1145 F2: проверяем смену privacy_mode перед каждым переводом.
-        self._check_privacy_mode_changed()
-        import time as _time
-        _t0 = _time.monotonic()
         # Профилируем весь translate()-pipeline по режиму. Имя span'а нормализуется
         # до входа чтобы даже mode=""/неизвестный mode попадали в согласованную метку.
         normalized_mode = self._normalize_mode(mode)
-        try:
-            from backend.observability import add_breadcrumb as _add_bc
-            _add_bc(
-                category="translation",
-                message="translate_start",
-                level="info",
-                data={"mode": normalized_mode, "network_mode": network_mode},
+        with _profiler.start_span(f"translate_{normalized_mode}"):
+            return self._translate_impl(
+                text=text,
+                normalized_mode=normalized_mode,
+                network_mode=network_mode,
+                translation_style=translation_style,
+                glossary=glossary,
             )
-        except Exception:
-            pass  # telemetry must never break translation
-        _result: TranslationResult | None = None
-        _exc: Exception | None = None
-        try:
-            with _profiler.start_span(f"translate_{normalized_mode}"):
-                _result = self._translate_impl(
-                    text=text,
-                    normalized_mode=normalized_mode,
-                    network_mode=network_mode,
-                    translation_style=translation_style,
-                    glossary=glossary,
-                )
-            return _result
-        except Exception as exc:
-            _exc = exc
-            raise
-        finally:
-            try:
-                from backend.observability import add_breadcrumb as _add_bc
-                _duration_ms = int((_time.monotonic() - _t0) * 1000)
-                if _exc is not None:
-                    _add_bc(
-                        category="translation",
-                        message="translate_error",
-                        level="error",
-                        data={"ok": False, "duration_ms": _duration_ms, "error_type": type(_exc).__name__},
-                    )
-                elif _result is not None:
-                    _add_bc(
-                        category="translation",
-                        message="translate_finish",
-                        level="info",
-                        data={"ok": _result.ok, "duration_ms": _duration_ms, "engine": _result.engine, "mode": _result.mode},
-                    )
-            except Exception:
-                pass  # telemetry must never break translation
 
     def _translate_impl(
         self,
@@ -308,12 +171,6 @@ class Translator:
     ) -> TranslationResult:
         """Внутренняя реализация translate(). Вынесена чтобы обернуть span'ом только
         наблюдаемую часть без дублирования normalize/cache логики."""
-        # W1145 F2: detect privacy_mode true-transition and purge in-RAM cache.
-        privacy_now = bool(getattr(self, "_privacy_mode", False))
-        if privacy_now and not self._privacy_was_on:
-            self.clear_cache()
-        self._privacy_was_on = privacy_now
-
         clean_text = text.strip()
         normalized_style = self._normalize_style(translation_style)
         normalized_network_mode = self._normalize_network_mode(network_mode)
@@ -338,21 +195,21 @@ class Translator:
         if cached is not None:
             return self._apply_glossary_to_result(cached, safe_glossary)
 
-        # W1429: персистентный кэш — проверяем после промаха in-memory кэша.
-        # Ключ использует normalized_mode/style/network_mode для изоляции режимов.
-        # Только successful (status="ok") результаты хранятся на диске.
-        # Значение закодировано как "src_lang\x00tgt_lang\x00engine\x00translated_text".
-        _tc = self._translation_cache
-        if _tc is not None:
-            _persistent_hit = _tc.get(
+        # Персистентный кэш — проверяем после промаха in-memory кэша.
+        # Ключ: (text, normalized_mode, normalized_style, "persistent") — стабильный,
+        # не зависит от сети или имени модели. Только successful (status="ok") результаты.
+        if self._translation_cache is not None:
+            persistent_hit = self._translation_cache.get(
                 text=clean_text,
                 source=normalized_mode,
                 target=normalized_style,
                 engine="persistent",
-                network_mode=normalized_network_mode,
             )
-            if _persistent_hit is not None:
-                parts = _persistent_hit.split("\x00", 3)
+            if persistent_hit is not None:
+                # Восстанавливаем объект из кэшированной строки (text)
+                # Исходный результат был успешным; source/target_lang берём из engine-field
+                # закодированного вида "src:target:engine_name" → разбираем здесь.
+                parts = persistent_hit.split("\x00", 3)
                 if len(parts) == 4:
                     src_lang, tgt_lang, orig_engine, translated_text = parts
                     restored = TranslationResult(
@@ -385,19 +242,15 @@ class Translator:
                 translation_style=normalized_style,
             )
             self._cache_set(cache_key, result)
-            # W1429: персистируем успешный билингвальный перевод
-            if result.ok and result.text and _tc is not None:
-                try:
-                    _tc.put(
-                        text=clean_text,
-                        source=normalized_mode,
-                        target=normalized_style,
-                        engine="persistent",
-                        network_mode=normalized_network_mode,
-                        result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
-                    )
-                except Exception:  # noqa: BLE001
-                    pass  # кэш не критичен
+            # Персистируем успешные результаты
+            if result.ok and self._translation_cache is not None:
+                self._translation_cache.put(
+                    text=clean_text,
+                    source=normalized_mode,
+                    target=normalized_style,
+                    engine="persistent",
+                    result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+                )
             return self._apply_glossary_to_result(result, safe_glossary)
 
         result = self._translate_single_mode(
@@ -407,19 +260,15 @@ class Translator:
             translation_style=normalized_style,
         )
         self._cache_set(cache_key, result)
-        # W1429: персистируем успешные переводы для выживания между перезапусками
-        if result.ok and result.text and _tc is not None:
-            try:
-                _tc.put(
-                    text=clean_text,
-                    source=normalized_mode,
-                    target=normalized_style,
-                    engine="persistent",
-                    network_mode=normalized_network_mode,
-                    result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
-                )
-            except Exception:  # noqa: BLE001
-                pass  # кэш не критичен
+        # Персистируем успешные результаты
+        if result.ok and self._translation_cache is not None:
+            self._translation_cache.put(
+                text=clean_text,
+                source=normalized_mode,
+                target=normalized_style,
+                engine="persistent",
+                result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+            )
         return self._apply_glossary_to_result(result, safe_glossary)
 
     def _translate_single_mode(
@@ -544,39 +393,32 @@ class Translator:
             )
 
         # Пробуем загрузить основную (специализированную) модель.
-        # Быстрый путь — модель уже в кэше, без блокировки.
         pipeline = self._pipelines.get(pipeline_key)
         if pipeline is None:
-            # W926 F2: double-checked locking — берём per-key Lock, потом проверяем снова
-            # под ним, чтобы конкурентный поток не построил ту же модель дважды.
-            lock = self._get_pipeline_lock(pipeline_key)
-            with lock:
-                pipeline = self._pipelines.get(pipeline_key)
-                if pipeline is None:
-                    pipeline = self._build_pipeline(model_name=model_name, allow_network=allow_network)
-                    if pipeline is None:
-                        # Основная модель недоступна — пробуем NLLB-200 distilled как fallback.
-                        nllb_result = self._try_nllb_fallback(
-                            text=text,
-                            source_lang=source_lang,
-                            target_lang=target_lang,
-                            allow_network=allow_network,
-                            translation_style=translation_style,
-                            return_mode=return_mode,
-                        )
-                        if nllb_result is not None:
-                            return nllb_result
-                        # NLLB тоже недоступен — кэшируем недоступность основной и возвращаем статус.
-                        self._unavailable.add(pipeline_key)
-                        return TranslationResult(
-                            text="",
-                            status="model_unavailable_offline" if not allow_network else "model_unavailable_online",
-                            source_lang=source_lang,
-                            target_lang=target_lang,
-                            mode=return_mode,
-                            engine="hf_marian",
-                        )
-                    self._pipelines[pipeline_key] = pipeline
+            pipeline = self._build_pipeline(model_name=model_name, allow_network=allow_network)
+            if pipeline is None:
+                # Основная модель недоступна — пробуем NLLB-200 distilled как fallback.
+                nllb_result = self._try_nllb_fallback(
+                    text=text,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    allow_network=allow_network,
+                    translation_style=translation_style,
+                    return_mode=return_mode,
+                )
+                if nllb_result is not None:
+                    return nllb_result
+                # NLLB тоже недоступен — кэшируем недоступность основной и возвращаем статус.
+                self._unavailable.add(pipeline_key)
+                return TranslationResult(
+                    text="",
+                    status="model_unavailable_offline" if not allow_network else "model_unavailable_online",
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    mode=return_mode,
+                    engine="hf_marian",
+                )
+            self._pipelines[pipeline_key] = pipeline
 
         try:
             translated = self._translate_text_chunks(pipeline=pipeline, text=text)
@@ -641,23 +483,17 @@ class Translator:
             return None
 
         # Ищем уже загруженный NLLB pipeline для этой пары языков.
-        # Быстрый путь без блокировки.
         pipeline = self._pipelines.get(nllb_key)
         if pipeline is None:
-            # W926 F2: double-checked locking для NLLB (~2.4 GB), аналогично Marian выше.
-            lock = self._get_pipeline_lock(nllb_key)
-            with lock:
-                pipeline = self._pipelines.get(nllb_key)
-                if pipeline is None:
-                    pipeline = self._build_nllb_pipeline(
-                        src_lang=src_flores,
-                        tgt_lang=tgt_flores,
-                        allow_network=allow_network,
-                    )
-                    if pipeline is None:
-                        self._unavailable.add(nllb_key)
-                        return None
-                    self._pipelines[nllb_key] = pipeline
+            pipeline = self._build_nllb_pipeline(
+                src_lang=src_flores,
+                tgt_lang=tgt_flores,
+                allow_network=allow_network,
+            )
+            if pipeline is None:
+                self._unavailable.add(nllb_key)
+                return None
+            self._pipelines[nllb_key] = pipeline
 
         try:
             translated = self._translate_text_chunks(pipeline=pipeline, text=text)
@@ -900,24 +736,10 @@ class Translator:
 
     @staticmethod
     def _apply_glossary(text: str, glossary: dict[str, str]) -> str:
-        """Применяет пользовательские замены терминов к переводу.
-
-        Использует regex с границами слов (\\b) чтобы избежать порчи субстрок:
-        «AI» не заменяет часть «PAIN», «el» — часть «elecciones».
-        re.IGNORECASE обеспечивает регистронезависимое сопоставление.
-        re.escape защищает от специальных символов в термине (напр. «C++»).
-
-        Lambda-обёртка над target предотвращает интерпретацию обратных слешей
-        в значении глоссария (напр. «C:\\Users» или «\\1ref» вызывали re.error).
-        """
+        """Применяет пользовательские замены терминов к переводу."""
         result = text
         for source, target in glossary.items():
-            result = re.sub(
-                r"\b" + re.escape(source) + r"\b",
-                lambda _m, _t=target: _t,
-                result,
-                flags=re.IGNORECASE,
-            )
+            result = result.replace(source, target)
         return result
 
     def _apply_glossary_to_result(self, result: TranslationResult, glossary: dict[str, str]) -> TranslationResult:
@@ -935,21 +757,19 @@ class Translator:
         )
 
     def _cache_get(self, key: tuple[str, str, str, str]) -> TranslationResult | None:
-        """Берёт результат из LRU-кэша перевода (W1145 F1: protected by RLock)."""
-        with self._cache_lock:
-            value = self._cache.get(key)
-            if value is None:
-                return None
-            self._cache.move_to_end(key)
-            return value
+        """Берёт результат из LRU-кэша перевода."""
+        value = self._cache.get(key)
+        if value is None:
+            return None
+        self._cache.move_to_end(key)
+        return value
 
     def _cache_set(self, key: tuple[str, str, str, str], value: TranslationResult) -> None:
-        """Сохраняет результат в LRU-кэш (W1145 F1: protected by RLock)."""
-        with self._cache_lock:
-            self._cache[key] = value
-            self._cache.move_to_end(key)
-            while len(self._cache) > self._cache_capacity:
-                self._cache.popitem(last=False)
+        """Сохраняет результат в LRU-кэш."""
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_capacity:
+            self._cache.popitem(last=False)
 
     @staticmethod
     def _split_text_chunks(text: str, max_chars: int) -> list[str]:

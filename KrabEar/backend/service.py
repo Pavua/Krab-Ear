@@ -65,6 +65,7 @@ from core.config import settings
 from core.audio_converter import AudioConverter
 from core.auto_glossary import AutoGlossaryBuilder
 from backend.translator import Translator
+from backend.translation_cache import TranslationCache
 from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
@@ -204,6 +205,10 @@ class BackendService:
                     transcriber.engine._settings_get = self._get_runtime_setting
 
         self.translator = translator or Translator()
+        # Персистентный кэш переводов — инжектируем в translator сразу после создания
+        # чтобы успешные переводы пережили перезапуск процесса. W1190 (wire fix).
+        self._translation_cache = TranslationCache(data_dir=str(store.data_dir))
+        self.translator._translation_cache = self._translation_cache
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
         # Hot-propagate LLMRewriter settings changes without restart.
@@ -946,6 +951,7 @@ class BackendService:
             # VERIFIED: called from Swift (HistoryPanel)
             "remove_translation_glossary_item": self._translation.handle_remove_translation_glossary_item,
             "get_glossary_suggestions": self._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
+            "clear_translation_cache": self._handle_clear_translation_cache,  # очистить персистентный LRU-кэш переводов (память + файл)
             "suggest_medical_glossary_terms": self._glossary_auto_learn.handle_suggest_medical_glossary_terms,  # мед. домен auto-learn: предлагает пары ES↔RU из истории переводов
             "apply_glossary_suggestions": self._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
             "export_glossary_csv": self._handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
@@ -2368,6 +2374,21 @@ class BackendService:
         audit = get_privacy_audit_logger()
         audit.clear()
         return {"ok": True}
+
+    def _handle_clear_translation_cache(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Очищает персистентный LRU-кэш переводов (память + файл на диске).
+
+        Полезно при смене языковой пары, обновлении моделей или ручном сбросе.
+        Возвращает:
+            ok       — True.
+            entries  — количество записей до очистки.
+        """
+        entries_before = 0
+        if self._translation_cache is not None:
+            stats = self._translation_cache.get_stats()
+            entries_before = stats.get("entries", 0)
+            self._translation_cache.clear()
+        return {"ok": True, "entries_cleared": entries_before}
 
     # --- D.2.3: Scored STT routing decision ---
 
