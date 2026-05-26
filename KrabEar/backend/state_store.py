@@ -845,6 +845,9 @@ class StateStore:
 
     def _compact_unlocked(self) -> None:
         """Собирает активные записи в новый основной журнал и очищает дельты."""
+        # W1254 F1: capture deleted IDs before clearing tombstones
+        deleted_ids = self._load_deleted_ids_unlocked()
+
         active = self._load_active_items_unlocked()
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
@@ -860,6 +863,17 @@ class StateStore:
         self.favorites_path.write_text("", encoding="utf-8")
         self.text_updates_path.write_text("", encoding="utf-8")
         self.action_items_path.write_text("", encoding="utf-8")
+
+        # W1254 F1: purge version cascade for all compacted-away (tombstoned) items
+        _versioner = getattr(self, "_transcript_versioner", None)
+        if _versioner is not None and deleted_ids:
+            for _item_id in deleted_ids:
+                try:
+                    _versioner.purge_versions_for_item(_item_id)
+                except Exception:
+                    logger.exception(
+                        "_compact_unlocked: не удалось удалить версии для id=%s", _item_id
+                    )
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""

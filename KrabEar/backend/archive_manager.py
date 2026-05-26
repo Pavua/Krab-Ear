@@ -36,8 +36,9 @@ class ArchiveManager:
     истории. Удалённые из активной истории записи могут быть восстановлены.
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, transcript_versioner: Any | None = None) -> None:
         self._store = store
+        self._transcript_versioner = transcript_versioner
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
@@ -122,6 +123,14 @@ class ArchiveManager:
                 item_dict["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self._append_ndjson(self._archive_path, item_dict)
                 _store.delete_history_item(clean_id)
+                # W1254 F1: purge version cascade on archive
+                if self._transcript_versioner is not None:
+                    try:
+                        self._transcript_versioner.purge_versions_for_item(clean_id)
+                    except Exception:
+                        logger.exception(
+                            "archive_items: не удалось удалить версии для id=%s", clean_id
+                        )
                 archived_count += 1
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0

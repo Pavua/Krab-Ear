@@ -22,6 +22,9 @@ class RecordingMerger:
     чтобы упростить тестирование и следовать паттерну других сервисов.
     """
 
+    def __init__(self, transcript_versioner: Any | None = None) -> None:
+        self._transcript_versioner = transcript_versioner
+
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
@@ -68,6 +71,14 @@ class RecordingMerger:
             for item in items:
                 if store.delete_history_item(item.id):
                     deleted_ids.append(item.id)
+                    # W1254 F1: purge version cascade on merge-delete
+                    if self._transcript_versioner is not None:
+                        try:
+                            self._transcript_versioner.purge_versions_for_item(item.id)
+                        except Exception:
+                            logger.exception(
+                                "merge_items: не удалось удалить версии для id=%s", item.id
+                            )
             logger.info(
                 "Объединено %d записей → %s; удалено %d оригиналов",
                 len(items),

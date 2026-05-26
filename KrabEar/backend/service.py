@@ -392,8 +392,10 @@ class BackendService:
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
-        self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
+        # W1254 F1: late-inject versioner into StateStore for compact cascade
+        self.store._transcript_versioner = self._transcript_versioning
+        self._merger = RecordingMerger(transcript_versioner=self._transcript_versioning)
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
@@ -439,7 +441,10 @@ class BackendService:
         self._timeline_view = TimelineViewGenerator()
         self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
-        self._archive_manager = ArchiveManager(store=self.store)
+        self._archive_manager = ArchiveManager(
+            store=self.store,
+            transcript_versioner=self._transcript_versioning,
+        )
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
