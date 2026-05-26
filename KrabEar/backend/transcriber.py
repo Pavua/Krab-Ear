@@ -56,6 +56,7 @@ class Transcriber:
         settings: dict | None = None,
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
+        silence_ranges: list[tuple[float, float]] | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -68,6 +69,8 @@ class Transcriber:
             diarize: Явное управление диаризацией для текущего вызова. None = использовать
                      глобальный settings.DIARIZATION_ENABLED. Если settings передан и
                      diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
+            silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
+                            Если указаны, обнуляет тихие участки аудио перед STT.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
@@ -91,6 +94,7 @@ class Transcriber:
             stt_hotwords=stt_hotwords,
             diarize=diarize,
             skip_vad_prefilter=skip_vad_prefilter,
+            silence_ranges=silence_ranges,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
