@@ -260,6 +260,29 @@ class StateStore:
             self._append_ndjson(self.tombstones_path, {"id": clean_id})
         return True
 
+    def restore_history_item_raw(self, raw_dict: "dict[str, Any]") -> str:
+        """Записывает словарь записи напрямую в history.ndjson, сохраняя все поля.
+
+        Если запись с таким же ID уже существует в активной истории, к ID
+        добавляется суффикс ``-restored`` для сохранения трассируемости.
+        Возвращает итоговый ID, под которым запись была сохранена.
+        """
+        item_id = str(raw_dict.get("id", "")).strip()
+        if not item_id:
+            import uuid as _uuid
+            item_id = str(_uuid.uuid4())
+
+        payload = dict(raw_dict)
+
+        with self._lock():
+            existing_ids = {item.id for item in self._load_active_items_unlocked()}
+            if item_id in existing_ids:
+                item_id = item_id + "-restored"
+            payload["id"] = item_id
+            self._append_ndjson(self.history_path, payload)
+
+        return item_id
+
     def get_history_page(self, cursor: str | None, limit: int) -> tuple[list[dict[str, Any]], str | None]:
         """Возвращает страницу истории от новых к старым."""
         return self.get_history_page_filtered(
