@@ -3068,9 +3068,12 @@ class AudioEngine:
                 )
 
             with open(audio_path, "rb") as f:
+                req_headers = {}
+                if settings.STT_GATEWAY_TOKEN:
+                    req_headers["Authorization"] = f"Bearer {settings.STT_GATEWAY_TOKEN}"
                 resp = requests.post(
                     settings.STT_GATEWAY_URL,
-                    headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
+                    headers=req_headers,
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
                     timeout=60,
