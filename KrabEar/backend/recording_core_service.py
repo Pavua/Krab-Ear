@@ -1102,26 +1102,72 @@ class RecordingCoreService:
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
 
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-        )
+        try:
+            item = self.store.add_history_item(
+                text=display_text,
+                paste_status="failed",
+                source_text=text,
+                translated_text=translated_text,
+                translation_mode=translation.mode,
+                source_lang=translation.source_lang,
+                target_lang=translation.target_lang,
+                translation_status=translation_status,
+                translation_engine=translation.engine,
+                cleaned_text=tp.get("cleaned_text", ""),
+                llm_applied=bool(tp.get("llm_applied", False)),
+                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+                diarization=diarization_data,
+                audio_duration_sec=duration_sec if duration_sec else None,
+                confidence=confidence if confidence else None,
+                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+            )
+        except OSError as _disk_exc:
+            import errno as _errno
+            _is_enospc = getattr(_disk_exc, "errno", None) == _errno.ENOSPC
+            _reason = "disk_full" if _is_enospc else "io_error"
+            logger.error(
+                "Phase E: не удалось сохранить историю — %s: %s",
+                _reason,
+                _disk_exc,
+                extra={"reason": _reason, "errno": getattr(_disk_exc, "errno", None)},
+            )
+            try:
+                from backend.error_codes import ERROR_REGISTRY
+                from datetime import datetime, timezone
+                _entry = ERROR_REGISTRY.get("history.write_fail", {})
+                event_bus.emit("krab.error", {
+                    "severity": _entry.get("severity", "critical"),
+                    "component": "history",
+                    "code": "history.write_fail",
+                    "message_user": _entry.get("user_msg_ru", "Не удалось сохранить транскрипт"),
+                    "message_debug": f"OSError errno={getattr(_disk_exc, 'errno', None)}: {_disk_exc}",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "context": {"reason": _reason},
+                })
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "status": "persist_failed",
+                "reason": _reason,
+                "transcript_text": text,
+                "duration_sec": duration_sec,
+                "quality_profile": sr["quality_profile"],
+                "cleanup_profile": sr["cleanup_profile"],
+                "translation_mode": sr["translation_mode"],
+                "translate_and_paste": sr["translate_and_paste"],
+                "translation_status": translation_status,
+                "source_lang": translation.source_lang,
+                "target_lang": translation.target_lang,
+                "translated_text": translated_text,
+                "history_id": None,
+                "stop_tail_trim_ms": stop_tail_trim_ms,
+                "silence_detected": silence_detected,
+                "silence_guard_enabled": silence_guard_enabled,
+                "background_guard_rejected": background_guard_rejected,
+            }
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
