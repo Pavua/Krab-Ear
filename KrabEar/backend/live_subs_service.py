@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 import numpy as np
 
 from backend.event_bus import bus as event_bus
+from backend.observability import add_breadcrumb
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
 
@@ -99,6 +100,15 @@ class LiveSubsService:
 
         buf_sec = self.buffer_duration_sec(sample_rate)
         if result is not None:
+            add_breadcrumb(
+                category="live_subs",
+                message="live_subs_ingest",
+                data={
+                    "status": "flushed",
+                    "buffer_duration_sec": round(buf_sec, 2),
+                    "has_translation": result.get("translation") is not None,
+                },
+            )
             return {
                 "status": "flushed",
                 "buffer_duration_sec": buf_sec,
@@ -109,7 +119,13 @@ class LiveSubsService:
 
     def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
         """IPC handler: live_subs_stop."""
-        return self.stop()
+        result = self.stop()
+        add_breadcrumb(
+            category="live_subs",
+            message="live_subs_stop",
+            data={"ok": True},
+        )
+        return result
 
     # ── internals ─────────────────────────────────────────────────────────────
 

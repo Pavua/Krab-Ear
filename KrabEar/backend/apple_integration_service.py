@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time as _time
 from typing import Any, TYPE_CHECKING
 
 from core.config import settings
+from backend.observability import add_breadcrumb
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 
 if TYPE_CHECKING:
@@ -73,6 +75,7 @@ class AppleIntegrationService:
             except (ValueError, TypeError):
                 pass
 
+        _t0 = _time.monotonic()
         try:
             result = self._telegram_bridge.send_message(
                 text=text,
@@ -80,13 +83,30 @@ class AppleIntegrationService:
                 reply_to=reply_to,
             )
         except CircuitBreakerOpen as exc:
+            add_breadcrumb(
+                category="apple_integration",
+                message="send_to_telegram",
+                level="error",
+                data={"ok": False, "error_type": "circuit_open"},
+            )
             raise RuntimeError(f"circuit_open: {exc}") from exc
         except (Exception,) as exc:
             msg = str(exc)
+            add_breadcrumb(
+                category="apple_integration",
+                message="send_to_telegram",
+                level="error",
+                data={"ok": False, "error_type": "krab_unavailable"},
+            )
             if "krab_unavailable" in msg or "krab_error" in msg:
                 raise RuntimeError(msg) from exc
             raise RuntimeError(f"krab_unavailable: {msg}") from exc
 
+        add_breadcrumb(
+            category="apple_integration",
+            message="send_to_telegram",
+            data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+        )
         return result
 
     def handle_list_telegram_chats(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -146,17 +166,41 @@ tell application "Notes"
 end tell
 '''
 
+        _t0 = _time.monotonic()
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
+                add_breadcrumb(
+                    category="apple_integration",
+                    message="create_apple_note",
+                    data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+                )
                 return {"ok": True, "note_id": result.stdout.strip(), "error": None}
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_apple_note",
+                level="warning",
+                data={"ok": False, "error_type": "osascript_error"},
+            )
             return {"ok": False, "note_id": None, "error": result.stderr.strip()}
         except subprocess.TimeoutExpired:
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_apple_note",
+                level="error",
+                data={"ok": False, "error_type": "timeout"},
+            )
             return {"ok": False, "note_id": None, "error": "osascript timeout"}
         except Exception as exc:
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_apple_note",
+                level="error",
+                data={"ok": False, "error_type": type(exc).__name__},
+            )
             return {"ok": False, "note_id": None, "error": str(exc)}
 
     # ── Apple Reminders integration (Phase D.4) ──────────────────────────────
@@ -253,17 +297,41 @@ end tell'''
     end tell
 end tell'''
 
+        _t0 = _time.monotonic()
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0:
+                add_breadcrumb(
+                    category="apple_integration",
+                    message="create_calendar_event",
+                    data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
+                )
                 return {"ok": True, "error": None}
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_calendar_event",
+                level="warning",
+                data={"ok": False, "error_type": "osascript_error"},
+            )
             return {"ok": False, "error": result.stderr.strip()}
         except subprocess.TimeoutExpired:
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_calendar_event",
+                level="error",
+                data={"ok": False, "error_type": "timeout"},
+            )
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
+            add_breadcrumb(
+                category="apple_integration",
+                message="create_calendar_event",
+                level="error",
+                data={"ok": False, "error_type": type(exc).__name__},
+            )
             return {"ok": False, "error": str(exc)}
 
     # ── iMessage integration (Phase D.4) ────────────────────────────────────

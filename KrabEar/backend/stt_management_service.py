@@ -8,7 +8,10 @@ scored routing decision, select_model.
 from __future__ import annotations
 
 import logging
+import time as _time
 from typing import Any, TYPE_CHECKING
+
+from backend.observability import add_breadcrumb
 
 if TYPE_CHECKING:
     from backend.settings_service import SettingsService
@@ -65,6 +68,11 @@ class STTManagementService:
                 current = current[excess:]
                 truncated = True
             self._settings_svc.handle_set_settings({"stt_hotwords": current})
+        add_breadcrumb(
+            category="stt",
+            message="add_stt_hotword",
+            data={"total_hotwords": len(current), "truncated": truncated},
+        )
         return {"hotwords": current, "truncated": truncated}
 
     def handle_remove_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -122,11 +130,34 @@ class STTManagementService:
             }
         """
         if self._transcriber is None or not hasattr(self._transcriber, "engine"):
+            add_breadcrumb(
+                category="stt",
+                message="warmup_stt",
+                level="warning",
+                data={"loaded": False, "error": "engine not available"},
+            )
             return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
         engine = self._transcriber.engine
         if engine is None or not hasattr(engine, "warmup") or not callable(engine.warmup):
+            add_breadcrumb(
+                category="stt",
+                message="warmup_stt",
+                level="warning",
+                data={"loaded": False, "error": "engine not available"},
+            )
             return {"loaded": False, "latency_ms": 0, "model_name": "", "error": "engine not available"}
-        return engine.warmup()
+        _t0 = _time.monotonic()
+        result = engine.warmup()
+        add_breadcrumb(
+            category="stt",
+            message="warmup_stt",
+            data={
+                "loaded": result.get("loaded", False),
+                "model_name": result.get("model_name", ""),
+                "duration_ms": result.get("latency_ms", round((_time.monotonic() - _t0) * 1000)),
+            },
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Scored STT routing decision (debug)
@@ -236,6 +267,15 @@ class STTManagementService:
             quality=quality,
             is_preview=is_preview,
             system_load=system_load,
+        )
+        add_breadcrumb(
+            category="stt",
+            message="select_model",
+            data={
+                "model_name": sel.model_name,
+                "quality_tier": sel.quality_tier,
+                "duration_sec": duration_sec,
+            },
         )
         return {
             "model_name": sel.model_name,
