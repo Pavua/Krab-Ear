@@ -21,12 +21,30 @@ _VOWELS_ES = frozenset("aeiouáéíóúüAEIOUÁÉÍÓÚÜ")
 _VOWELS_EN = frozenset("aeiouAEIOU")
 _ALL_VOWELS = _VOWELS_RU | _VOWELS_ES | _VOWELS_EN
 
-# Паттерн для разбивки на предложения
-_RE_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+# Паттерн для разбивки на предложения (основной — после ! и ?)
+_RE_SENTENCE_SPLIT = re.compile(r"(?<=[!?])\s+(?=[A-ZА-ЯЁ\"À-ɏ])")
+# Паттерн для разбивки на предложения по точке (только после слов ≥2 символа,
+# чтобы не срабатывать на однобуквенные аббревиатуры вида «г.», «ул.»)
+_RE_SENTENCE_SPLIT_DOT = re.compile(
+    r"(?<=[А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]{2}\.)\s+(?=[A-ZА-ЯЁ\"À-ɏ])"
+)
 # Паттерн для токенизации слов (кириллица + латиница + дефис внутри)
 _RE_WORD = re.compile(r"[А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+(?:[-'][А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+)*")
 # Паттерн для очистки дефисов/апострофов при подсчёте длины слова
 _RE_HYPHEN_APOS = re.compile(r"[-']")
+
+# Заглушка для троеточия при разбивке на предложения
+_ELLIPSIS_PLACEHOLDER = "\x00ELLIPSIS\x00"
+
+# Известные русские сокращения (без точки), которые не должны делить предложение.
+# Например: «г.» (год/город), «ул.» (улица), «т.е.» (то есть), «т.д.» (так далее),
+# «т.п.» (тому подобное), «стр.» (страница), «ч.» (часть).
+_RU_ABBREV = frozenset({"г", "ул", "т.е", "т.д", "т.п", "стр", "ч", "пр", "д", "кв"})
+
+# Паттерн для замены известных аббревиатур перед разбивкой
+_RE_ABBREV = re.compile(
+    r"\b(" + "|".join(re.escape(a) for a in sorted(_RU_ABBREV, key=len, reverse=True)) + r")\."
+)
 
 
 def _count_syllables(word: str) -> int:
@@ -41,12 +59,49 @@ def _tokenize_words(text: str) -> List[str]:
 
 
 def _split_sentences(text: str) -> List[str]:
-    """Разбивает текст на предложения, фильтруя пустые."""
-    raw = _RE_SENTENCE_SPLIT.split(text.strip())
-    sentences = [s.strip() for s in raw if s.strip()]
-    # Если нет явных разделителей — весь текст одно предложение
+    """Разбивает текст на предложения, фильтруя пустые.
+
+    Корректно обрабатывает:
+    - Троеточие ``...`` — не считается границей предложения.
+    - Русские сокращения ``г.``, ``ул.``, ``т.е.``, ``т.д.``, ``т.п.`` и др.
+    - Разрыв предложения только по ``.`` перед заглавной буквой, если перед
+      точкой стоит слово длиной ≥ 2 символа (исключает однобуквенные аббревиатуры).
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    # 1. Заменяем троеточие-символ и буквенное «...» на заглушку
+    work = text.replace("…", _ELLIPSIS_PLACEHOLDER)
+    work = work.replace("...", _ELLIPSIS_PLACEHOLDER)
+
+    # 2. Защищаем известные сокращения: «г.» → «г\x00»  (убираем точку)
+    #    Потом восстановим при финальной замене заглушек.
+    _ABBREV_MARK = "\x00ABBREV\x00"
+
+    def _protect_abbrev(m: re.Match) -> str:
+        return m.group(1) + _ABBREV_MARK
+
+    work = _RE_ABBREV.sub(_protect_abbrev, work)
+
+    # 3. Разбиваем по ! и ?
+    parts: List[str] = []
+    current_parts = _RE_SENTENCE_SPLIT.split(work)
+    for part in current_parts:
+        # Дополнительно разбиваем по точке (только перед заглавной, слово ≥ 2 символа)
+        sub_parts = _RE_SENTENCE_SPLIT_DOT.split(part)
+        parts.extend(sub_parts)
+
+    # 4. Восстанавливаем заглушки
+    def _restore(s: str) -> str:
+        s = s.replace(_ELLIPSIS_PLACEHOLDER, "...")
+        s = s.replace(_ABBREV_MARK, ".")
+        return s.strip()
+
+    sentences = [_restore(s) for s in parts if _restore(s)]
+
     if not sentences:
-        return [text.strip()] if text.strip() else []
+        return [text] if text else []
     return sentences
 
 
