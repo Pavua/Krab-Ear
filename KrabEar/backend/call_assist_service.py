@@ -244,6 +244,26 @@ class CallAssistService:
 
     def handle_start(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запускает сессию ассистента звонка с интеграцией Voice Gateway."""
+        # F1: guard against double-start race — reject if a session is already active.
+        # Mark active=True atomically under the lock *before* doing any I/O so that
+        # concurrent callers see the "taken" state immediately.
+        with self._lock:
+            if self._state.get("active"):
+                existing_id = self._state.get("session_id", "")
+                logger.warning(
+                    "handle_start: отклонено — сессия %s уже активна",
+                    existing_id,
+                )
+                return {
+                    "ok": False,
+                    "error": "already_active",
+                    "session_id": existing_id,
+                    "status": self._state.get("status", "running"),
+                }
+            # Claim the slot immediately so concurrent callers see active=True
+            self._state["active"] = True
+            self._state["status"] = "starting"
+
         if not self.recorder.is_recording:
             started = self.recorder.start()
             if started:
@@ -370,6 +390,10 @@ class CallAssistService:
             self._state["status"] = "stopped"
             self._state["stopped_at"] = stopped_at
             state = dict(self._state)
+
+        # F2: stop recorder when the call assist session ends to prevent unbounded recording
+        if self.recorder.is_recording:
+            self.recorder.stop()
 
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()

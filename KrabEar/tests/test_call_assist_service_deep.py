@@ -547,10 +547,10 @@ class TestHandlesVgConnectionFailure(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestConcurrentStartBlocked(unittest.TestCase):
-    """Only one active call session at a time; second start should overwrite state."""
+    """Only one active call session at a time; second start must be rejected (W830 F1)."""
 
     def test_concurrent_start_blocked(self) -> None:
-        """Two sequential starts: state remains consistent (second overwrites first)."""
+        """Second sequential start while session active returns already_active error."""
         gw = _GwOk(session_id="gw-a")
         svc = _idle_svc(gateway=gw)
 
@@ -558,20 +558,19 @@ class TestConcurrentStartBlocked(unittest.TestCase):
         self.assertTrue(result1["active"])
         session1 = result1["session_id"]
 
-        # A second start while already active — new session replaces old one
+        # A second start while already active — must be rejected (W830 F1 fix)
         gw2 = _GwOk(session_id="gw-b")
         svc.gateway = gw2
         result2 = svc.handle_start({"translation_mode": "auto_to_ru"})
-        self.assertTrue(result2["active"])
-        session2 = result2["session_id"]
+        self.assertFalse(result2.get("ok", True), "Second start must be rejected")
+        self.assertEqual(result2.get("error"), "already_active")
+        self.assertEqual(result2.get("session_id"), session1)
 
-        # Sessions are distinct UUIDs
-        self.assertNotEqual(session1, session2)
-        # Internal state reflects the second start
-        self.assertEqual(svc.state["session_id"], session2)
+        # Internal state is unchanged — still the first session
+        self.assertEqual(svc.state["session_id"], session1)
 
     def test_concurrent_start_from_two_threads(self) -> None:
-        """Two threads calling handle_start — both return active, no exception."""
+        """Two threads calling handle_start — exactly one succeeds, one gets already_active."""
         results: list[dict] = []
         errors: list[Exception] = []
 
@@ -596,8 +595,11 @@ class TestConcurrentStartBlocked(unittest.TestCase):
 
         self.assertEqual(len(errors), 0, f"Unexpected errors: {errors}")
         self.assertEqual(len(results), 2)
-        for r in results:
-            self.assertTrue(r["active"])
+        # Exactly one result is active, the other is the already_active rejection
+        active_results = [r for r in results if r.get("active")]
+        rejected_results = [r for r in results if r.get("error") == "already_active"]
+        self.assertEqual(len(active_results), 1, "Exactly one start must succeed")
+        self.assertEqual(len(rejected_results), 1, "Exactly one start must be rejected")
 
 
 # ---------------------------------------------------------------------------
