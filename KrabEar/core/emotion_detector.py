@@ -41,19 +41,23 @@ _NEGATIVE_PHRASES: dict[str, list[str]] = {
 
 _NEGATIVE_WORDS: dict[str, list[str]] = {
     "ru": [
-        "плохо", "ужасно", "нет", "не", "нельзя", "никогда", "невозможно",
+        # Чистые отрицательные частицы («не», «нет») удалены — W1009 F1:
+        # они служебные слова, а не сентиментальные.
+        "плохо", "ужасно", "нельзя", "никогда", "невозможно",
         "провал", "ошибка", "неудача", "плохой", "ужасный", "отстой",
         "катастрофа", "беда", "кошмар", "хуже", "худший", "жуть",
         "ненавижу", "надоело", "бесит", "раздражает", "злой", "злость",
         "злюсь", "отвратительно", "скучно",
     ],
     "es": [
-        "mal", "malo", "terrible", "no", "nunca", "imposible", "error",
+        # «no» удалено как чистая отрицательная частица — W1009 F1.
+        "mal", "malo", "terrible", "nunca", "imposible", "error",
         "fallo", "fracaso", "horrible", "pésimo", "desastre", "odio",
         "detesto", "molesta", "fastidio", "peor", "peorísimo",
     ],
     "en": [
-        "bad", "terrible", "no", "never", "impossible", "error", "fail",
+        # «no», «never», «not» удалены как чистые отрицательные частицы — W1009 F1.
+        "bad", "terrible", "impossible", "error", "fail",
         "failure", "horrible", "awful", "disaster", "hate", "worst",
         "annoying", "frustrated", "angry", "useless",
     ],
@@ -61,18 +65,21 @@ _NEGATIVE_WORDS: dict[str, list[str]] = {
 
 _POSITIVE_WORDS: dict[str, list[str]] = {
     "ru": [
-        "отлично", "здорово", "да", "хорошо", "прекрасно", "замечательно",
+        # «да» удалено — утвердительная частица, не сентиментальное слово (W1009 F3).
+        "отлично", "здорово", "хорошо", "прекрасно", "замечательно",
         "супер", "круто", "восхитительно", "великолепно", "молодец",
         "спасибо", "благодарю", "люблю", "нравится", "радость", "счастье",
         "успех", "победа", "класс", "шикарно", "браво", "отличный",
     ],
     "es": [
-        "bien", "bueno", "sí", "excelente", "maravilloso", "fantástico",
+        # «sí» удалено — утвердительная частица (W1009 F3).
+        "bien", "bueno", "excelente", "maravilloso", "fantástico",
         "genial", "perfecto", "increíble", "gracias", "amor", "feliz",
         "éxito", "bravo", "estupendo",
     ],
     "en": [
-        "great", "good", "yes", "excellent", "wonderful", "fantastic",
+        # «yes» удалено — утвердительная частица (W1009 F3).
+        "great", "good", "excellent", "wonderful", "fantastic",
         "awesome", "perfect", "amazing", "thanks", "love", "happy",
         "success", "brilliant", "superb",
     ],
