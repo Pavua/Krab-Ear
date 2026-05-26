@@ -91,7 +91,6 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
-from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -122,11 +121,9 @@ from backend.observability import (
     init_sentry,
     install_signal_handlers,
 )
-from backend.audit_logger import AuditLogger
 from backend.calendar_link import CalendarLinker
-from backend.text_processing_service import TextProcessingService
 from backend.privacy_audit import get_privacy_audit_logger
-from backend.text_processing_service import TextProcessingService
+from backend.audit_logger import AuditLogger
 
 import argparse
 from datetime import datetime, timedelta
@@ -441,9 +438,7 @@ class BackendService:
         self._metadata_enricher = MetadataEnricher()
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
-        self._auto_deduplicator = AutoDeduplicator(
-            settings_provider=self._get_runtime_setting,
-        )
+        self._auto_deduplicator = AutoDeduplicator()
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
@@ -479,8 +474,6 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
-        # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
-        self._history._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -556,15 +549,11 @@ class BackendService:
         )
         self._disk_monitor.start()
 
-        # Audit logger — append-only NDJSON log of all IPC requests (W1351 F1 fix).
-        # Was dead module in production until this instantiation was added.
-        # GracefulShutdownHandler.register(service) reads self._audit_logger via getattr.
-        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
-
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
 
-        # Audit log — IPC-request trace (W1381)
+        # Audit logger — структурированный журнал IPC-запросов (NDJSON, ежедневная ротация 7 дней)
+        # Всегда включён (core observability). Флашится при shutdown через GracefulShutdownHandler.
         self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
@@ -1236,8 +1225,6 @@ class BackendService:
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
-            # --- IPC audit log (W1381) ---
-            "get_audit_log": self._handle_get_audit_log,  # последние записи IPC audit log; privacy_mode блокирует
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
@@ -1304,27 +1291,28 @@ class BackendService:
                 level="info",
             )
 
-        _t_start = time.monotonic()
+        _t0 = time.monotonic()
         try:
             result = handler(params)
-            _response = {"id": request_id, "ok": True, "result": result}
+            response = {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
-            _response = self._error(request_id, "internal_error", str(exc))
-        finally:
-            _duration_ms = (time.monotonic() - _t_start) * 1000
-            _audit: AuditLogger | None = getattr(self, "_audit_logger", None)
-            if _audit is not None:
-                try:
-                    _audit.log_request(
-                        method=method,
-                        params=params or {},
-                        result=_response,
-                        duration_ms=_duration_ms,
-                    )
-                except Exception:
-                    logger.exception("audit_logger: log_request failed — dispatch unaffected")
-        return _response
+            response = self._error(request_id, "internal_error", str(exc))
+
+        # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
+        try:
+            _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            if not _privacy_on:
+                self._audit_logger.log_request(
+                    method=method,
+                    params=params if isinstance(params, dict) else {},
+                    result=response,
+                    duration_ms=(time.monotonic() - _t0) * 1000,
+                )
+        except Exception:
+            pass  # audit logging никогда не должен ронять IPC-ответ
+
+        return response
 
     _BATCH_MAX_REQUESTS = 50
 
@@ -2390,36 +2378,6 @@ class BackendService:
         audit.clear()
         return {"ok": True}
 
-    # --- IPC audit log (W1381) ---
-
-    def _handle_get_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает последние записи IPC audit log для операторов/отладки.
-
-        Параметры:
-            days_back — количество дней для выборки (default 7, range 1–90).
-            limit     — максимальное число записей (default 200).
-
-        Возвращает:
-            entries — список записей {ts, method, params_keys, success, duration_ms}.
-            reason  — «privacy_mode» когда данные недоступны.
-        """
-        # Privacy mode: возвращаем пустой ответ без утечки метаданных
-        if self._cached_settings().get("privacy_mode_enabled", False):
-            return {"ok": True, "entries": [], "reason": "privacy_mode"}
-
-        raw_days = params.get("days_back", 7)
-        try:
-            days_back = int(raw_days)
-        except (TypeError, ValueError):
-            days_back = 7
-        days_back = max(1, min(days_back, 90))
-
-        limit = int(params.get("limit", 200))
-        limit = max(1, min(limit, 1000))
-
-        entries = self._audit_logger.get_audit_log(limit=limit)
-        return {"ok": True, "entries": entries}
-
     # --- D.2.3: Scored STT routing decision ---
 
     def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2931,17 +2889,6 @@ class BackendService:
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": True,
-                "daily_sentiment": [],
-                "overall_sentiment": 0.0,
-                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
-                "mood_trend": "stable",
-                "most_positive_day": {},
-                "most_negative_day": {},
-                "reason": "privacy_mode_active",
-            }
         days = int(params.get("days", 30))
         try:
             with self.store._lock():
@@ -2953,15 +2900,6 @@ class BackendService:
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
-        # W1408 F1: privacy guard — не раскрываем текст транскрипций в режиме конфиденциальности
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": True,
-                "items": [],
-                "common_words": [],
-                "unique_words": {},
-                "reason": "privacy_mode_active",
-            }
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise ValueError("Параметр item_ids обязателен (список строк)")
@@ -3669,8 +3607,6 @@ end tell'''
             dict: total_scanned, duplicate_groups, duplicates.
         """
         params["_store"] = self.store
-        # W1406 N2: inject semantic_searcher so stale-embedding cleanup loop can run
-        params["_semantic_searcher"] = self._semantic_searcher
         return self._auto_deduplicator.handle_run_deduplication(params)
 
     def _handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
