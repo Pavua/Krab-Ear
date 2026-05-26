@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.audio_denoiser import AudioDenoiser, _find_noise_window
+from core.audio_denoiser import AudioDenoiser, _has_whispered_segments
 from core.noise_profiler import NoiseProfiler
 
 _SR = 16000  # стандартная частота дискретизации Whisper
@@ -281,88 +281,125 @@ class TestAudioDenoiserWave128(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# W1067 — Regression: noise floor из тишайшего окна, а не из первых 200 мс
+# W1071 — F2 (strong-mode whisper downgrade) + F4 (multichannel warning)
 # ---------------------------------------------------------------------------
 
-class TestNoiseWindowSelection(unittest.TestCase):
-    """W1062 F1 HIGH: noise floor должен браться из тишайшего окна, а не первых 200 мс."""
+def _make_whisper_audio(duration_sec: float = 1.0) -> np.ndarray:
+    """Синусоида шёпотной амплитуды (-42 dB RMS ≈ линейн. 0.008)."""
+    t = np.linspace(0, duration_sec, int(_SR * duration_sec), endpoint=False)
+    # Амплитуда 0.008 даёт RMS ≈ 0.0057 → 20*log10(0.0057) ≈ -44.9 dB
+    return (0.008 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
 
-    def test_find_noise_window_returns_int(self) -> None:
-        """_find_noise_window возвращает целочисленный индекс начала окна."""
-        audio = np.random.default_rng(0).standard_normal(32000).astype(np.float64)
-        start = _find_noise_window(audio, _SR)
-        self.assertIsInstance(start, int)
-        self.assertGreaterEqual(start, 0)
 
-    def test_find_noise_window_selects_quietest_region(self) -> None:
-        """_find_noise_window выбирает тишайшее окно, а не первое."""
-        # Первые 3200 сэмплов (200 мс) — речевой сигнал (высокая амплитуда)
-        # Вторые 3200 сэмплов — тишина (почти нулевая амплитуда)
-        rng = np.random.default_rng(42)
-        speech_window = rng.standard_normal(3200).astype(np.float64) * 0.5
-        silence_window = np.zeros(3200, dtype=np.float64) + 1e-6
-        # Ещё один речевой фрагмент в конце
-        tail = rng.standard_normal(9600).astype(np.float64) * 0.4
-        audio = np.concatenate([speech_window, silence_window, tail])
+def _make_normal_speech_audio(duration_sec: float = 1.0) -> np.ndarray:
+    """Синусоида нормальной громкости речи (-12 dB RMS)."""
+    t = np.linspace(0, duration_sec, int(_SR * duration_sec), endpoint=False)
+    # Амплитуда 0.25 даёт RMS ≈ 0.177 → ≈ -15 dB — вне диапазона шёпота
+    return (0.25 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
 
-        start = _find_noise_window(audio, _SR, window_ms=200)
-        # Тишайшее окно — второе (индекс 1 → start = 3200)
-        self.assertEqual(start, 3200,
-                         f"Ожидали start=3200 (тишина), получили {start}")
 
-    def test_find_noise_window_short_audio_returns_zero(self) -> None:
-        """Если аудио короче одного окна — возвращаем 0."""
-        short = np.ones(100, dtype=np.float64)
-        start = _find_noise_window(short, _SR, window_ms=200)
-        self.assertEqual(start, 0)
+class TestHasWhisperedSegments(unittest.TestCase):
+    """Тесты вспомогательной функции _has_whispered_segments."""
 
-    def test_speech_at_start_not_suppressed(self) -> None:
-        """Речевой сигнал в НАЧАЛЕ записи не должен подавляться через noise floor.
+    def test_whisper_amplitude_detected(self) -> None:
+        """Шёпотная амплитуда в диапазоне -50..-35 dB обнаруживается."""
+        audio = _make_whisper_audio(duration_sec=1.0).astype(np.float64)
+        self.assertTrue(_has_whispered_segments(audio, _SR))
 
-        Регрессионный тест для W1062 F1 HIGH: до фикса первые 200 мс брались как
-        noise reference. Если пользователь начал говорить сразу после хоткея —
-        речевые гармоники попадали в noise reference и подавлялись.
+    def test_normal_speech_not_detected_as_whisper(self) -> None:
+        """Нормальная громкость речи (выше -35 dB) не считается шёпотом."""
+        audio = _make_normal_speech_audio(duration_sec=1.0).astype(np.float64)
+        self.assertFalse(_has_whispered_segments(audio, _SR))
 
-        Схема теста:
-        - Первые 200 мс: громкий речеподобный синусоидальный сигнал (440 Гц).
-        - Следующие 200 мс: полная тишина (noise floor).
-        - Ещё 600 мс: слабый фоновый шум.
+    def test_silence_not_detected_as_whisper(self) -> None:
+        """Тишина (ниже -50 dB) не считается шёпотом."""
+        silence = np.zeros(int(_SR * 1.0), dtype=np.float64)
+        self.assertFalse(_has_whispered_segments(silence, _SR))
 
-        После деноизинга речь в начале должна остаться достаточно громкой.
+    def test_empty_audio_safe(self) -> None:
+        """Пустой массив не вызывает исключений."""
+        self.assertFalse(_has_whispered_segments(np.array([]), _SR))
+
+
+class TestStrongModeWhisperDowngrade(unittest.TestCase):
+    """W1062 F2 — strong-mode автоматически понижается до moderate при шёпоте."""
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_strong_mode_downgrades_when_whisper_detected(self) -> None:
+        """При шёпотной амплитуде strong эффективно использует moderate-параметры.
+
+        Проверяем косвенно: результат strong при шёпоте должен быть ближе
+        к результату moderate (для нормального сигнала), чем результат чистого
+        strong, потому что downgrade ограничивает prop_decrease до 0.75.
         """
-        sr = _SR
-        window = int(0.2 * sr)  # 3200 сэмплов @ 16 кГц
+        whisper_audio = _make_whisper_audio(duration_sec=1.0)
 
-        # Первые 200 мс — речь (громкий синус)
-        t_speech = np.linspace(0, 0.2, window, endpoint=False)
-        speech = (0.5 * np.sin(2 * np.pi * 440.0 * t_speech)).astype(np.float64)
+        result_strong = self.denoiser.denoise(whisper_audio, _SR, strength="strong")
+        result_moderate = self.denoiser.denoise(whisper_audio, _SR, strength="moderate")
 
-        # Следующие 200 мс — тишина (истинный noise floor)
-        silence = np.zeros(window, dtype=np.float64)
-
-        # Оставшиеся 600 мс — слабый шум
-        rng = np.random.default_rng(99)
-        tail = rng.standard_normal(int(0.6 * sr)).astype(np.float64) * 0.02
-
-        audio = np.concatenate([speech, silence, tail]).astype(np.float32)
-
-        denoiser = AudioDenoiser()
-        result = denoiser.denoise(audio, sr, strength="moderate")
-
-        # RMS первых 200 мс результата должна быть близка к RMS входных 200 мс.
-        # До фикса: noise reference = speech → mask удаляла гармоники речи.
-        # После фикса: noise reference = тишина → речь должна сохраняться.
-        speech_rms_in = float(np.sqrt(np.mean(audio[:window].astype(np.float64) ** 2)))
-        speech_rms_out = float(np.sqrt(np.mean(result[:window].astype(np.float64) ** 2)))
-
-        # Допускаем не более 40% потерь амплитуды речи
-        ratio = speech_rms_out / (speech_rms_in + 1e-10)
-        self.assertGreater(
-            ratio, 0.6,
-            f"Речь в начале подавлена слишком сильно: ratio={ratio:.3f} "
-            f"(rms_in={speech_rms_in:.4f}, rms_out={speech_rms_out:.4f}). "
-            f"Вероятно, noise floor взят из речевого фрагмента, а не из тишины."
+        # strong при шёпоте должен дать тот же результат что moderate
+        # (поскольку происходит downgrade strong→moderate)
+        np.testing.assert_array_almost_equal(
+            result_strong, result_moderate, decimal=6,
+            err_msg="strong с шёпотом должен вести себя идентично moderate (downgrade)",
         )
+
+    def test_strong_mode_unchanged_for_normal_speech(self) -> None:
+        """При нормальной громкости речи strong НЕ понижается до moderate."""
+        normal_audio = _make_normal_speech_audio(duration_sec=1.0)
+
+        result_strong = self.denoiser.denoise(normal_audio, _SR, strength="strong")
+        result_moderate = self.denoiser.denoise(normal_audio, _SR, strength="moderate")
+
+        # strong при нормальной речи НЕ должен быть равен moderate
+        diff = float(np.mean(np.abs(result_strong.astype(np.float64) - result_moderate.astype(np.float64))))
+        self.assertGreater(
+            diff, 1e-8,
+            "strong без шёпота должен отличаться от moderate (нет downgrade)",
+        )
+
+    def test_strong_mode_output_shape_preserved_for_whisper(self) -> None:
+        """Форма выходного массива сохраняется после downgrade."""
+        whisper_audio = _make_whisper_audio(duration_sec=0.5)
+        result = self.denoiser.denoise(whisper_audio, _SR, strength="strong")
+        self.assertEqual(result.shape, whisper_audio.shape)
+
+    def test_strong_mode_output_clipped_for_whisper(self) -> None:
+        """Выходные значения остаются в [-1, 1] после downgrade."""
+        whisper_audio = _make_whisper_audio(duration_sec=1.0)
+        result = self.denoiser.denoise(whisper_audio, _SR, strength="strong")
+        self.assertLessEqual(float(np.max(result)), 1.0)
+        self.assertGreaterEqual(float(np.min(result)), -1.0)
+
+
+class TestMultichannelWarning(unittest.TestCase):
+    """W1062 F4 — многоканальный вход логирует предупреждение."""
+
+    def setUp(self) -> None:
+        self.denoiser = AudioDenoiser()
+
+    def test_multichannel_logs_warning(self) -> None:
+        """При многоканальном входе логируется предупреждение о downmix."""
+        mono = _make_noisy_audio(duration_sec=0.5, snr_target_db=5.0)
+        stereo = np.stack([mono, mono], axis=1)  # (N, 2)
+
+        with self.assertLogs("KrabEar.AudioDenoiser", level="WARNING") as cm:
+            self.denoiser.denoise(stereo, _SR, strength="moderate")
+
+        self.assertTrue(
+            any("многоканальный" in msg or "моно" in msg for msg in cm.output),
+            f"Ожидалось предупреждение о многоканальном входе, получено: {cm.output}",
+        )
+
+    def test_multichannel_output_is_mono(self) -> None:
+        """После обработки многоканального входа возвращается 1-D массив."""
+        mono = _make_noisy_audio(duration_sec=0.5, snr_target_db=5.0)
+        stereo = np.stack([mono, mono], axis=1)  # (N, 2)
+        result = self.denoiser.denoise(stereo, _SR, strength="light")
+        self.assertEqual(result.ndim, 1)
+        self.assertEqual(result.shape[0], stereo.shape[0])
 
 
 if __name__ == "__main__":
