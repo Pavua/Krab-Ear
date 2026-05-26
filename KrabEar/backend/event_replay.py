@@ -61,8 +61,12 @@ class EventReplayManager:
 
         if self._persist_path:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            self._file_handle = self._persist_path.open("a", encoding="utf-8")
-            logger.info("EventReplayManager: персистенция в %s", self._persist_path)
+            # Открываем в режиме "w" (truncate), а не "a" (append):
+            # файл ограничен событиями текущей сессии — in-memory кольцевой буфер
+            # уже ограничивает их до 10 000. Режим "a" приводил к неограниченному
+            # росту (~14 МБ/день, ~5 ГБ/год). W829 CRIT-1.
+            self._file_handle = self._persist_path.open("w", encoding="utf-8")
+            logger.info("EventReplayManager: персистенция в %s (truncate на старте)", self._persist_path)
 
     # ------------------------------------------------------------------
     # Публичный API
