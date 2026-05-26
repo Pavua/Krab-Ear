@@ -37,6 +37,9 @@ class EventBus:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue[dict[str, Any] | None]] = []
+        # Late-injected EventReplayManager — set after both objects are constructed.
+        # When not None, every emitted event is also recorded in the replay ring buffer.
+        self._event_replay: Any | None = None
 
     def subscribe(self) -> queue.Queue[dict[str, Any] | None]:
         """Регистрирует нового подписчика и возвращает его очередь.
@@ -79,6 +82,12 @@ class EventBus:
                 dropped += 1
         if dropped:
             logger.warning("EventBus: %d подписчик(ов) пропустили событие %s (очередь полна)", dropped, event_type)
+        # Forward to event replay ring buffer (late-injected, no-op when None).
+        if self._event_replay is not None:
+            try:
+                self._event_replay.record_event(event_type, payload)
+            except Exception:
+                logger.warning("EventBus: не удалось записать событие %s в EventReplayManager", event_type, exc_info=True)
 
     def emit_typed(self, event_type: EventType, payload: BaseModel) -> None:
         """Типизированный emit — валидирует payload через Pydantic модель."""
