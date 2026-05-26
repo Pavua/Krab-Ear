@@ -22,7 +22,10 @@ logger = logging.getLogger("KrabEar.NormalizationProfiles")
 
 # Precompiled regex — используются в apply() и _apply_rule() на каждой транскрипции
 _RE_NORMALIZE_WS = re.compile(r"\s+")
-_RE_CAPITALIZE_SENT = re.compile(r"(?:^|(?<=[.!?…])\s+)([а-яa-z])")
+# W1050 F4: расширен до всех Unicode-слов (\w + re.UNICODE),
+# что покрывает испанские акцентированные буквы (é, ñ, á, etc.)
+# и любые другие Unicode-символы класса "word character".
+_RE_CAPITALIZE_SENT = re.compile(r"(?:^|(?<=[.!?…])\s+)(\w)", re.UNICODE)
 _RE_STRIP_TRAILING_PERIOD = re.compile(r"[.]+$")
 
 # ── Встроенные профили ──────────────────────────────────────────────────────
