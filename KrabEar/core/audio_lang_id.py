@@ -18,6 +18,7 @@ detect_language() (encoder + language head, без decoder).
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -41,6 +42,9 @@ class AudioLanguageID:
 
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
+    # RLock защищает check/insert/clear операции над _model_cache от гонок
+    # (reentrant — тот же поток может войти повторно без deadlock)
+    _model_cache_lock: threading.RLock = threading.RLock()
 
     def __init__(
         self,
@@ -217,23 +221,25 @@ class AudioLanguageID:
         # H4: старые записи — чистый leak: объект модели удерживает MLX Metal
         # буферы, даже после mx.clear_cache() в engine.py.  Держим только
         # текущую модель; при смене профиля (balanced→max) старая вытесняется.
-        if model_path not in AudioLanguageID._model_cache:
-            logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
-            if len(AudioLanguageID._model_cache) >= 1:
-                logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
-                AudioLanguageID._model_cache.clear()
-            try:
-                model = mlx_whisper.load_models.load_model(model_path)
-                AudioLanguageID._model_cache[model_path] = model
-            except Exception as exc:
-                logger.warning(
-                    "AudioLanguageID: не удалось загрузить модель %s: %s",
-                    model_path,
-                    exc,
-                )
-                return None
+        # _model_cache_lock защищает check/clear/insert от гонок (W1109 F1 HIGH).
+        with AudioLanguageID._model_cache_lock:
+            if model_path not in AudioLanguageID._model_cache:
+                logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
+                if len(AudioLanguageID._model_cache) >= 1:
+                    logger.debug("AudioLanguageID: вытесняем старую модель из кеша")
+                    AudioLanguageID._model_cache.clear()
+                try:
+                    model = mlx_whisper.load_models.load_model(model_path)
+                    AudioLanguageID._model_cache[model_path] = model
+                except Exception as exc:
+                    logger.warning(
+                        "AudioLanguageID: не удалось загрузить модель %s: %s",
+                        model_path,
+                        exc,
+                    )
+                    return None
 
-        model = AudioLanguageID._model_cache[model_path]
+            model = AudioLanguageID._model_cache[model_path]
 
         # Строим log-mel spectrogram
         try:
