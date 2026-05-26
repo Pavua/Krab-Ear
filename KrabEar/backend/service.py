@@ -389,6 +389,7 @@ class BackendService:
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
+            settings_provider=lambda: self._settings_svc.cached_settings(),
         )
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
