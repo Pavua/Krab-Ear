@@ -8,6 +8,7 @@ Whisper-сегментов: длительность слов, паузы, consi
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from dataclasses import dataclass, asdict
 from typing import List
@@ -45,10 +46,12 @@ def _extract_words(segments: List[dict]) -> List[dict]:
                 if isinstance(w, dict) and "start" in w and "end" in w:
                     start = float(w["start"])
                     end = float(w["end"])
-                    if end > start:
-                        result.append({"word": str(w.get("word", "")), "start": start, "end": end})
+                    if not (math.isfinite(start) and math.isfinite(end) and end > start):
+                        continue  # skip non-finite or invalid pairs
+                    result.append({"word": str(w.get("word", "")), "start": start, "end": end})
         else:
             # Fallback: сегмент без пословных меток
+            logger.debug("word_timing: words field absent, falling back to segment-level (coarse)")
             start = seg.get("start")
             end = seg.get("end")
             if start is not None and end is not None:

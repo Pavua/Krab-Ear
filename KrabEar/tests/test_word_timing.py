@@ -321,6 +321,26 @@ class TestWordTimingFallback(unittest.TestCase):
         self.assertGreater(report.avg_word_duration_ms, 0.0)
         self.assertGreaterEqual(report.total_pause_time_sec, 0.0)
 
+    def test_segment_fallback_logs_debug(self) -> None:
+        """W990 F1: при fallback на сегмент без words должен эмитироваться debug-лог.
+
+        Проверяем через assertLogs что 'word_timing: words field absent' появляется
+        хотя бы один раз при обработке сегмента без поля words.
+        """
+        segments = _make_bare_segments([
+            ("Первый сегмент.", 0.0, 1.0),
+            ("Второй сегмент.", 1.5, 2.5),
+        ])
+        with self.assertLogs("core.word_timing", level="DEBUG") as cm:
+            self.analyzer.analyze(segments)
+        # Убеждаемся что нужное сообщение присутствует хотя бы в одной записи
+        fallback_msgs = [
+            line for line in cm.output
+            if "words field absent" in line and "segment-level" in line
+        ]
+        self.assertGreater(len(fallback_msgs), 0,
+                           msg="Expected fallback debug log was not emitted")
+
 
 class TestExtractWordsHelper(unittest.TestCase):
     """Юнит-тесты вспомогательной функции _extract_words."""
@@ -352,6 +372,33 @@ class TestExtractWordsHelper(unittest.TestCase):
         self.assertIn("хорошее", texts)
         self.assertIn("снова_хорошее", texts)
         self.assertNotIn("плохое", texts)
+
+    def test_inf_timestamp_filtered(self) -> None:
+        """W990 F5: слова с float('inf') timestamps должны быть отфильтрованы.
+
+        До фикса float('inf') проходил проверку end > start и propagировал
+        inf в avg_word_duration_ms. После фикса math.isfinite() guard
+        отбрасывает такие записи.
+        """
+        import math
+        segments = [{
+            "start": 0.0, "end": 1.0,
+            "words": [
+                {"word": "нормальное", "start": 0.0, "end": 0.5},
+                {"word": "inf_start", "start": float("inf"), "end": float("inf")},
+                {"word": "inf_end", "start": 0.6, "end": float("inf")},
+                {"word": "neg_inf", "start": float("-inf"), "end": 0.9},
+                {"word": "nan_word", "start": float("nan"), "end": 0.8},
+            ]
+        }]
+        words = _extract_words(segments)
+        # Только "нормальное" должно пройти
+        self.assertEqual(len(words), 1)
+        self.assertEqual(words[0]["word"], "нормальное")
+        # Убеждаемся что start/end конечны
+        for w in words:
+            self.assertTrue(math.isfinite(w["start"]))
+            self.assertTrue(math.isfinite(w["end"]))
 
 
 class TestWordTimingIPCHandler(unittest.TestCase):
