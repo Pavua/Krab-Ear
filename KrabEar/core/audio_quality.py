@@ -16,6 +16,17 @@ import numpy as np
 
 logger = logging.getLogger("KrabEar.AudioQuality")
 
+
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Coerce v to a finite float, replacing NaN/Inf with default.
+
+    Prevents RFC 8259 violations (literal NaN/Infinity tokens) when the
+    result dict is serialised with json.dumps(), which would crash Swift's
+    JSONDecoder on the receiving end.
+    """
+    return v if (isinstance(v, (int, float)) and math.isfinite(v)) else default
+
+
 # ---------------------------------------------------------------------------
 # Пороговые значения для оценки качества
 # ---------------------------------------------------------------------------
@@ -141,12 +152,12 @@ class AudioQualityAnalyzer:
         quality_score = self._score(snr_estimate_db, clipping_ratio, silence_ratio, rms_level)
 
         return AudioQualityReport(
-            rms_level=round(rms_level, 6),
-            peak_level=round(peak_level, 6),
-            snr_estimate_db=round(snr_estimate_db, 2),
-            clipping_ratio=round(clipping_ratio, 6),
-            silence_ratio=round(silence_ratio, 4),
-            duration_sec=round(duration_sec, 4),
+            rms_level=round(_safe_float(rms_level), 6),
+            peak_level=round(_safe_float(peak_level), 6),
+            snr_estimate_db=round(_safe_float(snr_estimate_db), 2),
+            clipping_ratio=round(_safe_float(clipping_ratio), 6),
+            silence_ratio=round(_safe_float(silence_ratio, 1.0), 4),
+            duration_sec=round(_safe_float(duration_sec), 4),
             quality_score=quality_score,
             warnings=warnings,
         )
