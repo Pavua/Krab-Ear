@@ -609,5 +609,108 @@ class TestBreadcrumbs(unittest.TestCase):
         self.assertGreater(len(keys_changed), 0)
 
 
+class TestSaveLockConcurrency(unittest.TestCase):
+    """W1427 F4 MED — RLock serialises concurrent read-modify-write save paths."""
+
+    def test_save_lock_is_rlock(self):
+        """_save_lock должен быть RLock (реентрантный), а не обычным Lock."""
+        import threading
+
+        store = _make_store()
+        svc = SettingsService(store=store)
+        # RLock can be acquired twice by the same thread without deadlocking.
+        acquired_twice = False
+        with svc._save_lock:
+            with svc._save_lock:  # re-entrant acquisition — must not block
+                acquired_twice = True
+        self.assertTrue(acquired_twice, "_save_lock deadlocked on re-entrant acquire — not an RLock")
+
+    def test_concurrent_set_settings_no_lost_update(self):
+        """10 потоков × 50 операций set_settings с чередующимися ключами не должны терять обновления."""
+        import threading
+
+        store = _make_store()
+        svc = SettingsService(store=store)
+
+        errors: list[Exception] = []
+        lock = threading.Lock()
+        THREADS = 10
+        OPS_PER_THREAD = 50
+
+        def worker(thread_id: int) -> None:
+            for i in range(OPS_PER_THREAD):
+                key = f"thread_{thread_id}_op_{i}"
+                try:
+                    # Use a key that won't be normalised away — wrap inside
+                    # existing permitted text_templates dict so it survives
+                    # handle_set_settings normalisation.
+                    svc.handle_set_settings(
+                        {"history_page_size": 50 + (thread_id % 10)}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    with lock:
+                        errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(THREADS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [], f"Unexpected errors in concurrent save: {errors[:3]}")
+        # store.save_settings must have been called exactly THREADS * OPS_PER_THREAD times
+        expected_calls = THREADS * OPS_PER_THREAD
+        actual_calls = store.save_settings.call_count
+        self.assertEqual(
+            actual_calls,
+            expected_calls,
+            f"Expected {expected_calls} saves, got {actual_calls} — possible lost update",
+        )
+
+    def test_set_settings_then_apply_preset_serialized(self):
+        """handle_set_settings и handle_apply_profile_preset выполняются без гонок под _save_lock."""
+        import threading
+
+        store = _make_store()
+        svc = SettingsService(store=store)
+
+        results: list[dict] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def run_set() -> None:
+            try:
+                r = svc.handle_set_settings({"history_page_size": 100})
+                with lock:
+                    results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        def run_preset() -> None:
+            try:
+                with unittest.mock.patch("backend.event_bus.bus"):
+                    r = svc.handle_apply_profile_preset({"profile": "meeting"})
+                with lock:
+                    results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        # Interleave both operations across many threads
+        threads = []
+        for _ in range(5):
+            threads.append(threading.Thread(target=run_set))
+            threads.append(threading.Thread(target=run_preset))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [], f"Errors during concurrent set+preset: {errors[:3]}")
+        self.assertEqual(len(results), 10, "Expected 10 results (5 set + 5 preset)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,6 +78,12 @@ class SettingsService:
         # BackendService registers a hook to propagate hot-reloaded values to
         # live collaborators (e.g. LLMRewriter.set_api_key).
         self._after_save_hooks: list[Any] = []
+        # RLock serialises concurrent read-modify-write save paths so that
+        # simultaneous IPC connections cannot clobber each other (W1427 F4 TOCTOU).
+        # RLock (not Lock) so internal re-entrant calls (e.g. handle_set_settings
+        # calling invalidate_cache which is called again within the same lock) do
+        # not deadlock.
+        self._save_lock = threading.RLock()
 
     def register_after_save_hook(self, hook: Any) -> None:
         """Register a callable(old_settings, new_settings) fired after each set_settings save."""
@@ -114,6 +121,11 @@ class SettingsService:
         return self.cached_settings()
 
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._save_lock:
+            return self._set_settings_locked(params)
+
+    def _set_settings_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Inner body of handle_set_settings, called under self._save_lock."""
         old_settings = self.cached_settings()
         try:
             self._backup.create_backup(old_settings, reason="before_set")
@@ -314,34 +326,35 @@ class SettingsService:
 
         После успешного применения эмитирует preset.changed через EventBus.
         """
-        profile = str(params.get("profile", "")).strip()
-        preset = self._PROFILE_PRESETS.get(profile)
-        if preset is None:
-            available = ", ".join(self._PROFILE_PRESETS.keys())
-            raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
+        with self._save_lock:
+            profile = str(params.get("profile", "")).strip()
+            preset = self._PROFILE_PRESETS.get(profile)
+            if preset is None:
+                available = ", ".join(self._PROFILE_PRESETS.keys())
+                raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
 
-        settings = self.cached_settings()
-        settings.update(preset)
-        settings["active_preset"] = profile
-        result = self.store.save_settings(settings)
-        self.invalidate_cache()
-        add_breadcrumb(
-            category="settings",
-            message="apply_profile_preset",
-            data={
-                "profile": profile,
-                "keys_changed": sorted(preset.keys()),
-            },
-        )
-        try:
-            import backend.event_bus as _ebus  # noqa: PLC0415
-            _ebus.bus.emit("preset.changed", {
-                "profile": profile,
-                "description": self._PROFILE_PRESET_DESCRIPTIONS.get(profile, ""),
-            })
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
-        return result
+            settings = self.cached_settings()
+            settings.update(preset)
+            settings["active_preset"] = profile
+            result = self.store.save_settings(settings)
+            self.invalidate_cache()
+            add_breadcrumb(
+                category="settings",
+                message="apply_profile_preset",
+                data={
+                    "profile": profile,
+                    "keys_changed": sorted(preset.keys()),
+                },
+            )
+            try:
+                import backend.event_bus as _ebus  # noqa: PLC0415
+                _ebus.bus.emit("preset.changed", {
+                    "profile": profile,
+                    "description": self._PROFILE_PRESET_DESCRIPTIONS.get(profile, ""),
+                })
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
+            return result
 
     def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущие настройки уведомлений из хранилища настроек."""
@@ -357,30 +370,31 @@ class SettingsService:
 
     def handle_set_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Обновляет настройки уведомлений. Принимает любое подмножество полей."""
-        settings = self.cached_settings()
+        with self._save_lock:
+            settings = self.cached_settings()
 
-        _BOOL_FIELDS = (
-            "notifications_enabled",
-            "notify_on_low_confidence",
-            "notify_on_llm_failure",
-            "notify_on_import_complete",
-            "notify_sound_enabled",
-        )
-        for field in _BOOL_FIELDS:
-            if field in params:
-                settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
-
-        if "notify_confidence_threshold" in params:
-            settings["notify_confidence_threshold"] = self._coerce_bounded(
-                value=params["notify_confidence_threshold"],
-                default=0.5,
-                min_value=0.0,
-                max_value=1.0,
+            _BOOL_FIELDS = (
+                "notifications_enabled",
+                "notify_on_low_confidence",
+                "notify_on_llm_failure",
+                "notify_on_import_complete",
+                "notify_sound_enabled",
             )
+            for field in _BOOL_FIELDS:
+                if field in params:
+                    settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
 
-        result = self.store.save_settings(settings)
-        self.invalidate_cache()
-        return result
+            if "notify_confidence_threshold" in params:
+                settings["notify_confidence_threshold"] = self._coerce_bounded(
+                    value=params["notify_confidence_threshold"],
+                    default=0.5,
+                    min_value=0.0,
+                    max_value=1.0,
+                )
+
+            result = self.store.save_settings(settings)
+            self.invalidate_cache()
+            return result
 
     # Sensitive fields — никогда не экспортируются
     _SENSITIVE_FIELDS: frozenset[str] = frozenset({
@@ -442,44 +456,45 @@ class SettingsService:
         if not isinstance(incoming, dict):
             raise ValueError("Файл настроек должен содержать JSON-объект")
 
-        errors: list[str] = []
-        skipped = 0
-        merged = self.cached_settings()
+        with self._save_lock:
+            errors: list[str] = []
+            skipped = 0
+            merged = self.cached_settings()
 
-        for key, value in incoming.items():
-            if key in self._SENSITIVE_FIELDS:
-                skipped += 1
-                _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
-                continue
-            merged[key] = value
+            for key, value in incoming.items():
+                if key in self._SENSITIVE_FIELDS:
+                    skipped += 1
+                    _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
+                    continue
+                merged[key] = value
 
-        # Validate the merged result
-        vr = self._validator.validate(merged)
-        if not vr.valid:
-            errors.extend(vr.errors)
-        if vr.warnings:
-            for w in vr.warnings:
-                _log.warning("import_settings: %s", w)
-            errors.extend(vr.warnings)
-        merged = vr.fixed
+            # Validate the merged result
+            vr = self._validator.validate(merged)
+            if not vr.valid:
+                errors.extend(vr.errors)
+            if vr.warnings:
+                for w in vr.warnings:
+                    _log.warning("import_settings: %s", w)
+                errors.extend(vr.warnings)
+            merged = vr.fixed
 
-        imported = len(incoming) - skipped
-        self.store.save_settings(merged)
-        self.invalidate_cache()
-        add_breadcrumb(
-            category="settings",
-            message="import_settings",
-            level="info" if not errors else "warning",
-            data={
-                "imported": imported,
-                "skipped": skipped,
-                "error_count": len(errors),
-            },
-        )
+            imported = len(incoming) - skipped
+            self.store.save_settings(merged)
+            self.invalidate_cache()
+            add_breadcrumb(
+                category="settings",
+                message="import_settings",
+                level="info" if not errors else "warning",
+                data={
+                    "imported": imported,
+                    "skipped": skipped,
+                    "error_count": len(errors),
+                },
+            )
 
-        _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
-                  imported, skipped, len(errors), src)
-        return {"imported": imported, "skipped": skipped, "errors": errors}
+            _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
+                      imported, skipped, len(errors), src)
+            return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных пресетов профилей с описаниями и значениями."""
@@ -527,12 +542,13 @@ class SettingsService:
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
 
-        restored = self._backup.restore_backup(backup_id)
-        self.store.save_settings(restored)
-        self.invalidate_cache()
+        with self._save_lock:
+            restored = self._backup.restore_backup(backup_id)
+            self.store.save_settings(restored)
+            self.invalidate_cache()
 
-        _log.info("handle_restore_settings_backup: restored from %s", backup_id)
-        return {"restored_settings": restored, "backup_id": backup_id}
+            _log.info("handle_restore_settings_backup: restored from %s", backup_id)
+            return {"restored_settings": restored, "backup_id": backup_id}
 
     def handle_create_manual_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Создаёт ручной бэкап текущих настроек с произвольной причиной.
