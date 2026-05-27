@@ -781,5 +781,111 @@ class TestAudioLangIDMxClearCacheW1117(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# W1438 — Regression tests: no duplicate clear_model_cache / _HAS_MLX
+# ---------------------------------------------------------------------------
+
+class TestNoDuplicateDefinitionsW1438(unittest.TestCase):
+    """W1438 F1+F2 HIGH: verify that audio_lang_id.py has no duplicate
+    clear_model_cache() definitions and no duplicate _HAS_MLX try/except blocks.
+
+    These are AST-level regression guards so that future merge-footguns
+    (same pattern as W970/W1340/W1416 in translator.py) are caught immediately.
+    """
+
+    def _parse_source(self):
+        import ast
+        import os
+        src_path = os.path.join(
+            os.path.dirname(__file__), "..", "core", "audio_lang_id.py"
+        )
+        with open(src_path, encoding="utf-8") as f:
+            return ast.parse(f.read())
+
+    def test_no_duplicate_clear_model_cache_definitions(self):
+        """AudioLanguageID must have exactly ONE clear_model_cache classmethod."""
+        import ast
+        tree = self._parse_source()
+        methods = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "AudioLanguageID":
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.append(item.name)
+        count = methods.count("clear_model_cache")
+        self.assertEqual(
+            count, 1,
+            f"clear_model_cache defined {count} times in AudioLanguageID "
+            f"(expected exactly 1). W1438 F1 regression."
+        )
+
+    def test_no_duplicate_has_mlx_blocks(self):
+        """Module level must have exactly ONE _HAS_MLX try/except block."""
+        import ast
+        tree = self._parse_source()
+        has_mlx_assignments = 0
+        # Walk only module-level nodes (not inside class/function bodies)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Assign):
+                        for target in stmt.targets:
+                            if isinstance(target, ast.Name) and target.id == "_HAS_MLX":
+                                has_mlx_assignments += 1
+        self.assertEqual(
+            has_mlx_assignments, 1,
+            f"_HAS_MLX assigned in {has_mlx_assignments} try blocks "
+            f"(expected exactly 1). W1438 F2 regression."
+        )
+
+    def test_clear_model_cache_calls_mx_clear_cache_when_mlx_available(self):
+        """clear_model_cache() must call mx.clear_cache() when MLX is available.
+
+        W1416 fix: the W1340 version (last-definition winner before this fix)
+        only cleared the dict and did NOT call mx.clear_cache(), leaving Metal
+        GPU buffers (~300-500 MB) unreleased after model eviction.
+        """
+        import sys
+        from unittest.mock import patch
+
+        import core.audio_lang_id as _ali_mod
+
+        # Ensure the class cache is clean before test
+        AudioLanguageID._model_cache.clear()
+
+        clear_cache_called = {"n": 0}
+
+        def _fake_clear_cache():
+            clear_cache_called["n"] += 1
+
+        # When mlx.core is installed, patch clear_cache on the real module.
+        # When mlx.core is absent, inject a mock into sys.modules.
+        real_mlx = sys.modules.get("mlx.core")
+        original_has_mlx = _ali_mod._HAS_MLX
+        try:
+            if real_mlx is not None:
+                # mlx.core is installed — patch its clear_cache attribute
+                with patch.object(real_mlx, "clear_cache", _fake_clear_cache):
+                    _ali_mod._HAS_MLX = True
+                    AudioLanguageID.clear_model_cache()
+            else:
+                # mlx.core not installed — inject a mock module
+                from unittest.mock import MagicMock
+                mock_mx = MagicMock()
+                mock_mx.clear_cache = _fake_clear_cache
+                with patch.dict(sys.modules, {"mlx.core": mock_mx}):
+                    _ali_mod._HAS_MLX = True
+                    AudioLanguageID.clear_model_cache()
+        finally:
+            _ali_mod._HAS_MLX = original_has_mlx
+
+        self.assertGreater(
+            clear_cache_called["n"], 0,
+            "clear_model_cache() must call mx.clear_cache() when _HAS_MLX=True. "
+            "W1416 regression: W1340 version (no mx.clear_cache) was winning via "
+            "last-definition rule before W1438 fix."
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
