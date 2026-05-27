@@ -365,10 +365,23 @@ class RecordingCoreService:
             for r in (self.store.data_dir, Path.home(), Path("/tmp"), Path(tempfile.gettempdir()))
         ]
         selected: list[str] = []
+        rejected_paths: list[str] = []
         for p in selected_raw:
             resolved = Path(p).expanduser().resolve()
             if any(resolved.is_relative_to(root) for root in allowed_roots):
                 selected.append(str(resolved))
+            else:
+                rejected_paths.append(p)
+                logger.warning(
+                    "transcribe_paths_async: path outside allowlist: %s", p
+                )
+        if rejected_paths and not selected:
+            return {
+                "ok": False,
+                "error": "all_paths_rejected",
+                "rejected_paths": rejected_paths,
+                "message": f"Все {len(rejected_paths)} путей отклонены: за пределами допустимых корней",
+            }
         try:
             audio_paths = self._collect_audio_paths(selected) if selected else []
         except Exception:
@@ -504,10 +517,14 @@ class RecordingCoreService:
                 "ok": True,
                 "job_id": job_id,
                 "file_count": total_files,
+                "rejected_count": len(rejected_paths),
                 "duration_ms": round((time.monotonic() - _t0) * 1000),
             },
         )
-        return {"job_id": job_id}
+        result: dict[str, Any] = {"job_id": job_id}
+        if rejected_paths:
+            result["rejected_paths"] = rejected_paths
+        return result
 
     def handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние async-job'а."""

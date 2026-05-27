@@ -491,5 +491,61 @@ class TestConstructorAndProperties(unittest.TestCase):
         self.assertFalse(svc.preview_thread_alive)
 
 
+class TestTranscribePathsAsyncAllowlist(unittest.TestCase):
+    """W1502 — handle_transcribe_paths_async must report rejected paths, not silently drop."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def _make_svc(self):
+        return _make_service(self._tmp)
+
+    def test_transcribe_paths_async_rejected_returned_in_response(self):
+        """Paths outside the allowlist must appear in rejected_paths in the response."""
+        svc = self._make_svc()
+        outside_path = "/nonexistent_root_W1502/audio.wav"
+        result = svc.handle_transcribe_paths_async({"paths": [outside_path]})
+        # All-rejected branch: returns error dict without job_id
+        self.assertFalse(result.get("ok", True))
+        self.assertIn("rejected_paths", result)
+        self.assertIn(outside_path, result["rejected_paths"])
+
+    def test_transcribe_paths_async_all_rejected_returns_error(self):
+        """When every path is rejected the handler must return an error, not a job_id."""
+        svc = self._make_svc()
+        bad_paths = [
+            "/nonexistent_root_A/a.wav",
+            "/nonexistent_root_B/b.mp3",
+        ]
+        result = svc.handle_transcribe_paths_async({"paths": bad_paths})
+        self.assertNotIn("job_id", result)
+        self.assertEqual(result.get("error"), "all_paths_rejected")
+        self.assertEqual(len(result["rejected_paths"]), 2)
+
+    def test_transcribe_paths_async_valid_paths_processed(self):
+        """Paths inside the allowlist (tmp dir) must be accepted and a job_id returned."""
+        import tempfile as _tmp_mod
+        svc = self._make_svc()
+        with _tmp_mod.NamedTemporaryFile(suffix=".wav", dir=self._tmp, delete=False) as f:
+            valid_path = f.name
+        result = svc.handle_transcribe_paths_async({"paths": [valid_path]})
+        self.assertIn("job_id", result)
+        # No rejected_paths key expected when all paths are valid
+        self.assertNotIn("rejected_paths", result)
+
+    def test_transcribe_paths_async_mixed_returns_job_and_rejected(self):
+        """Mix of valid and invalid paths: job is started AND rejected_paths is reported."""
+        import tempfile as _tmp_mod
+        svc = self._make_svc()
+        with _tmp_mod.NamedTemporaryFile(suffix=".wav", dir=self._tmp, delete=False) as f:
+            valid_path = f.name
+        bad_path = "/nonexistent_root_W1502_mix/c.wav"
+        result = svc.handle_transcribe_paths_async({"paths": [valid_path, bad_path]})
+        self.assertIn("job_id", result)
+        self.assertIn("rejected_paths", result)
+        self.assertIn(bad_path, result["rejected_paths"])
+        self.assertNotIn(valid_path, result["rejected_paths"])
+
+
 if __name__ == "__main__":
     unittest.main()
