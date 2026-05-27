@@ -7,6 +7,7 @@ RMS/peak уровни, SNR, клиппинг, тишина — и возвращ
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,22 @@ import numpy as np
 from core.silence_detector import SILENCE_THRESHOLD_AMP
 
 logger = logging.getLogger("KrabEar.AudioQuality")
+
+
+def _safe_float(value, default=0.0):
+    """Coerce value to finite float; return default on NaN/Inf/error.
+
+    Restored by W1522 — W1107 commit silently removed this function along with
+    `import math`, fully reverting W1442/W1017/W1103 NaN protection. NaN inputs
+    produce invalid JSON that crashes Swift JSONDecoder (RFC 8259 violation).
+    """
+    try:
+        result = float(value)
+        if math.isfinite(result):
+            return result
+    except (TypeError, ValueError):
+        pass
+    return default
 
 # ---------------------------------------------------------------------------
 # Пороговые значения для оценки качества
@@ -111,8 +128,9 @@ class AudioQualityAnalyzer:
         duration_sec = n_samples / max(sample_rate, 1)
 
         # --- RMS и пик ---
-        rms_level = float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0
-        peak_level = float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0
+        # _safe_float guards against NaN/Inf from corrupt audio (W1017/W1442).
+        rms_level = _safe_float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0
+        peak_level = _safe_float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0
 
         # --- Клиппинг ---
         clipping_samples = int(np.sum(np.abs(audio_data) >= _CLIPPING_THRESHOLD))
@@ -122,7 +140,7 @@ class AudioQualityAnalyzer:
         silence_ratio = self._compute_silence_ratio(audio_data)
 
         # --- SNR (оценка) ---
-        snr_estimate_db = self._estimate_snr(audio_data, sample_rate)
+        snr_estimate_db = _safe_float(self._estimate_snr(audio_data, sample_rate))
 
         # --- Предупреждения ---
         warnings: list[str] = []
