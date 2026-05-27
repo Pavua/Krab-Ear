@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,10 @@ logger = logging.getLogger("KrabEar.Backend.TranscriptWriter")
 
 class TranscriptWriter:
     """Записывает транскрибацию в Markdown-файл в формате Obsidian."""
+
+    # Класс-уровневый мьютекс: сериализует collision-resolution + запись,
+    # исключая TOCTOU-гонку при одновременных вызовах write_transcript.
+    _write_lock: threading.Lock = threading.Lock()
 
     @staticmethod
     def _format_duration(seconds: float | None) -> str:
@@ -109,6 +115,73 @@ class TranscriptWriter:
         return "\n".join(lines)
 
     @classmethod
+    def _atomic_write(cls, path: Path, content: str) -> None:
+        """Записывает content в path атомарно: tmp → fsync → rename.
+
+        Гарантирует отсутствие частичных файлов при сбое процесса.
+        """
+        tmp_path = path.with_suffix(".md.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            # Убираем мусорный .tmp при любой ошибке
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _reserve_path(cls, output_dir: Path, date_str: str, ts: str | None) -> Path:
+        """Атомарно резервирует уникальный путь для нового файла.
+
+        Алгоритм:
+        1. Пробуем создать базовый файл через O_CREAT|O_EXCL (атомарно).
+        2. При FileExistsError добавляем временной суффикс, затем числовые -1/-2/... пока не получим эксклюзивный доступ.
+
+        Возвращает Path к пустому зарезервированному файлу (будет перезаписан через _atomic_write).
+        """
+        # Шаг 1: базовое имя
+        base_path = output_dir / f"{date_str}-Транскрибация.md"
+        try:
+            fd = os.open(base_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return base_path
+        except FileExistsError:
+            pass
+
+        # Шаг 2: добавляем время из ts, если доступно
+        try:
+            time_str = datetime.fromisoformat(ts).strftime("%H%M%S") if ts else datetime.now().strftime("%H%M%S")
+        except (ValueError, TypeError):
+            time_str = datetime.now().strftime("%H%M%S")
+
+        time_path = output_dir / f"{date_str}-Транскрибация-{time_str}.md"
+        try:
+            fd = os.open(time_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return time_path
+        except FileExistsError:
+            pass
+
+        # Шаг 3: числовые суффиксы -1, -2, ... до победы
+        counter = 1
+        while True:
+            candidate = output_dir / f"{date_str}-Транскрибация-{time_str}-{counter}.md"
+            try:
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return candidate
+            except FileExistsError:
+                counter += 1
+                if counter > 9999:  # защита от бесконечного цикла
+                    raise RuntimeError(f"Не удалось зарезервировать уникальный путь в {output_dir}")
+
+    @classmethod
     def write_transcript(cls, item: dict[str, Any], output_dir: Path) -> Path:
         """Записывает транскрибацию в .md файл.
 
@@ -118,6 +191,11 @@ class TranscriptWriter:
 
         Возвращает:
             Path: путь к созданному файлу
+
+        Потокобезопасность:
+            _write_lock сериализует reservation + write, устраняя TOCTOU-гонку.
+        Атомарность:
+            Запись идёт через tmp → fsync → os.replace — нет частичных файлов.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,19 +205,19 @@ class TranscriptWriter:
         except (ValueError, TypeError):
             date_str = datetime.now().strftime("%Y-%m-%d")
 
-        filename = f"{date_str}-Транскрибация.md"
-        file_path = output_dir / filename
-
-        # Если файл на эту дату уже есть — добавляем время как суффикс
-        if file_path.exists():
-            try:
-                time_str = datetime.fromisoformat(ts).strftime("%H%M%S") if ts else datetime.now().strftime("%H%M%S")
-            except (ValueError, TypeError):
-                time_str = datetime.now().strftime("%H%M%S")
-            filename = f"{date_str}-Транскрибация-{time_str}.md"
-            file_path = output_dir / filename
-
         content = cls.build_content(item)
-        file_path.write_text(content, encoding="utf-8")
+
+        with cls._write_lock:
+            file_path = cls._reserve_path(output_dir, date_str, ts)
+            try:
+                cls._atomic_write(file_path, content)
+            except Exception:
+                # Снимаем резервацию при ошибке записи
+                try:
+                    file_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+
         logger.info("Транскрибация сохранена: %s", file_path)
         return file_path
