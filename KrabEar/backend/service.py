@@ -294,18 +294,10 @@ class BackendService:
         self._chains = RecordingChainManager(store=self.store)
         self._bookmarks = BookmarkManager(data_dir=self.store.data_dir)
         self._recording_scheduler = RecordingScheduler(data_dir=self.store.data_dir)
-        # Семантический поиск (opt-in, lazy model load).
-        # Initialized here so HistoryService can use it on delete_history_item (W1148 F1).
-        self._semantic_searcher = SemanticSearcher(
-            data_dir=self.store.data_dir,
-            model_name=settings.SEMANTIC_SEARCH_MODEL,
-            enabled=settings.SEMANTIC_SEARCH_ENABLED,
-        )
         self._history = HistoryService(
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
-            semantic_searcher=self._semantic_searcher,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -324,7 +316,6 @@ class BackendService:
         self._live_subs = LiveSubsService(
             transcriber=self.transcriber,
             translator=self.translator,
-            settings_get=self._get_runtime_setting,
         )
         self._translation = TranslationService(
             translator=self.translator,
@@ -476,6 +467,14 @@ class BackendService:
                 )
             ),
         )
+        # Семантический поиск (opt-in, lazy model load)
+        self._semantic_searcher = SemanticSearcher(
+            data_dir=self.store.data_dir,
+            model_name=settings.SEMANTIC_SEARCH_MODEL,
+            enabled=settings.SEMANTIC_SEARCH_ENABLED,
+        )
+        # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
+        self._history._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -976,7 +975,6 @@ class BackendService:
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
-            "purge_history": self._handle_purge_history,  # удаляет ВСЕ записи истории и очищает embeddings (privacy)
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории
@@ -1118,7 +1116,6 @@ class BackendService:
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
             "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
             "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
-            "reset_unavailable_models": self._handle_reset_unavailable_models,  # W1141: очистить TTL-список недоступных STT-моделей вручную
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
             # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
@@ -2362,40 +2359,6 @@ class BackendService:
         audit.clear()
         return {"ok": True}
 
-    def _handle_purge_history(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет ВСЕ записи истории и очищает semantic-search embeddings.
-
-        Предназначен для операций полной очистки в privacy-режиме.
-        Гарантирует, что embeddings.npy и embeddings_index.json не содержат
-        личных данных после вызова.
-
-        Возвращает:
-            deleted (int): количество удалённых записей истории.
-            embeddings_cleared (bool): True если semantic-search индекс очищен.
-        """
-        deleted = 0
-        try:
-            with self.store._lock():
-                active = self.store._load_active_items_unlocked()
-                for item in active:
-                    self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
-                deleted = len(active)
-        except Exception as exc:
-            logger.warning("purge_history: ошибка при удалении истории: %s", exc)
-
-        embeddings_cleared = False
-        try:
-            self._semantic_searcher.purge_all()
-            embeddings_cleared = True
-        except Exception as exc:
-            logger.warning("purge_history: ошибка при очистке embeddings: %s", exc)
-
-        logger.info(
-            "purge_history: удалено %d записей, embeddings_cleared=%s",
-            deleted, embeddings_cleared,
-        )
-        return {"deleted": deleted, "embeddings_cleared": embeddings_cleared}
-
     # --- D.2.3: Scored STT routing decision ---
 
     def _handle_get_stt_routing_decision(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3582,18 +3545,6 @@ end tell'''
             "estimated_latency_ms": sel.estimated_latency_ms,
             "quality_tier": sel.quality_tier,
         }
-
-    def _handle_reset_unavailable_models(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: reset_unavailable_models — очистить TTL-список недоступных STT-моделей.
-
-        W1137 F2 (W1141): принудительно сбрасывает список временно недоступных моделей
-        (тех, что были evicted из chain из-за OOM/timeout) без перезапуска backend-процесса.
-        Модели снова войдут в fallback chain при следующей транскрибации.
-
-        Возвращает:
-            {cleared: [список моделей], count: int}
-        """
-        return self.engine.reset_unavailable_models()
 
     def _handle_get_smart_vocabulary_suggestions(self, params: dict) -> dict:
         """IPC: get_smart_vocabulary_suggestions — предложения для словаря STT."""
