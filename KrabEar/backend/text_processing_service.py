@@ -299,6 +299,8 @@ class TextProcessingService:
 
         Params:
             abbreviation (str): Аббревиатура (например, "т.н.").
+              W1442 backwards-compat: also accepts legacy ``abbr`` key from the
+              removed shadow def; `abbreviation` takes precedence if both present.
             expansion    (str): Полная форма (например, "так называемый").
             language     (str, optional): Код языка (по умолчанию "ru").
             flags        (str, optional): Дополнительные флаги, например "no_after_digit".
@@ -309,7 +311,9 @@ class TextProcessingService:
         Raises:
             ValueError: если ``abbreviation`` или ``expansion`` пустые.
         """
-        abbr = str(params.get("abbreviation", "")).strip()
+        # W1442: accept both `abbreviation` (canonical) and `abbr` (legacy shadow def alias)
+        abbr_raw = params.get("abbreviation") or params.get("abbr") or ""
+        abbr = str(abbr_raw).strip()
         expansion = str(params.get("expansion", "")).strip()
         language = str(params.get("language", "ru"))
         flags = str(params.get("flags", ""))
@@ -320,7 +324,15 @@ class TextProcessingService:
         self._abbreviation_expander.add_abbreviation(
             abbr, expansion, language=language, flags=flags
         )
-        return {"added": True, "abbreviation": abbr, "expansion": expansion, "language": language}
+        # W1442: return both `abbreviation` (canonical) and `abbr` (legacy shadow def alias)
+        # so existing callers / tests keyed on either name keep working post-deduplication.
+        return {
+            "added": True,
+            "abbreviation": abbr,
+            "abbr": abbr,
+            "expansion": expansion,
+            "language": language,
+        }
 
     def handle_remove_abbreviation(self, params: dict) -> dict:
         """IPC: remove_abbreviation — удалить аббревиатуру.
@@ -350,29 +362,11 @@ class TextProcessingService:
         abbreviations = self._abbreviation_expander.list_abbreviations(language=language)
         return {"abbreviations": abbreviations, "language": language, "count": len(abbreviations)}
 
-    def handle_add_abbreviation(self, params: dict) -> dict:
-        """IPC: add_abbreviation — добавить пользовательскую аббревиатуру.
-
-        Params:
-            abbr (str): Аббревиатура (например, "т.н.").
-            expansion (str): Полная форма (например, "так называемый").
-            language (str, optional): Код языка (по умолчанию "ru").
-            flags (str, optional): Дополнительные флаги (например, "no_after_digit").
-
-        Returns:
-            {"added": bool, "abbr": str, "language": str}
-        """
-        abbr = str(params.get("abbr", "")).strip()
-        expansion = str(params.get("expansion", "")).strip()
-        language = str(params.get("language", "ru"))
-        flags = str(params.get("flags", ""))
-        if not abbr or not expansion:
-            raise ValueError("abbr и expansion обязательны")
-        self._abbreviation_expander.add_abbreviation(abbr, expansion, language=language, flags=flags)
-        return {"added": True, "abbr": abbr, "language": language}
-
     # ------------------------------------------------------------------ #
     # post_process_text / list_post_process_steps                         #
+    # (W1442) shadow handle_add_abbreviation def removed — used wrong     #
+    # param key `abbr` and dropped `expansion` from response, breaking    #
+    # Swift IPC API which sends `abbreviation` key. Kept first def above. #
     # ------------------------------------------------------------------ #
 
     def handle_post_process_text(self, params: dict) -> dict:
