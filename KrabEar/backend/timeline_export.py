@@ -71,6 +71,37 @@ def _ical_dt(dt: datetime) -> str:
     return utc.strftime("%Y%m%dT%H%M%SZ")
 
 
+def _fold_ics_line(line: str, max_octets: int = 75) -> str:
+    """RFC 5545 §3.1 line-folding: splits at max_octets octet boundary.
+
+    Continuation lines are prefixed with CRLF + SP.  Input ``line`` must NOT
+    include the trailing CRLF — it is added by the caller when joining.
+
+    Args:
+        line:       A single iCalendar content line (e.g. ``SUMMARY:text``).
+        max_octets: Maximum octets per line segment (RFC 5545 mandates 75).
+
+    Returns:
+        The folded line with CRLF+SP inserted at every fold point.
+    """
+    encoded = line.encode("utf-8")
+    if len(encoded) <= max_octets:
+        return line
+
+    parts: list[str] = []
+    while len(encoded) > max_octets:
+        # Split at exactly max_octets; back off if we are inside a multi-byte
+        # UTF-8 sequence (continuation bytes start with 0b10xxxxxx = 0x80-0xBF).
+        cut = max_octets
+        while cut > 0 and (encoded[cut] & 0xC0) == 0x80:
+            cut -= 1
+        parts.append(encoded[:cut].decode("utf-8"))
+        encoded = encoded[cut:]
+        max_octets = 74  # continuation lines: 1 SP prefix → 74 content octets
+    parts.append(encoded.decode("utf-8"))
+    return "\r\n ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Основной класс
 # ---------------------------------------------------------------------------
@@ -86,6 +117,7 @@ class TimelineExporter:
         blocks: list[dict[str, Any]],
         width: int = 1200,
         height: int = 400,
+        privacy_mode: bool = False,
     ) -> str:
         """Генерирует SVG-визуализацию временной шкалы.
 
@@ -130,7 +162,11 @@ class TimelineExporter:
 
             color = _block_color(block, idx)
             start_ts = str(block.get("start_time", ""))
-            summary = str(block.get("summary_text", ""))[:40]
+            # F4: privacy guard — omit transcript keywords from SVG tooltip
+            if privacy_mode:
+                summary = ""
+            else:
+                summary = str(block.get("summary_text", ""))[:40]
             lang_str = ", ".join(block.get("languages") or [])
             duration = block.get("total_duration_sec", 0)
 
@@ -235,17 +271,24 @@ class TimelineExporter:
 
     # ── iCalendar ────────────────────────────────────────────────────────────
 
-    def export_ical(self, items: list[dict[str, Any]]) -> str:
+    def export_ical(
+        self,
+        items: list[dict[str, Any]],
+        privacy_mode: bool = False,
+    ) -> str:
         """Экспортирует список блоков (или элементов истории) в iCalendar (RFC 5545).
 
         Каждый элемент становится VEVENT:
           - DTSTART / DTEND из ``start_time`` / ``end_time``
             (или ``ts`` + ``audio_duration_sec`` для элементов истории).
           - SUMMARY из ``summary_text`` или ``text`` (усечённый).
+            Если ``privacy_mode=True`` — заменяется на generic «Krab Ear recording».
           - DESCRIPTION — языки + кол-во записей.
+          - Все строки соответствуют RFC 5545 §3.1 (75-octet line-folding).
 
         Args:
-            items: список dict — TimelineBlock.to_dict() или элементы истории.
+            items:        список dict — TimelineBlock.to_dict() или элементы истории.
+            privacy_mode: если True — SUMMARY не содержит текст транскрипции.
 
         Returns:
             Строка iCalendar.
@@ -283,13 +326,16 @@ class TimelineExporter:
                 from datetime import timedelta
                 end_dt = start_dt + timedelta(hours=1)
 
-            # SUMMARY
-            summary_raw = (
-                item.get("summary_text")
-                or item.get("text", "")[:80]
-                or "Recording"
-            )
-            summary = self._ical_escape(str(summary_raw)[:75])
+            # SUMMARY — F2: privacy guard
+            if privacy_mode:
+                summary_text = "Krab Ear recording"
+            else:
+                summary_text = (
+                    item.get("summary_text")
+                    or item.get("text", "")[:80]
+                    or "Recording"
+                )
+            summary_escaped = self._ical_escape(str(summary_text))
 
             # DESCRIPTION
             langs = item.get("languages") or []
@@ -303,19 +349,21 @@ class TimelineExporter:
             duration_s = item.get("total_duration_sec")
             if duration_s:
                 desc_parts.append(f"Duration: {float(duration_s):.0f}s")
-            description = self._ical_escape(" | ".join(desc_parts)) if desc_parts else ""
+            description_escaped = self._ical_escape(" | ".join(desc_parts)) if desc_parts else ""
 
-            lines += [
+            # F1: RFC 5545 §3.1 — fold all content lines at 75 octets
+            vevent_lines = [
                 "BEGIN:VEVENT",
-                f"UID:{uid}",
-                f"DTSTAMP:{now_str}",
-                f"DTSTART:{_ical_dt(start_dt)}",
-                f"DTEND:{_ical_dt(end_dt)}",
-                f"SUMMARY:{summary}",
+                _fold_ics_line(f"UID:{uid}"),
+                _fold_ics_line(f"DTSTAMP:{now_str}"),
+                _fold_ics_line(f"DTSTART:{_ical_dt(start_dt)}"),
+                _fold_ics_line(f"DTEND:{_ical_dt(end_dt)}"),
+                _fold_ics_line(f"SUMMARY:{summary_escaped}"),
             ]
-            if description:
-                lines.append(f"DESCRIPTION:{description}")
-            lines.append("END:VEVENT")
+            if description_escaped:
+                vevent_lines.append(_fold_ics_line(f"DESCRIPTION:{description_escaped}"))
+            vevent_lines.append("END:VEVENT")
+            lines.extend(vevent_lines)
 
         lines.append("END:VCALENDAR")
         return "\r\n".join(lines) + "\r\n"
