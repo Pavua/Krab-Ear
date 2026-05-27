@@ -31,6 +31,9 @@ _STALE_DAYS = 180
 
 _FILE_NAME = "paste_app_memory.json"
 
+# Максимальная длина bundle_id во избежание раздувания персистентного JSON (F-2)
+_MAX_BUNDLE_ID_LEN = 512
+
 
 def _utcnow_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
@@ -72,6 +75,13 @@ class PasteAppMemory:
             return
         if not bundle_id or not bundle_id.strip():
             return
+        if len(str(bundle_id)) > _MAX_BUNDLE_ID_LEN:
+            _log.warning(
+                "PasteAppMemory.record: bundle_id слишком длинный (%d > %d символов), игнорируем",
+                len(str(bundle_id)),
+                _MAX_BUNDLE_ID_LEN,
+            )
+            return
         if profile not in VALID_PROFILES:
             raise ValueError(f"Неизвестный профиль вставки: {profile!r}. Допустимые: {sorted(VALID_PROFILES)}")
         with self._lock:
@@ -87,15 +97,15 @@ class PasteAppMemory:
             return None
         if not bundle_id:
             return None
+        # Единый lock-блок исключает TOCTOU: concurrent delete между двумя acquire не
+        # может привести к повторной вставке удалённой записи (F-1).
         with self._lock:
             entry = self._data.get(bundle_id)
-        if entry is None:
-            return None
-        # Обновляем last_used при чтении (silent write)
-        with self._lock:
-            if bundle_id in self._data:
-                self._data[bundle_id]["last_used"] = _utcnow_iso()
-                self._save()
+            if entry is None:
+                return None
+            # Обновляем last_used при чтении (silent write) в том же scope
+            self._data[bundle_id]["last_used"] = _utcnow_iso()
+            self._save()
         return entry["profile"]
 
     def list_profiles(self) -> list[dict[str, str]]:
