@@ -587,5 +587,83 @@ class TestWave97RequiredCoverage(unittest.TestCase):
         self.assertTrue(all(c >= 0 for c in result_counts))
 
 
+class TestPrivacyModeGuard(unittest.TestCase):
+    """W968 F4 — privacy_mode_enabled redacts event payload in record_event."""
+
+    def test_record_event_redacts_in_privacy_mode(self):
+        """В режиме конфиденциальности data заменяется заглушкой {redacted: True}."""
+        def privacy_provider():
+            return {"privacy_mode_enabled": True}
+
+        mgr = EventReplayManager(max_buffer=100, settings_provider=privacy_provider)
+        mgr.record_event("stt.final", {"text": "секрет", "confidence": 0.99})
+        events = mgr.get_events()
+        mgr.close()
+
+        self.assertEqual(len(events), 1)
+        data = events[0]["data"]
+        self.assertTrue(data.get("redacted"), "data.redacted must be True in privacy mode")
+        self.assertEqual(data.get("reason"), "privacy_mode")
+        self.assertNotIn("text", data, "transcript text must not appear in privacy mode")
+        self.assertNotIn("confidence", data, "confidence must not appear in privacy mode")
+
+    def test_record_event_passes_data_when_privacy_disabled(self):
+        """При privacy_mode_enabled=False данные пишутся без изменений."""
+        def normal_provider():
+            return {"privacy_mode_enabled": False}
+
+        mgr = EventReplayManager(max_buffer=100, settings_provider=normal_provider)
+        mgr.record_event("stt.final", {"text": "привет", "confidence": 0.95})
+        events = mgr.get_events()
+        mgr.close()
+
+        self.assertEqual(len(events), 1)
+        data = events[0]["data"]
+        self.assertNotIn("redacted", data)
+        self.assertEqual(data.get("text"), "привет")
+
+    def test_record_event_no_settings_provider_passes_data(self):
+        """Без settings_provider (None) данные пишутся без изменений."""
+        mgr = EventReplayManager(max_buffer=100)
+        mgr.record_event("ping", {"key": "value"})
+        events = mgr.get_events()
+        mgr.close()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"].get("key"), "value")
+
+    def test_privacy_mode_guard_persisted_file_also_redacted(self):
+        """В режиме конфиденциальности persisted NDJSON тоже содержит заглушку."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            mgr = EventReplayManager(
+                persist_path=path,
+                max_buffer=100,
+                settings_provider=lambda: {"privacy_mode_enabled": True},
+            )
+            mgr.record_event("stt.final", {"text": "конфиденциально"})
+            mgr.close()
+
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            entry = json.loads(lines[0])
+            self.assertTrue(entry["data"].get("redacted"))
+            self.assertNotIn("text", entry["data"])
+
+    def test_settings_provider_exception_falls_back_to_no_redaction(self):
+        """Если settings_provider бросает исключение, redaction не применяется."""
+        def broken_provider():
+            raise RuntimeError("Settings unavailable")
+
+        mgr = EventReplayManager(max_buffer=100, settings_provider=broken_provider)
+        mgr.record_event("ping", {"key": "value"})
+        events = mgr.get_events()
+        mgr.close()
+
+        self.assertEqual(len(events), 1)
+        # No redaction on provider failure — safe fallback
+        self.assertEqual(events[0]["data"].get("key"), "value")
+
+
 if __name__ == "__main__":
     unittest.main()

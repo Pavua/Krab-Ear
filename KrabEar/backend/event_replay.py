@@ -16,7 +16,7 @@ import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.EventReplay")
 
@@ -52,11 +52,13 @@ class EventReplayManager:
         self,
         persist_path: Path | str | None = None,
         max_buffer: int = _MAX_BUFFER_SIZE,
+        settings_provider: Optional[Callable[[], dict]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
         self._seq: int = 0  # монотонный счётчик для восстановления порядка
         self._persist_path: Path | None = Path(persist_path) if persist_path else None
+        self._settings_provider = settings_provider
         self._file_handle = None
 
         if self._persist_path:
@@ -72,12 +74,30 @@ class EventReplayManager:
     # Публичный API
     # ------------------------------------------------------------------
 
+    def _is_privacy_mode(self) -> bool:
+        """Возвращает True если privacy_mode_enabled активен в настройках."""
+        if self._settings_provider is None:
+            return False
+        try:
+            return bool(self._settings_provider().get("privacy_mode_enabled", False))
+        except Exception:
+            return False
+
     def record_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Записывает событие с текущим timestamp."""
+        """Записывает событие с текущим timestamp.
+
+        В режиме конфиденциальности (privacy_mode_enabled=True) вместо
+        оригинальных данных сохраняются только метаданные-заглушки, чтобы
+        текст транскрипций не попал в лог событий.
+        """
+        if self._is_privacy_mode():
+            event_data: dict[str, Any] = {"redacted": True, "reason": "privacy_mode"}
+        else:
+            event_data = data if isinstance(data, dict) else {}
         entry = {
             "type": event_type,
             "ts": _utc_now_iso(),
-            "data": data if isinstance(data, dict) else {},
+            "data": event_data,
         }
         with self._lock:
             self._seq += 1

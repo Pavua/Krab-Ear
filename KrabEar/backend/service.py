@@ -447,6 +447,7 @@ class BackendService:
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
+            settings_provider=lambda: self._settings_svc.cached_settings(),
         )
         # Wire EventBus → EventReplayManager so every emitted event is recorded
         # in the ring buffer.  Late-injection avoids circular imports and keeps
