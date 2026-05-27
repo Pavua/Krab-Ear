@@ -14,6 +14,8 @@ from typing import Optional
 
 import numpy as np
 
+from core.silence_constants import SILENCE_THRESHOLD_AMP
+
 logger = logging.getLogger("KrabEar.AudioQuality")
 
 
@@ -33,7 +35,12 @@ def _safe_float(v: float, default: float = 0.0) -> float:
 
 _CLIPPING_THRESHOLD = 0.99      # амплитуда ≥ порога считается клиппингом
 _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме при анализе тишины
-_SILENCE_RMS_THRESHOLD = 0.001  # RMS фрейма ниже этого → тишина
+# Единый порог тишины -40 dBFS (0.01) из core.silence_constants (W1333 SSOT).
+# ВНИМАНИЕ: порог изменился с 0.001 (-60 dB) → 0.01 (-40 dB).
+# Следствие: фреймы с RMS в диапазоне [0.001, 0.01) теперь классифицируются
+# как тишина, а не речь. Это делает поведение analyze_silence и
+# analyze_audio_quality IPC-методов согласованным (W1468 N1 HIGH).
+_SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 
