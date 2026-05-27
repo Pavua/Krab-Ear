@@ -97,6 +97,22 @@ def _parse_osascript_output(raw: str) -> list[dict[str, Any]]:
     return results
 
 
+_TCC_DENIAL_MARKERS = (
+    "not authorized",
+    "not allowed",
+    "(-1743)",               # AppleEvent send denied (macOS TCC)
+    "errAEEventNotPermitted",
+    "isn't running",         # app not yet TCC-prompted / automation blocked
+    "doesn't have permission",
+)
+
+
+def _is_tcc_denial(stderr: str) -> bool:
+    """Возвращает True, если stderr содержит признак отказа TCC Calendar."""
+    s = stderr.lower()
+    return any(marker.lower() in s for marker in _TCC_DENIAL_MARKERS)
+
+
 class CalendarLinker:
     """Связывает транскрипции с активными событиями Calendar.app через osascript."""
 
@@ -151,7 +167,7 @@ class CalendarLinker:
             logger.warning("CalendarLinker: ошибка запуска osascript: %s", exc)
             return None
         stderr = proc.stderr or ""
-        if "Not authorized" in stderr or "not allowed" in stderr.lower():
+        if _is_tcc_denial(stderr):
             logger.info("CalendarLinker: нет разрешения TCC Calendar")
             return None
         if proc.returncode != 0 and not proc.stdout.strip():
