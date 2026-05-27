@@ -81,6 +81,14 @@ def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG0
 
     Called by sentry-sdk synchronously before the event is enqueued for
     transmission — safe to mutate the dict in-place and return it.
+
+    Fields walked (W1483 F1+F2):
+    - ``exception.values[].stacktrace.frames[]`` — filename, abs_path, module, vars
+    - ``extra``, ``contexts``, ``tags`` — top-level metadata dicts
+    - ``message`` — top-level message string
+    - ``breadcrumbs.values[]`` — each crumb's ``data`` dict and ``message`` string
+    - ``logentry`` — ``message`` string and ``params`` (F2)
+    - ``request`` — ``data``, ``query_string``, ``cookies`` (F2)
     """
     try:
         # Walk exception values → stacktrace frames → filename / abs_path / vars.
@@ -103,6 +111,30 @@ def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG0
         # Redact message string if present.
         if "message" in event and isinstance(event["message"], str):
             event["message"] = _redact_string(event["message"])
+
+        # W1483 F1 — Walk breadcrumbs: each crumb's data dict and message string.
+        breadcrumbs = event.get("breadcrumbs") or {}
+        for crumb in (breadcrumbs.get("values") or []):
+            if isinstance(crumb, dict):
+                if "message" in crumb and isinstance(crumb["message"], str):
+                    crumb["message"] = _redact_string(crumb["message"])
+                if "data" in crumb and isinstance(crumb["data"], dict):
+                    crumb["data"] = _redact_value(crumb["data"])
+
+        # W1483 F2 — Walk logentry: message string and params.
+        logentry = event.get("logentry")
+        if isinstance(logentry, dict):
+            if "message" in logentry and isinstance(logentry["message"], str):
+                logentry["message"] = _redact_string(logentry["message"])
+            if "params" in logentry:
+                logentry["params"] = _redact_value(logentry["params"])
+
+        # W1483 F2 — Walk request: data, query_string, cookies.
+        request = event.get("request")
+        if isinstance(request, dict):
+            for req_key in ("data", "query_string", "cookies"):
+                if req_key in request:
+                    request[req_key] = _redact_value(request[req_key])
 
     except Exception:  # noqa: BLE001
         # Never let redaction break crash reporting.
