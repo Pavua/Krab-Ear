@@ -206,9 +206,14 @@ class EventReplayManager:
         }
 
     def clear(self) -> None:
-        """Очищает буфер событий (не удаляет файл персистенции)."""
+        """Очищает буфер событий и усекает файл персистенции (если задан)."""
         with self._lock:
             self._buffer.clear()
+            if self._persist_path is not None:
+                try:
+                    self._persist_path.write_text("", encoding="utf-8")
+                except Exception:
+                    logger.warning("event_replay: failed to truncate persist file on clear")
 
     def close(self) -> None:
         """Закрывает файл персистенции, если он открыт."""
@@ -226,10 +231,16 @@ class EventReplayManager:
 
     def handle_get_event_log(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик get_event_log."""
+        try:
+            limit = int(params.get("limit", 100))
+            if limit < 1 or limit > 10_000:
+                limit = max(1, min(10_000, limit))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "limit must be an integer 1-10000"}
         events = self.get_events(
             since=params.get("since"),
             event_type=params.get("event_type"),
-            limit=int(params.get("limit", 100)),
+            limit=limit,
         )
         return {"events": events, "count": len(events)}
 
