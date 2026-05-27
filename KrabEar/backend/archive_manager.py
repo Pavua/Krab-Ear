@@ -41,8 +41,9 @@ class ArchiveManager:
     безопасность при одновременном доступе нескольких процессов к одному data_dir.
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, semantic_searcher: Any | None = None) -> None:
         self._store = store
+        self._semantic_searcher = semantic_searcher
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
@@ -187,6 +188,15 @@ class ArchiveManager:
                             rb_exc,
                         )
                     continue
+
+                # Шаг 3: удаляем из индекса семантического поиска (W1449 F1).
+                if self._semantic_searcher is not None:
+                    try:
+                        self._semantic_searcher.remove_item(clean_id)
+                    except Exception:
+                        logger.warning(
+                            "archive_items: semantic remove failed for %s", clean_id
+                        )
 
                 archived_count += 1
 

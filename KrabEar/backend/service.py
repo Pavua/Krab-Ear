@@ -563,6 +563,8 @@ class BackendService:
         )
         # W1148 F1: wire semantic_searcher into HistoryService so delete cleans up index
         self._history._semantic_searcher = self._semantic_searcher
+        # W1449 F1: wire semantic_searcher into ArchiveManager so archive_items cleans up index
+        self._archive_manager._semantic_searcher = self._semantic_searcher
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,

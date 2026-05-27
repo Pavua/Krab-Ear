@@ -522,5 +522,102 @@ class ArchiveManagerWave138TestCase(unittest.TestCase):
         self.assertEqual(stats["total_archived"], 2)
 
 
+class ArchiveManagerSemanticW1458TestCase(unittest.TestCase):
+    """W1458 — archive_items removes stale embeddings from semantic search index."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+
+    # ------------------------------------------------------------------
+    # Fake semantic searcher
+    # ------------------------------------------------------------------
+
+    class FakeSemanticSearcher:
+        """Minimal fake SemanticSearcher for W1458 tests."""
+
+        def __init__(self) -> None:
+            self.removed_ids: list[str] = []
+            self.raise_on_remove: bool = False
+
+        def remove_item(self, item_id: str) -> bool:
+            if self.raise_on_remove:
+                raise RuntimeError("simulated remove_item failure")
+            self.removed_ids.append(item_id)
+            return True
+
+    def test_archive_items_removes_from_semantic_index(self) -> None:
+        """archive_items calls semantic_searcher.remove_item for each archived id."""
+        searcher = self.FakeSemanticSearcher()
+        mgr = ArchiveManager(store=self._store, semantic_searcher=searcher)
+
+        self._store.add_fake_item("sem-1", "Запись 1")
+        self._store.add_fake_item("sem-2", "Запись 2")
+
+        result = mgr.archive_items(item_ids=["sem-1", "sem-2"])
+
+        self.assertEqual(result.archived_count, 2)
+        self.assertIn("sem-1", searcher.removed_ids)
+        self.assertIn("sem-2", searcher.removed_ids)
+
+    def test_archive_safe_when_semantic_searcher_none(self) -> None:
+        """archive_items succeeds without errors when no semantic_searcher injected."""
+        mgr = ArchiveManager(store=self._store)  # no semantic_searcher
+
+        self._store.add_fake_item("nosem-1", "Без индекса")
+        result = mgr.archive_items(item_ids=["nosem-1"])
+
+        self.assertEqual(result.archived_count, 1)
+
+    def test_archive_items_semantic_remove_exception_does_not_abort(self) -> None:
+        """If semantic_searcher.remove_item raises, archive still completes."""
+        searcher = self.FakeSemanticSearcher()
+        searcher.raise_on_remove = True
+        mgr = ArchiveManager(store=self._store, semantic_searcher=searcher)
+
+        self._store.add_fake_item("err-sem", "Ошибка индекса")
+        result = mgr.archive_items(item_ids=["err-sem"])
+
+        # Archive still succeeds — semantic error is swallowed with a warning.
+        self.assertEqual(result.archived_count, 1)
+        self.assertIn("err-sem", self._store._deleted)
+
+    def test_archive_items_nonexistent_id_no_semantic_call(self) -> None:
+        """Nonexistent items never reach semantic_searcher.remove_item."""
+        searcher = self.FakeSemanticSearcher()
+        mgr = ArchiveManager(store=self._store, semantic_searcher=searcher)
+
+        result = mgr.archive_items(item_ids=["ghost-123"])
+
+        self.assertEqual(result.archived_count, 0)
+        self.assertEqual(searcher.removed_ids, [])
+
+    def test_archive_items_semantic_remove_called_once_per_item(self) -> None:
+        """remove_item is called exactly once per successfully archived item."""
+        searcher = self.FakeSemanticSearcher()
+        mgr = ArchiveManager(store=self._store, semantic_searcher=searcher)
+
+        for i in range(5):
+            self._store.add_fake_item(f"multi-sem-{i}", f"Запись {i}")
+
+        mgr.archive_items(item_ids=[f"multi-sem-{i}" for i in range(5)])
+
+        self.assertEqual(len(searcher.removed_ids), 5)
+        for i in range(5):
+            self.assertIn(f"multi-sem-{i}", searcher.removed_ids)
+
+    def test_late_inject_semantic_searcher(self) -> None:
+        """Semantic searcher can be injected after construction (late-inject pattern)."""
+        mgr = ArchiveManager(store=self._store)  # constructed without searcher
+        searcher = self.FakeSemanticSearcher()
+        mgr._semantic_searcher = searcher  # late-inject (as done in service.py)
+
+        self._store.add_fake_item("late-inject", "Поздняя инъекция")
+        result = mgr.archive_items(item_ids=["late-inject"])
+
+        self.assertEqual(result.archived_count, 1)
+        self.assertIn("late-inject", searcher.removed_ids)
+
+
 if __name__ == "__main__":
     unittest.main()
