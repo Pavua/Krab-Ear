@@ -211,8 +211,8 @@ class TestClearTranslationCacheHandler(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         cache = TranslationCache(data_dir=tmpdir)
         # Добавляем 2 записи вручную
-        cache.put("hello", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Hola", "offline_default")
-        cache.put("world", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Mundo", "offline_default")
+        cache.put("hello", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Hola")
+        cache.put("world", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Mundo")
         self.assertEqual(cache.get_stats()["entries"], 2)
 
         svc = self._make_handler(cache)
@@ -232,7 +232,7 @@ class TestClearTranslationCacheHandler(unittest.TestCase):
         """Handler очищает и файл на диске (persist_locked вызывается)."""
         tmpdir = tempfile.mkdtemp()
         cache = TranslationCache(data_dir=tmpdir)
-        cache.put("test", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Test", "offline_default")
+        cache.put("test", "ru_to_es", "neutral", "persistent", "ru\x00es\x00m\x00Test")
 
         svc = self._make_handler(cache)
         svc._handle_clear_translation_cache({})
