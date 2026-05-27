@@ -165,7 +165,8 @@ class TestConcurrentRecordThreadSafety(unittest.TestCase):
     """test_concurrent_record_thread_safety"""
 
     def test_concurrent_record_thread_safety(self):
-        mc = MetricsCollector(window_size=500)
+        # window_size=1000 вмещает все 800 успешных + 200 ошибочных записей
+        mc = MetricsCollector(window_size=1000)
         exceptions = []
         num_threads = 20
         per_thread = 50
@@ -207,7 +208,7 @@ class TestResetClearsAllMetrics(unittest.TestCase):
         with mc._lock:
             mc.latencies.clear()
             mc.confidences.clear()
-            mc.errors = 0
+            mc.error_events.clear()  # errors is now a property backed by error_events
             mc.total_requests = 0
 
         summary = mc.get_summary()

@@ -146,7 +146,9 @@ class TestThreadSafety(unittest.TestCase):
     """test_thread_safety — запись из нескольких потоков без краша."""
 
     def test_thread_safety(self):
-        mc = MetricsCollector(window_size=500)
+        # window_size=1000 вмещает все 900 успешных + 100 ошибочных запросов
+        # (10 потоков × 100 запросов; 10% ошибок)
+        mc = MetricsCollector(window_size=1000)
         errors = []
         num_threads = 10
         records_per_thread = 100
@@ -168,7 +170,7 @@ class TestThreadSafety(unittest.TestCase):
 
         summary = mc.get_summary()
         self.assertEqual(summary["total_requests"], num_threads * records_per_thread)
-        # error_rate должен быть ~0.1 (каждый 10-й)
+        # error_rate = errors / (errors + successes) = 100 / (100 + 900) = 0.1
         self.assertAlmostEqual(summary["error_rate"], 0.1, delta=0.01)
 
 
