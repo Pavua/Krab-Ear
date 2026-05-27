@@ -103,8 +103,9 @@ class Translator:
         self._unavailable: set[tuple] = set()
         self._cache: OrderedDict[tuple[str, str, str, str], TranslationResult] = OrderedDict()
         self._cache_capacity = 500
-        # W1145 F1 HIGH — lock для thread-safe доступа к _cache.
-        self._cache_lock = threading.Lock()
+        # W1145 F1 HIGH — RLock для thread-safe доступа к _cache (OrderedDict не потокобезопасен
+        # для concurrent read+move_to_end из live_subs background thread).
+        self._cache_lock = threading.RLock()
         # W1145 F2 HIGH — отслеживаем предыдущее состояние privacy_mode чтобы сбрасывать кэш
         # при переходе. None = «ещё не инициализировано» (нет сброса на первом вызове).
         self._last_privacy_mode: bool | None = None
@@ -113,6 +114,17 @@ class Translator:
         # Когда задан, успешные переводы персистируются на диск и переживают перезапуск.
         self._translation_cache: Any | None = None  # type: TranslationCache | None
         # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
+
+    def clear_cache(self) -> None:
+        """Очищает LRU-кэш переводов и сбрасывает список недоступных моделей.
+
+        Вызывается при переходе privacy_mode → True, чтобы стёртые RAM-переводы
+        не «утекали» в следующие запросы (W1145 F2).
+        """
+        with self._cache_lock:
+            self._cache.clear()
+            self._unavailable.clear()
+        logger.debug("Translator cache cleared (privacy_mode transition)")
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -275,6 +287,12 @@ class Translator:
     ) -> TranslationResult:
         """Внутренняя реализация translate(). Вынесена чтобы обернуть span'ом только
         наблюдаемую часть без дублирования normalize/cache логики."""
+        # W1145 F2: detect privacy_mode true-transition and purge in-RAM cache.
+        privacy_now = bool(getattr(self, "_privacy_mode", False))
+        if privacy_now and not self._privacy_was_on:
+            self.clear_cache()
+        self._privacy_was_on = privacy_now
+
         clean_text = text.strip()
         normalized_style = self._normalize_style(translation_style)
         normalized_network_mode = self._normalize_network_mode(network_mode)
@@ -883,7 +901,7 @@ class Translator:
         )
 
     def _cache_get(self, key: tuple[str, str, str, str]) -> TranslationResult | None:
-        """Берёт результат из LRU-кэша перевода. Thread-safe."""
+        """Берёт результат из LRU-кэша перевода (W1145 F1: protected by RLock)."""
         with self._cache_lock:
             value = self._cache.get(key)
             if value is None:
@@ -892,7 +910,7 @@ class Translator:
             return value
 
     def _cache_set(self, key: tuple[str, str, str, str], value: TranslationResult) -> None:
-        """Сохраняет результат в LRU-кэш. Thread-safe."""
+        """Сохраняет результат в LRU-кэш (W1145 F1: protected by RLock)."""
         with self._cache_lock:
             self._cache[key] = value
             self._cache.move_to_end(key)
