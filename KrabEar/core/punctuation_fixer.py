@@ -18,7 +18,39 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 # Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби, не «, не URL)
 # ':' включён, но (?!/) исключает URL-схемы (http:/, https:/, file:/ и т.п.)
 _NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»]|:(?!/))([^\s\d»\"')\]])")
-_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
+
+# Находим все точки перед заглавной буквой — фактическую вставку пробела
+# определяет _insert_period_space() с учётом контекста.
+_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"\.([А-ЯA-ZЁ])")
+
+
+def _insert_period_space(m: re.Match) -> str:
+    """Callback для _NO_SPACE_AFTER_PERIOD_RE.
+
+    Вставляет пробел после точки только если это граница предложения, а не:
+    - точечное сокращение (т.е., т.д., i.e., etc.) — когда перед точкой стоит
+      символ, которому предшествовала другая точка (X.X. паттерн);
+    - версионная строка (v1.0.Beta, 2.3.5) — перед точкой стоит цифра.
+    """
+    start = m.start()
+    text = m.string
+    # Символ непосредственно перед точкой
+    char_before = text[start - 1] if start > 0 else ""
+    # Является ли символ перед точкой цифрой? → версионная строка
+    if char_before.isdigit():
+        return m.group(0)
+    # Является ли символ перед точкой буквой, которой предшествует другая точка?
+    # Т.е. паттерн «...X.Y.» где Y — текущий символ перед нашей точкой
+    if char_before and re.match(r"[а-яёА-ЯЁa-zA-Z]", char_before):
+        pos_before_char = start - 2
+        if pos_before_char >= 0 and text[pos_before_char] == ".":
+            return m.group(0)  # аббревиатура типа т.е., v.s.
+        # Дополнительно: если перед символом стоит начало строки или пробел,
+        # то это первый компонент аббревиатуры (например, «т.» в «т.е.»)
+        if pos_before_char < 0 or text[pos_before_char] in (" ", "\t", "\n", "(", "["):
+            return m.group(0)  # одиночный символ + точка в начале слова = аббревиатура
+    # Граница предложения — вставляем пробел
+    return ". " + m.group(1)
 
 # STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
 # common Whisper output like "dime.como".  Only applied in ES mode.
@@ -79,7 +111,7 @@ class PunctuationFixer:
         # введённые шагом A, не попадут под очистку шага B (W1348 R1).
         result = _MULTI_SPACE_RE.sub(" ", result)
         result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
-        result = _NO_SPACE_AFTER_PERIOD_RE.sub(r"\1 \2", result)
+        result = _NO_SPACE_AFTER_PERIOD_RE.sub(_insert_period_space, result)
         result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
         result = _CAPITALIZE_AFTER_SENT_RE.sub(lambda m: m.group(1) + m.group(2).upper(), result)
 
