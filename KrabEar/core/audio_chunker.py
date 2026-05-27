@@ -13,6 +13,7 @@ from typing import Optional
 
 import numpy as np
 
+from core.silence_constants import SILENCE_THRESHOLD_DB
 from core.silence_detector import SilenceDetector, SilenceRegion
 
 logger = logging.getLogger("KrabEar.AudioChunker")
@@ -76,7 +77,7 @@ class AudioChunker:
     def __init__(
         self,
         silence_detector: Optional[SilenceDetector] = None,
-        threshold_db: float = -40.0,
+        threshold_db: float = SILENCE_THRESHOLD_DB,
         min_silence_sec: float = _MIN_SILENCE_SEC,
     ) -> None:
         """
