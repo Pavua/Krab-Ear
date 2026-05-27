@@ -135,7 +135,6 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\bХроме\b", "Chrome"),
     # Obsidian (note app)
     (r"\bОбсидиан\b", "Obsidian"),
-    (r"\bОбсидиан\b", "Obsidian"),
     # Inference
     (r"\bинференс\b", "inference"),
     (r"\bинференца\b", "inference"),
@@ -302,8 +301,9 @@ _BRAND_REPLACEMENTS_RAW: list[tuple[str, str]] = [
     (r"\b[Ээ][Мм]\s+[Пп][Ээ]\s*3\b", "MP3"),              # «Эм пэ 3»
     # WAV
     (r"\b[Вв]ав\s+[Фф]айл\b", "WAV файл"),
-    # SSL — «эс эс эль»; э = U+044D, use [Ээ] and [Лл]
-    (r"\b[Ээ]с\s+[Ээ]с\s+[Ее]ль\b", "SSL"),
+    # SSL — «эс эс эль»; correct Cyrillic letter L = «эль» (Э U+044D); Whisper sometimes
+    # transcribes as «ель» (Е U+0415, yew tree). Accept both: [ЭэЕе]ль.
+    (r"\b[Ээ]с\s+[Ээ]с\s+[ЭэЕе]ль\b", "SSL"),
 
     # ── Russian dev-slang / dictation patterns (batch-10) ───────────────────
     # subagent — Russian phonetic variants
