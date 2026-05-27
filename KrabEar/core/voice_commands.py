@@ -8,6 +8,14 @@ VoiceCommandProcessor сканирует распознанный текст н�
 
 Запуск тестов:
     PYTHONPATH=$(pwd)/KrabEar python -m pytest KrabEar/tests/test_voice_commands.py -v
+
+W1251 fix: ambiguous single-word triggers removed from default tables.
+  - RU: «вопрос» and «точка» removed (common words causing production text damage).
+  - EN: «period», «colon», «tab», «dash» removed (medical/UI terms).
+  - ES: «coma», «punto», «dos puntos» removed («coma» = medical coma in Spanish).
+Use _VOICE_COMMANDS_STRICT_MODE = True (default) to enforce multi-word-only mode.
+Set to False (or call set_voice_commands_strict_mode(False) via IPC) to re-enable
+single-word triggers for users who prefer them.
 """
 
 from __future__ import annotations
@@ -18,6 +26,13 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.VoiceCommands")
 
+# ---------------------------------------------------------------------------
+# Strict mode: when True, only unambiguous multi-word commands are active.
+# Single-word triggers that collide with common vocabulary are excluded.
+# Set to False to restore legacy single-word behaviour (per-user opt-in).
+# ---------------------------------------------------------------------------
+_VOICE_COMMANDS_STRICT_MODE: bool = True
+
 
 # ---------------------------------------------------------------------------
 # Таблицы команд: (паттерн, тип, значение)
@@ -26,7 +41,9 @@ logger = logging.getLogger("KrabEar.VoiceCommands")
 
 # Каждая запись: (regex_pattern, action, action_arg)
 # Порядок важен — более длинные/специфичные паттерны должны идти ПЕРВЕЕ.
-_RU_COMMANDS: list[tuple[str, str, str]] = [
+
+# Multi-word (unambiguous) RU commands — always active.
+_RU_COMMANDS_MULTIWORD: list[tuple[str, str, str]] = [
     # Удаление — «удалить последнее <N> X»
     (r"удалить последнее слово", "delete_last", "word"),
     (r"удалить последнее предложение", "delete_last", "sentence"),
@@ -34,26 +51,33 @@ _RU_COMMANDS: list[tuple[str, str, str]] = [
     (r"удалить последнее", "delete_last", "word"),  # fallback
     # Регистр
     (r"большая буква", "capitalize_next", ""),
-    (r"капс", "uppercase_sent", ""),
     (r"верхний регистр", "uppercase_sent", ""),
-    # Составные знаки препинания (2 слова — РАНЬШЕ одиночных)
+    # Составные знаки препинания (2+ слов — РАНЬШЕ одиночных)
     (r"точка с запятой", "insert", ";"),
     (r"восклицательный знак", "insert", "!"),
     (r"вопросительный знак", "insert", "?"),
     (r"новый абзац", "insert", "\n\n"),
     (r"новая строка", "insert", "\n"),
-    # Одиночные
+    # Single-word, low-ambiguity (kept in multi-word table)
     (r"запятая", "insert", ","),
-    (r"точка", "insert", "."),
     (r"двоеточие", "insert", ":"),
-    (r"тире", "insert", " — "),
     (r"восклицание", "insert", "!"),
-    (r"вопрос", "insert", "?"),
     (r"табуляция", "insert", "\t"),
     (r"пробел", "insert", " "),
+    (r"капс", "uppercase_sent", ""),
 ]
 
-_ES_COMMANDS: list[tuple[str, str, str]] = [
+# Single-word RU triggers that are common words — only active in non-strict mode.
+# REMOVED from default: «вопрос» (= "question"), «точка» (= "dot/point"),
+# as they cause production text damage (e.g. "это важный вопрос" → "это важный?").
+_RU_COMMANDS_SINGLE_WORD_AMBIGUOUS: list[tuple[str, str, str]] = [
+    (r"точка", "insert", "."),
+    (r"вопрос", "insert", "?"),
+    (r"тире", "insert", " — "),
+]
+
+# Multi-word (unambiguous) ES commands — always active.
+_ES_COMMANDS_MULTIWORD: list[tuple[str, str, str]] = [
     # Удаление
     (r"borrar última palabra", "delete_last", "word"),
     (r"borrar último párrafo", "delete_last", "paragraph"),
@@ -69,17 +93,23 @@ _ES_COMMANDS: list[tuple[str, str, str]] = [
     (r"signo de exclamación", "insert", "!"),
     (r"signo de interrogación", "insert", "?"),
     (r"nueva línea", "insert", "\n"),
-    (r"nueva línea", "insert", "\n"),
-    # Одиночные
+    # Single-word, low-ambiguity (kept in multi-word table)
+    (r"tabulación", "insert", "\t"),
+    (r"espacio", "insert", " "),
+    (r"guión largo", "insert", " — "),
+]
+
+# Single-word ES triggers that are common words — only active in non-strict mode.
+# REMOVED from default: «coma» (= "coma" in medical Spanish, e.g. "paciente en coma"),
+# «punto» (= "point/dot"), «dos puntos» (two words but common phrase "dos puntos de...").
+_ES_COMMANDS_SINGLE_WORD_AMBIGUOUS: list[tuple[str, str, str]] = [
     (r"coma", "insert", ","),
     (r"punto", "insert", "."),
     (r"dos puntos", "insert", ":"),
-    (r"guión largo", "insert", " — "),
-    (r"tabulación", "insert", "\t"),
-    (r"espacio", "insert", " "),
 ]
 
-_EN_COMMANDS: list[tuple[str, str, str]] = [
+# Multi-word (unambiguous) EN commands — always active.
+_EN_COMMANDS_MULTIWORD: list[tuple[str, str, str]] = [
     # Удаление
     (r"delete last word", "delete_last", "word"),
     (r"delete last sentence", "delete_last", "sentence"),
@@ -97,15 +127,58 @@ _EN_COMMANDS: list[tuple[str, str, str]] = [
     (r"exclamation point", "insert", "!"),
     (r"question mark", "insert", "?"),
     (r"new line", "insert", "\n"),
-    # Одиночные
-    (r"comma", "insert", ","),
-    (r"period", "insert", "."),
     (r"full stop", "insert", "."),
-    (r"colon", "insert", ":"),
     (r"em dash", "insert", " — "),
-    (r"dash", "insert", "-"),
-    (r"tab", "insert", "\t"),
+    # Single-word, low-ambiguity (kept in multi-word table)
+    (r"comma", "insert", ","),
 ]
+
+# Single-word EN triggers that are common words — only active in non-strict mode.
+# REMOVED from default: «period» (medical/financial term), «colon» (medical term),
+# «tab» (UI/keyboard term), «dash» (used in dictation as punctuation or word).
+_EN_COMMANDS_SINGLE_WORD_AMBIGUOUS: list[tuple[str, str, str]] = [
+    (r"period", "insert", "."),
+    (r"colon", "insert", ":"),
+    (r"tab", "insert", "\t"),
+    (r"dash", "insert", "-"),
+]
+
+
+def _build_command_table(
+    multiword: list[tuple[str, str, str]],
+    ambiguous: list[tuple[str, str, str]],
+    strict: bool,
+) -> list[tuple[str, str, str]]:
+    """Собирает итоговую таблицу команд с учётом strict mode.
+
+    В strict mode (default): только multiword (unambiguous) команды.
+    В non-strict mode: multiword + ambiguous однословные триггеры.
+    """
+    if strict:
+        return list(multiword)
+    return list(multiword) + list(ambiguous)
+
+
+def _make_lang_commands(strict: bool) -> dict[str, list[tuple[str, str, str]]]:
+    return {
+        "ru": _build_command_table(_RU_COMMANDS_MULTIWORD, _RU_COMMANDS_SINGLE_WORD_AMBIGUOUS, strict),
+        "es": _build_command_table(_ES_COMMANDS_MULTIWORD, _ES_COMMANDS_SINGLE_WORD_AMBIGUOUS, strict),
+        "en": _build_command_table(_EN_COMMANDS_MULTIWORD, _EN_COMMANDS_SINGLE_WORD_AMBIGUOUS, strict),
+    }
+
+
+# Active command tables (rebuilt when strict mode changes).
+_RU_COMMANDS: list[tuple[str, str, str]] = _build_command_table(
+    _RU_COMMANDS_MULTIWORD, _RU_COMMANDS_SINGLE_WORD_AMBIGUOUS, _VOICE_COMMANDS_STRICT_MODE
+)
+_ES_COMMANDS: list[tuple[str, str, str]] = _build_command_table(
+    _ES_COMMANDS_MULTIWORD, _ES_COMMANDS_SINGLE_WORD_AMBIGUOUS, _VOICE_COMMANDS_STRICT_MODE
+)
+_EN_COMMANDS: list[tuple[str, str, str]] = _build_command_table(
+    _EN_COMMANDS_MULTIWORD, _EN_COMMANDS_SINGLE_WORD_AMBIGUOUS, _VOICE_COMMANDS_STRICT_MODE
+)
+
+_LANG_COMMANDS: dict[str, list[tuple[str, str, str]]] = _make_lang_commands(_VOICE_COMMANDS_STRICT_MODE)
 
 _LANG_COMMANDS: dict[str, list[tuple[str, str, str]]] = {
     "ru": _RU_COMMANDS,
@@ -114,7 +187,8 @@ _LANG_COMMANDS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 # Компилированные паттерны: {lang: [(compiled_re, action, arg), ...]}
-_COMPILED: dict[str, list[tuple[re.Pattern[str], str, str]]] = {}
+# Cache is keyed by (lang, strict_mode) to support runtime mode switching.
+_COMPILED: dict[tuple[str, bool], list[tuple[re.Pattern[str], str, str]]] = {}
 
 
 def _build_pattern(raw_pattern: str) -> re.Pattern[str]:
@@ -131,12 +205,19 @@ def _build_pattern(raw_pattern: str) -> re.Pattern[str]:
     return re.compile(r"\b" + escaped + r"\b", re.IGNORECASE)
 
 
-def _get_compiled(lang: str) -> list[tuple[re.Pattern[str], str, str]]:
-    """Возвращает компилированные паттерны для языка (с кэшированием)."""
-    if lang not in _COMPILED:
-        raw = _LANG_COMMANDS.get(lang, [])
-        _COMPILED[lang] = [(_build_pattern(p), action, arg) for p, action, arg in raw]
-    return _COMPILED[lang]
+def _get_compiled(lang: str, strict: bool = True) -> list[tuple[re.Pattern[str], str, str]]:
+    """Возвращает компилированные паттерны для языка (с кэшированием).
+
+    Args:
+        lang: язык ("ru", "es", "en").
+        strict: если True — только multiword (unambiguous) команды.
+    """
+    cache_key = (lang, strict)
+    if cache_key not in _COMPILED:
+        lang_table = _make_lang_commands(strict)
+        raw = lang_table.get(lang, [])
+        _COMPILED[cache_key] = [(_build_pattern(p), action, arg) for p, action, arg in raw]
+    return _COMPILED[cache_key]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +280,11 @@ class VoiceCommandProcessor:
     Алгоритм: однопроходный жадный слева направо.
     На каждой позиции ищем самый длинный паттерн для данного языка.
     Если найден — применяем action; если нет — копируем символ в вывод.
+
+    Strict mode (default True): only multi-word, unambiguous commands fire.
+    Non-strict mode: additionally enables single-word triggers like «вопрос»,
+    «точка», «period», «colon», «tab», «coma», «punto» etc.
+    Use set_voice_commands_strict_mode(False) to opt-in to legacy behaviour.
     """
 
     def __init__(
@@ -212,6 +298,8 @@ class VoiceCommandProcessor:
                          Если None — читаем из DEFAULT_SETTINGS / фолбэк.
         """
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        # Instance-level strict mode override; None = use module-level default.
+        self._strict_mode_override: Optional[bool] = None
 
     # --- Runtime toggle helpers ---
 
@@ -223,6 +311,34 @@ class VoiceCommandProcessor:
         if isinstance(val, str):
             return [lang.strip() for lang in val.split(",") if lang.strip()]
         return list(val)
+
+    def _strict_mode(self) -> bool:
+        """Возвращает текущий strict mode (instance override или module default)."""
+        if self._strict_mode_override is not None:
+            return self._strict_mode_override
+        return bool(self._settings_get("voice_commands_strict_mode", _VOICE_COMMANDS_STRICT_MODE))
+
+    # --- IPC-facing API ---
+
+    def set_voice_commands_strict_mode(self, enabled: bool) -> None:
+        """Переключает strict mode для данного экземпляра процессора.
+
+        Когда enabled=True (default): только многословные (unambiguous) команды
+        активны. Однословные триггеры-омонимы («вопрос», «точка», «period»,
+        «colon», «tab», «coma», «punto») отключены.
+
+        Когда enabled=False: все команды активны (legacy-режим). Рекомендуется
+        только для пользователей, которые явно диктуют команды и не говорят
+        медицинских/технических терминов.
+
+        Args:
+            enabled: True = strict (safe default), False = all triggers active.
+        """
+        self._strict_mode_override = bool(enabled)
+        logger.info(
+            "VoiceCommands: strict mode %s",
+            "enabled" if enabled else "disabled (all single-word triggers active)",
+        )
 
     # --- Public API ---
 
@@ -248,15 +364,16 @@ class VoiceCommandProcessor:
             logger.debug("VoiceCommands: язык %s не в разрешённых %s, пропускаем", lang, allowed)
             return text
 
-        patterns = _get_compiled(lang)
+        strict = self._strict_mode()
+        patterns = _get_compiled(lang, strict=strict)
         if not patterns:
             return text
 
         result = self._apply_commands(text, patterns)
         if result != text:
             logger.debug(
-                "VoiceCommands: %d chars → %d chars (lang=%s)",
-                len(text), len(result), lang,
+                "VoiceCommands: %d chars → %d chars (lang=%s, strict=%s)",
+                len(text), len(result), lang, strict,
             )
         return result
 
