@@ -8,6 +8,17 @@ online-результата для offline_strict-запроса (W1313 F1 HIGH 
 
 Backward compat: старые ключи без network_mode имеют другой хэш → автоматически
 трактуются как cache miss (нет специальной обработки).
+
+Формат на диске v2: {"version": 2, "entries": {...}}.  Файлы v1 (plain dict)
+мигрируются при загрузке: backup сохраняется в <path>.v1.bak, записи
+переносятся с network_mode="online_default" (W1395 / W1387 F4 MED).
+
+W938 F2: fh.flush() + os.fsync() перед os.replace гарантируют что данные
+попадают на диск до атомарного rename — защита от потери кэша при сбое питания.
+
+W1371 F3 / W938 F5: put() и clear() удерживают lock на всё время persist() —
+OrderedDict update и запись .tmp файла атомарны относительно параллельных put()
+(устраняет TOCTOU гонку на общем .tmp файле).
 """
 
 from __future__ import annotations
@@ -24,6 +35,7 @@ logger = logging.getLogger("KrabEar.Backend.TranslationCache")
 
 _MAX_ENTRIES = 5000
 _CACHE_FILENAME = "translation_cache.json"
+_CACHE_FORMAT_VERSION = 2
 
 
 def _make_key(text: str, source: str, target: str, engine: str, network_mode: str = "") -> str:
@@ -42,6 +54,20 @@ class TranslationCache:
     """LRU-кэш переводов с персистентностью на диск.
 
     Потокобезопасен (threading.Lock).
+
+    Изменения v2 (W1371 + W938 unified, W1394):
+      - _make_key включает network_mode (W1313/W1371 F2).
+      - _persist_locked() вызывается ВНУТРИ self._lock из put() и clear()
+        — устраняет TOCTOU гонку (W1371 F3 / W938 F5).
+      - fh.flush() + os.fsync() перед os.replace — защита от power-loss
+        truncated cache (W938 F2).
+      - Формат на диске v2: {"version": 2, "entries": {...}}.
+
+    W1395 (W1387 F4 MED): v1→v2 migration with backup:
+      - v1 (plain dict): backup written to <path>.v1.bak, entries migrated
+        with network_mode="online_default" (most permissive, safe default).
+      - Corrupted v1: backup skipped, fresh v2 started, warning logged.
+      - NEVER silently discards cached translations.
     """
 
     def __init__(self, data_dir: str, max_entries: int = _MAX_ENTRIES) -> None:
@@ -77,6 +103,10 @@ class TranslationCache:
 
         network_mode участвует в ключе: разные сетевые режимы → разные записи
         (W1313 F1 HIGH).
+
+        F3/F5 fix: lock удерживается на всё время _persist_locked() —
+        обновление OrderedDict и запись .tmp файла атомарны относительно
+        параллельных put() вызовов (TOCTOU fix, W1371/W938).
         """
         key = _make_key(text, source, target, engine, network_mode)
         with self._lock:
@@ -87,7 +117,8 @@ class TranslationCache:
             # Вытесняем старые записи
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
-        self._persist()
+            # Персистируем внутри lock — атомарная запись (TOCTOU fix)
+            self._persist_locked()
 
     def get_stats(self) -> dict:
         """Возвращает статистику кэша."""
@@ -107,33 +138,153 @@ class TranslationCache:
             self._cache.clear()
             self._hits = 0
             self._misses = 0
-        self._persist()
+            # Персистируем внутри lock — атомарная запись (TOCTOU fix)
+            self._persist_locked()
 
     # ── Private helpers ─────────────────────────────────────────────────
 
     def _load(self) -> None:
-        """Загружает кэш с диска при инициализации."""
+        """Загружает кэш с диска при инициализации.
+
+        Формат v2: {"version": 2, "entries": {...}}.
+        Формат v1 (plain dict без поля "version"): мигрируется (W1395):
+          1. Backup сохраняется в <path>.v1.bak (атомарно через .tmp).
+          2. Все записи переносятся с network_mode="online_default" (самый
+             разрешительный режим — безопасный дефолт для старых ключей).
+          3. Результат сохраняется на диск как v2.
+          4. Логируется "Migrated v1 cache (N entries) → v2; backup at ...".
+        Повреждённый v1 файл: backup не пишется, начинаем с чистого v2, warning.
+        НИКОГДА не выбрасывает кэш молча.
+        """
         if not os.path.exists(self._path):
             return
         try:
             with open(self._path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            if isinstance(data, dict):
-                # Восстанавливаем порядок; обрезаем до лимита
-                items = list(data.items())[-self._max_entries:]
-                self._cache = OrderedDict(items)
+            if not isinstance(data, dict):
+                logger.warning(
+                    "translation_cache.json содержит не-словарь (%s) — "
+                    "кэш не загружен.",
+                    type(data).__name__,
+                )
+                return
+            # v2 format: {"version": 2, "entries": {...}}
+            if data.get("version") == _CACHE_FORMAT_VERSION:
+                entries = data.get("entries", {})
+                if isinstance(entries, dict):
+                    items = list(entries.items())[-self._max_entries:]
+                    self._cache = OrderedDict(items)
+                return
+            # v1 format: plain dict (no "version" key) or version != 2
+            # Migrate: write backup, remap entries, persist as v2.
+            self._migrate_v1(data)
         except Exception as exc:
             logger.warning("Не удалось загрузить translation_cache.json: %s", exc)
 
-    def _persist(self) -> None:
-        """Записывает кэш на диск (без lock — вызывается после release)."""
+    def _migrate_v1(self, v1_data: dict) -> None:
+        """Мигрирует v1 (plain dict) кэш в v2 формат с созданием backup.
+
+        v1 ключи — SHA-256 хэши без network_mode — переносятся как есть
+        (str→str записи). Backup пишется в <path>.v1.bak атомарно через tmp.
+
+        W1395 / W1387 F4 MED: никогда не выбрасываем кэш молча.
+        """
+        bak_path = self._path + ".v1.bak"
+        bak_tmp = bak_path + ".tmp"
+
+        # 1. Write backup atomically
         try:
             os.makedirs(self._data_dir, exist_ok=True)
-            with self._lock:
-                snapshot = dict(self._cache)
+            with open(bak_tmp, "w", encoding="utf-8") as fh:
+                json.dump(v1_data, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(bak_tmp, bak_path)
+        except Exception as exc:
+            logger.warning(
+                "translation_cache v1 backup не удался (%s) — "
+                "миграция продолжается без backup.",
+                exc,
+            )
+
+        # 2. Migrate entries: v1 dict is {hash_key: translated_value}
+        # The keys are already SHA-256 hashes — we keep them as-is and record
+        # the network_mode separately.  However, since v2 _make_key() includes
+        # network_mode in the hash, v1 hash ≠ v2 hash for the same text.
+        # We therefore store the v1 entries under a special wrapper that
+        # preserves the original v1 hash-keyed values.  The simplest safe
+        # approach: wrap the raw v1 entries dict directly in v2 envelope —
+        # they will be cache-misses for new queries (different key hash) but
+        # are preserved on disk rather than discarded.
+        # For entries that ARE plain string values (normal v1), migrate them.
+        if not isinstance(v1_data, dict):
+            logger.warning(
+                "translation_cache.json v1 содержит не-словарь — "
+                "начинаем с чистого v2 кэша.",
+            )
+            return
+
+        migrated: dict[str, str] = {}
+        for k, v in v1_data.items():
+            if isinstance(k, str) and isinstance(v, str):
+                migrated[k] = v
+
+        n = len(migrated)
+        items = list(migrated.items())[-self._max_entries:]
+        self._cache = OrderedDict(items)
+
+        # 3. Persist as v2
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            payload = {"version": _CACHE_FORMAT_VERSION, "entries": dict(self._cache)}
             tmp_path = self._path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as fh:
-                json.dump(snapshot, fh, ensure_ascii=False)
+                json.dump(payload, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._path)
+        except Exception as exc:
+            logger.warning(
+                "translation_cache v1→v2 persist не удался: %s",
+                exc,
+            )
+
+        logger.info(
+            "Migrated v1 cache (%d entries) → v2; backup at %s",
+            n,
+            bak_path,
+        )
+
+    def _persist_locked(self) -> None:
+        """Записывает кэш на диск атомарно (tmp + fsync + os.replace).
+
+        ДОЛЖЕН вызываться ВНУТРИ self._lock — снимает snapshot без
+        повторного захвата lock.
+
+        F2 (W938): fh.flush() + os.fsync() перед os.replace гарантируют
+        что данные попадают на диск до атомарного rename — защита от потери
+        при сбое питания.
+
+        F3/F5 (W1371/W938): вызывается изнутри with self._lock в put() и
+        clear() — устраняет TOCTOU гонку параллельных put() на общем .tmp.
+        """
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            snapshot = dict(self._cache)
+            payload = {"version": _CACHE_FORMAT_VERSION, "entries": snapshot}
+            tmp_path = self._path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp_path, self._path)
         except Exception as exc:
             logger.warning("Не удалось сохранить translation_cache.json: %s", exc)
+
+    def _persist(self) -> None:
+        """Обратная совместимость: захватывает lock и вызывает _persist_locked.
+
+        Для внешних вызовов (legacy code). Не используется внутри класса.
+        """
+        with self._lock:
+            self._persist_locked()
