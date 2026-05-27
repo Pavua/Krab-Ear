@@ -3,6 +3,22 @@
 Редактирует персональные данные из транскрипций: телефоны, email, номера банковских карт,
 паспортные данные, даты рождения и произвольные пользовательские паттерны.
 Не требует внешних зависимостей — только стандартная библиотека (re).
+
+Соглашение о токенах-плейсхолдерах
+------------------------------------
+Все встроенные токены замены используют кириллицу для согласованности с русскоязычным
+интерфейсом проекта и корректной обработки в downstream-компонентах (paste-форматтеры,
+синхронизация с Obsidian), которые ищут именно кириллические токены:
+
+    [ТЕЛЕФОН]       — российский номер телефона
+    [EMAIL]         — адрес электронной почты (латиница сохраняется намеренно — это не ПДн-тип)
+    [КАРТА]         — номер банковской карты
+    [ПАСПОРТ]       — паспортные данные РФ
+    [ДАТА_РОЖДЕНИЯ] — дата рождения
+    [ИНН]           — ИНН физического лица
+    [СНИЛС]         — СНИЛС
+    [ССН]           — американский Social Security Number (транслит SSN → ССН)
+    [ИБАН]          — международный номер счёта IBAN (транслит IBAN → ИБАН)
 """
 
 from __future__ import annotations
@@ -64,6 +80,36 @@ def _passes_inn_checksum(digits: str) -> bool:
     return False
 
 
+# ── СНИЛС mod-101 checksum helper ────────────────────────────────────────────
+
+def _passes_snils_mod101(digits: str) -> bool:
+    """Verify 11-digit СНИЛС number passes the official mod-101 checksum.
+
+    Rules (ПФР):
+    - Calculate weighted sum: sum(digit[i] * (9 - i)) for i in 0..8
+    - If sum < 100: control = sum
+    - If sum == 100 or sum == 101: control = 0
+    - If sum > 101: control = (sum % 101) if (sum % 101) < 100 else 0
+    - Compare control to last two digits of СНИЛС.
+    """
+    if len(digits) != 11:
+        return False
+    try:
+        d = [int(c) for c in digits]
+    except ValueError:
+        return False
+    s = sum(d[i] * (9 - i) for i in range(9))
+    if s < 100:
+        control = s
+    elif s in (100, 101):
+        control = 0
+    else:
+        r = s % 101
+        control = r if r < 100 else 0
+    actual = d[9] * 10 + d[10]
+    return control == actual
+
+
 # ── Датаклассы результата ────────────────────────────────────────────────────
 
 @dataclass
@@ -85,9 +131,11 @@ class AnonymizeResult:
 
 # ── Встроенные правила ───────────────────────────────────────────────────────
 
-# Формат: (name, compiled_pattern, replacement_label)
-_BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
-    # Телефонные номера: RU (+7/8), ES (+34), EN/US (+1) и локальный формат
+# Формат: (name, pattern, replacement_label[, re_flags])
+# re_flags по умолчанию = re.IGNORECASE. Для правил, чувствительных к регистру (напр. IBAN),
+# передавайте явно 0 (без флагов).
+_BUILTIN_RULES_RAW: list[tuple] = [
+    # Российские телефоны: +7/8 и различные форматы скобок/дефисов/пробелов
     (
         "phone",
         r"(?<!\d)"
@@ -174,17 +222,45 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         r"\b\d{12}\b",
         "[ИНН]",
     ),
-    # СНИЛС: XXX-XXX-XXX XX  /  XXXXXXXXXXX (11 цифр)
+    # СНИЛС: XXX-XXX-XXX XX  /  XXX XXX XXX XX  /  XXXXXXXXXXX (11 цифр без разделителей)
+    # Форматированный вариант совпадает первым; неформатированный (OCR, голос) — вторым.
     (
         "snils",
-        r"\b\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}\b",
+        r"\b(?:\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}|\d{11})\b",
         "[СНИЛС]",
+    ),
+    # US SSN: NNN-NN-NNNN
+    # Токен — кириллический транслит (ССН) для согласованности с locale-набором.
+    (
+        "ssn",
+        r"\b\d{3}-\d{2}-\d{4}\b",
+        "[ССН]",
+    ),
+    # IBAN: CC##<до 30 буквенно-цифровых символов>, в том числе space-grouped форма
+    # (e.g. GB82 WEST 1234 5698 7654 32 — доминирующий печатный формат).
+    # ВАЖНО: компилируется без re.IGNORECASE (re_flags=0) — IBANы всегда в верхнем регистре;
+    # case-sensitive matching предотвращает ложные совпадения с обычными словами
+    # после числа (e.g. "32 transfer").
+    # Токен — кириллический транслит (ИБАН) для согласованности с locale-набором.
+    (
+        "iban",
+        r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{1,4})+(?=[^A-Z0-9]|$)",
+        "[ИБАН]",
+        0,  # re_flags: без IGNORECASE
     ),
 ]
 
 
-def _compile_rules(raw: list[tuple[str, str, str]]) -> list[tuple[str, re.Pattern, str]]:
-    return [(name, re.compile(pattern, re.IGNORECASE), repl) for name, pattern, repl in raw]
+def _compile_rules(raw: list[tuple]) -> list[tuple[str, re.Pattern, str]]:
+    result = []
+    for entry in raw:
+        if len(entry) == 4:
+            name, pattern, repl, flags = entry
+        else:
+            name, pattern, repl = entry
+            flags = re.IGNORECASE
+        result.append((name, re.compile(pattern, flags), repl))
+    return result
 
 
 class TextAnonymizer:
@@ -245,6 +321,17 @@ class TextAnonymizer:
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_inn_checksum(digits):
                         continue
+                if name == "snils":
+                    # Для неформатированного 11-значного СНИЛС применяем mod-101 контроль,
+                    # чтобы избежать ложных совпадений (OCR/голос → длинные числа).
+                    # Форматированный вариант (с разделителями) пропускаем без проверки —
+                    # наличие структуры XXX-XXX-XXX-XX само по себе является сигналом.
+                    raw = m.group(0)
+                    digits_only = re.sub(r"[\s\-]", "", raw)
+                    if len(digits_only) == 11 and raw == digits_only:
+                        # Только цифры без разделителей — требуем валидную контрольную сумму
+                        if not _passes_snils_mod101(digits_only):
+                            continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 
         if not matches:
