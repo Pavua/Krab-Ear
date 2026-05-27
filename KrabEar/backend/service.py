@@ -458,6 +458,8 @@ class BackendService:
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
+        # Late-injection: wire chain manager so merger can update chains on delete_originals.
+        self._merger.recording_chain_mgr = self._chains
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)

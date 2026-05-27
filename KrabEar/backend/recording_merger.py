@@ -20,7 +20,16 @@ class RecordingMerger:
 
     Конструктор не требует store — он передаётся явно в каждый метод,
     чтобы упростить тестирование и следовать паттерну других сервисов.
+
+    Атрибут ``recording_chain_mgr`` — поздняя инъекция (late-injection):
+    инициализируется None, устанавливается из BackendService после создания
+    обоих объектов, чтобы избежать циклической зависимости при конструировании.
+    Когда установлен, merge_items автоматически обновляет цепочки при
+    ``delete_originals=True``.
     """
+
+    def __init__(self) -> None:
+        self.recording_chain_mgr: Any | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -69,15 +78,52 @@ class RecordingMerger:
             store.update_history_item_tags(new_item.id, merged_data["tags"])
 
         if delete_originals:
+            original_ids = [item.id for item in items]
+
+            # --- Step 1: capture chain memberships BEFORE deletion ---
+            chain_membership: dict[str, list[str]] = {}
+            if self.recording_chain_mgr is not None:
+                try:
+                    chain_membership = self.recording_chain_mgr.find_chains_containing(
+                        original_ids
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось получить цепочки для %s — пропускаем обновление цепочек",
+                        original_ids,
+                    )
+
             deleted_ids: list[str] = []
             for item in items:
                 if store.delete_history_item(item.id):
                     deleted_ids.append(item.id)
+
+            # --- Step 2: replace originals with merged item in each chain ---
+            if chain_membership and self.recording_chain_mgr is not None:
+                for chain_id, matched_ids in chain_membership.items():
+                    try:
+                        changed = self.recording_chain_mgr.replace_items_in_chain(
+                            chain_id, matched_ids, new_item.id
+                        )
+                        if changed:
+                            logger.info(
+                                "Цепочка %s: заменены %s → %s",
+                                chain_id,
+                                matched_ids,
+                                new_item.id,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Не удалось обновить цепочку %s — ghost refs остаются",
+                            chain_id,
+                        )
+
             logger.info(
-                "Объединено %d записей → %s; удалено %d оригиналов",
+                "Объединено %d записей → %s; удалено %d оригиналов; цепочек обновлено %d",
                 len(items),
                 new_item.id,
                 len(deleted_ids),
+                len(chain_membership),
             )
         else:
             logger.info(
