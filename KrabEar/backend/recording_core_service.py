@@ -1043,6 +1043,8 @@ class RecordingCoreService:
             },
         )
 
+        _phase_c_settings = self._settings_svc.cached_settings()
+        _diarize_enabled = _phase_c_settings.get("diarization_enabled", False)
         transcribe_payload = self.transcriber.transcribe(
             audio,
             quality_profile=quality_profile,
@@ -1052,6 +1054,8 @@ class RecordingCoreService:
             history_context=_recent_history if _recent_history else None,
             stt_hotwords=_combined_hotwords,
             silence_ranges=silence_ranges if silence_ranges else None,
+            settings=_phase_c_settings,
+            diarize=True if _diarize_enabled else None,
         )
 
         return {"transcribe_payload": transcribe_payload}
@@ -1402,25 +1406,14 @@ class RecordingCoreService:
                     pass
 
                 import_lang_hint = lang_hint if lang_hint else "auto"
-                if progress_callback is not None:
-                    self.transcriber.engine.set_quality_profile(quality_profile)
-                    transcribe_payload = self.transcriber.engine.transcribe(
-                        audio_path,
-                        cleanup_profile=cleanup_profile,
-                        is_preview=False,
-                        domain="casual",
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                        lang_hint=import_lang_hint,
-                        progress_callback=progress_callback,
-                    )
-                else:
-                    transcribe_payload = self.transcriber.transcribe(
-                        audio_path,
-                        quality_profile=quality_profile,
-                        cleanup_profile=cleanup_profile,
-                        lang_hint=import_lang_hint,
-                        extra_vocabulary=user_vocabulary if user_vocabulary else None,
-                    )
+                transcribe_payload = self.transcriber.transcribe(
+                    audio_path,
+                    quality_profile=quality_profile,
+                    cleanup_profile=cleanup_profile,
+                    lang_hint=import_lang_hint,
+                    extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                    progress_callback=progress_callback,
+                )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
                 if not text:
