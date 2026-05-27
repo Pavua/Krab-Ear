@@ -399,11 +399,11 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
 
     def test_auto_dedup_skips_in_privacy_mode(self) -> None:
         """check_duplicate возвращает 'kept' когда privacy_mode=True."""
-        # Мок-провайдер настроек с включённым privacy_mode
-        def privacy_settings() -> dict:
-            return {"privacy_mode": True}
-
-        deduplicator = AutoDeduplicator(settings_provider=privacy_settings)
+        # W1505 N1 HIGH fix: settings_provider должен принимать два аргумента (key, default)
+        # согласно интерфейсу W1248: Callable[[str, Any], Any].
+        deduplicator = AutoDeduplicator(
+            settings_provider=lambda k, d=False: True if k == "privacy_mode" else d
+        )
 
         # Store с существующей идентичной записью
         existing_item = {
@@ -429,10 +429,10 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
 
     def test_auto_dedup_active_when_privacy_mode_disabled(self) -> None:
         """check_duplicate работает штатно когда privacy_mode=False."""
-        def normal_settings() -> dict:
-            return {"privacy_mode": False}
-
-        deduplicator = AutoDeduplicator(settings_provider=normal_settings)
+        # W1505 N1 HIGH fix: используем двухаргументный провайдер
+        deduplicator = AutoDeduplicator(
+            settings_provider=lambda k, d=False: False if k == "privacy_mode" else d
+        )
 
         existing_item = {
             "id": "orig-002",
@@ -474,7 +474,8 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
 
     def test_privacy_mode_settings_provider_exception_safe(self) -> None:
         """Если settings_provider бросает исключение — privacy_mode считается False (fail-safe)."""
-        def broken_settings() -> dict:
+        # W1505 N1 HIGH fix: провайдер принимает два аргумента (key, default)
+        def broken_settings(key: str, default: object = False) -> object:
             raise RuntimeError("Ошибка получения настроек")
 
         deduplicator = AutoDeduplicator(settings_provider=broken_settings)
@@ -495,6 +496,35 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
             store=mock_store,
         )
         self.assertIn(result.action_taken, ("kept", "skipped", "merged"))
+
+    def test_privacy_provider_signature_two_args(self) -> None:
+        """Регрессия W1505 N1 HIGH: settings_provider вызывается с двумя аргументами (key, default).
+
+        Нулевой lambda (zero-arg) вызывает TypeError который поглощается except Exception
+        и возвращает False — privacy_mode никогда не активируется. Этот тест ловит регрессию.
+        """
+        calls: list[tuple] = []
+
+        def recording_provider(key: str, default: object = False) -> object:
+            calls.append((key, default))
+            return True if key == "privacy_mode" else default
+
+        deduplicator = AutoDeduplicator(settings_provider=recording_provider)
+        mock_store = MagicMock()
+        mock_store.get_history_page.return_value = ([], None)
+
+        deduplicator.check_duplicate(
+            text="тестовый текст для регрессии",
+            timestamp=_now_iso(),
+            store=mock_store,
+        )
+
+        # Провайдер должен быть вызван ровно с двумя аргументами
+        self.assertGreater(len(calls), 0, "settings_provider не был вызван")
+        for call_args in calls:
+            self.assertEqual(len(call_args), 2, f"Ожидалось 2 аргумента, получено {len(call_args)}: {call_args}")
+        # privacy_mode=True → check_duplicate возвращает 'kept', store не вызывается
+        mock_store.get_history_page.assert_not_called()
 
 
 class AutoDedupConstantsTestCase(unittest.TestCase):
