@@ -30,17 +30,22 @@ class ComparisonReport:
 
     period1: PeriodStats
     period2: PeriodStats
-    recordings_change_pct: float
-    duration_change_pct: float
+    recordings_change_pct: "float | str"  # "no_baseline" если не было записей в period1
+    duration_change_pct: "float | str"    # "no_baseline" если не было длительности в period1
     confidence_change: float  # абсолютное изменение (не %)
     new_languages: list[str]  # языки в period2, отсутствующие в period1
     summary: str
 
 
-def _pct_change(old: float, new: float) -> float:
-    """Процентное изменение от old к new. 0 если old == 0."""
+def _pct_change(old: float, new: float) -> "float | str":
+    """Процентное изменение от old к new.
+
+    Returns:
+        float — процентное изменение, если old != 0.
+        "no_baseline" — если old == 0 (нет базы для сравнения).
+    """
     if old == 0.0:
-        return 0.0
+        return "no_baseline"
     return round((new - old) / old * 100, 2)
 
 
@@ -129,9 +134,21 @@ def compare_periods(
         ComparisonReport с delta-метриками и человекочитаемым summary.
     """
     p1_start = _iso_date(period1_start)
-    p1_end = _iso_date(period1_end) + "T23:59:59"
+    p1_end_date = _iso_date(period1_end)
     p2_start = _iso_date(period2_start)
-    p2_end = _iso_date(period2_end) + "T23:59:59"
+    p2_end_date = _iso_date(period2_end)
+
+    if p1_start > p1_end_date:
+        raise ValueError(
+            f"period start must be <= end: period1 {p1_start} > {p1_end_date}"
+        )
+    if p2_start > p2_end_date:
+        raise ValueError(
+            f"period start must be <= end: period2 {p2_start} > {p2_end_date}"
+        )
+
+    p1_end = p1_end_date + "T23:59:59"
+    p2_end = p2_end_date + "T23:59:59"
 
     stats1 = _collect_stats(store, p1_start, p1_end)
     stats2 = _collect_stats(store, p2_start, p2_end)
@@ -147,9 +164,11 @@ def compare_periods(
     # Генерируем summary
     lines = []
 
-    def _fmt_pct(val: float) -> str:
-        sign = "+" if val >= 0 else ""
-        return f"{sign}{val:.1f}%"
+    def _fmt_pct(val: "float | str") -> str:
+        if val == "no_baseline":
+            return "нет базы"
+        sign = "+" if val >= 0 else ""  # type: ignore[operator]
+        return f"{sign}{val:.1f}%"  # type: ignore[str-bytes-safe]
 
     lines.append(
         f"Записей: {stats2.recordings} (было {stats1.recordings}, {_fmt_pct(rec_change)})"
@@ -197,7 +216,7 @@ def compare_weeks(store: Any, weeks_back: int = 2) -> ComparisonReport:
     p2_end = today
 
     p1_end = week_start - timedelta(days=1)
-    p1_start = p1_end - timedelta(days=(weeks_back - 1) * 7 - 1)
+    p1_start = p1_end - timedelta(days=(weeks_back - 1) * 7)
 
     return compare_periods(store, p1_start, p1_end, p2_start, p2_end)
 

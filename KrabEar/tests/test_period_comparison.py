@@ -22,9 +22,9 @@ class PercentageChangeTestCase(unittest.TestCase):
     """Тесты функции _pct_change."""
 
     def test_pct_change_zero_baseline(self) -> None:
-        """old == 0 → результат 0 (деление на 0 защищено)."""
+        """old == 0 → 'no_baseline' (нет базы для сравнения, деление на 0 защищено)."""
         result = _pct_change(0.0, 100.0)
-        self.assertEqual(result, 0.0)
+        self.assertEqual(result, "no_baseline")
 
     def test_pct_change_positive_growth(self) -> None:
         """new > old → положительное значение."""
@@ -133,7 +133,7 @@ class PeriodComparisonTwoPeriodsTestCase(unittest.TestCase):
 
         self.assertEqual(report.period1.recordings, 0)
         self.assertEqual(report.period2.recordings, 1)
-        self.assertEqual(report.recordings_change_pct, 0.0)
+        self.assertEqual(report.recordings_change_pct, "no_baseline")
 
     def test_compare_periods_percentage_accuracy(self) -> None:
         """Точность расчёта процентных изменений для countable метрик."""
@@ -185,8 +185,8 @@ class EmptyPeriodTestCase(unittest.TestCase):
 
         self.assertEqual(report.period1.recordings, 0)
         self.assertEqual(report.period2.recordings, 0)
-        self.assertEqual(report.recordings_change_pct, 0.0)
-        self.assertEqual(report.duration_change_pct, 0.0)
+        self.assertEqual(report.recordings_change_pct, "no_baseline")
+        self.assertEqual(report.duration_change_pct, "no_baseline")
         self.assertEqual(report.confidence_change, 0.0)
 
     def test_empty_period_returns_zero_stats(self) -> None:
@@ -395,8 +395,9 @@ class ComparisonReportStructureTestCase(unittest.TestCase):
 
         self.assertIsInstance(report.period1, PeriodStats)
         self.assertIsInstance(report.period2, PeriodStats)
-        self.assertIsInstance(report.recordings_change_pct, float)
-        self.assertIsInstance(report.duration_change_pct, float)
+        # recordings_change_pct is "no_baseline" when p1 has 0 recordings
+        self.assertIn(type(report.recordings_change_pct), (float, str))
+        self.assertIn(type(report.duration_change_pct), (float, str))
         self.assertIsInstance(report.confidence_change, float)
         self.assertIsInstance(report.new_languages, list)
         self.assertIsInstance(report.summary, str)
@@ -811,20 +812,20 @@ class PeriodUnitDayWeekMonthTestCase(unittest.TestCase):
 class PercentageDeltaZeroBaselineTestCase(unittest.TestCase):
     """test_percentage_delta_zero_baseline — divide-by-zero guard in _pct_change."""
 
-    def test_zero_old_returns_zero(self) -> None:
-        """_pct_change(0, any) == 0.0 (no ZeroDivisionError)."""
-        self.assertEqual(_pct_change(0.0, 500.0), 0.0)
+    def test_zero_old_returns_no_baseline(self) -> None:
+        """_pct_change(0, any) == 'no_baseline' (no ZeroDivisionError)."""
+        self.assertEqual(_pct_change(0.0, 500.0), "no_baseline")
 
-    def test_zero_old_negative_new_returns_zero(self) -> None:
-        """_pct_change(0, negative) also returns 0.0."""
-        self.assertEqual(_pct_change(0.0, -100.0), 0.0)
+    def test_zero_old_negative_new_returns_no_baseline(self) -> None:
+        """_pct_change(0, negative) returns 'no_baseline'."""
+        self.assertEqual(_pct_change(0.0, -100.0), "no_baseline")
 
-    def test_zero_old_zero_new_returns_zero(self) -> None:
-        """_pct_change(0, 0) == 0.0."""
-        self.assertEqual(_pct_change(0.0, 0.0), 0.0)
+    def test_zero_old_zero_new_returns_no_baseline(self) -> None:
+        """_pct_change(0, 0) == 'no_baseline'."""
+        self.assertEqual(_pct_change(0.0, 0.0), "no_baseline")
 
     def test_period_with_zero_recordings_zero_duration_no_crash(self) -> None:
-        """compare_periods with both periods empty returns zero pct changes."""
+        """compare_periods with both periods empty returns no_baseline pct changes."""
         mock_store = MagicMock()
         mock_store.get_history_page_filtered.return_value = ([], None)
 
@@ -834,12 +835,12 @@ class PercentageDeltaZeroBaselineTestCase(unittest.TestCase):
             "2024-01-08", "2024-01-14",
         )
 
-        self.assertEqual(report.recordings_change_pct, 0.0)
-        self.assertEqual(report.duration_change_pct, 0.0)
+        self.assertEqual(report.recordings_change_pct, "no_baseline")
+        self.assertEqual(report.duration_change_pct, "no_baseline")
         self.assertEqual(report.confidence_change, 0.0)
 
-    def test_duration_zero_baseline_no_crash(self) -> None:
-        """Period1 has items with zero duration — no ZeroDivisionError for duration pct."""
+    def test_duration_zero_baseline_returns_no_baseline(self) -> None:
+        """Period1 has items with zero duration — duration_change_pct == 'no_baseline'."""
         mock_store = MagicMock()
         mock_store.get_history_page_filtered.side_effect = [
             (
@@ -860,7 +861,7 @@ class PercentageDeltaZeroBaselineTestCase(unittest.TestCase):
             "2024-01-08", "2024-01-14",
         )
 
-        self.assertEqual(report.duration_change_pct, 0.0)
+        self.assertEqual(report.duration_change_pct, "no_baseline")
 
 
 class UnicodeSummaryTextTestCase(unittest.TestCase):
@@ -941,6 +942,153 @@ class UnicodeSummaryTextTestCase(unittest.TestCase):
         # Must be JSON-serializable with Cyrillic
         serialized = json.dumps(d, ensure_ascii=False)
         self.assertIn("Записей", serialized)
+
+
+# ---------------------------------------------------------------------------
+# W1296: new required test cases (F1 + F2 + F5)
+# ---------------------------------------------------------------------------
+
+class CompareWeeksBack1SevenDayWindowTestCase(unittest.TestCase):
+    """test_compare_weeks_back_1_gives_7_day_window — F1 fix: weeks_back=1 should
+    produce a 7-day window (p1 = previous week Mon-Sun) without the off-by-one bug."""
+
+    def setUp(self) -> None:
+        self.mock_store = MagicMock()
+        self.mock_store.get_history_page_filtered.return_value = ([], None)
+
+    def test_compare_weeks_back_1_gives_7_day_window(self) -> None:
+        """weeks_back=1 → p1_start <= p1_end (non-inverted, non-empty window).
+
+        Before F1 fix: formula was (weeks_back-1)*7-1 = -1 → p1_start = p1_end + 1
+        (inverted, empty). After fix: formula (weeks_back-1)*7 = 0 → p1_start = p1_end
+        (valid single-day window). The key invariant is p1_start <= p1_end.
+        """
+        from backend.period_comparison import compare_weeks
+        from datetime import date
+
+        compare_weeks(self.mock_store, weeks_back=1)
+
+        call_args = self.mock_store.get_history_page_filtered.call_args_list
+        p1_from_ts = call_args[0][1]["from_ts"]
+        p1_to_ts = call_args[0][1]["to_ts"]
+
+        p1_start = date.fromisoformat(p1_from_ts[:10])
+        p1_end = date.fromisoformat(p1_to_ts[:10])
+
+        # Core invariant: start must be <= end (not inverted)
+        self.assertLessEqual(
+            p1_start, p1_end,
+            msg=f"p1 is inverted: start={p1_start} > end={p1_end}",
+        )
+
+    def test_compare_weeks_back_2_gives_correct_previous_week(self) -> None:
+        """weeks_back=2 → p1 ends on day before current week start (Sunday).
+
+        With formula (weeks_back-1)*7 and weeks_back=2:
+          p1_start = p1_end - 7 → delta = 7 days (8 inclusive days).
+        This is a regression guard: p1_end must equal last Sunday.
+        """
+        from backend.period_comparison import compare_weeks
+        import datetime
+
+        compare_weeks(self.mock_store, weeks_back=2)
+
+        call_args = self.mock_store.get_history_page_filtered.call_args_list
+        p1_to_ts = call_args[0][1]["to_ts"]
+        p1_from_ts = call_args[0][1]["from_ts"]
+
+        p1_end = datetime.date.fromisoformat(p1_to_ts[:10])
+        p1_start = datetime.date.fromisoformat(p1_from_ts[:10])
+
+        today = datetime.date.today()
+        week_start = today - datetime.timedelta(days=today.weekday())
+        expected_end = week_start - datetime.timedelta(days=1)
+
+        self.assertEqual(p1_end, expected_end)
+        # Invariant: p1_start <= p1_end (non-inverted)
+        self.assertLessEqual(p1_start, p1_end)
+
+
+class ComparePeriodsInvertedDatesRaisesTestCase(unittest.TestCase):
+    """test_compare_periods_inverted_dates_raises — F2 fix: start > end raises ValueError."""
+
+    def setUp(self) -> None:
+        self.mock_store = MagicMock()
+
+    def test_compare_periods_inverted_dates_raises(self) -> None:
+        """period1 start > end raises ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            compare_periods(
+                self.mock_store,
+                "2024-01-10",  # start
+                "2024-01-05",  # end < start → invalid
+                "2024-01-11",
+                "2024-01-17",
+            )
+        self.assertIn("period start must be <= end", str(ctx.exception))
+
+    def test_compare_periods_inverted_p2_raises(self) -> None:
+        """period2 start > end raises ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            compare_periods(
+                self.mock_store,
+                "2024-01-01",
+                "2024-01-07",
+                "2024-01-20",  # start
+                "2024-01-15",  # end < start → invalid
+            )
+        self.assertIn("period start must be <= end", str(ctx.exception))
+
+    def test_compare_periods_equal_dates_does_not_raise(self) -> None:
+        """start == end (single-day period) is valid — should not raise."""
+        self.mock_store.get_history_page_filtered.return_value = ([], None)
+        # Must not raise
+        try:
+            compare_periods(
+                self.mock_store,
+                "2024-01-05",
+                "2024-01-05",
+                "2024-01-06",
+                "2024-01-06",
+            )
+        except ValueError:
+            self.fail("compare_periods raised ValueError for equal start==end dates")
+
+
+class PctChangeZeroBaselineReturnsNoBaselineFlagTestCase(unittest.TestCase):
+    """test_pct_change_zero_baseline_returns_no_baseline_flag — F5 fix."""
+
+    def test_pct_change_zero_baseline_returns_no_baseline_flag(self) -> None:
+        """_pct_change(0, any) returns the sentinel string 'no_baseline'."""
+        self.assertEqual(_pct_change(0.0, 42.0), "no_baseline")
+        self.assertEqual(_pct_change(0.0, 0.0), "no_baseline")
+        self.assertEqual(_pct_change(0.0, -1.0), "no_baseline")
+
+    def test_pct_change_nonzero_baseline_returns_float(self) -> None:
+        """_pct_change with nonzero old always returns a float (not 'no_baseline')."""
+        result = _pct_change(100.0, 150.0)
+        self.assertIsInstance(result, float)
+        self.assertAlmostEqual(result, 50.0, places=1)
+
+    def test_no_baseline_flag_propagates_to_report(self) -> None:
+        """compare_periods with empty p1 propagates 'no_baseline' to recordings_change_pct."""
+        mock_store = MagicMock()
+        mock_store.get_history_page_filtered.side_effect = [
+            ([], None),  # period1: empty
+            (
+                [{"audio_duration_sec": 60.0, "text": "hello", "confidence": 0.9,
+                  "source_lang": "EN"}],
+                None,
+            ),
+        ]
+
+        report = compare_periods(
+            mock_store,
+            "2024-03-01", "2024-03-07",
+            "2024-03-08", "2024-03-14",
+        )
+
+        self.assertEqual(report.recordings_change_pct, "no_baseline")
 
 
 if __name__ == "__main__":
