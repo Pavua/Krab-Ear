@@ -1319,11 +1319,20 @@ class AudioEngine:
             attempt_start = time.time()
             try:
                 if candidate["kind"] == "model":
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(
+                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = _executor.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
                         )
                         attempt_result = future.result(timeout=settings.TRANSCRIBE_TIMEOUT_SEC)
+                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception:
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        _executor.shutdown(wait=False)
                     attempt_result["model_used"] = model_label
                 else:
                     attempt_result = self._transcribe_remote(audio_data, prompt)
@@ -1847,9 +1856,18 @@ class AudioEngine:
                 timeout = settings.TRANSCRIBE_TIMEOUT_SEC
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = _executor.submit(self._transcribe_model, audio_data, model_name, prompt, language)
                         result = future.result(timeout=timeout)
+                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception:
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
             except concurrent.futures.TimeoutError:
