@@ -207,6 +207,99 @@ class TestCreateCalendarEvent(unittest.TestCase):
         # We'll just check the method is callable.
         self.assertTrue(callable(handler))
 
+    # ------------------------------------------------------------------
+    # W1028-F5: backslash-before-quote AppleScript injection regression
+    # ------------------------------------------------------------------
+
+    def test_escape_as_str_backslash_first_ordering(self):
+        """_escape_as_str must escape backslash BEFORE quote.
+
+        Input 'Stand\\"' (backslash + quote) would produce 'Stand\\\\"' with
+        the wrong order (quote first), leaving a literal \\ that cancels the
+        escaping of the following quote — allowing AppleScript injection.
+        With correct (backslash-first) ordering the result is 'Stand\\\\\\"':
+        the backslash is doubled first, then the quote is escaped separately.
+        """
+        result = BackendService._escape_as_str('Stand\\"')
+        # Backslash must be doubled: \ → \\
+        # Quote must be escaped:     " → \"
+        # Combined input \\" → \\\\\" (four chars: \\, \, ")
+        self.assertIn('\\\\', result, "Backslash must be doubled")
+        self.assertIn('\\"', result, "Quote must be backslash-escaped")
+        # The dangerous sequence (unescaped backslash cancelling quote escape)
+        # must NOT appear: a single \ followed immediately by "
+        import re as _re
+        # After escaping, there must be no odd-count backslash run before "
+        # Simplest check: the raw literal \" (one backslash, one quote) only
+        # appears as part of a larger \\" (two backslashes + quote) sequence.
+        self.assertNotIn('\\"', result.replace('\\\\"', ''))
+
+    def test_escape_as_str_plain_string_unchanged(self):
+        """Strings without special chars pass through _escape_as_str untouched."""
+        s = "Hello World 2026"
+        self.assertEqual(BackendService._escape_as_str(s), s)
+
+    def test_escape_as_str_strips_control_chars(self):
+        """Newlines and NUL bytes in title must be replaced with spaces."""
+        s = "line1\nline2\rline3\x00end"
+        result = BackendService._escape_as_str(s)
+        self.assertNotIn('\n', result)
+        self.assertNotIn('\r', result)
+        self.assertNotIn('\x00', result)
+
+    @patch("subprocess.run")
+    def test_backslash_in_title_does_not_escape_quote(self, mock_run):
+        """Injection attempt 'foo\\"; do evil' must not produce executable AS.
+
+        W1028-F5: input 'foo\\"; do evil' with naive quote-first escaping
+        produces 'foo\\\\"; do evil' — the \\\\ is interpreted as two
+        literal backslashes and the " closes the AS string, breaking out.
+        With backslash-first escaping it produces 'foo\\\\\\\\"; do evil' —
+        safe because the backslashes are fully doubled before the quote is escaped.
+        """
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        injection_title = 'foo\\"; do evil'
+        self.service._handle_create_calendar_event({
+            "title": injection_title,
+            "start_date": "05/26/2026 10:00:00",
+        })
+
+        script = mock_run.call_args[0][0][2]
+        # The raw injection sequence must not appear literally in the script
+        self.assertNotIn('foo\\"; do evil', script,
+                         "Injection sequence must be neutralised by escaping")
+        # The backslash must be doubled (safe)
+        self.assertIn('\\\\', script, "Backslash must be doubled in script")
+
+    @patch("subprocess.run")
+    def test_backslash_in_notes_does_not_escape_quote(self, mock_run):
+        """Same backslash-injection test for notes field."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        self.service._handle_create_calendar_event({
+            "title": "Safe title",
+            "notes": 'bad\\"; inject',
+            "start_date": "05/26/2026 11:00:00",
+        })
+
+        script = mock_run.call_args[0][0][2]
+        self.assertNotIn('bad\\"; inject', script)
+
+    @patch("subprocess.run")
+    def test_backslash_in_calendar_name_does_not_escape_quote(self, mock_run):
+        """Same backslash-injection test for calendar_name field."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        self.service._handle_create_calendar_event({
+            "title": "Safe title",
+            "start_date": "05/26/2026 12:00:00",
+            "calendar_name": 'Work\\"; malicious',
+        })
+
+        script = mock_run.call_args[0][0][2]
+        self.assertNotIn('Work\\"; malicious', script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3155,6 +3155,19 @@ end tell
 
     # ── Apple Calendar integration (Phase D.4) ──────────────────────────────
 
+    @staticmethod
+    def _escape_as_str(s: str) -> str:
+        """Escape a string for safe embedding inside an AppleScript double-quoted string.
+
+        Backslashes MUST be doubled before quotes so that a trailing backslash
+        cannot cancel the closing-quote escape (W1028-F5 / W944 fix).
+        Also strips control characters (CR, LF, NUL) that would break the script.
+        """
+        s = re.sub(r'[\r\n\x00]', ' ', s)
+        s = s.replace('\\', '\\\\')  # backslash FIRST — prevents Stand\" → Stand\\"
+        s = s.replace('"', '\\"')
+        return s
+
     def _handle_create_calendar_event(self, params: dict) -> dict:
         """Create Apple Calendar event via osascript.
 
