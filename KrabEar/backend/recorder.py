@@ -24,6 +24,11 @@ logger = logging.getLogger("KrabEar.Backend.Recorder")
 
 _AUDIO_LEVEL_EMIT_INTERVAL_SEC = 0.033  # ~30 Hz для VU meter
 
+# Максимальное количество семплов для защиты от утечки памяти.
+# 4 часа @ 16 kHz = 230 400 000 семплов ≈ 880 МБ float32.
+# При превышении запись автоматически останавливается с ошибкой audio.max_duration_reached.
+MAX_RECORDING_SAMPLES = 16000 * 60 * 60 * 4  # 4 hours @ 16 kHz
+
 
 class AudioRecorder:
     """Потокобезопасный рекордер c режимом start/stop."""
@@ -37,6 +42,7 @@ class AudioRecorder:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._chunks: list[np.ndarray] = []
+        self._chunks_total_samples: int = 0  # O(1) счётчик для get_duration_sec без concatenate
         self._is_recording = False
         self._started_at: float = 0.0
         self._on_audio_level = on_audio_level
@@ -53,6 +59,7 @@ class AudioRecorder:
             if self._is_recording:
                 return False
             self._chunks = []
+            self._chunks_total_samples = 0
             self._stop_event.clear()
             self._is_recording = True
             self._started_at = time.monotonic()
@@ -76,6 +83,7 @@ class AudioRecorder:
             duration = max(0.0, time.monotonic() - self._started_at)
             chunks = list(self._chunks)
             self._chunks = []
+            self._chunks_total_samples = 0
             self._thread = None
 
         if not chunks:
@@ -103,7 +111,12 @@ class AudioRecorder:
             return max(0.0, time.monotonic() - self._started_at)
 
     def snapshot_audio(self, max_duration_sec: float = 12.0) -> tuple[np.ndarray, float]:
-        """Возвращает срез последнего аудио для realtime preview без остановки записи."""
+        """Возвращает срез последнего аудио для realtime preview без остановки записи.
+
+        Оптимизация (W1327 F1): обходит чанки с конца и накапливает только нужный
+        хвост — не конкатенирует весь буфер (который может быть >200 МБ при 1-часовой
+        записи). Сложность O(n) по числу чанков в окне, а не O(N) по всем семплам.
+        """
         with self._lock:
             duration = max(0.0, time.monotonic() - self._started_at) if self._is_recording else 0.0
             chunks = list(self._chunks)
@@ -111,11 +124,30 @@ class AudioRecorder:
         if not chunks:
             return np.array([], dtype=np.float32), duration
 
-        audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
-        if max_duration_sec > 0:
-            max_samples = int(self.sample_rate * max_duration_sec)
-            if max_samples > 0 and audio.size > max_samples:
-                audio = audio[-max_samples:]
+        if max_duration_sec <= 0:
+            # Весь буфер запрошен — конкатенируем полностью
+            audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32)
+            return audio, duration
+
+        max_samples = int(self.sample_rate * max_duration_sec)
+        if max_samples <= 0:
+            return np.array([], dtype=np.float32), duration
+
+        # Обходим чанки с конца, накапливая семплы пока не наберём нужное количество.
+        # Это избегает конкатенации 200+ МБ буфера только чтобы взять последние 12 с.
+        tail_chunks: list[np.ndarray] = []
+        collected = 0
+        for chunk in reversed(chunks):
+            flat = chunk.reshape(-1)
+            tail_chunks.append(flat)
+            collected += flat.size
+            if collected >= max_samples:
+                break
+
+        tail_chunks.reverse()
+        audio = np.concatenate(tail_chunks, axis=0).astype(np.float32)
+        if audio.size > max_samples:
+            audio = audio[-max_samples:]
         return audio, duration
 
     def snapshot_rms(self) -> float:
@@ -146,7 +178,18 @@ class AudioRecorder:
                         logger.warning("Переполнение аудиобуфера во время записи")
                         self._push_buffer_overflow_error()
                     with self._lock:
+                        chunk_samples = data.reshape(-1).size
+                        if self._chunks_total_samples + chunk_samples > MAX_RECORDING_SAMPLES:
+                            self._is_recording = False
+                            logger.warning(
+                                "Достигнут лимит длительности записи (%d сек)",
+                                MAX_RECORDING_SAMPLES // self.sample_rate,
+                                extra={"max_samples": MAX_RECORDING_SAMPLES},
+                            )
+                            self._push_max_duration_error()
+                            break
                         self._chunks.append(data.copy())
+                        self._chunks_total_samples += chunk_samples
                     if self._on_audio_level is not None:
                         now = time.monotonic()
                         if now - last_level_emit_at >= _AUDIO_LEVEL_EMIT_INTERVAL_SEC:
@@ -163,6 +206,33 @@ class AudioRecorder:
         finally:
             with self._lock:
                 self._is_recording = False
+
+    def _push_max_duration_error(self) -> None:
+        """Push audio.max_duration_reached to error bus. Never raises.
+
+        W1331: вызывается из _worker под self._lock когда достигнут MAX_RECORDING_SAMPLES.
+        """
+        error_bus = getattr(self, "_error_bus", None)
+        if error_bus is None:
+            return
+        try:
+            from backend.error_bus import KrabError
+            from datetime import datetime, timezone
+            max_hours = MAX_RECORDING_SAMPLES // (self.sample_rate * 3600)
+            err = KrabError(
+                severity="warn",
+                component="audio",
+                code="audio.max_duration_reached",
+                message_user=f"Запись превысила максимальную длительность ({max_hours} ч) и была автоматически остановлена",
+                message_debug=f"MAX_RECORDING_SAMPLES={MAX_RECORDING_SAMPLES} exceeded",
+                timestamp=datetime.now(timezone.utc),
+                context={"max_samples": MAX_RECORDING_SAMPLES, "max_hours": max_hours},
+                actionable=False,
+                action_id=None,
+            )
+            error_bus.push(err)
+        except Exception:
+            logger.exception("AudioRecorder: error_bus.push (max_duration_reached) failed")
 
     def _push_buffer_overflow_error(self) -> None:
         """Push audio.buffer_overflow to error bus. Never raises.
