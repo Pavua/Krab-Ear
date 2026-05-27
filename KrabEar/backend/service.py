@@ -2910,6 +2910,17 @@ class BackendService:
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "daily_sentiment": [],
+                "overall_sentiment": 0.0,
+                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
+                "mood_trend": "stable",
+                "most_positive_day": {},
+                "most_negative_day": {},
+                "reason": "privacy_mode_active",
+            }
         days = int(params.get("days", 30))
         try:
             with self.store._lock():
