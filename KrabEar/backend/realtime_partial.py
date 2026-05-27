@@ -12,7 +12,10 @@ realtime_partial_enabled) и каждые ``interval_sec`` секунд:
 Поток:
     start(session_id) → worker loop → stop(timeout_sec)
 
-Ошибки не прерывают цикл — логируются на уровне debug (первые 5 — warning).
+Ошибки: первые 5 подряд — WARNING. После ``_MAX_CONSECUTIVE_ERRORS`` (10)
+подряд без успеха — воркер завершает цикл и эмитирует событие
+``realtime.partial_disabled`` через event_bus. Пользователь может перезапустить
+partial transcription через IPC (stop + start recording).
 """
 
 from __future__ import annotations
@@ -29,6 +32,11 @@ _REALTIME_FINAL_TYPE = "realtime.final_transcript"
 
 # После этого числа подряд идущих ошибок — лог переходит на WARNING.
 _ERROR_WARN_THRESHOLD = 5
+
+# После этого числа подряд идущих ошибок — воркер завершает цикл.
+_MAX_CONSECUTIVE_ERRORS = 10
+
+_REALTIME_PARTIAL_DISABLED_TYPE = "realtime.partial_disabled"
 
 
 class RealtimePartialTranscriber:
@@ -156,6 +164,8 @@ class RealtimePartialTranscriber:
             except Exception as exc:
                 self._log_error("snapshot_audio упал", exc, error_count)
                 error_count += 1
+                if error_count >= _MAX_CONSECUTIVE_ERRORS:
+                    break
                 continue
 
             # Пропускаем если нет новых данных (меньше 0.5 сек прогресса)
@@ -175,6 +185,8 @@ class RealtimePartialTranscriber:
             except Exception as exc:
                 self._log_error("transcribe_preview упал", exc, error_count)
                 error_count += 1
+                if error_count >= _MAX_CONSECUTIVE_ERRORS:
+                    break
                 continue
 
             text = (result.get("text") or "").strip() if isinstance(result, dict) else ""
@@ -197,6 +209,30 @@ class RealtimePartialTranscriber:
             except Exception as exc:
                 self._log_error("event_bus.emit упал", exc, error_count)
                 error_count += 1
+                if error_count >= _MAX_CONSECUTIVE_ERRORS:
+                    break
+
+        # Circuit breaker: если вышли из-за накопленных ошибок — сигнализируем.
+        if error_count >= _MAX_CONSECUTIVE_ERRORS:
+            logger.error(
+                "RealtimePartialTranscriber отключён после %d последовательных ошибок "
+                "(session=%s). Перезапустите запись для восстановления.",
+                error_count,
+                self._session_id,
+                extra={"consecutive_errors": error_count, "session_id": self._session_id},
+            )
+            try:
+                self._event_bus.emit(
+                    _REALTIME_PARTIAL_DISABLED_TYPE,
+                    {
+                        "session_id": self._session_id,
+                        "reason": "consecutive_errors",
+                        "error_count": error_count,
+                        "ts": time.time(),
+                    },
+                )
+            except Exception:
+                pass  # лог уже выведен выше; silently ignore emit failure
 
     def _log_error(self, message: str, exc: Exception, count: int) -> None:
         """Логирует ошибку на уровне DEBUG или WARNING в зависимости от частоты."""
