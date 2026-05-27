@@ -523,5 +523,115 @@ class TestIpcIntegration(unittest.TestCase):
         self.assertTrue(result["enabled"])
 
 
+# ---------------------------------------------------------------------------
+# W982: тест периодического фонового потока ExportScheduler
+# ---------------------------------------------------------------------------
+
+class TestExportSchedulerPeriodicWorker(unittest.TestCase):
+    """Проверяем, что BackendService запускает фоновый поток ExportScheduler
+    и что он вызывает check_and_export() с правильным store."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make_service(self):
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+        from unittest.mock import patch
+
+        store = StateStore(data_dir=self.data_dir)
+        with patch("backend.service.AudioRecorder"), \
+                patch("backend.service.Transcriber"), \
+                patch("backend.service.Translator"), \
+                patch("backend.service.settings") as mock_settings:
+            mock_settings.LLM_ENABLED = False
+            mock_settings.AUTO_BACKUP_ENABLED = False
+            mock_settings.AUTO_EXPORT_ENABLED = False
+            mock_settings.IPC_THROTTLE_ENABLED = False
+            mock_settings.IPC_SIGNING_ENABLED = False
+            mock_settings.PIPELINE_V2 = False
+            svc = BackendService(store=store)
+        return svc
+
+    def test_export_scheduler_thread_is_started(self):
+        """BackendService.__init__ должен запустить поток 'export-scheduler'."""
+        svc = self._make_service()
+        thread = getattr(svc, "_export_scheduler_thread", None)
+        self.assertIsNotNone(thread, "_export_scheduler_thread должен существовать")
+        self.assertTrue(thread.is_alive(), "Поток export-scheduler должен быть запущен")
+        self.assertEqual(thread.name, "export-scheduler")
+        self.assertTrue(thread.daemon, "Поток export-scheduler должен быть daemon")
+        # Cleanup
+        svc.close()
+
+    def test_export_scheduler_stop_event_exists(self):
+        """BackendService.__init__ должен создать _export_scheduler_stop Event."""
+        svc = self._make_service()
+        stop = getattr(svc, "_export_scheduler_stop", None)
+        self.assertIsNotNone(stop, "_export_scheduler_stop должен существовать")
+        svc.close()
+
+    def test_close_stops_export_scheduler_thread(self):
+        """close() должен остановить поток export-scheduler."""
+        svc = self._make_service()
+        thread = svc._export_scheduler_thread
+        self.assertTrue(thread.is_alive())
+        svc.close()
+        # После close() stop_event должен быть выставлен
+        self.assertTrue(svc._export_scheduler_stop.is_set())
+        # Поток должен завершиться в течение 3 секунд
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive(), "Поток export-scheduler должен остановиться после close()")
+
+    def test_export_scheduler_periodic_tick_calls_check_and_export(self):
+        """_export_scheduler_loop вызывает check_and_export со store BackendService.
+
+        Тест подменяет check_and_export на Mock, заменяет _EXPORT_SCHEDULER_INTERVAL_SEC=0
+        и использует side_effect чтобы выйти из цикла после первого вызова.
+        """
+        from backend.state_store import StateStore
+        from backend.service import BackendService
+        from unittest.mock import patch, MagicMock
+
+        store = StateStore(data_dir=self.data_dir)
+        with patch("backend.service.AudioRecorder"), \
+                patch("backend.service.Transcriber"), \
+                patch("backend.service.Translator"), \
+                patch("backend.service.settings") as mock_settings:
+            mock_settings.LLM_ENABLED = False
+            mock_settings.AUTO_BACKUP_ENABLED = False
+            mock_settings.AUTO_EXPORT_ENABLED = False
+            mock_settings.IPC_THROTTLE_ENABLED = False
+            mock_settings.IPC_SIGNING_ENABLED = False
+            mock_settings.PIPELINE_V2 = False
+            svc = BackendService(store=store)
+
+        # Stop the background thread immediately so it doesn't race.
+        svc._export_scheduler_stop.set()
+        svc._export_scheduler_thread.join(timeout=2.0)
+        svc._export_scheduler_stop.clear()
+
+        # Подменяем check_and_export на Mock; side_effect останавливает цикл после первого тика.
+        def _check_and_stop(store_arg):
+            svc._export_scheduler_stop.set()  # прерывает while loop
+            return None
+
+        mock_check = MagicMock(side_effect=_check_and_stop)
+        svc._export_scheduler.check_and_export = mock_check
+
+        # Устанавливаем нулевой интервал ожидания чтобы цикл не спал.
+        svc._EXPORT_SCHEDULER_INTERVAL_SEC = 0
+
+        # Запускаем loop синхронно — он выполнит ровно один тик и выйдет.
+        svc._export_scheduler_loop()
+
+        # check_and_export должен был вызваться ровно один раз с self.store.
+        mock_check.assert_called_once_with(svc.store)
+
+
 if __name__ == "__main__":
     unittest.main()
