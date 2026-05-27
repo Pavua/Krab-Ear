@@ -111,6 +111,23 @@ class MLXWatchdog:
         Raises:
             MLXTimeoutError: если fn() не завершилась за timeout_sec.
             Exception:       если fn() бросила исключение (прокидывается as-is).
+
+        THREAD-SAFETY NOTE (W1358 F1 MED — sister to 2026-04-19 SIGSEGV, PR #71):
+        run_with_timeout() is always called from inside ``with mlx_lock():`` in
+        engine.py.  The daemon thread executes fn() WITHOUT holding that lock —
+        only the caller's thread holds it.  If we raise MLXTimeoutError while the
+        daemon thread is still running mlx_whisper.transcribe(), the caller exits
+        the ``with mlx_lock()`` block, releasing the lock.  The still-running
+        daemon thread then accesses the MLX GPU concurrently with the next caller
+        that acquires the lock → SIGSEGV (same class of bug as PR #71).
+
+        Fix: after the initial timed join reveals a live thread, perform an
+        *unbounded* join() — block until the daemon fully completes — BEFORE
+        raising MLXTimeoutError.  This keeps the mlx_lock held throughout the
+        daemon's lifetime, eliminating the race.  The trade-off is an additional
+        backend stall (the thread may be stuck indefinitely), but BackendSupervisor
+        will SIGTERM → respawn the process if that occurs.  This is safer than a
+        concurrent GPU corruption that causes a silent SIGSEGV mid-inference.
         """
         with self._lock:
             self.total_calls += 1
@@ -133,18 +150,31 @@ class MLXWatchdog:
         elapsed = time.monotonic() - start_time
 
         if thread.is_alive():
-            # Поток завис — таймаут
+            # Поток завис — таймаут истёк, но поток ещё держит MLX GPU.
+            # КРИТИЧНО: НЕ выходим немедленно.  Делаем unbounded join() чтобы
+            # удержать mlx_lock (захваченный caller'ом) до завершения потока.
+            # Это предотвращает SIGSEGV от concurrent GPU access (W1358 F1 MED).
             with self._lock:
                 self.crashes_count += 1
             logger.error(
                 "[MLXWatchdog] inference timed out after %.1fs (model=%s, "
-                "total_crashes=%d). Signalling fallback.",
+                "total_crashes=%d). Waiting for daemon thread to finish "
+                "before releasing MLX lock (W1358 race-guard).",
                 elapsed,
                 model_name,
                 self.crashes_count,
             )
             _notify_sentry_timeout(model_name, elapsed, self.crashes_count)
             _push_watchdog_hang(model_name, elapsed, self.crashes_count)
+            # Unbounded wait: держим caller-thread (и mlx_lock) до завершения
+            # daemon thread.  BackendSupervisor (HealthMonitor) убьёт процесс
+            # если бэкенд не отвечает на ping слишком долго.
+            thread.join()
+            logger.warning(
+                "[MLXWatchdog] daemon thread finally completed after stall "
+                "(model=%s). Propagating MLXTimeoutError.",
+                model_name,
+            )
             raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
 
         # Поток завершился — проверяем результат
