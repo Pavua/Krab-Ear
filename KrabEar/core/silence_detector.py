@@ -34,6 +34,19 @@ def _db_to_amplitude(db: float) -> float:
 # которые не хотят пересчитывать через _db_to_amplitude при каждом вызове.
 SILENCE_THRESHOLD_AMP: float = _db_to_amplitude(SILENCE_THRESHOLD_DB)
 
+# W1018: строгий порог для агрессивной обрезки (телефонные звонки).
+# -40 дБ = 0.01 амплитуды — обрезает весь фоновый шум офиса/дома.
+SILENCE_THRESHOLD_DB_STRICT: float = -40.0
+SILENCE_THRESHOLD_DB_STRICT_AMP: float = _db_to_amplitude(SILENCE_THRESHOLD_DB_STRICT)
+
+# W1018: порог «сохранить шёпот» для тихого микрофона (по умолчанию для STT).
+# -55 дБ = ~0.00178 амплитуды — сохраняет шёпот и тихую речь для Whisper.
+# Используется SmartSilenceSkipper и RealtimeSilenceFilter.
+SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
+SILENCE_THRESHOLD_DB_PRESERVE_WHISPER_AMP: float = _db_to_amplitude(
+    SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
+)
+
 
 @dataclass
 class SilenceRegion:
