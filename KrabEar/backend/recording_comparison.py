@@ -19,16 +19,26 @@ MAX_ITEMS = 10
 _MIN_WORD_LEN = 3
 
 # Стоп-слова (RU + EN, базовый набор)
-_STOP_WORDS: frozenset[str] = frozenset({
-    # EN
+_STOP_WORDS_EN: frozenset[str] = frozenset({
     "the", "and", "for", "that", "this", "with", "are", "was", "were",
     "have", "has", "had", "not", "but", "from", "they", "you", "all",
     "can", "will", "just", "been", "more", "also", "than", "its",
-    # RU
+})
+
+_STOP_WORDS_RU: frozenset[str] = frozenset({
     "это", "как", "что", "для", "или", "его", "так", "уже", "она",
     "они", "мы", "вы", "им", "нет", "от", "до", "при", "по", "из",
-    "на", "не", "со", "же", "бы", "то", "он", "то",
+    "на", "не", "со", "же", "бы", "то", "он",
 })
+
+# Стоп-слова испанского (ES) — предлоги, артикли, местоимения, частицы
+_STOP_WORDS_ES: frozenset[str] = frozenset({
+    "por", "que", "con", "para", "sin", "como", "del", "las", "los",
+    "una", "uno", "muy", "más", "esto", "esta", "ese", "esa", "esos",
+    "esas", "hay", "pero", "cuando", "tiene", "tengo", "puede", "hacer",
+})
+
+_STOP_WORDS: frozenset[str] = _STOP_WORDS_EN | _STOP_WORDS_RU | _STOP_WORDS_ES
 
 
 @dataclass
@@ -58,10 +68,14 @@ class ComparisonView:
 
 
 def _tokenize(text: str) -> set[str]:
-    """Возвращает множество нормализованных токенов из текста."""
+    """Возвращает множество нормализованных токенов из текста.
+
+    Поддерживает кириллицу, латиницу (EN) и испанские символы с диакритикой
+    (áéíóúüñÁÉÍÓÚÜÑ — W1408 F2 fix).
+    """
     if not text:
         return set()
-    tokens = re.findall(r"[a-zA-Zа-яёА-ЯЁ]+", text.lower())
+    tokens = re.findall(r"[a-zA-Zа-яёА-ЯЁáéíóúüñÁÉÍÓÚÜÑ]+", text.lower())
     return {t for t in tokens if len(t) >= _MIN_WORD_LEN and t not in _STOP_WORDS}
 
 

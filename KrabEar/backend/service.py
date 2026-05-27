@@ -2879,6 +2879,15 @@ class BackendService:
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сравнивает несколько записей side-by-side."""
+        # W1408 F1: privacy guard — не раскрываем текст транскрипций в режиме конфиденциальности
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {
+                "ok": True,
+                "items": [],
+                "common_words": [],
+                "unique_words": {},
+                "reason": "privacy_mode_active",
+            }
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise ValueError("Параметр item_ids обязателен (список строк)")
