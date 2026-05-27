@@ -262,6 +262,9 @@ class LLMRewriter:
         # None = backward-compat (флаг не проверяется, rewrite работает как раньше).
         self._feature_flags = feature_flags
         self._runtime_timeout_provider = runtime_timeout_provider
+        # W1504 N3+N4: privacy mode guard — late-injected callable(key, default) -> value.
+        # None = privacy check skipped (backward compat). Set by BackendService after init.
+        self._settings_getter: Optional[Callable] = None
         self._circuit = CircuitBreaker(
             fail_threshold=circuit_fail_threshold,
             initial_reset_sec=circuit_initial_reset_sec,
@@ -909,6 +912,15 @@ class LLMRewriter:
         if not cleaned_input:
             return text
 
+        # W1504 N4: privacy mode blocks all LLM calls including fix_punctuation_only
+        try:
+            settings_getter = self._settings_getter
+            if settings_getter and settings_getter("privacy_mode_enabled", False):
+                logger.debug("fix_punctuation_only: skipped — privacy_mode_enabled")
+                return None
+        except Exception:
+            pass
+
         if not self._circuit.allow_request():
             logger.debug("fix_punctuation_only: circuit open, skip")
             return None
@@ -1000,6 +1012,17 @@ class LLMRewriter:
 
         Контракт: НИКОГДА не raises. Все ошибки — через LLMRewriteResult.ok=False.
         """
+        # W1504 N3: privacy mode blocks all LLM calls including summarize
+        try:
+            settings_getter = self._settings_getter
+            if settings_getter and settings_getter("privacy_mode_enabled", False):
+                logger.debug("summarize: skipped — privacy_mode_enabled")
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="privacy_mode", latency_ms=None
+                )
+        except Exception:
+            pass
+
         cleaned_input = (text or "").strip()
         if not cleaned_input:
             return LLMRewriteResult(
