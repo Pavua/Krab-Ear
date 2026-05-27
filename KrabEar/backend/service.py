@@ -91,6 +91,7 @@ from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
+from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
@@ -554,6 +555,11 @@ class BackendService:
             data_dir=self.store.data_dir,
         )
         self._disk_monitor.start()
+
+        # Audit logger — append-only NDJSON log of all IPC requests (W1351 F1 fix).
+        # Was dead module in production until this instantiation was added.
+        # GracefulShutdownHandler.register(service) reads self._audit_logger via getattr.
+        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
@@ -1298,12 +1304,27 @@ class BackendService:
                 level="info",
             )
 
+        _t_start = time.monotonic()
         try:
             result = handler(params)
-            return {"id": request_id, "ok": True, "result": result}
+            _response = {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
-            return self._error(request_id, "internal_error", str(exc))
+            _response = self._error(request_id, "internal_error", str(exc))
+        finally:
+            _duration_ms = (time.monotonic() - _t_start) * 1000
+            _audit: AuditLogger | None = getattr(self, "_audit_logger", None)
+            if _audit is not None:
+                try:
+                    _audit.log_request(
+                        method=method,
+                        params=params or {},
+                        result=_response,
+                        duration_ms=_duration_ms,
+                    )
+                except Exception:
+                    logger.exception("audit_logger: log_request failed — dispatch unaffected")
+        return _response
 
     _BATCH_MAX_REQUESTS = 50
 
