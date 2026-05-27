@@ -186,6 +186,14 @@ class StateStore:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
+        reasoning: str | None = None,
+        audio_path: str = "",
+        is_protected: bool = False,
+        tags: list | None = None,
+        favorite: bool = False,
+        action_items: list | None = None,
+        decisions: list | None = None,
+        questions: list | None = None,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -209,6 +217,14 @@ class StateStore:
             emotion=emotion,
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
+            reasoning=reasoning,
+            audio_path=audio_path,
+            is_protected=is_protected,
+            tags=tags,
+            favorite=favorite,
+            action_items=action_items,
+            decisions=decisions,
+            questions=questions,
         )
         try:
             with self._lock():
