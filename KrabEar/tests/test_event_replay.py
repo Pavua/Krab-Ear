@@ -415,7 +415,7 @@ class TestClearBuffer(unittest.TestCase):
             mgr = EventReplayManager(persist_path=path, max_buffer=50)
             mgr.record_event("x", {})
             mgr.clear()
-            # файл остаётся, т.к. clear() не трогает диск
+            # файл остаётся на диске (не удаляется), хотя содержимое усекается до ""
             self.assertTrue(path.exists())
             mgr.close()
 
@@ -663,6 +663,53 @@ class TestPrivacyModeGuard(unittest.TestCase):
         self.assertEqual(len(events), 1)
         # No redaction on provider failure — safe fallback
         self.assertEqual(events[0]["data"].get("key"), "value")
+
+
+class TestW1444LimitValidationAndClearTruncate(unittest.TestCase):
+    """W1444 — event_replay limit validation (F2 MED) + clear truncates file (F3 LOW)."""
+
+    # F2 MED: non-integer limit returns structured error
+    def test_get_event_log_invalid_limit_returns_error(self):
+        """handle_get_event_log with non-integer limit returns structured IPC error."""
+        mgr = EventReplayManager(max_buffer=100)
+        mgr.record_event("ping", {})
+        result = mgr.handle_get_event_log({"limit": "not-a-number"})
+        mgr.close()
+
+        self.assertFalse(result.get("ok"), "ok must be False on invalid limit")
+        self.assertIn("error", result)
+        self.assertIn("limit", result["error"])
+
+    # F2 MED: out-of-range limit is clamped (not an error)
+    def test_get_event_log_negative_limit_clamps(self):
+        """handle_get_event_log with negative limit clamps to 1 (no error)."""
+        mgr = EventReplayManager(max_buffer=100)
+        for _ in range(5):
+            mgr.record_event("ev", {})
+        result = mgr.handle_get_event_log({"limit": -10})
+        mgr.close()
+
+        self.assertIn("events", result, "result must have 'events' key on clamped limit")
+        self.assertGreaterEqual(result["count"], 1)
+
+    # F3 LOW: clear() truncates persist file
+    def test_clear_truncates_persist_file(self):
+        """clear() empties both in-memory buffer and persist file on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            mgr = EventReplayManager(persist_path=path, max_buffer=50)
+            mgr.record_event("before_clear", {"x": 1})
+            mgr.record_event("before_clear", {"x": 2})
+            # File has content before clear
+            self.assertGreater(path.stat().st_size, 0)
+
+            mgr.clear()
+
+            # Buffer is empty
+            self.assertEqual(mgr.get_event_stats()["total_events"], 0)
+            # File is truncated (empty) after clear
+            self.assertEqual(path.read_text(encoding="utf-8"), "")
+            mgr.close()
 
 
 if __name__ == "__main__":
