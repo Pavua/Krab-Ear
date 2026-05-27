@@ -801,10 +801,21 @@ class Translator:
 
     @staticmethod
     def _apply_glossary(text: str, glossary: dict[str, str]) -> str:
-        """Применяет пользовательские замены терминов к переводу."""
+        """Применяет пользовательские замены терминов к переводу.
+
+        Использует regex с границами слов (\\b) чтобы избежать порчи субстрок:
+        «AI» не заменяет часть «PAIN», «el» — часть «elecciones».
+        re.IGNORECASE обеспечивает регистронезависимое сопоставление.
+        re.escape защищает от специальных символов в термине (напр. «C++»).
+        """
         result = text
         for source, target in glossary.items():
-            result = result.replace(source, target)
+            result = re.sub(
+                r"\b" + re.escape(source) + r"\b",
+                target,
+                result,
+                flags=re.IGNORECASE,
+            )
         return result
 
     def _apply_glossary_to_result(self, result: TranslationResult, glossary: dict[str, str]) -> TranslationResult:
