@@ -677,7 +677,11 @@ class BackendService:
         self._disk_monitor.start()
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
-        self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+        # error_bus передаётся явно, чтобы flush_all() сбрасывал warn-батчи при SIGTERM.
+        self._shutdown_handler = GracefulShutdownHandler(
+            data_dir=self.store.data_dir,
+            error_bus=self._error_bus,
+        )
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:

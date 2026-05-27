@@ -98,6 +98,23 @@ class WarnBatcher:
             if should_flush:
                 self._flush_locked(code)
 
+    def flush_all(self) -> int:
+        """Flush all pending warn batches to Sentry immediately.
+
+        Intended for use at process shutdown to prevent silently dropping
+        accumulated warn-tier errors.  Acquires the internal lock, iterates
+        all pending codes, sends each batch via ``_flush_locked``, then clears
+        the internal state.
+
+        Returns:
+            Total number of individual ``KrabError`` objects that were flushed.
+        """
+        with self._lock:
+            total = sum(len(v) for v in self._buffer.values())
+            for code in list(self._buffer.keys()):
+                self._flush_locked(code)
+        return total
+
     def _flush_locked(self, code: str) -> None:
         """Flush the buffer for *code* to Sentry. Must be called while holding self._lock."""
         batch = self._buffer.pop(code, [])
@@ -207,6 +224,19 @@ class ErrorBus:
                 self._warn_batcher._buffer.clear()
                 self._warn_batcher._first_seen.clear()
         return count
+
+    def flush_all(self) -> int:
+        """Flush all pending warn-tier batches to Sentry immediately.
+
+        Delegates to ``WarnBatcher.flush_all()`` when a batcher is configured.
+        Safe to call when Sentry is disabled (``_warn_batcher is None``).
+
+        Returns:
+            Number of individual ``KrabError`` objects flushed (0 if no batcher).
+        """
+        if self._warn_batcher is None:
+            return 0
+        return self._warn_batcher.flush_all()
 
     # ------------------------------------------------------------------
     # Internal helpers

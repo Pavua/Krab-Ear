@@ -39,11 +39,19 @@ class GracefulShutdownHandler:
 
     Args:
         data_dir: директория, куда сохраняется ``shutdown_info.json``.
+        error_bus: опциональный ``ErrorBus``; если передан, его ``flush_all()``
+            вызывается перед финальным выходом, чтобы сбросить в Sentry все
+            накопленные warn-tier батчи.
     """
 
-    def __init__(self, data_dir: str | os.PathLike | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | os.PathLike | None = None,
+        error_bus: Any = None,
+    ) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir else None
         self._service: Any = None
+        self._error_bus: Any = error_bus
         self._lock = threading.Lock()
         # _shutdown_started гарантирует, что только один поток выполняет shutdown()
         self._shutdown_started = False
@@ -157,6 +165,14 @@ class GracefulShutdownHandler:
             clean = False
             errors.append(f"socket: {exc}")
             logger.exception("Ошибка закрытия IPC-сокета при завершении")
+
+        # 7. Сбрасываем накопленные warn-tier батчи в Sentry (ErrorBus.flush_all)
+        try:
+            self._close_error_bus()
+        except Exception as exc:
+            clean = False
+            errors.append(f"error_bus: {exc}")
+            logger.exception("Ошибка сброса error_bus при завершении")
 
         elapsed_ms = round((time.monotonic() - shutdown_start) * 1000, 1)
         ts_now = datetime.now(timezone.utc).isoformat()
@@ -278,6 +294,29 @@ class GracefulShutdownHandler:
         if callable(stop):
             stop()
             logger.debug("IPC-сокет закрыт")
+
+    def _close_error_bus(self) -> None:
+        """Сбрасывает все накопленные warn-tier батчи в Sentry через ErrorBus.flush_all().
+
+        Вызывается последним шагом shutdown() перед записью метаданных, чтобы
+        ни один накопленный warn-батч не был молча потерян при корректном завершении.
+        """
+        # Also check service for _error_bus as a fallback (set via register())
+        error_bus = self._error_bus
+        if error_bus is None and self._service is not None:
+            error_bus = getattr(self._service, "_error_bus", None)
+        if error_bus is None:
+            return
+        flush_all = getattr(error_bus, "flush_all", None)
+        if not callable(flush_all):
+            return
+        flushed = flush_all()
+        if flushed:
+            logger.info(
+                "ErrorBus: %d warn-tier ошибок сброшено в Sentry при завершении", flushed
+            )
+        else:
+            logger.debug("ErrorBus: нет накопленных warn-батчей при завершении")
 
     # ------------------------------------------------------------------
     # Персистентность shutdown_info.json
