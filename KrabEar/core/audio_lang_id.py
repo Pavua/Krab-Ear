@@ -69,8 +69,8 @@ class AudioLanguageID:
         logger.debug("AudioLanguageID._model_cache очищен по запросу hook'а")
         if _HAS_MLX:
             try:
-                import mlx.core as mx
-                mx.clear_cache()
+                with mlx_lock():
+                    mx.clear_cache()
             except Exception:
                 pass  # MLX не установлен или старая версия без clear_cache
 
