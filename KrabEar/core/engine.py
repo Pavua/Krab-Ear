@@ -2443,6 +2443,7 @@ class AudioEngine:
 
         # --- Word-level timestamps (phoneme alignment) ---
         word_timestamps = None
+        aligned = None  # W1214: init before try-block so diarization branch never hits NameError
         if settings.WHISPERX_WORD_TIMESTAMPS and result.get("segments"):
             try:
                 align_model, metadata = _whisperx.load_align_model(
