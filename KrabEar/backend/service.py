@@ -1143,6 +1143,7 @@ class BackendService:
             "list_transcription_queue": self._transcription_queue.handle_list_queue,  # список всех заданий очереди транскрипции
             "detect_emotion": self._text_processing_svc.handle_detect_emotion,  # эвристическое определение эмоции в тексте транскрипции
             "estimate_recording_cost": self._handle_estimate_recording_cost,  # оценка вычислительной стоимости обработки записи
+            "estimate_batch_cost": self._handle_estimate_batch_cost,  # суммарная оценка стоимости пакетного импорта записей
             "get_daily_cost_summary": self._handle_get_daily_cost_summary,  # сводка вычислительных расходов за сегодня
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
@@ -3580,6 +3581,18 @@ end tell'''
     def _handle_get_daily_cost_summary(self, params: dict) -> dict:
         """IPC: get_daily_cost_summary — сводка вычислительных расходов за сегодня."""
         return self._cost_estimator.get_daily_cost_summary(self._usage_tracker)
+
+    def _handle_estimate_batch_cost(self, params: dict) -> dict:
+        """IPC: estimate_batch_cost — суммарная оценка стоимости пакетного импорта.
+
+        Параметры:
+            files — список объектов, каждый: {"duration_sec": float,
+                    "quality": str, "features": dict}.
+
+        Ответ: суммарные вычислительные затраты по всем файлам.
+        """
+        files = list(params.get("files") or [])
+        return self._cost_estimator.estimate_batch_cost(files)
 
     # ── Abbreviation expander IPC handlers ────────────────────────────────────
 
