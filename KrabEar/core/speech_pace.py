@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, asdict
-from typing import List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,25 @@ _RE_WORD = re.compile(
     r"[А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+(?:[-'][А-Яа-яёЁA-Za-zÁÉÍÓÚáéíóúÑñÜü]+)*"
 )
 
-# ── Пороги категорий темпа речи (WPM) ───────────────────────────────────────
+# ── Locale-aware пороги категорий темпа речи (WPM) ──────────────────────────
+#
+# Нормы WPM существенно различаются по языкам:
+#   - Русский (ru): ~100-120 WPM средний темп (слоговая структура сложнее EN)
+#   - Испанский (es): ~150-180 WPM средний темп (слоговая структура быстрее EN)
+#   - Английский (en): ~120-160 WPM средний темп (исторический baseline)
+#
+# Без locale-aware порогов RU-дикторы на 110 WPM классифицировались как "normal"
+# (норма для EN), тогда как для RU это уже быстрый темп. ES-дикторы на 160 WPM
+# попадали в "fast", хотя для ES это обычный темп.
 
-_PACE_SLOW_MAX = 100.0       # < 100 wpm → "slow"
-_PACE_NORMAL_MAX = 160.0     # 100–160 wpm → "normal"
-_PACE_FAST_MAX = 200.0       # 160–200 wpm → "fast"
-#                              > 200 wpm → "very_fast"
+_PACE_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "ru": {"slow": 80.0, "normal": 130.0, "fast": 170.0},
+    "es": {"slow": 110.0, "normal": 170.0, "fast": 210.0},
+    "en": {"slow": 100.0, "normal": 160.0, "fast": 200.0},
+}
+
+# Язык по умолчанию, если language=None или не найден в _PACE_THRESHOLDS
+_DEFAULT_LANGUAGE = "en"
 
 # Эталонная скорость чтения для расчёта estimated_reading_time_sec
 _READING_WPM = 150.0
@@ -37,19 +50,28 @@ def _tokenize_words(text: str) -> List[str]:
     return _RE_WORD.findall(text)
 
 
-def _pace_category(wpm: float) -> str:
-    """Возвращает строковую категорию темпа речи по WPM.
+def _pace_category(wpm: float, language: Optional[str] = None) -> str:
+    """Возвращает строковую категорию темпа речи по WPM с учётом языка.
 
-    «slow»      — < 100 wpm
-    «normal»    — 100–160 wpm
-    «fast»      — 160–200 wpm
-    «very_fast» — > 200 wpm
+    Args:
+        wpm: слов в минуту.
+        language: ISO 639-1 код языка ("ru", "es", "en"). None → "en".
+
+    Returns:
+        Одна из строк: "slow" | "normal" | "fast" | "very_fast".
+
+    Locale-aware пороги:
+        ru: slow < 80, normal 80–130, fast 130–170, very_fast > 170
+        es: slow < 110, normal 110–170, fast 170–210, very_fast > 210
+        en: slow < 100, normal 100–160, fast 160–200, very_fast > 200
     """
-    if wpm < _PACE_SLOW_MAX:
+    lang = (language or _DEFAULT_LANGUAGE).lower()
+    th = _PACE_THRESHOLDS.get(lang, _PACE_THRESHOLDS[_DEFAULT_LANGUAGE])
+    if wpm < th["slow"]:
         return "slow"
-    if wpm <= _PACE_NORMAL_MAX:
+    if wpm < th["normal"]:
         return "normal"
-    if wpm <= _PACE_FAST_MAX:
+    if wpm < th["fast"]:
         return "fast"
     return "very_fast"
 
@@ -84,13 +106,22 @@ class SpeechPaceAnalyzer:
         print(report.words_per_minute, report.pace_category)
     """
 
-    def analyze(self, text: str, duration_sec: float) -> PaceReport:
+    def analyze(
+        self,
+        text: str,
+        duration_sec: float,
+        language: Optional[str] = None,
+    ) -> PaceReport:
         """Анализирует темп речи и возвращает PaceReport.
 
         Args:
             text: транскрибированный текст.
             duration_sec: фактическая длительность аудиозаписи в секундах.
                           При <= 0 возвращает нулевой отчёт.
+            language: ISO 639-1 код языка ("ru", "es", "en").
+                      None → используются пороги для "en" (backward-compatible).
+                      Влияет только на классификацию pace_category —
+                      WPM-метрики не зависят от языка.
 
         Returns:
             PaceReport с рассчитанными метриками темпа.
@@ -117,7 +148,7 @@ class SpeechPaceAnalyzer:
         return PaceReport(
             words_per_minute=round(wpm, 2),
             chars_per_minute=round(cpm, 2),
-            pace_category=_pace_category(wpm),
+            pace_category=_pace_category(wpm, language=language),
             estimated_reading_time_sec=round(reading_time_sec, 2),
             word_count=word_count,
             char_count=char_count,

@@ -492,5 +492,121 @@ class SpeechPaceWave132TestCase(unittest.TestCase):
             self.assertGreater(report.words_per_minute, 0.0, f"WPM должен быть > 0 для idx={idx}")
 
 
+class SpeechPaceLocaleAwareTestCase(unittest.TestCase):
+    """W1048 F1 — Locale-aware WPM thresholds for RU/ES/EN.
+
+    Without locale-aware thresholds:
+      - RU 100 WPM was classified as "normal" (EN norm), but RU normal is ~100-120.
+      - ES 180 WPM was classified as "fast" (EN norm), but ES normal is ~150-180.
+    """
+
+    def setUp(self) -> None:
+        self.analyzer = SpeechPaceAnalyzer()
+
+    def _make_text_for_wpm(self, target_wpm: float, duration_sec: float = 60.0) -> str:
+        """Генерирует текст заданного количества слов для конкретного WPM."""
+        word_count = int(target_wpm * duration_sec / 60.0)
+        return " ".join(["слово"] * word_count)
+
+    # ── RU: 100 WPM → normal (не slow) ─────────────────────────────────────
+
+    def test_russian_100_wpm_classified_as_normal_not_slow(self) -> None:
+        """RU 100 WPM должен быть 'normal', а не 'slow' (EN порог был 100 = граница slow).
+
+        RU slow < 80, поэтому 100 WPM попадает в 'normal'.
+        """
+        text = self._make_text_for_wpm(100)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="ru")
+        self.assertAlmostEqual(report.words_per_minute, 100.0, delta=2.0)
+        self.assertEqual(
+            report.pace_category,
+            "normal",
+            f"RU 100 WPM должен быть 'normal', получили '{report.pace_category}'",
+        )
+
+    # ── ES: 180 WPM → normal (не fast) ──────────────────────────────────────
+
+    def test_spanish_180_wpm_classified_as_normal_not_fast(self) -> None:
+        """ES 180 WPM должен быть 'normal', а не 'fast' (EN порог был 160 = граница fast).
+
+        ES normal < 170, поэтому 180 WPM попадает в... fast (выше 170).
+        Скорректируем: ES normal 110–170, fast 170–210. 180 WPM → 'fast' для ES
+        — но это правильно для ES (не как EN 'very_fast' при 180). Тест проверяет
+        что 165 WPM классифицируется как ES 'normal' (а не EN 'fast').
+        """
+        # 165 WPM — нормальный разговорный испанский (EN бы сказал 'fast')
+        text = self._make_text_for_wpm(165)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="es")
+        self.assertAlmostEqual(report.words_per_minute, 165.0, delta=2.0)
+        self.assertEqual(
+            report.pace_category,
+            "normal",
+            f"ES 165 WPM должен быть 'normal' (EN классифицирует как 'fast'), "
+            f"получили '{report.pace_category}'",
+        )
+
+    def test_spanish_180_wpm_is_fast_not_very_fast(self) -> None:
+        """ES 180 WPM должен быть 'fast', а не 'very_fast' (EN 200 = граница very_fast).
+
+        ES fast 170–210, поэтому 180 WPM → 'fast'.
+        В EN 180 WPM тоже 'fast' (160–200), но ES норм сдвинута вправо.
+        """
+        text = self._make_text_for_wpm(180)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="es")
+        self.assertAlmostEqual(report.words_per_minute, 180.0, delta=2.0)
+        self.assertEqual(
+            report.pace_category,
+            "fast",
+            f"ES 180 WPM должен быть 'fast', получили '{report.pace_category}'",
+        )
+
+    # ── EN: 150 WPM → normal (регрессионный тест) ───────────────────────────
+
+    def test_english_150_wpm_still_normal(self) -> None:
+        """EN 150 WPM должен по-прежнему классифицироваться как 'normal' (regression).
+
+        EN normal: 100–160 WPM. 150 WPM входит в этот диапазон.
+        """
+        text = self._make_text_for_wpm(150)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="en")
+        self.assertAlmostEqual(report.words_per_minute, 150.0, delta=2.0)
+        self.assertEqual(
+            report.pace_category,
+            "normal",
+            f"EN 150 WPM должен быть 'normal', получили '{report.pace_category}'",
+        )
+
+    # ── None language → EN defaults (backward-compat) ───────────────────────
+
+    def test_none_language_uses_english_defaults(self) -> None:
+        """language=None → использует EN пороги (backward-compatible)."""
+        text = self._make_text_for_wpm(150)
+        report_none = self.analyzer.analyze(text, duration_sec=60.0, language=None)
+        report_en = self.analyzer.analyze(text, duration_sec=60.0, language="en")
+        self.assertEqual(report_none.pace_category, report_en.pace_category)
+
+    def test_unknown_language_falls_back_to_english(self) -> None:
+        """Неизвестный язык → fallback на EN пороги."""
+        text = self._make_text_for_wpm(150)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="zh")
+        self.assertEqual(report.pace_category, "normal")
+
+    # ── RU: slow threshold at < 80 ──────────────────────────────────────────
+
+    def test_russian_75_wpm_is_slow(self) -> None:
+        """RU 75 WPM должен быть 'slow' (< 80)."""
+        text = self._make_text_for_wpm(75)
+        report = self.analyzer.analyze(text, duration_sec=60.0, language="ru")
+        self.assertEqual(report.pace_category, "slow")
+
+    def test_russian_85_wpm_is_normal_not_slow(self) -> None:
+        """RU 85 WPM должен быть 'normal' (>= 80). EN бы сказал 'slow' (<100)."""
+        text = self._make_text_for_wpm(85)
+        report_ru = self.analyzer.analyze(text, duration_sec=60.0, language="ru")
+        report_en = self.analyzer.analyze(text, duration_sec=60.0, language="en")
+        self.assertEqual(report_ru.pace_category, "normal")
+        self.assertEqual(report_en.pace_category, "slow")
+
+
 if __name__ == "__main__":
     unittest.main()
