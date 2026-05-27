@@ -147,6 +147,19 @@ class SearchAndAnalysisService:
         result = self._semantic_searcher.index_all(items, force=force)
         return result
 
+    def handle_semantic_search_reset(self, params: dict) -> dict:
+        """IPC: semantic_search_reset — сбрасывает зафиксированную ошибку загрузки модели.
+
+        Позволяет повторную попытку загрузки SentenceTransformer после временного сбоя
+        (сеть, HuggingFace недоступен, недостаточно RAM и т.п.).  Без этого метода
+        ``_model_error`` остаётся установленным навсегда и любые вызовы semantic_search
+        молча возвращают пустой результат.
+
+        Returns:
+            {"reset": bool, "previous_error": str|None}
+        """
+        return self._semantic_searcher.reset_model_error()
+
     # ================================================================== #
     # Кластер 2 — Извлечение задач / решений / вопросов                   #
     # ================================================================== #

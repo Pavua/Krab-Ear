@@ -208,6 +208,26 @@ class SemanticSearcher:
             logger.warning("semantic_search: ошибка поиска: %s", exc)
             return []
 
+    def reset_model_error(self) -> dict:
+        """Сбрасывает зафиксированную ошибку загрузки модели, позволяя повторную попытку.
+
+        Очищает ``_model_error`` и ``_model``/``_model_loaded``, так что следующий
+        вызов ``_get_model()`` попытается загрузить модель заново.  Полезно после
+        временных сбоев (сеть, HuggingFace недоступен, недостаточно RAM и т.п.).
+
+        Returns:
+            {"reset": True, "previous_error": str|None}
+        """
+        with self._model_lock:
+            previous = self._model_error
+            self._model_error = None
+            self._model = None
+            self._model_loaded = False
+        logger.info(
+            "semantic_search: сброс ошибки модели, предыдущая: %s", previous or "—"
+        )
+        return {"reset": True, "previous_error": previous}
+
     def remove_item(self, item_id: str) -> bool:
         """Remove item from index. Returns True if removed, False if not found.
 

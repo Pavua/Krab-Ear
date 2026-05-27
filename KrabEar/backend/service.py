@@ -824,6 +824,10 @@ class BackendService:
         """Delegated to SearchAndAnalysisService (Wave 757)."""
         return self._search_analysis_svc.handle_semantic_search_reindex(params)
 
+    def _handle_semantic_search_reset(self, params: dict) -> dict:
+        """Delegated to SearchAndAnalysisService (Wave 911 / W884-E3)."""
+        return self._search_analysis_svc.handle_semantic_search_reset(params)
+
     def close(self) -> None:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
