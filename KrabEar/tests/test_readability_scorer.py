@@ -407,5 +407,86 @@ class TestReadabilityScorerWave114(unittest.TestCase):
             self.assertGreaterEqual(r.flesch_score, 0.0)
 
 
+class TestSentenceSplitterW1049F2(unittest.TestCase):
+    """W1049 F2 — ellipsis and RU abbreviation sentence-split bugs."""
+
+    def setUp(self) -> None:
+        self.scorer = ReadabilityScorer()
+
+    # ── F2-1: троеточие не является границей предложения ─────────────────────
+
+    def test_ellipsis_not_treated_as_sentence_boundary(self) -> None:
+        """Троеточие '...' не должно разбивать предложение на части."""
+        text = "Подождите... Это не конец."
+        report = self.scorer.score(text)
+        # «Подождите...» и «Это не конец.» — два предложения (разделитель — пробел+заглавная после ?)
+        # Но «...» само по себе НЕ является самостоятельной границей.
+        # Проверяем, что troetochie в середине слова/фразы не дробит текст лишний раз.
+        text2 = "Он говорил долго... очень долго. Потом замолчал."
+        report2 = self.scorer.score(text2)
+        # Ожидаем 2 предложения (только точка-пробел-Заглавная — разрыв)
+        self.assertEqual(report2.sentence_count, 2,
+                         msg=f"Ellipsis mid-sentence should not split; got {report2.sentence_count}")
+
+    def test_ellipsis_unicode_not_sentence_boundary(self) -> None:
+        """Unicode-троеточие '…' не должно быть границей предложения."""
+        text = "Хм… не знаю. Подумаю ещё."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 2,
+                         msg=f"Unicode ellipsis should not split sentence; got {report.sentence_count}")
+
+    # ── F2-2: аббревиатура «г.» не разбивает предложение ────────────────────
+
+    def test_ru_abbreviation_g_not_split(self) -> None:
+        """Аббревиатура «г.» (год/город) не должна разбивать предложение."""
+        text = "Это было в г. Москва давно. Теперь всё иначе."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 2,
+                         msg=f"'г.' abbrev should not split sentence; got {report.sentence_count}")
+
+    # ── F2-3: аббревиатура «т.е.» не разбивает предложение ──────────────────
+
+    def test_ru_abbreviation_te_not_split(self) -> None:
+        """Аббревиатура «т.е.» не должна разбивать предложение."""
+        text = "Это важно, т.е. критично для проекта. Надо исправить."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 2,
+                         msg=f"'т.е.' abbrev should not split sentence; got {report.sentence_count}")
+
+    # ── F2-4: аббревиатура «ул.» не разбивает предложение ───────────────────
+
+    def test_ru_abbreviation_ul_not_split(self) -> None:
+        """Аббревиатура «ул.» (улица) не должна разбивать предложение."""
+        text = "Живу на ул. Ленина уже пять лет. Хорошее место."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 2,
+                         msg=f"'ул.' abbrev should not split sentence; got {report.sentence_count}")
+
+    # ── F2-5: обычные предложения по-прежнему разбиваются ────────────────────
+
+    def test_normal_sentences_still_split(self) -> None:
+        """Обычные предложения разделяются корректно (регрессия)."""
+        text = "Первое предложение. Второе предложение. Третье предложение."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 3,
+                         msg=f"Normal sentences should split; got {report.sentence_count}")
+
+    def test_exclamation_and_question_still_split(self) -> None:
+        """Предложения с ! и ? по-прежнему разбиваются (регрессия)."""
+        text = "Привет! Как дела? Всё хорошо."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 3,
+                         msg=f"! and ? should still split; got {report.sentence_count}")
+
+    def test_abbreviation_td_not_split(self) -> None:
+        """Аббревиатура «т.д.» (так далее) не разбивает предложение на лишние части."""
+        # Два реальных предложения — граница по точке после «продолжать», но
+        # «т.д.» внутри первого предложения не должно создавать лишний разрыв.
+        text = "Берём яблоки, груши и т.д., список большой. Надо всё купить."
+        report = self.scorer.score(text)
+        self.assertEqual(report.sentence_count, 2,
+                         msg=f"'т.д.' abbrev should not split sentence; got {report.sentence_count}")
+
+
 if __name__ == "__main__":
     unittest.main()
