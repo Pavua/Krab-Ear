@@ -42,6 +42,9 @@ HEAVY_METHODS: Set[str] = {
     "repair_integrity",         # исправление целостности
     "get_waveform",             # генерация waveform-данных
     "extract_action_items",     # LLM извлечение задач/решений/вопросов из транскрипта
+    "semantic_search_reindex",  # полная переиндексация всей истории через sentence-embeddings (W1183)
+    "export_html_report",       # генерация автономного HTML-отчёта с аналитикой (W1183)
+    "generate_html_report",     # алиас export_html_report для Swift UI (W1183)
 }
 
 MEDIUM_METHODS: Set[str] = {
@@ -70,6 +73,10 @@ MEDIUM_METHODS: Set[str] = {
     "get_error_report",         # отчёт об ошибках
     "get_error_stats",          # статистика ошибок
     "health_check",             # health check подсистем
+    "get_timeline_view",        # группировка истории по временным блокам (W1183)
+    "generate_stats_report",    # полный Markdown-отчёт статистики за период (W1183)
+    "get_sentiment_trends",     # анализ трендов тональности за N дней (W1183)
+    "semantic_search",          # семантический поиск по истории через embeddings (W1183)
 }
 
 # Методы, полностью исключённые из throttling.
