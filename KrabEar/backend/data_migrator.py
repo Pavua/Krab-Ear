@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import shutil
@@ -345,7 +346,21 @@ class DataMigrator:
 
         Добавляет поля tags=[], favorite=false, annotation="" ко всем записям,
         которым они не хватает. Перезаписывает history.ndjson атомарно.
+
+        Удерживает POSIX flock(LOCK_EX) на history.lock на всё время записи,
+        чтобы исключить гонку с параллельными append-операциями StateStore.
         """
+        lock_path = data_dir / "history.lock"
+        with open(lock_path, "a+") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                result = self._do_migrate_v1_to_v2(data_dir, backup_path)
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        return result
+
+    def _do_migrate_v1_to_v2(self, data_dir: Path, backup_path: str) -> MigrationResult:
+        """Внутренний метод миграции — вызывается под удержанием history.lock."""
         history_path = data_dir / "history.ndjson"
         all_items = _read_ndjson(history_path)
 
