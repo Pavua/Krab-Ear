@@ -417,6 +417,10 @@ class BackendService:
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
+        # Wire EventBus → EventReplayManager so every emitted event is recorded
+        # in the ring buffer.  Late-injection avoids circular imports and keeps
+        # both objects independently constructable (important for tests).
+        event_bus._event_replay = self._event_replay
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
