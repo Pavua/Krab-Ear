@@ -891,5 +891,66 @@ class TestUsageTrackerUnicodeInMetadata(unittest.TestCase):
             self.assertIsInstance(all_time["recordings"], int)
 
 
+class TestUsageTrackerAtomicPersist(unittest.TestCase):
+    """Тесты атомарности записи (W937 F2 — tmp+fsync+rename)."""
+
+    def test_atomic_persist_no_partial_file(self):
+        """После _persist() .tmp файл не остаётся на диске — rename прошёл атомарно."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            tracker.record_usage(10.0, 50)
+
+            stats_file = Path(tmp) / "usage_stats.json"
+            tmp_file = stats_file.with_suffix(stats_file.suffix + ".tmp")
+
+            # После нормального persist: основной файл существует, .tmp — нет
+            self.assertTrue(stats_file.exists(), "stats file must exist after persist")
+            self.assertFalse(tmp_file.exists(), ".tmp file must be cleaned up after atomic rename")
+
+    def test_atomic_persist_file_is_valid_json(self):
+        """Файл, записанный через atomic persist, является корректным JSON."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = UsageTracker(data_dir=tmp)
+            tracker.record_usage(5.0, 25)
+            tracker.record_usage(15.0, 75)
+
+            stats_file = Path(tmp) / "usage_stats.json"
+            data = json.loads(stats_file.read_text(encoding="utf-8"))
+            self.assertIn("daily", data)
+            self.assertIn("all_time", data)
+            self.assertEqual(data["all_time"]["recordings"], 2)
+
+    def test_corrupt_file_logs_warning_not_silent(self):
+        """Повреждённый файл при загрузке генерирует WARNING (не молчит)."""
+        import logging
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "usage_stats.json"
+            stats_path.write_text("{bad json{{", encoding="utf-8")
+
+            with self.assertLogs("KrabEar.Backend.UsageTracker", level="WARNING") as cm:
+                _tracker = UsageTracker(data_dir=tmp)
+
+            # Убеждаемся, что хотя бы одно WARNING-сообщение было залогировано
+            warning_msgs = [r for r in cm.output if "WARNING" in r]
+            self.assertTrue(warning_msgs, "Expected at least one WARNING log on corrupt file")
+            # Счётчики сброшены в ноль
+            stats = _tracker.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 0)
+
+    def test_atomic_persist_survives_reload(self):
+        """Данные, записанные через atomic persist, корректно загружаются при перезагрузке."""
+        with tempfile.TemporaryDirectory() as tmp:
+            t1 = UsageTracker(data_dir=tmp)
+            t1.record_usage(30.0, 150)
+            t1.record_usage(10.0, 50)
+
+            t2 = UsageTracker(data_dir=tmp)
+            stats = t2.get_usage_stats()
+            self.assertEqual(stats["all_time"]["recordings"], 2)
+            self.assertAlmostEqual(stats["all_time"]["total_duration_sec"], 40.0)
+            self.assertEqual(stats["all_time"]["total_words"], 200)
+
+
 if __name__ == "__main__":
     unittest.main()
