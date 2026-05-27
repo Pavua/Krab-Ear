@@ -17,6 +17,99 @@ logger = logging.getLogger(__name__)
 
 _sentry_initialized = False
 
+# ---------------------------------------------------------------------------
+# PII / path redaction for Sentry events (W1193 F4)
+# ---------------------------------------------------------------------------
+
+#: Pattern matching absolute /Users/<username>/... paths (spaces allowed in sub-paths).
+_HOME_PATH_RE = re.compile(r"/Users/[^/\"']+(/[^\"']*)")
+
+#: Marker used when a transcript path is stripped entirely.
+_TRANSCRIPT_REDACTED = "<transcript-path-redacted>"
+
+#: Prefix fragment that identifies KrabEar transcript paths.
+_TRANSCRIPT_PATH_FRAGMENT = "KrabEar/transcripts/"
+
+
+def _redact_string(value: str) -> str:
+    """Redact file-system paths and transcript filenames from *value*.
+
+    Two rules applied in order:
+    1. Any path (absolute ``/Users/…`` or home-relative ``~/…``) that
+       contains the ``KrabEar/transcripts/`` fragment is replaced entirely
+       with ``<transcript-path-redacted>``.
+    2. Remaining ``/Users/<username>/...`` absolute paths are collapsed to
+       ``~/...`` (home-relative form).
+    """
+    # Rule 1 — drop transcript paths entirely (both /Users/... and ~/... forms).
+    # Note: paths like ~/Library/Application Support/KrabEar/transcripts/...
+    # may contain spaces, so we use [^\"']* rather than [^\s\"']*.
+    if _TRANSCRIPT_PATH_FRAGMENT in value:
+        value = re.sub(
+            r"/Users/[^/\s]+/[^\"']*KrabEar/transcripts/[^\"']*",
+            _TRANSCRIPT_REDACTED,
+            value,
+        )
+        value = re.sub(
+            r"~/[^\"']*KrabEar/transcripts/[^\"']*",
+            _TRANSCRIPT_REDACTED,
+            value,
+        )
+
+    # Rule 2 — collapse remaining /Users/<name>/... → ~/...
+    value = _HOME_PATH_RE.sub(r"~\1", value)
+    return value
+
+
+def _redact_value(obj: object) -> object:
+    """Recursively redact strings inside dicts, lists, and plain strings."""
+    if isinstance(obj, str):
+        return _redact_string(obj)
+    if isinstance(obj, dict):
+        return {k: _redact_value(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_value(item) for item in obj]
+    return obj
+
+
+def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG001
+    """``before_send`` callback: redact PII / local paths from Sentry events.
+
+    - Replaces ``/Users/<username>/...`` with ``~/...``.
+    - Removes ``KrabEar/transcripts/...`` filenames entirely.
+    - Returns *event* (possibly mutated) or ``None`` to drop the event.
+
+    Called by sentry-sdk synchronously before the event is enqueued for
+    transmission — safe to mutate the dict in-place and return it.
+    """
+    try:
+        # Walk exception values → stacktrace frames → filename / abs_path / vars.
+        exception = event.get("exception") or {}
+        for exc_value in (exception.get("values") or []):
+            stacktrace = exc_value.get("stacktrace") or {}
+            for frame in (stacktrace.get("frames") or []):
+                for key in ("filename", "abs_path", "module"):
+                    if key in frame and isinstance(frame[key], str):
+                        frame[key] = _redact_string(frame[key])
+                # Redact vars dict (local variables in the frame).
+                if "vars" in frame:
+                    frame["vars"] = _redact_value(frame["vars"])
+
+        # Walk top-level extra / contexts dicts.
+        for top_key in ("extra", "contexts", "tags"):
+            if top_key in event:
+                event[top_key] = _redact_value(event[top_key])
+
+        # Redact message string if present.
+        if "message" in event and isinstance(event["message"], str):
+            event["message"] = _redact_string(event["message"])
+
+    except Exception:  # noqa: BLE001
+        # Never let redaction break crash reporting.
+        pass
+
+    return event
+
 
 def _read_version_from_plist() -> str | None:
     """Read CFBundleShortVersionString from the app bundle's Info.plist.
@@ -149,6 +242,8 @@ def init_sentry(
             release=resolved_release,
             traces_sample_rate=0.05,
             send_default_pii=False,  # конфиденциальность
+            include_local_variables=False,  # W1193 F4: hide local file paths
+            before_send=_sentry_before_send,  # W1193 F4: redact PII / paths
         )
         _sentry_initialized = True
         logger.info(
