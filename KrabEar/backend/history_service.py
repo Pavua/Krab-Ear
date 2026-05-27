@@ -792,14 +792,16 @@ class HistoryService:
 
         speakers = {t.get("speaker") for t in turns if t.get("speaker")}
         srt_lines: list[str] = []
-        for seq, turn in enumerate(turns, start=1):
+        idx = 0
+        for turn in turns:
             speaker = turn.get("speaker", "SPEAKER_00")
             turn_text = str(turn.get("text", "")).strip()
             if not turn_text:
                 continue
+            idx += 1
             start_sec = float(turn.get("start", 0.0) or 0.0)
             end_sec = float(turn.get("end", start_sec + 1.0) or start_sec + 1.0)
-            srt_lines.append(str(seq))
+            srt_lines.append(str(idx))
             srt_lines.append(f"{self._srt_timestamp(start_sec)} --> {self._srt_timestamp(end_sec)}")
             if self._should_include_speaker_labels(params):
                 lbl = self._resolve_speaker_name(speaker, lang=getattr(target_item, "source_lang", None))
