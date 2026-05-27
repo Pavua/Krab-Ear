@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import platform
 import subprocess
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -121,6 +122,7 @@ class CalendarLinker:
         self._cached_result: dict[str, Any] | None = None
         self._cache_at_time: float = 0.0
         self._cache_window_key: str = ""
+        self._cache_lock = threading.Lock()
 
     def _window_key(self, at_time: datetime) -> str:
         minute_bucket = (at_time.minute // self._cache_minutes) * self._cache_minutes
@@ -136,17 +138,18 @@ class CalendarLinker:
         window = self._window_key(at_time)
         now_mono = time.monotonic()
         cache_ttl_sec = self._cache_minutes * 60
-        if (
-            self._cache_window_key == window
-            and (now_mono - self._cache_at_time) < cache_ttl_sec
-        ):
-            logger.debug("CalendarLinker: кэш hit (window=%s)", window)
-            return self._cached_result
-        result = self._query_calendar()
-        self._cached_result = result
-        self._cache_at_time = now_mono
-        self._cache_window_key = window
-        return result
+        with self._cache_lock:
+            if (
+                self._cache_window_key == window
+                and (now_mono - self._cache_at_time) < cache_ttl_sec
+            ):
+                logger.debug("CalendarLinker: кэш hit (window=%s)", window)
+                return self._cached_result
+            result = self._query_calendar()
+            self._cached_result = result
+            self._cache_at_time = now_mono
+            self._cache_window_key = window
+            return result
 
     def _query_calendar(self) -> dict[str, Any] | None:
         """Выполняет osascript и возвращает наиболее релевантное событие или None."""
