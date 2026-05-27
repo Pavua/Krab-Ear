@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,7 @@ class AbbreviationExpander:
         """
         self._data_dir = data_dir
         self._expand_ambiguous = expand_ambiguous
+        self._lock = threading.RLock()
         # {language: {abbr: {"expansion": str, "flags": str, "builtin": bool,
         #                     "ambiguous": bool}}}
         self._abbrevs: dict[str, dict[str, dict[str, Any]]] = {}
@@ -258,8 +260,10 @@ class AbbreviationExpander:
             return text
 
         lang = language.lower()
-        if lang not in self._compiled:
-            return text
+        with self._lock:
+            if lang not in self._compiled:
+                return text
+            compiled_list = list(self._compiled[lang])
 
         # Определяем, нужно ли разворачивать неоднозначные аббревиатуры
         allow_ambiguous = (
@@ -273,12 +277,9 @@ class AbbreviationExpander:
         for m in _CODE_SPAN_RE.finditer(text):
             protected.append((m.start(), m.end()))
 
-        result = text
-        offset = 0  # смещение при замене
-
         # Собираем все совпадения
         matches: list[tuple[int, int, str, str, str]] = []
-        for compiled_re, expansion, flags, abbr in self._compiled[lang]:
+        for compiled_re, expansion, flags, abbr in compiled_list:
             # Пропускаем неоднозначные если opt-in не включён
             entry = self._abbrevs.get(lang, {}).get(abbr, {})
             if entry.get("ambiguous", False) and not allow_ambiguous:
@@ -329,15 +330,16 @@ class AbbreviationExpander:
             flags: Дополнительные флаги (например, "no_after_digit").
         """
         lang = language.lower()
-        if lang not in self._abbrevs:
-            self._abbrevs[lang] = {}
-        self._abbrevs[lang][abbr] = {
-            "expansion": expansion,
-            "flags": flags,
-            "builtin": False,
-            "ambiguous": False,  # пользовательские записи всегда однозначны
-        }
-        self._rebuild_compiled(lang)
+        with self._lock:
+            if lang not in self._abbrevs:
+                self._abbrevs[lang] = {}
+            self._abbrevs[lang][abbr] = {
+                "expansion": expansion,
+                "flags": flags,
+                "builtin": False,
+                "ambiguous": False,  # пользовательские записи всегда однозначны
+            }
+            self._rebuild_compiled(lang)
         self._save_custom()
         logger.debug("Добавлена аббревиатура [%s] %r → %r", lang, abbr, expansion)
 
@@ -352,10 +354,11 @@ class AbbreviationExpander:
             True если аббревиатура была удалена, False если не найдена.
         """
         lang = language.lower()
-        if lang not in self._abbrevs or abbr not in self._abbrevs[lang]:
-            return False
-        del self._abbrevs[lang][abbr]
-        self._rebuild_compiled(lang)
+        with self._lock:
+            if lang not in self._abbrevs or abbr not in self._abbrevs[lang]:
+                return False
+            del self._abbrevs[lang][abbr]
+            self._rebuild_compiled(lang)
         self._save_custom()
         logger.debug("Удалена аббревиатура [%s] %r", lang, abbr)
         return True
@@ -372,18 +375,19 @@ class AbbreviationExpander:
             по умолчанию — только при ``expand_ambiguous=True``.
         """
         lang = language.lower()
-        if lang not in self._abbrevs:
-            return []
-        return [
-            {
-                "abbr": abbr,
-                "expansion": entry["expansion"],
-                "flags": entry.get("flags", ""),
-                "builtin": entry.get("builtin", False),
-                "ambiguous": entry.get("ambiguous", False),
-            }
-            for abbr, entry in sorted(self._abbrevs[lang].items())
-        ]
+        with self._lock:
+            if lang not in self._abbrevs:
+                return []
+            return [
+                {
+                    "abbr": abbr,
+                    "expansion": entry["expansion"],
+                    "flags": entry.get("flags", ""),
+                    "builtin": entry.get("builtin", False),
+                    "ambiguous": entry.get("ambiguous", False),
+                }
+                for abbr, entry in sorted(self._abbrevs[lang].items())
+            ]
 
     # ── Вспомогательные методы ─────────────────────────────────────────────────
 
