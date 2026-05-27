@@ -110,15 +110,51 @@ class PunctuationFixer:
         if result and result[0].islower():
             result = result[0].upper() + result[1:]
 
-        # Добавить ¿ к вопросам
-        if result.rstrip().endswith("?") and not result.lstrip().startswith("¿"):
-            result = "¿" + result.lstrip()
-
-        # Добавить ¡ к восклицаниям
-        if result.rstrip().endswith("!") and not result.lstrip().startswith("¡"):
-            result = "¡" + result.lstrip()
+        # Добавить ¿/¡ к каждому предложению отдельно, а не ко всему тексту.
+        # Разбиваем на токены: разделители (.!?) сохраняются в выводе.
+        result = self._apply_inverted_markers_per_sentence(result)
 
         return result
+
+    # Pattern splits on sentence-ending punctuation, keeping the delimiter in
+    # the list via a capturing group.  E.g. "Hola. cómo estás?" →
+    # ["Hola", ".", " cómo estás", "?", ""]
+    _SENT_SPLIT_RE = re.compile(r"([.!?…]+)")
+
+    def _apply_inverted_markers_per_sentence(self, text: str) -> str:
+        """Prepend ¿/¡ to each individual sentence that ends with ?/! only."""
+        parts = self._SENT_SPLIT_RE.split(text)
+        # parts alternates: [sentence_body, delimiter, sentence_body, delimiter, …, tail]
+        # Reconstruct, adding markers to each (body, delimiter) pair.
+        out: List[str] = []
+        i = 0
+        while i < len(parts):
+            body = parts[i]
+            # Try to get the following delimiter (if any).
+            if i + 1 < len(parts):
+                delim = parts[i + 1]
+                i += 2
+            else:
+                # Last tail with no trailing delimiter.
+                out.append(body)
+                break
+
+            stripped_body = body.strip()
+            # Determine the effective end character for this sentence.
+            last_char = delim[-1] if delim else ""
+
+            if last_char == "?" and stripped_body and not stripped_body.startswith("¿"):
+                # Prepend ¿ right before the first non-whitespace character in body.
+                leading_ws = len(body) - len(body.lstrip())
+                body = body[:leading_ws] + "¿" + body[leading_ws:]
+            elif last_char == "!" and stripped_body and not stripped_body.startswith("¡"):
+                leading_ws = len(body) - len(body.lstrip())
+                body = body[:leading_ws] + "¡" + body[leading_ws:]
+
+            out.append(body)
+            out.append(delim)
+
+        return "".join(out)
 
     def get_fixes_applied(self, original: str, fixed: str) -> List[str]:
         """Возвращает список описаний применённых изменений.
@@ -158,11 +194,11 @@ class PunctuationFixer:
         if _CAPITALIZE_AFTER_SENT_RE.search(original):
             fixes.append("capitalized after sentence ending")
 
-        # Испанский: добавление ¿/¡
-        if original.rstrip().endswith("?") and not original.lstrip().startswith("¿") and fixed.startswith("¿"):
+        # Испанский: добавление ¿/¡ (per-sentence — достаточно найти хоть один маркер в fixed)
+        if "?" in original and "¿" in fixed and "¿" not in original:
             fixes.append("added ¿ before question")
 
-        if original.rstrip().endswith("!") and not original.lstrip().startswith("¡") and fixed.startswith("¡"):
+        if "!" in original and "¡" in fixed and "¡" not in original:
             fixes.append("added ¡ before exclamation")
 
         if not fixes:
