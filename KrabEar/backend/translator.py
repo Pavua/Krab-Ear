@@ -117,34 +117,24 @@ class Translator:
         # W1190/W1429 — _translation_cache late-injection (set by BackendService after init).
         # Когда задан, успешные переводы персистируются на диск и переживают перезапуск.
         self._translation_cache: Any | None = None  # type: TranslationCache | None
-        # W1492 F2 HIGH: _privacy_was_on must be initialized to avoid AttributeError on first call
-        # when privacy=True. None = «не инициализировано» (sentinel, не будет триггерить clear_cache).
-        self._privacy_was_on: bool | None = None
+        # W1492 F3 HIGH — _settings_getter late-injection (set by BackendService after init).
+        # Callable[[str, Any], Any] that reads runtime settings; used by
+        # _check_privacy_mode_changed() on every translate() call to detect privacy-mode
+        # transitions. When None (e.g. unit-test stubs that don't inject), the check is
+        # a no-op — safe but privacy transitions will not be detected.
+        self._settings_getter: Any | None = None  # type: Callable[[str, Any], Any] | None
         # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
 
     def clear_cache(self) -> None:
-        """Очищает LRU-кэш переводов, сбрасывает список недоступных моделей и disk-кэш.
+        """Очищает LRU-кэш переводов и сбрасывает список недоступных моделей.
 
         Вызывается при переходе privacy_mode → True, чтобы стёртые RAM-переводы
         не «утекали» в следующие запросы (W1145 F2).
-
-        W1492 F1 CRIT: единственная корректная версия — сбрасывает ВСЕ три слоя:
-        1) in-memory LRU cache (_cache)
-        2) set недоступных моделей (_unavailable) — критично, иначе failed models block forever
-        3) disk-persistent layer (_translation_cache, late-injected, may be None)
         """
         with self._cache_lock:
             self._cache.clear()
             self._unavailable.clear()
         logger.debug("Translator cache cleared (privacy_mode transition)")
-        # Очистить disk-persistent layer (late-injected, may be None).
-        tc = self._translation_cache
-        if tc is not None:
-            try:
-                tc.clear()
-                logger.debug("Translator: disk translation_cache cleared")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -176,6 +166,24 @@ class Translator:
             except Exception:
                 pass  # Sentry itself failing — stay silent
             logger.exception("error_bus.push failed for code=%s", code)
+
+    def clear_cache(self) -> None:
+        """Очищает оба слоя кэша: in-memory LRU и персистентный диск-кэш.
+
+        W1313 F2 / W1429: thread-safe через _cache_lock. Если _translation_cache
+        не инжектирован — пропускаем без ошибки (late-injection pattern).
+        """
+        with self._cache_lock:
+            self._cache.clear()
+        logger.debug("Translator: in-memory translation cache cleared")
+        # Очистить disk-persistent layer (late-injected, may be None).
+        tc = self._translation_cache
+        if tc is not None:
+            try:
+                tc.clear()
+                logger.debug("Translator: disk translation_cache cleared")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
 
     def _check_privacy_mode_changed(self, privacy_mode_enabled: bool | None = None) -> None:
         """Определяет переход privacy_mode и сбрасывает оба слоя кэша.

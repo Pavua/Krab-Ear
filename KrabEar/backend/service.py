@@ -210,6 +210,10 @@ class BackendService:
         # translator сразу после создания, чтобы успешные переводы пережили перезапуск.
         self._translation_cache = TranslationCache(data_dir=str(store.data_dir))
         self.translator._translation_cache = self._translation_cache
+        # W1492 F3 HIGH: inject runtime-settings getter so _check_privacy_mode_changed()
+        # can read "privacy_mode_enabled" on every translate() call. Without this the
+        # getter slot stays None and privacy-mode transitions are never detected.
+        self.translator._settings_getter = self._get_runtime_setting
         self._start_time: float = time.monotonic()
         # W774: track timestamps of audio-device poll IPC calls for flood detection.
         # deque maxlen=10 keeps only the 10 most recent call times (one per method combined).
