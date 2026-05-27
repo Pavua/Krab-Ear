@@ -381,6 +381,13 @@ class SettingsService:
         settings["active_preset"] = profile
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        try:
+            from core.config import reload_settings_from_json  # noqa: PLC0415
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("apply_profile_preset: hot-reloaded %d pydantic fields", updated)
+        except Exception:  # noqa: BLE001
+            _log.exception("reload_settings_from_json failed in apply_profile_preset")
         self._fire_after_save_hooks(old_settings, settings)
         add_breadcrumb(
             category="settings",
@@ -441,6 +448,13 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
+        try:
+            from core.config import reload_settings_from_json  # noqa: PLC0415
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("set_notification_preferences: hot-reloaded %d pydantic fields", updated)
+        except Exception:  # noqa: BLE001
+            _log.exception("reload_settings_from_json failed in set_notification_preferences")
         self._fire_after_save_hooks(old_settings, settings)
         return result
 
@@ -526,6 +540,13 @@ class SettingsService:
         imported = len(incoming) - skipped
         self.store.save_settings(merged)
         self.invalidate_cache()
+        try:
+            from core.config import reload_settings_from_json  # noqa: PLC0415
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("import_settings: hot-reloaded %d pydantic fields", updated)
+        except Exception:  # noqa: BLE001
+            _log.exception("reload_settings_from_json failed in import_settings")
         self._fire_after_save_hooks(old_settings, merged)
         add_breadcrumb(
             category="settings",
@@ -618,6 +639,13 @@ class SettingsService:
 
         self.store.save_settings(restored)
         self.invalidate_cache()
+        try:
+            from core.config import reload_settings_from_json  # noqa: PLC0415
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("restore_settings_backup: hot-reloaded %d pydantic fields", updated)
+        except Exception:  # noqa: BLE001
+            _log.exception("reload_settings_from_json failed in restore_settings_backup")
         self._fire_after_save_hooks(old_settings, restored)
 
         add_breadcrumb(
