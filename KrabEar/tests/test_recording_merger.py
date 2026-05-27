@@ -639,6 +639,7 @@ class TestMergerRequiredNames(unittest.TestCase):
             self.assertIn("merged_from", r)
 
 
+<<<<<<< HEAD
 class StrictFakeStore:
     """Строгий фейк StateStore, который НЕ принимает tags в add_history_item.
 
@@ -805,6 +806,104 @@ class TestMergeTagsSeparateUpdate(unittest.TestCase):
             self.assertIn("important", merged_item.tags)
             # Без дублей
             self.assertEqual(merged_item.tags.count("meeting"), 1)
+
+
+class TestMergeAtomicRollback(unittest.TestCase):
+    """W1266 F2 MED — transactional delete phase with rollback (W1269 fix)."""
+
+    def setUp(self) -> None:
+        self.merger = RecordingMerger()
+
+    def _make_store(self) -> FakeStore:
+        store = FakeStore()
+        store.add_fake_item("r1", "Alpha", ts="2026-04-12T09:00:00")
+        store.add_fake_item("r2", "Beta", ts="2026-04-12T09:01:00")
+        store.add_fake_item("r3", "Gamma", ts="2026-04-12T09:02:00")
+        return store
+
+    # ------------------------------------------------------------------
+    # Test 1: happy-path — creates new item and deletes all originals
+    # ------------------------------------------------------------------
+    def test_merge_succeeds_creates_new_and_deletes_originals(self) -> None:
+        """Successful merge: new item exists, all originals tombstoned."""
+        store = self._make_store()
+        result = self.merger.merge_items(
+            ["r1", "r2", "r3"], store, delete_originals=True
+        )
+        # New merged item was added
+        self.assertEqual(len(store._added), 1)
+        new_id = store._added[0].id
+        self.assertEqual(result["id"], new_id)
+        # All originals deleted
+        self.assertIn("r1", store._deleted)
+        self.assertIn("r2", store._deleted)
+        self.assertIn("r3", store._deleted)
+        # New item NOT deleted (no rollback triggered)
+        self.assertNotIn(new_id, store._deleted)
+
+    # ------------------------------------------------------------------
+    # Test 2: delete failure mid-loop rolls back the new merged item
+    # ------------------------------------------------------------------
+    def test_merge_delete_failure_rolls_back_new_item(self) -> None:
+        """If delete_history_item raises, the new merged item is tombstoned."""
+        from backend.recording_merger import MergeRollbackError
+
+        store = self._make_store()
+        # Make delete_history_item raise on the second call (i.e. mid-loop)
+        call_count: list[int] = [0]
+        original_delete = store.delete_history_item
+
+        def failing_delete(item_id: str) -> bool:
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise RuntimeError("simulated storage failure")
+            return original_delete(item_id)
+
+        store.delete_history_item = failing_delete  # type: ignore[method-assign]
+
+        with self.assertRaises(MergeRollbackError) as ctx:
+            self.merger.merge_items(["r1", "r2", "r3"], store, delete_originals=True)
+
+        err = ctx.exception
+        # New merged item must have been created
+        self.assertIsNotNone(err.new_item_id)
+        # Rollback tombstone must have been applied to the merged item
+        self.assertTrue(err.rollback_ok)
+        self.assertIn(err.new_item_id, store._deleted)
+        # At least the first original was deleted before failure
+        self.assertGreaterEqual(len(err.deleted_ids), 1)
+
+    # ------------------------------------------------------------------
+    # Test 3: partial failure → MergeRollbackError with correct fields
+    # ------------------------------------------------------------------
+    def test_merge_partial_failure_logs_and_raises(self) -> None:
+        """MergeRollbackError carries failed_id and cause exception."""
+        from backend.recording_merger import MergeRollbackError
+
+        store = self._make_store()
+        original_delete = store.delete_history_item
+        call_count: list[int] = [0]
+
+        def raises_on_third(item_id: str) -> bool:
+            call_count[0] += 1
+            if call_count[0] == 3:
+                raise IOError("disk full")
+            return original_delete(item_id)
+
+        store.delete_history_item = raises_on_third  # type: ignore[method-assign]
+
+        with self.assertRaises(MergeRollbackError) as ctx:
+            self.merger.merge_items(["r1", "r2", "r3"], store, delete_originals=True)
+
+        err = ctx.exception
+        # Two originals were deleted before the third failed
+        self.assertEqual(len(err.deleted_ids), 2)
+        # The failing ID should be the third original
+        self.assertIsNotNone(err.failed_id)
+        # Original cause must be preserved
+        self.assertIsInstance(err.__cause__, IOError)
+        # Error message mentions rollback
+        self.assertIn("откат", str(err).lower())
 
 
 if __name__ == "__main__":
