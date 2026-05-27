@@ -19,26 +19,54 @@ from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
 from urllib3.util.retry import Retry
 
+# F3 (W1203): SSRF guard — reuse WebhookManager's validated URL checker.
+from backend.webhook_manager import _is_safe_webhook_url  # noqa: PLC2701
+
 logger = logging.getLogger("KrabEar.Backend.TwilioAdapter")
 
 # Twilio REST API base — включает Account SID как часть пути
 TWILIO_API_BASE = "https://api.twilio.com/2010-04-01/Accounts"
 
-# Retry config: 3 попытки, экспоненциальная задержка, retry на 429 + 5xx
+# Retry config: 3 попытки, экспоненциальная задержка, retry на 5xx only.
+# 429 исключён из urllib3 retry list, чтобы избежать двойного sleep с нашим
+# Retry-After обработчиком в _handle_response (F1 fix — W1203).
 _RETRY_TOTAL = 3
 _RETRY_BACKOFF = 1.0
-_RETRY_STATUS = frozenset([429, 500, 502, 503, 504])
+_RETRY_STATUS = frozenset([500, 502, 503, 504])
+
+# Maximum seconds we will sleep on a Twilio 429 Retry-After header.
+# Prevents a MITM or misbehaving server from blocking the IPC thread forever.
+_RETRY_AFTER_MAX_SEC = 60.0
 
 # Минимальная пауза при 429 если Retry-After не задан
 _RATE_LIMIT_SLEEP_SEC = 2.0
 
+# Maximum length for error detail forwarded to IPC / logs (F5 — W1203).
+_ERROR_DETAIL_MAX_CHARS = 512
+
 # Regex E.164: +<1-15 digits>
 _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
+
+# F3-TW (W1203): Twilio Account SID — "AC" + 32 hex chars.
+_ACCOUNT_SID_RE = re.compile(r"^AC[0-9a-fA-F]{32}$")
+
+# F2 (W1203): Twilio Call SID — "CA" + 32 hex chars.
+_CALL_SID_RE = re.compile(r"^CA[0-9a-fA-F]{32}$")
 
 
 def _is_valid_phone(number: str) -> bool:
     """Проверяет формат E.164."""
     return bool(_E164_RE.match(number or ""))
+
+
+def _is_valid_account_sid(value: str) -> bool:
+    """F3-TW (W1203): проверяет формат Twilio Account SID (AC + 32 hex)."""
+    return bool(_ACCOUNT_SID_RE.match(value or ""))
+
+
+def _is_valid_call_sid(value: str) -> bool:
+    """F2 (W1203): проверяет формат Twilio Call SID (CA + 32 hex)."""
+    return bool(_CALL_SID_RE.match(value or ""))
 
 
 def _build_session() -> requests.Session:
@@ -84,7 +112,15 @@ class TwilioAdapter:
         auth_token: str = "",
         from_number: str = "",
     ) -> None:
-        self._account_sid = (account_sid or "").strip()
+        sid = (account_sid or "").strip()
+        # F3-TW (W1203): reject malformed Account SIDs at init to prevent path
+        # traversal via _base_url() which embeds the SID in the URL path.
+        # Empty string is allowed (stub mode); any non-empty value must match AC + 32 hex.
+        if sid and not _is_valid_account_sid(sid):
+            raise ValueError(
+                f"account_sid не соответствует формату Twilio (AC + 32 hex): {sid!r}"
+            )
+        self._account_sid = sid
         self._auth_token = (auth_token or "").strip()
         self._from_number = (from_number or "").strip()
         self._session: Optional[requests.Session] = None
@@ -163,10 +199,16 @@ class TwilioAdapter:
         if status == 400:
             try:
                 body = resp.json()
-                detail = body.get("message", resp.text)
+                # F5 (W1203): prefer errors[*].detail, truncate to 512 chars.
+                errors = body.get("errors", [])
+                if errors and isinstance(errors, list):
+                    detail = errors[0].get("detail", str(errors[0]))
+                else:
+                    detail = body.get("message", resp.text or "Bad request")
+                detail = str(detail)[:_ERROR_DETAIL_MAX_CHARS]
                 code = body.get("code", "")
             except ValueError:
-                detail = resp.text or "Bad request"
+                detail = (resp.text or "Bad request")[:_ERROR_DETAIL_MAX_CHARS]
                 code = ""
             return {
                 "ok": False,
@@ -197,8 +239,17 @@ class TwilioAdapter:
         # 429 — Rate limit
         if status == 429:
             retry_after = resp.headers.get("Retry-After")
-            wait = float(retry_after) if retry_after else _RATE_LIMIT_SLEEP_SEC
-            logger.warning("Twilio rate limit hit, waiting %.1fs", wait)
+            # F1 (W1203): cap wait to _RETRY_AFTER_MAX_SEC to prevent an
+            # unbounded sleep caused by a huge or malicious Retry-After value.
+            try:
+                raw_wait = float(retry_after) if retry_after else _RATE_LIMIT_SLEEP_SEC
+            except (ValueError, TypeError):
+                raw_wait = _RATE_LIMIT_SLEEP_SEC
+            wait = max(0.0, min(raw_wait, _RETRY_AFTER_MAX_SEC))
+            logger.warning(
+                "Twilio rate limit hit, waiting %.1fs (capped at %.0fs)",
+                wait, _RETRY_AFTER_MAX_SEC,
+            )
             time.sleep(wait)
             return {
                 "ok": False,
@@ -220,10 +271,17 @@ class TwilioAdapter:
         # Прочие ошибки
         try:
             body = resp.json()
-            detail = body.get("message", str(body))
+            # F5 (W1203): prefer errors[*].detail; truncate to 512 chars before
+            # forwarding to IPC / logs to prevent verbatim Twilio body leakage.
+            errors = body.get("errors", [])
+            if errors and isinstance(errors, list):
+                detail = errors[0].get("detail", str(errors[0]))
+            else:
+                detail = body.get("message", str(body))
+            detail = str(detail)[:_ERROR_DETAIL_MAX_CHARS]
             twilio_code = body.get("code", "")
         except ValueError:
-            detail = resp.text or f"HTTP {status}"
+            detail = (resp.text or f"HTTP {status}")[:_ERROR_DETAIL_MAX_CHARS]
             twilio_code = ""
 
         logger.error("Twilio API error %s: %s", status, detail)
@@ -277,6 +335,18 @@ class TwilioAdapter:
             "Twiml": "<Response><Say>Connected</Say></Response>",
         }
         if webhook_url:
+            # F3 (W1203): validate webhook_url against SSRF check before forwarding
+            # to Twilio, preventing internal service exposure via callback URL.
+            safe, reject_reason = _is_safe_webhook_url(webhook_url)
+            if not safe:
+                logger.warning(
+                    "Twilio dial rejected webhook_url: %s (%s)", webhook_url, reject_reason
+                )
+                return {
+                    "ok": False,
+                    "error": "unsafe_webhook_url",
+                    "message": f"webhook_url отклонён защитой SSRF: {reject_reason}",
+                }
             payload["StatusCallback"] = webhook_url
             payload["StatusCallbackMethod"] = "POST"
 
@@ -311,6 +381,16 @@ class TwilioAdapter:
         if not call_control_id:
             return {"ok": False, "error": "missing_call_control_id"}
 
+        # F2 (W1203): reject call_control_id values that are not valid Twilio Call SIDs
+        # (CA + 32 hex) to prevent path traversal in URL interpolation.
+        if not _is_valid_call_sid(call_control_id):
+            logger.warning("Twilio hangup rejected: invalid call SID %r", call_control_id)
+            return {
+                "ok": False,
+                "error": "invalid_call_control_id",
+                "message": "call_control_id не соответствует формату Twilio Call SID (CA + 32 hex)",
+            }
+
         # Twilio завершает звонок через POST с Status=completed
         result = self._post(
             f"/Calls/{call_control_id}.json",
@@ -333,6 +413,17 @@ class TwilioAdapter:
 
         if not call_control_id:
             return {"ok": False, "error": "missing_call_control_id"}
+
+        # F2 (W1203): reject call_control_id values that are not valid Twilio Call SIDs.
+        if not _is_valid_call_sid(call_control_id):
+            logger.warning(
+                "Twilio get_call_status rejected: invalid call SID %r", call_control_id
+            )
+            return {
+                "ok": False,
+                "error": "invalid_call_control_id",
+                "message": "call_control_id не соответствует формату Twilio Call SID (CA + 32 hex)",
+            }
 
         result = self._get(f"/Calls/{call_control_id}.json")
         if not result["ok"]:
