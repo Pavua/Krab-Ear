@@ -51,7 +51,7 @@ class TestAuditLoggerBasic(unittest.TestCase):
         self.assertFalse(entry["success"])
 
     def test_sensitive_methods_no_params(self):
-        """Для чувствительных методов params_keys не логируются."""
+        """Для чувствительных методов params redact-ятся (redacted=True, param_count=N)."""
         for method in _SENSITIVE_METHODS:
             self.logger.log_request(method, {"password": "secret", "key": "val"}, {"ok": True, "result": {}}, 1.0)
         files = list(Path(self.tmpdir).glob("audit_*.ndjson"))
@@ -59,7 +59,9 @@ class TestAuditLoggerBasic(unittest.TestCase):
             for line in f:
                 entry = json.loads(line)
                 if entry["method"] in _SENSITIVE_METHODS:
-                    self.assertEqual(entry["params_keys"], [])
+                    self.assertTrue(entry.get("redacted"), f"method={entry['method']} не redacted")
+                    self.assertEqual(entry.get("param_count"), 2)
+                    self.assertNotIn("params_keys", entry)
 
     def test_get_audit_log_returns_entries(self):
         """get_audit_log возвращает все записанные записи."""

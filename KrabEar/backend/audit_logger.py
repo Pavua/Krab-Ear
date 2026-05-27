@@ -16,11 +16,71 @@ from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.AuditLogger")
 
-# Методы, параметры которых не логируются (чувствительные данные)
+# Методы, параметры которых полностью redact-ятся в audit log (чувствительные данные).
+# Категории:
+#   A — API-ключи / токены / credentials (set_settings содержит voice_gateway_api_key,
+#       hf_token, lm_studio_api_key, rest_api_key, telnyx/twilio credentials и т.д.)
+#   B — полный текст транскрипций (translate_*, send_to_telegram, send_imessage, …)
+#   C — файловые пути (transcribe_paths, export_timeline_*, configure_obsidian_sync, …)
+#   D — персональные данные / calendar / messaging
+#   E — пресеты/импорт настроек (могут содержать credentials из файла)
 _SENSITIVE_METHODS = frozenset({
-    "set_settings",
-    "set_notification_preferences",
-    "apply_profile_preset",
+    # --- A: настройки содержат credentials ---
+    "set_settings",                      # voice_gateway_api_key, hf_token, api_keys, …
+    "set_notification_preferences",      # может содержать webhook URLs с токенами
+    "apply_profile_preset",              # применяет набор settings (credentials possible)
+    "import_settings",                   # импортирует settings.json — может содержать секреты
+    "restore_settings_backup",           # восстанавливает settings с credentials
+    "apply_config_preset",               # возвращает settings_patch с credentials
+    "create_config_preset",              # сохраняет произвольный settings_patch
+    # --- B: полный текст транскрипций ---
+    "translate_text",                    # params: text (полный текст)
+    "translate_selection",               # params: text (выделенный текст)
+    "send_to_telegram",                  # params: text (транскрипция), chat_id
+    "send_imessage",                     # params: text (сообщение), recipient
+    "summarize_text",                    # params: text
+    "summarize_item",                    # params: item_id → text leak через result
+    "post_process_text",                 # params: text
+    "score_readability",                 # params: text
+    "compare_texts",                     # params: text_a, text_b
+    "detect_emotion",                    # params: text
+    "expand_abbreviations",              # params: text
+    "extract_terms",                     # params: text
+    "format_for_paste",                  # params: text + target_app
+    "generate_auto_title",              # params: text
+    "score_transcription",               # params: text
+    "check_duplicate",                   # params: text
+    "replace_word_in_last_transcript",   # params: old_word, new_word (transcript mutation)
+    "synthesize_speech",                 # params: text (синтез речи)
+    "live_subs_ingest",                  # params: audio_b64 (base64 PCM chunks — большой объём)
+    "semantic_search",                   # params: query (текст поиска)
+    "check_hotwords",                    # params: text (транскрипция)
+    # --- C: файловые пути ---
+    "transcribe_paths",                  # params: paths (список файловых путей)
+    "transcribe_paths_async",            # params: paths
+    "preview_transcribe_paths",          # params: paths
+    "enqueue_transcription",             # params: path
+    "export_timeline_svg",               # params: output_path
+    "export_timeline_json",              # params: output_path
+    "export_timeline_ical",              # params: output_path
+    "configure_auto_export",             # params: output_dir
+    "configure_obsidian_sync",           # params: vault_path
+    "export_settings",                   # params: file_path (куда экспортировать settings)
+    "analyze_audio_quality",             # params: file_path (полный путь к аудио)
+    "analyze_silence",                   # params: file_path
+    "get_audio_info",                    # params: file_path
+    "profile_noise",                     # params: file_path
+    "get_waveform",                      # params: file_path
+    "check_audio_duplicate",             # params: file_path
+    "analyze_word_timing",               # params: file_path
+    # --- D: персональные данные (Calendar, Notes, Reminders, Telegram) ---
+    "create_apple_note",                 # params: title, body (personal data)
+    "create_apple_reminder",             # params: title, body, due_date
+    "create_calendar_event",             # params: title, start_time, end_time, notes
+    "call_session_create",               # params: phone_number (phone PII)
+    "call_session_add_transcript",       # params: text (call transcript)
+    # --- E: webhook URLs (могут содержать API-токены в URL) ---
+    "register_webhook",                  # params: url (может быть webhook secret URL)
 })
 
 _KEEP_DAYS = 7
@@ -64,10 +124,15 @@ class AuditLogger:
             },
         )
 
+        if method in _SENSITIVE_METHODS:
+            params_info: dict[str, Any] = {"redacted": True, "param_count": len(params) if params else 0}
+        else:
+            params_info = {"params_keys": sorted(params.keys()) if params else []}
+
         entry: dict[str, Any] = {
             "ts": ts,
             "method": method,
-            "params_keys": sorted(params.keys()) if (params and method not in _SENSITIVE_METHODS) else [],
+            **params_info,
             "success": success,
             "duration_ms": round(duration_ms, 2),
         }
