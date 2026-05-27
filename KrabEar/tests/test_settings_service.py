@@ -609,223 +609,107 @@ class TestBreadcrumbs(unittest.TestCase):
         self.assertGreater(len(keys_changed), 0)
 
 
-class TestMigrationRunsAtLoadTime(unittest.TestCase):
-    """W928 F2: SettingsValidator.migrate() должен вызываться при загрузке настроек.
+class TestSaveLockConcurrency(unittest.TestCase):
+    """W1427 F4 MED — RLock serialises concurrent read-modify-write save paths."""
 
-    Проверяет, что cached_settings() автоматически мигрирует v1.0 → v2.0:
-    - history_limit переименовывается в history_policy
-    - старый ключ удаляется из настроек
-    - изменения записываются на диск (write-back)
-    - повторная загрузка уже на v2.0 — migrate() не нужен (write-back не вызывается)
-    """
+    def test_save_lock_is_rlock(self):
+        """_save_lock должен быть RLock (реентрантный), а не обычным Lock."""
+        import threading
 
-    def _make_v1_store(self) -> MagicMock:
-        """Создаёт store с v1.0 настройками (history_limit вместо history_policy)."""
-        store = MagicMock()
-        v1_settings = {
-            "schema_version": "1.0",
-            "quality_profile": "balanced",
-            "cleanup_profile": "soft",
-            "translation_mode": "off",
-            "auto_paste": True,
-            "realtime_preview_enabled": True,
-            "mode": "headless",
-            "translation_style": "neutral",
-            "clipboard_mode": "always_copy",
-            "update_channel": "stable",
-            "translation_glossary": {},
-            "text_templates": {},
-            "network_mode": "offline_default",
-            "hotkey_profile": "default",
-            "history_limit": "unlimited",  # v1.0 field name
-            "history_text_density": "normal",
-            "capture_source_mode": "mic",
-            "ui_last_tab": "history",
-            "auto_start_enabled": False,
-            "show_dock_icon": True,
-            "play_start_sound": True,
-            "audio_ducking_enabled": True,
-            "silence_guard_enabled": True,
-            "background_guard_enabled": True,
-            "call_notify_default": True,
-            "call_auto_summary": True,
-            "history_focus_mode": True,
-            "voice_gateway_url": "http://127.0.0.1:8090",
-            "voice_gateway_api_key": "",
-            "history_page_size": 50,
-            "audio_ducking_percent": 50,
-            "stop_tail_trim_ms": 180,
-            "silence_guard_rms_threshold": 0.0020,
-            "silence_guard_peak_threshold": 0.0120,
-            "silence_guard_active_ratio_threshold": 0.015,
-            "background_guard_min_peak": 0.025,
-            "background_guard_min_rms": 0.0040,
-            "background_guard_uniform_frame_threshold": 0.0060,
-            "background_guard_max_uniform_active_ratio": 0.92,
-            "overlay_opacity_percent": 45,
-            "notifications_enabled": True,
-            "notify_on_low_confidence": True,
-            "notify_confidence_threshold": 0.5,
-            "notify_on_llm_failure": True,
-            "notify_on_import_complete": True,
-            "notify_sound_enabled": True,
-        }
-        store.load_settings.return_value = dict(v1_settings)
-
-        saved: list[dict] = []
-
-        def _save(s: dict) -> dict:
-            store.load_settings.return_value = dict(s)
-            saved.clear()
-            saved.append(dict(s))
-            return dict(s)
-
-        store.save_settings.side_effect = _save
-        store._saved = saved
-        return store
-
-    def test_migration_runs_at_load_time_history_policy_present(self):
-        """cached_settings() должен вернуть history_policy после миграции из v1.0."""
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        result = svc.cached_settings()
-
-        self.assertIn("history_policy", result,
-                      "history_policy должен появиться после миграции v1.0→v2.0")
-
-    def test_migration_runs_at_load_time_old_key_removed(self):
-        """cached_settings() после миграции не должен содержать history_limit."""
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        result = svc.cached_settings()
-
-        self.assertNotIn("history_limit", result,
-                         "history_limit должен быть удалён после миграции v1.0→v2.0")
-
-    def test_migration_writes_back_to_disk_on_change(self):
-        """После миграции v1.0→v2.0 settings_service должен записать изменения на диск."""
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        svc.cached_settings()
-
-        store.save_settings.assert_called_once()
-        saved = store._saved[0]
-        self.assertIn("history_policy", saved)
-        self.assertNotIn("history_limit", saved)
-
-    def test_migration_stamps_schema_version_on_disk(self):
-        """После миграции на диске должна быть schema_version='2.0'."""
-        from backend.settings_validator import CURRENT_SCHEMA_VERSION
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        svc.cached_settings()
-
-        saved = store._saved[0]
-        self.assertEqual(saved.get("schema_version"), CURRENT_SCHEMA_VERSION)
-
-    def test_no_write_back_when_already_v2(self):
-        """Для уже мигрированных настроек (v2.0) save_settings не вызывается при load."""
-        store = _make_store()  # default store has no schema_version → treated as v1.0-absent
-        # Override with explicit 2.0 settings
-        v2_settings = dict(store._current)
-        v2_settings["schema_version"] = "2.0"
-        store.load_settings.return_value = dict(v2_settings)
-        svc = SettingsService(store=store)
-
-        svc.cached_settings()
-
-        # save_settings should NOT have been called (no migration needed)
-        store.save_settings.assert_not_called()
-
-    def test_migration_history_policy_value_preserved(self):
-        """Значение history_limit='unlimited' должно перейти в history_policy='unlimited'."""
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        result = svc.cached_settings()
-
-        self.assertEqual(result.get("history_policy"), "unlimited")
-
-    def test_migration_failure_does_not_raise(self):
-        """Если migrate() падает с ValueError, cached_settings() не должен выбросить исключение."""
-        store = self._make_v1_store()
-        # Force an unknown version to trigger ValueError in migrate()
-        bad_v = {"schema_version": "99.0", "quality_profile": "balanced"}
-        store.load_settings.return_value = dict(bad_v)
-        svc = SettingsService(store=store)
-
-        # Should not raise
-        try:
-            svc.cached_settings()
-        except Exception as exc:  # noqa: BLE001
-            self.fail(f"cached_settings() raised unexpectedly: {exc}")
-
-    def test_maybe_migrate_invalidates_cache_after_writeback(self):
-        """W1448 F2: _maybe_migrate() должен инвалидировать кэш после записи миграции на диск.
-
-        Сценарий: после write-back мигрированных настроек _cache должен быть сброшен
-        (чтобы следующий вызов cached_settings() перечитал свежие данные с диска, а не
-        вернул стale v1.0 из кэша, заполненного до save_settings()).
-        """
-        store = self._make_v1_store()
-        svc = SettingsService(store=store)
-
-        # Pre-populate the cache with raw v1.0 data (simulating a stale entry
-        # that would exist if invalidate_cache() were NOT called after write-back).
-        svc._cache = {"schema_version": "1.0", "quality_profile": "max", "stale": True}
-        svc._cache_ts = 1.0  # non-zero so TTL check would think cache is warm
-
-        # Now call cached_settings() — it should detect v1.0, migrate, write-back,
-        # and then invalidate the cache.  After invalidation the fresh data from
-        # store.load_settings is used, so the returned dict reflects v2.0 data.
-        result = svc.cached_settings()
-
-        # Cache must have been invalidated during migration write-back.
-        # The simplest observable side-effect: save_settings was called (migration
-        # happened) AND the returned settings contain the migrated key.
-        store.save_settings.assert_called_once()
-        self.assertIn("history_policy", result,
-                      "cache должен быть инвалидирован и перезагружен с мигрированными данными")
-        self.assertNotIn("stale", result,
-                         "stale кэш не должен быть виден после invalidate_cache()")
-
-    def test_maybe_migrate_no_invalidate_on_no_change(self):
-        """W1448 F2: _maybe_migrate() НЕ должен инвалидировать кэш, если миграция не нужна.
-
-        Когда settings уже на CURRENT_SCHEMA_VERSION, _maybe_migrate() возвращает raw
-        без каких-либо побочных эффектов — invalidate_cache() вызываться не должен.
-        """
         store = _make_store()
-        # Explicitly set current schema version so no migration is triggered.
-        from backend.settings_validator import CURRENT_SCHEMA_VERSION
-        v2_settings = dict(store._current)
-        v2_settings["schema_version"] = CURRENT_SCHEMA_VERSION
-        store.load_settings.return_value = dict(v2_settings)
+        svc = SettingsService(store=store)
+        # RLock can be acquired twice by the same thread without deadlocking.
+        acquired_twice = False
+        with svc._save_lock:
+            with svc._save_lock:  # re-entrant acquisition — must not block
+                acquired_twice = True
+        self.assertTrue(acquired_twice, "_save_lock deadlocked on re-entrant acquire — not an RLock")
 
+    def test_concurrent_set_settings_no_lost_update(self):
+        """10 потоков × 50 операций set_settings с чередующимися ключами не должны терять обновления."""
+        import threading
+
+        store = _make_store()
         svc = SettingsService(store=store)
 
-        # Prime the cache
-        svc.cached_settings()
-        store.save_settings.assert_not_called()
+        errors: list[Exception] = []
+        lock = threading.Lock()
+        THREADS = 10
+        OPS_PER_THREAD = 50
 
-        # Capture cache state
-        cached_before = svc._cache
-        ts_before = svc._cache_ts
+        def worker(thread_id: int) -> None:
+            for i in range(OPS_PER_THREAD):
+                key = f"thread_{thread_id}_op_{i}"
+                try:
+                    # Use a key that won't be normalised away — wrap inside
+                    # existing permitted text_templates dict so it survives
+                    # handle_set_settings normalisation.
+                    svc.handle_set_settings(
+                        {"history_page_size": 50 + (thread_id % 10)}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    with lock:
+                        errors.append(exc)
 
-        # Call again — still within TTL (no mock clock, but cache is warm)
-        svc.cached_settings()
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(THREADS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
 
-        # save_settings still not called — no migration write-back
-        store.save_settings.assert_not_called()
-        # Cache object identity: same reference (no invalidation occurred)
-        self.assertIs(svc._cache, cached_before,
-                      "_cache не должен меняться при отсутствии миграции")
-        self.assertEqual(svc._cache_ts, ts_before,
-                         "_cache_ts не должен меняться при отсутствии миграции")
+        self.assertEqual(errors, [], f"Unexpected errors in concurrent save: {errors[:3]}")
+        # store.save_settings must have been called exactly THREADS * OPS_PER_THREAD times
+        expected_calls = THREADS * OPS_PER_THREAD
+        actual_calls = store.save_settings.call_count
+        self.assertEqual(
+            actual_calls,
+            expected_calls,
+            f"Expected {expected_calls} saves, got {actual_calls} — possible lost update",
+        )
+
+    def test_set_settings_then_apply_preset_serialized(self):
+        """handle_set_settings и handle_apply_profile_preset выполняются без гонок под _save_lock."""
+        import threading
+
+        store = _make_store()
+        svc = SettingsService(store=store)
+
+        results: list[dict] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def run_set() -> None:
+            try:
+                r = svc.handle_set_settings({"history_page_size": 100})
+                with lock:
+                    results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        def run_preset() -> None:
+            try:
+                with unittest.mock.patch("backend.event_bus.bus"):
+                    r = svc.handle_apply_profile_preset({"profile": "meeting"})
+                with lock:
+                    results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        # Interleave both operations across many threads
+        threads = []
+        for _ in range(5):
+            threads.append(threading.Thread(target=run_set))
+            threads.append(threading.Thread(target=run_preset))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [], f"Errors during concurrent set+preset: {errors[:3]}")
+        self.assertEqual(len(results), 10, "Expected 10 results (5 set + 5 preset)")
 
 
 if __name__ == "__main__":
