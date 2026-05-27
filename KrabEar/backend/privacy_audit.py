@@ -294,6 +294,11 @@ class PrivacyAuditLogger:
 
         После очистки цепочка хешей сбрасывается (следующая запись начнёт новую
         цепочку с prev_hash=None).
+
+        WARNING (W957): Этот метод НЕ экспонирован через IPC dispatch.
+        Использовать ТОЛЬКО в unit-тестах и явных migration-скриптах.
+        Не вызывать из production IPC-пути — разрушает compliance audit trail
+        (W952 CRITICAL finding F-1).
         """
         try:
             self._log_path.unlink(missing_ok=True)
