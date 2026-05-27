@@ -91,10 +91,35 @@ class ExportScheduler:
         tmp.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._schedule_path)
 
+    def _validate_output_dir(self, output_dir_str: str) -> Path:
+        """Проверяет, что путь output_dir находится внутри data_dir.
+
+        Args:
+            output_dir_str: строковый путь к папке для экспортов.
+
+        Returns:
+            Абсолютный разрешённый Path, гарантированно внутри data_dir.
+
+        Raises:
+            ValueError: если путь выходит за пределы data_dir.
+        """
+        resolved = Path(output_dir_str).expanduser().resolve()
+        data_dir_resolved = self.data_dir.resolve()
+        if not resolved.is_relative_to(data_dir_resolved):
+            raise ValueError(
+                f"output_dir {resolved!r} должен находиться внутри data_dir"
+                f" {data_dir_resolved!r}"
+            )
+        return resolved
+
     def _effective_output_dir(self, schedule: dict) -> Path:
-        """Возвращает реальную папку для экспортов."""
+        """Возвращает реальную папку для экспортов.
+
+        Raises:
+            ValueError: если output_dir из расписания выходит за пределы data_dir.
+        """
         if schedule.get("output_dir"):
-            return Path(schedule["output_dir"])
+            return self._validate_output_dir(schedule["output_dir"])
         return self.exports_dir
 
     def _prune_old_exports(self, schedule: dict) -> dict:
@@ -349,11 +374,17 @@ class ExportScheduler:
             raise ValueError(f"Неподдерживаемый формат: {fmt!r}. Допустимые: {sorted(SUPPORTED_FORMATS)}")
         interval_hours = max(1, int(interval_hours))
 
+        # Validate output_dir before persisting — reject paths outside data_dir
+        validated_output_dir: str | None = None
+        if output_dir:
+            validated_path = self._validate_output_dir(str(output_dir))
+            validated_output_dir = str(validated_path)
+
         with self._lock:
             schedule = self._load_schedule()
             schedule["format"] = fmt
             schedule["interval_hours"] = interval_hours
-            schedule["output_dir"] = str(output_dir) if output_dir else None
+            schedule["output_dir"] = validated_output_dir
             schedule["enabled"] = bool(enabled)
             self._save_schedule(schedule)
 
