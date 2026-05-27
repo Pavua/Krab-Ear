@@ -101,6 +101,8 @@ class HistoryService:
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
+        # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
+        self._recording_chain_mgr = None
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -334,6 +336,9 @@ class HistoryService:
         # F4 W1343: cascade-delete orphan playback stats to prevent accumulation.
         if self._playback_tracker is not None:
             self._playback_tracker.remove_stats(item_id)
+        # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
+        if self._recording_chain_mgr is not None:
+            self._recording_chain_mgr.remove_item_from_all_chains(item_id)
         add_breadcrumb(
             category="history",
             message="delete_history_item",
@@ -1386,6 +1391,11 @@ class HistoryService:
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
+
+        # Каскадное удаление ghost item_ids из цепочек для каждой удалённой записи (W1253 RC-3).
+        if self._recording_chain_mgr is not None:
+            for item in to_delete:
+                self._recording_chain_mgr.remove_item_from_all_chains(item.id)
 
         add_breadcrumb(
             category="history",
