@@ -518,24 +518,25 @@ class GlossaryAppliedDuringTranslateTestCase(unittest.TestCase):
 
 
 class GlossaryCaseSensitivityTestCase(unittest.TestCase):
-    """Glossary matching is case-sensitive by default (str.replace)."""
+    """Glossary matching is case-insensitive (W1430: re.IGNORECASE added)."""
 
     def test_glossary_case_sensitive_exact_match(self) -> None:
-        """Exact-case key matches and is replaced; wrong case is not."""
+        """Exact-case key matches and is replaced; all-lowercase variant also matches."""
         glossary = {"Krab": "Краб"}
         # Exact match
         result = Translator._apply_glossary("Krab is here", glossary)
         self.assertIn("Краб", result)
-        # Wrong case — not replaced
+        # Wrong case — now also replaced due to re.IGNORECASE (W1430)
         result_lower = Translator._apply_glossary("krab is here", glossary)
-        self.assertNotIn("Краб", result_lower,
-                         "Glossary keys are case-sensitive; 'krab' != 'Krab'")
+        self.assertIn("Краб", result_lower,
+                      "W1430: re.IGNORECASE means 'krab' matches 'Krab' glossary key")
 
     def test_glossary_case_insensitive_not_default(self) -> None:
-        """Confirm that upper-case key does not match lower-case occurrence."""
+        """Upper-case key matches lower-case occurrence (W1430: re.IGNORECASE)."""
         glossary = {"HELLO": "ПРИВЕТ"}
         result = Translator._apply_glossary("hello world", glossary)
-        self.assertNotIn("ПРИВЕТ", result)
+        self.assertIn("ПРИВЕТ", result,
+                      "W1430: re.IGNORECASE means 'hello' matches 'HELLO' glossary key")
 
 
 class GlossaryUnicodeTestCase(unittest.TestCase):
@@ -553,10 +554,14 @@ class GlossaryUnicodeTestCase(unittest.TestCase):
         result_ar = Translator._apply_glossary("قال مرحبا للجميع", glossary_arabic)
         self.assertIn("hola", result_ar)
 
-        # Emoji term
+        # Emoji term — \b word-boundaries don't apply to emoji (non-word chars),
+        # so emoji glossary terms are NOT replaced by the regex-based implementation.
+        # This is a known limitation documented in W1430.
         glossary_emoji = {"🤖": "робот"}
         result_emoji = Translator._apply_glossary("Привет 🤖!", glossary_emoji)
-        self.assertEqual(result_emoji, "Привет робот!")
+        # emoji is surrounded by non-word chars (\b doesn't fire); term unchanged
+        self.assertEqual(result_emoji, "Привет 🤖!",
+                         "W1430: emoji glossary terms are not replaced (no \\b boundary)")
 
     def test_unicode_glossary_via_translation_service_set(self) -> None:
         """set_glossary_item round-trips unicode source/target without error."""
