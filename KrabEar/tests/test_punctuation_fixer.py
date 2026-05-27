@@ -280,5 +280,72 @@ class TestPunctuationFixerWave132(unittest.TestCase):
             self.assertTrue(len(result) > 0, f"Пустой результат для idx={idx}")
 
 
+class TestPunctuationFixerColonSymmetryW1376(unittest.TestCase):
+    """W1374 F1 HIGH — colon symmetry fix tests (W1376).
+
+    Root: _SPACE_BEFORE_PUNCT_RE removes space before colon but
+    _NO_SPACE_AFTER_PUNCT_RU_RE did not add space after colon.
+    Fix: added ':' to _NO_SPACE_AFTER_PUNCT_RU_RE character class.
+    """
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_colon_gets_space_after(self):
+        """'план:первый' → space inserted after colon before letter."""
+        result = self.fixer.fix("план:первый этап.", language="ru")
+        self.assertIn(": ", result, f"Ожидается пробел после двоеточия: {result!r}")
+        self.assertNotIn(":п", result, f"Не должно быть ':п' без пробела: {result!r}")
+
+    def test_space_before_colon_removed_and_space_after_added(self):
+        """'план :первый' — space before removed, space after inserted."""
+        result = self.fixer.fix("план :первый этап.", language="ru")
+        self.assertNotIn(" :", result, f"Пробел перед двоеточием должен быть удалён: {result!r}")
+        self.assertIn(": ", result, f"Ожидается пробел после двоеточия: {result!r}")
+
+    def test_time_format_unaffected_15_30(self):
+        """'встреча в 15:30' — colon between digits is NOT touched."""
+        result = self.fixer.fix("встреча в 15:30 сегодня.", language="ru")
+        self.assertIn("15:30", result, f"Формат времени 15:30 не должен изменяться: {result!r}")
+
+    def test_time_format_unaffected_09_00(self):
+        """'в 09:00 утра' — colon between digits is NOT touched."""
+        result = self.fixer.fix("в 09:00 утра.", language="ru")
+        self.assertIn("09:00", result, f"Формат времени 09:00 не должен изменяться: {result!r}")
+
+    def test_canonical_ru_no_regression(self):
+        """Standard Russian punctuation (comma, semicolon, exclamation, question) still works."""
+        # comma
+        r = self.fixer.fix("раз,два.", language="ru")
+        self.assertIn(", ", r)
+        # semicolon
+        r2 = self.fixer.fix("первое;второе.", language="ru")
+        self.assertIn("; ", r2)
+        # exclamation
+        r3 = self.fixer.fix("отлично!хорошо.", language="ru")
+        self.assertIn("! ", r3)
+        # question
+        r4 = self.fixer.fix("как дела?хорошо.", language="ru")
+        self.assertIn("? ", r4)
+
+    def test_canonical_es_no_regression(self):
+        """Spanish punctuation still works after the colon fix."""
+        result = self.fixer.fix("cómo estás?", language="es")
+        self.assertTrue(result.lstrip().startswith("¿"))
+        result2 = self.fixer.fix("qué bueno!", language="es")
+        self.assertTrue(result2.lstrip().startswith("¡"))
+
+    def test_canonical_en_no_regression(self):
+        """Default (non-ru/es) language does not break after the colon fix."""
+        result = self.fixer.fix("hello world")
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_colon_already_correct_not_double_spaced(self):
+        """'план: первый' is already correct — no extra space inserted."""
+        result = self.fixer.fix("план: первый этап.", language="ru")
+        self.assertNotIn(":  ", result, f"Не должно быть двойного пробела после двоеточия: {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

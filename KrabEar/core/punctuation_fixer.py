@@ -16,7 +16,8 @@ logger = logging.getLogger("KrabEar.PunctuationFixer")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 
 # Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
-_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
+# Двоеточие включено — но \d в классе исключений защищает временные форматы (15:30)
+_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,:;!?»])([^\s\d»\"')\]])")
 _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
 
 # Множественные пробелы
