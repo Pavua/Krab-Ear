@@ -6,6 +6,7 @@ QualityTrendAnalyzer — вычисляет дневные агрегаты conf
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -142,9 +143,13 @@ class QualityTrendAnalyzer:
         if val is None:
             return None
         try:
-            return float(val)
+            result = float(val)
         except (TypeError, ValueError):
             return None
+        # Guard against NaN/Inf which would corrupt daily avg and produce invalid JSON
+        if not math.isfinite(result):
+            return None
+        return result
 
     @staticmethod
     def _get_ts(item: Any) -> datetime | None:
@@ -198,11 +203,18 @@ class QualityTrendAnalyzer:
         return numerator / denominator
 
     def _build_distribution(self, confidences: list[float]) -> dict:
-        """Строит гистограмму по предопределённым бакетам."""
+        """Строит гистограмму по предопределённым бакетам.
+
+        Значения за пределами [0.0, 1.0] (конечные, но OOB) зажимаются к границам,
+        чтобы не потерять их из счётчика — они попадают в крайний бакет.
+        NaN/Inf уже отфильтрованы в _get_confidence и сюда не доходят.
+        """
         dist: dict[str, int] = {label: 0 for label, _, _ in self._BUCKETS}
         for c in confidences:
+            # Зажимаем OOB-значения к [0.0, 1.0] перед поиском бакета
+            c_clamped = max(0.0, min(1.0, c))
             for label, lo, hi in self._BUCKETS:
-                if lo <= c <= hi:
+                if lo <= c_clamped <= hi:
                     dist[label] += 1
                     break
         return dist
