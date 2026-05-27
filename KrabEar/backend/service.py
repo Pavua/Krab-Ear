@@ -125,6 +125,7 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
+from backend.text_processing_service import TextProcessingService
 
 import argparse
 from datetime import datetime, timedelta
@@ -1243,6 +1244,10 @@ class BackendService:
             "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
             "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            # --- CalendarLinker — auto-link transcriptions to Calendar.app events (W942 MEDIUM-1) ---
+            "link_to_calendar_event": self._handle_link_to_calendar_event,  # явно связать запись с текущим событием Calendar
+            "get_calendar_link": self._handle_get_calendar_link_v2,  # получить привязанное событие Calendar для записи
+            "search_by_calendar_event": self._handle_search_by_calendar_event_v2,  # поиск записей по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -3277,6 +3282,133 @@ end tell'''
             return {"ok": False, "error": "osascript timeout"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    # ── CalendarLinker IPC handlers (W942 MEDIUM-1) ─────────────────────────
+
+    def _handle_link_to_calendar_event(self, params: dict) -> dict:
+        """Явно связывает запись истории с активным событием Calendar.app.
+
+        params:
+          history_item_id: str (required) — id записи в истории
+          at_time: str | None (optional) — ISO 8601 момент записи; по умолчанию now()
+
+        Returns:
+          {"ok": bool, "calendar_event": dict | None, "skipped": bool, "reason": str | None}
+
+        Поведение:
+        - Если calendar_link_enabled=False → skipped=True, reason="disabled".
+        - Если privacy_mode_enabled=True → skipped=True, reason="privacy_mode".
+        - TCC denial / timeout → soft-fail (ok=True, calendar_event=None, reason="tcc_denied"|"timeout").
+        - Если событие найдено — сохраняет в StateStore и возвращает его.
+        """
+        item_id = str(params.get("history_item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "error": "history_item_id is required"}
+
+        # Privacy mode guard — calendar event titles are sensitive
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            logger.debug(
+                "link_to_calendar_event: пропуск — privacy_mode включён",
+                extra={"item_id": item_id},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": True, "reason": "privacy_mode"}
+
+        # Feature flag guard
+        if not self._get_runtime_setting("calendar_link_enabled", False):
+            logger.debug(
+                "link_to_calendar_event: пропуск — calendar_link_enabled=False",
+                extra={"item_id": item_id},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": True, "reason": "disabled"}
+
+        # Parse optional at_time
+        at_time = None
+        at_time_raw = params.get("at_time")
+        if at_time_raw:
+            try:
+                from datetime import datetime as _dt
+                at_time = _dt.fromisoformat(str(at_time_raw))
+            except (ValueError, TypeError):
+                pass  # fall through to now()
+
+        # Query Calendar — CalendarLinker already does all error-handling internally
+        try:
+            event = self._calendar_linker.find_active_event(at_time=at_time)
+        except Exception as exc:
+            logger.warning(
+                "link_to_calendar_event: неожиданная ошибка CalendarLinker",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            return {"ok": True, "calendar_event": None, "skipped": False, "reason": "error"}
+
+        if event is None:
+            return {"ok": True, "calendar_event": None, "skipped": False, "reason": "no_active_event"}
+
+        # Persist the link — best-effort; StateStore validates item_id exists
+        try:
+            saved = self.store.update_history_item_calendar(item_id, event)
+        except Exception as exc:
+            logger.warning(
+                "link_to_calendar_event: ошибка сохранения в StateStore",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            saved = False
+
+        logger.info(
+            "link_to_calendar_event: %s → «%s»",
+            item_id,
+            event.get("title"),
+            extra={"item_id": item_id, "event_title": event.get("title"), "saved": saved},
+        )
+        return {"ok": True, "calendar_event": event, "skipped": False, "reason": None}
+
+    def _handle_get_calendar_link_v2(self, params: dict) -> dict:
+        """Возвращает сохранённое событие Calendar для записи или None.
+
+        params:
+          history_item_id: str (required)
+
+        Returns:
+          {"ok": bool, "calendar_event": dict | None}
+
+        Note: метод назван _v2 чтобы не конфликтовать с _handle_get_calendar_link,
+        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "get_calendar_link".
+        """
+        item_id = str(params.get("history_item_id", "")).strip()
+        if not item_id:
+            return {"ok": False, "error": "history_item_id is required"}
+        try:
+            event = self.store.get_history_item_calendar(item_id)
+        except Exception as exc:
+            logger.warning(
+                "get_calendar_link: ошибка StateStore",
+                extra={"item_id": item_id, "error": str(exc)},
+            )
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "calendar_event": event}
+
+    def _handle_search_by_calendar_event_v2(self, params: dict) -> dict:
+        """Ищет записи, связанные с событием Calendar по подстроке в названии.
+
+        params:
+          event_title: str (required, пустая строка = все)
+
+        Returns:
+          {"ok": bool, "results": [{"item_id": str, "calendar_event": dict}, ...]}
+
+        Note: метод назван _v2 чтобы не конфликтовать с _handle_search_by_calendar_event,
+        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "search_by_calendar_event".
+        """
+        event_title = str(params.get("event_title", ""))
+        try:
+            results = self.store.search_by_calendar_event(event_title)
+        except Exception as exc:
+            logger.warning(
+                "search_by_calendar_event: ошибка StateStore",
+                extra={"event_title": event_title, "error": str(exc)},
+            )
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "results": results}
 
     # ── iMessage integration (Phase D.4) ────────────────────────────────────
 
