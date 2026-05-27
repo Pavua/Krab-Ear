@@ -374,6 +374,15 @@ class AudioEngine:
         self._whisperx_load_error: str | None = None
         self._whisperx_load_lock: threading.RLock = threading.RLock()
 
+        # Voxtral Mini 4B Realtime adapter state (lazy-loaded mistral-inference pipeline).
+        # Если mistral-inference не установлен или модель не грузится — адаптер навсегда
+        # отключается через _voxtral_load_error, whisper chain продолжает жить.
+        # RLock сериализует concurrent lazy-init — двойная проверка предотвращает
+        # двойную загрузку модели (~2-3 GB) при одновременных IPC-запросах (W1472 F1 HIGH).
+        self._voxtral_model = None  # type: ignore[var-annotated]
+        self._voxtral_load_error: str | None = None
+        self._voxtral_load_lock: threading.RLock = threading.RLock()
+
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
         self._last_llm_diff = None
@@ -2558,8 +2567,14 @@ class AudioEngine:
     # При VOXTRAL_REASONING_ENABLED=True возвращает reasoning: str (summary/Q&A).
 
     def _load_voxtral_model(self) -> Any:
-        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен."""
-        # Совместимость с тестами через AudioEngine.__new__() (без __init__).
+        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен.
+
+        Использует double-checked locking через _voxtral_load_lock (threading.RLock)
+        для предотвращения двойной загрузки (~2-3 GB) при конкурентных IPC-вызовах
+        (W1472 F1 HIGH). Паттерн аналогичен SenseVoice/Parakeet/WhisperX (W1235).
+        getattr-обёртка сохраняет совместимость с тестами через AudioEngine.__new__().
+        """
+        # Fast-path без блокировки — если модель уже загружена.
         if getattr(self, "_voxtral_model", None) is not None:
             return self._voxtral_model
         if getattr(self, "_voxtral_load_error", None):
@@ -2571,25 +2586,32 @@ class AudioEngine:
             )
             raise RuntimeError(self._voxtral_load_error)
 
-        # W1219 F3: validate repo ID against allowlist before download.
-        _voxtral_repo = settings.VOXTRAL_MODEL
-        if _voxtral_repo not in _VOXTRAL_REPO_ALLOWLIST:
-            self._voxtral_load_error = (
-                f"Voxtral: неизвестный repo_id '{_voxtral_repo}' — "
-                f"допустимы только: {sorted(_VOXTRAL_REPO_ALLOWLIST)}"
-            )
-            raise RuntimeError(self._voxtral_load_error)
-
-        with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
-            try:
-                from huggingface_hub import snapshot_download  # type: ignore
-                model_path = snapshot_download(repo_id=_voxtral_repo)
-                tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
-                model = _VoxtralTransformer.from_folder(model_path)
-                self._voxtral_model = (model, tokenizer)
-            except Exception as exc:
-                self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
+        with getattr(self, "_voxtral_load_lock", threading.RLock()):
+            # Re-check после получения блокировки (double-checked locking).
+            if getattr(self, "_voxtral_model", None) is not None:
+                return self._voxtral_model
+            if getattr(self, "_voxtral_load_error", None):
                 raise RuntimeError(self._voxtral_load_error)
+
+            # W1219 F3: validate repo ID against allowlist before download.
+            _voxtral_repo = settings.VOXTRAL_MODEL
+            if _voxtral_repo not in _VOXTRAL_REPO_ALLOWLIST:
+                self._voxtral_load_error = (
+                    f"Voxtral: неизвестный repo_id '{_voxtral_repo}' — "
+                    f"допустимы только: {sorted(_VOXTRAL_REPO_ALLOWLIST)}"
+                )
+                raise RuntimeError(self._voxtral_load_error)
+
+            with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
+                try:
+                    from huggingface_hub import snapshot_download  # type: ignore
+                    model_path = snapshot_download(repo_id=_voxtral_repo)
+                    tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
+                    model = _VoxtralTransformer.from_folder(model_path)
+                    self._voxtral_model = (model, tokenizer)
+                except Exception as exc:
+                    self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
+                    raise RuntimeError(self._voxtral_load_error)
 
         logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
         return self._voxtral_model
