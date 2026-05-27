@@ -26,6 +26,12 @@ _SILENCE_FRAME_SIZE = 1024      # семплов в одном фрейме пр
 # Порог тишины импортирован из core.silence_detector (SILENCE_THRESHOLD_AMP = 0.01,
 # соответствует -40 дБ). Ранее было захардкожено 0.001 (~-60 дБ) — исправлено в W885/F8.
 _SILENCE_RMS_THRESHOLD = SILENCE_THRESHOLD_AMP
+# W1510: порог noise floor для оценки SNR — концептуально отдельная константа от
+# _SILENCE_RMS_THRESHOLD. После W1477 _SILENCE_RMS_THRESHOLD сменился с 0.001 → 0.01,
+# что сломало SNR-оценку для типичных mic-амплитуд 0.02–0.14 (W1503 R1 HIGH regression):
+# выражение `_SILENCE_RMS_THRESHOLD * 10` давало 0.1, помечая ВСЕ фреймы чистого сигнала
+# как «noise floor» → SNR=0 dB → score="poor". Декаплинг устраняет coupling двух порогов.
+_SNR_NOISE_FLOOR_THRESHOLD = 0.01  # амплитуда ниже которой фреймы считаются noise floor в SNR-оценке
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 
@@ -191,8 +197,11 @@ class AudioQualityAnalyzer:
         if signal_rms < 1e-10:
             return 0.0
 
-        # Если есть тихие фреймы — берём их как noise floor
-        quiet_mask = frame_rms < _SILENCE_RMS_THRESHOLD * 10
+        # Если есть тихие фреймы — берём их как noise floor.
+        # W1510: используем _SNR_NOISE_FLOOR_THRESHOLD вместо _SILENCE_RMS_THRESHOLD * 10,
+        # чтобы decoupled константы — после W1477 (silence threshold 0.001→0.01) множитель
+        # давал 0.1, что помечало ALL фреймы чистого сигнала 0.02–0.14 как noise floor.
+        quiet_mask = frame_rms < _SNR_NOISE_FLOOR_THRESHOLD
         if np.sum(quiet_mask) >= 2:
             noise_rms = float(np.mean(frame_rms[quiet_mask]))
             if noise_rms < 1e-10:
