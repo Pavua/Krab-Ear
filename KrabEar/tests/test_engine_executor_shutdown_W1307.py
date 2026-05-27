@@ -1,13 +1,20 @@
-"""Tests for W1303 F4 MED fix — non-blocking ThreadPoolExecutor shutdown.
+"""Tests for W1307/W1472 F2 HIGH fix — non-blocking ThreadPoolExecutor shutdown.
 
 Verifies that when the STT transcription worker times out or raises, the
 executor is shut down with wait=False (non-blocking), not wait=True which
 would stall the fallback chain for up to TRANSCRIBE_TIMEOUT_SEC seconds on
 a GPU-stuck thread.
 
-Two suites:
-  - ExecutorShutdownNoWaitOnTimeoutTest   — shutdown(wait=False, cancel_futures=True) on timeout
-  - ExecutorNormalCompletionUnaffectedTest — normal path still returns result, no cancel_futures
+W1472 F2 correction:
+  - Replaced _transcribe_with_fallback_chain (non-existent) with the correct
+    method name _transcribe_with_fallback_impl throughout.
+  - Added test_adapter_dispatch_executor_non_blocking_shutdown and
+    test_engine_executor_method_name_correct (regression guard).
+
+Three suites:
+  - ExecutorShutdownNoWaitOnTimeoutTest   — shutdown(wait=False) on timeout
+  - ExecutorNormalCompletionUnaffectedTest — normal path still returns result
+  - AdapterDispatchExecutorNonBlockingTest — adapter dispatch branch (W1472 F2)
 """
 from __future__ import annotations
 
@@ -114,8 +121,8 @@ class ExecutorShutdownNoWaitOnTimeoutTest(unittest.TestCase):
             "Expected at least one shutdown(cancel_futures=True) call on timeout",
         )
 
-    def _run_fallback_chain_timeout_balanced(self):
-        """Drive _transcribe_with_fallback_chain (balanced profile) with timeout mock."""
+    def _run_fallback_impl_timeout_balanced(self):
+        """Drive _transcribe_with_fallback_impl (balanced profile) with timeout mock."""
         engine = _make_engine()
         # Force balanced profile so the chain only tries the balanced model then stops
         engine.quality_profile = "balanced"
@@ -144,15 +151,15 @@ class ExecutorShutdownNoWaitOnTimeoutTest(unittest.TestCase):
             mock_cfg.TRANSCRIBE_LANGUAGE = "ru"
 
             try:
-                engine._transcribe_with_fallback_chain(b"\x00" * 320, "prompt", "ru")
+                engine._transcribe_with_fallback_impl(b"\x00" * 320, "prompt", "ru")
             except Exception:
                 pass
 
         return mock_executor
 
-    def test_fallback_chain_shutdown_no_wait_on_timeout(self):
-        """_transcribe_with_fallback_chain: shutdown(wait=False) on TimeoutError."""
-        mock_executor = self._run_fallback_chain_timeout_balanced()
+    def test_fallback_impl_shutdown_no_wait_on_timeout(self):
+        """_transcribe_with_fallback_impl: shutdown(wait=False) on TimeoutError."""
+        mock_executor = self._run_fallback_impl_timeout_balanced()
         # The executor must have been constructed and then shut down non-blocking
         if mock_executor.shutdown.called:
             for c in mock_executor.shutdown.call_args_list:
@@ -222,8 +229,8 @@ class ExecutorNormalCompletionUnaffectedTest(unittest.TestCase):
             f"Unexpected cancel_futures=True on multipass success: {cancel_calls}",
         )
 
-    def _run_fallback_chain_success(self):
-        """Drive _transcribe_with_fallback_chain with a successful balanced model."""
+    def _run_fallback_impl_success(self):
+        """Drive _transcribe_with_fallback_impl with a successful balanced model."""
         engine = _make_engine()
         engine.quality_profile = "balanced"
 
@@ -252,15 +259,15 @@ class ExecutorNormalCompletionUnaffectedTest(unittest.TestCase):
             mock_cfg.TRANSCRIBE_LANGUAGE = "ru"
 
             try:
-                result = engine._transcribe_with_fallback_chain(b"\x00" * 320, "prompt", "ru")
+                result = engine._transcribe_with_fallback_impl(b"\x00" * 320, "prompt", "ru")
             except Exception:
                 result = None
 
         return mock_executor, result
 
-    def test_fallback_chain_no_cancel_futures_on_success(self):
-        """_transcribe_with_fallback_chain: no cancel_futures=True on success."""
-        mock_executor, _ = self._run_fallback_chain_success()
+    def test_fallback_impl_no_cancel_futures_on_success(self):
+        """_transcribe_with_fallback_impl: no cancel_futures=True on success."""
+        mock_executor, _ = self._run_fallback_impl_success()
         if mock_executor.shutdown.called:
             cancel_calls = [
                 c for c in mock_executor.shutdown.call_args_list
@@ -270,6 +277,94 @@ class ExecutorNormalCompletionUnaffectedTest(unittest.TestCase):
                 len(cancel_calls), 0,
                 f"Unexpected cancel_futures=True on success: {cancel_calls}",
             )
+
+
+# ---------------------------------------------------------------------------
+# Suite 3: adapter dispatch branch — W1472 F2 regression guards
+# ---------------------------------------------------------------------------
+
+class AdapterDispatchExecutorNonBlockingTest(unittest.TestCase):
+    """
+    W1472 F2 HIGH: The adapter dispatch branch in _transcribe_with_fallback_impl
+    previously used ``with ThreadPoolExecutor(...) as _pool:`` whose __exit__
+    calls shutdown(wait=True), blocking the fallback chain when an adapter is stuck.
+
+    After the fix, the adapter branch must use explicit _pool.shutdown(wait=False).
+    """
+
+    def test_engine_executor_method_name_correct(self):
+        """
+        AudioEngine must expose _transcribe_with_fallback_impl (not *_chain).
+
+        Regression guard: if this method is renamed again, this test fails
+        immediately and prevents vacuous passes in the executor tests above.
+        """
+        from core.engine import AudioEngine
+
+        self.assertTrue(
+            hasattr(AudioEngine, "_transcribe_with_fallback_impl"),
+            "AudioEngine._transcribe_with_fallback_impl not found — method was "
+            "renamed or removed; update W1307/W1478 tests accordingly.",
+        )
+        self.assertFalse(
+            hasattr(AudioEngine, "_transcribe_with_fallback_chain"),
+            "AudioEngine._transcribe_with_fallback_chain must NOT exist — "
+            "this was the ghost name that caused W1472 F2.  If re-added, "
+            "update all executor tests.",
+        )
+
+    def test_adapter_dispatch_executor_non_blocking_shutdown(self):
+        """
+        Source-level check: the adapter dispatch block inside
+        _transcribe_with_fallback_impl must NOT use the ``with ThreadPoolExecutor``
+        context-manager form (which blocks on __exit__), and MUST have an explicit
+        shutdown(wait=False) path.
+        """
+        from core.engine import AudioEngine
+        import inspect
+
+        source = inspect.getsource(AudioEngine._transcribe_with_fallback_impl)
+
+        # 1. Confirm non-blocking shutdown is present
+        self.assertIn(
+            "shutdown(wait=False)",
+            source,
+            "shutdown(wait=False) must be present in _transcribe_with_fallback_impl "
+            "— blocking shutdown was not fixed (W1472 F2 regression).",
+        )
+
+        # 2. Confirm the context-manager form is gone
+        self.assertNotIn(
+            "with concurrent.futures.ThreadPoolExecutor",
+            source,
+            "Found 'with concurrent.futures.ThreadPoolExecutor' in "
+            "_transcribe_with_fallback_impl — the adapter dispatch branch must use "
+            "explicit executor + finally: _pool.shutdown(wait=False), not the "
+            "context-manager form that calls shutdown(wait=True) on __exit__.",
+        )
+
+    def test_adapter_dispatch_has_finally_for_shutdown(self):
+        """
+        The adapter dispatch block must have a 'finally:' clause so that
+        _pool.shutdown(wait=False) is guaranteed on both success and timeout paths.
+        """
+        from core.engine import AudioEngine
+        import inspect
+
+        source = inspect.getsource(AudioEngine._transcribe_with_fallback_impl)
+
+        self.assertIn(
+            "finally:",
+            source,
+            "_transcribe_with_fallback_impl must contain a 'finally:' clause "
+            "to ensure executor shutdown regardless of timeout or success.",
+        )
+        self.assertIn(
+            "_pool.shutdown(wait=False)",
+            source,
+            "_pool.shutdown(wait=False) must be in a 'finally:' clause of the "
+            "adapter dispatch block in _transcribe_with_fallback_impl.",
+        )
 
 
 if __name__ == "__main__":
