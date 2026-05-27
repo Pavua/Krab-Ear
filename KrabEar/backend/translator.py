@@ -854,12 +854,15 @@ class Translator:
         «AI» не заменяет часть «PAIN», «el» — часть «elecciones».
         re.IGNORECASE обеспечивает регистронезависимое сопоставление.
         re.escape защищает от специальных символов в термине (напр. «C++»).
+
+        Lambda-обёртка над target предотвращает интерпретацию обратных слешей
+        в значении глоссария (напр. «C:\\Users» или «\\1ref» вызывали re.error).
         """
         result = text
         for source, target in glossary.items():
             result = re.sub(
                 r"\b" + re.escape(source) + r"\b",
-                target,
+                lambda _m, _t=target: _t,
                 result,
                 flags=re.IGNORECASE,
             )
