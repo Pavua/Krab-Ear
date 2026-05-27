@@ -737,5 +737,187 @@ class NearDuplicateThresholdTestCase(unittest.TestCase):
         self.assertIn(result.action_taken, ("skipped", "merged"))
 
 
+class W1412SettingsProviderTestCase(unittest.TestCase):
+    """W1406 N1 CRIT + N2 HIGH — regression tests для W1412 fix."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = _make_store(Path(self.tmp.name))
+
+    # ------------------------------------------------------------------
+    # test_auto_deduplicator_constructed_with_settings_provider
+    # ------------------------------------------------------------------
+    def test_auto_deduplicator_constructed_with_settings_provider(self) -> None:
+        """AutoDeduplicator принимает settings_provider kwarg и хранит его (W1406 N1)."""
+        called_keys: list[str] = []
+
+        def fake_provider(key: str, default: object = None) -> object:
+            called_keys.append(key)
+            return default
+
+        dedup = AutoDeduplicator(settings_provider=fake_provider)
+        # Поставщик должен быть сохранён
+        self.assertIs(dedup._settings_provider, fake_provider)
+
+    def test_auto_deduplicator_no_provider_still_works(self) -> None:
+        """AutoDeduplicator без settings_provider не падает (обратная совместимость)."""
+        dedup = AutoDeduplicator()
+        result = dedup.check_duplicate(
+            text="тест без провайдера",
+            timestamp=_now_iso(),
+            store=self.store,
+        )
+        self.assertIn(result.action_taken, ("kept", "skipped", "merged"))
+
+    # ------------------------------------------------------------------
+    # test_auto_dedup_skipped_when_privacy_mode_enabled
+    # ------------------------------------------------------------------
+    def test_auto_dedup_skipped_when_privacy_mode_enabled(self) -> None:
+        """check_duplicate пропускается когда privacy_mode=True (W1406 N1 CRIT).
+
+        Без этого теста W1248 privacy gate был постоянно обойдён — settings_provider
+        не инжектировался, поэтому _privacy_mode_enabled() всегда возвращал False.
+        """
+        # Добавляем запись в store чтобы было что сравнивать
+        text = "Конфиденциальная транскрипция приватного разговора"
+        self.store.add_history_item(text=text, paste_status="ok")
+
+        # Создаём dedup с privacy_mode=True
+        dedup = AutoDeduplicator(
+            settings_provider=lambda key, default=None: True if key == "privacy_mode" else default
+        )
+
+        result = dedup.check_duplicate(
+            text=text,  # идентичный текст — без privacy gate был бы дубликатом
+            timestamp=_now_iso(),
+            store=self.store,
+        )
+        # В режиме приватности дедупликация должна быть пропущена
+        self.assertFalse(result.is_duplicate, "Дедупликация не должна выполняться в режиме приватности")
+        self.assertEqual(result.action_taken, "kept")
+        self.assertEqual(result.similarity, 0.0)
+
+    def test_auto_dedup_not_skipped_when_privacy_mode_disabled(self) -> None:
+        """check_duplicate НЕ пропускается когда privacy_mode=False (нормальный режим)."""
+        text = "Обычная транскрипция без режима приватности"
+        self.store.add_history_item(text=text, paste_status="ok")
+
+        dedup = AutoDeduplicator(
+            settings_provider=lambda key, default=None: False if key == "privacy_mode" else default
+        )
+
+        result = dedup.check_duplicate(
+            text=text,
+            timestamp=_now_iso(),
+            store=self.store,
+        )
+        # Без privacy mode идентичный текст должен быть дубликатом
+        self.assertTrue(result.is_duplicate)
+
+    def test_privacy_mode_enabled_returns_false_without_provider(self) -> None:
+        """_privacy_mode_enabled() → False если settings_provider не задан."""
+        dedup = AutoDeduplicator()
+        self.assertFalse(dedup._privacy_mode_enabled())
+
+    def test_privacy_mode_enabled_returns_true_when_provider_says_so(self) -> None:
+        """_privacy_mode_enabled() → True если settings_provider возвращает True."""
+        dedup = AutoDeduplicator(settings_provider=lambda key, default=None: True)
+        self.assertTrue(dedup._privacy_mode_enabled())
+
+    def test_privacy_mode_enabled_handles_provider_exception(self) -> None:
+        """_privacy_mode_enabled() → False при исключении в settings_provider (не падает)."""
+        def broken_provider(key: str, default: object = None) -> object:
+            raise RuntimeError("settings broken")
+
+        dedup = AutoDeduplicator(settings_provider=broken_provider)
+        # Должен обработать исключение и вернуть False
+        self.assertFalse(dedup._privacy_mode_enabled())
+
+    # ------------------------------------------------------------------
+    # test_handle_run_deduplication_injects_semantic_searcher
+    # ------------------------------------------------------------------
+    def test_handle_run_deduplication_injects_semantic_searcher(self) -> None:
+        """_handle_run_deduplication инжектирует _semantic_searcher в params (W1406 N2 HIGH).
+
+        Проверяем через BackendService что params["_semantic_searcher"] присутствует
+        при вызове handle_run_deduplication.
+        """
+        store = StateStore(Path(self.tmp.name) / "svc_data")
+
+        recorder = MagicMock()
+        recorder.is_recording = False
+
+        from backend.service import BackendService
+        svc = BackendService(
+            store=store,
+            recorder=recorder,
+            transcriber=MagicMock(),
+            translator=MagicMock(),
+        )
+
+        # Патчим handle_run_deduplication чтобы перехватить params
+        captured_params: list[dict] = []
+        original_handler = svc._auto_deduplicator.handle_run_deduplication
+
+        def spy_handler(params: dict) -> dict:
+            captured_params.append(dict(params))
+            return original_handler(params)
+
+        svc._auto_deduplicator.handle_run_deduplication = spy_handler
+
+        resp = svc.handle_request(
+            {"id": "w1412-n2", "method": "run_deduplication", "params": {}}
+        )
+        self.assertTrue(resp.get("ok"), f"Expected ok=True, got: {resp}")
+
+        # Проверяем что semantic_searcher был инжектирован
+        self.assertTrue(
+            len(captured_params) > 0,
+            "handle_run_deduplication не был вызван"
+        )
+        self.assertIn(
+            "_semantic_searcher",
+            captured_params[0],
+            "W1406 N2: _semantic_searcher не был инжектирован в params"
+        )
+        # Инжектированный searcher должен быть тем же объектом что и в svc
+        self.assertIs(
+            captured_params[0]["_semantic_searcher"],
+            svc._semantic_searcher,
+            "Инжектированный semantic_searcher не совпадает с svc._semantic_searcher"
+        )
+
+    def test_service_auto_deduplicator_has_settings_provider(self) -> None:
+        """BackendService конструирует AutoDeduplicator с settings_provider (W1406 N1 CRIT).
+
+        Регрессионный тест — без этого фикса settings_provider=None и privacy gate
+        всегда обходился.
+        """
+        store = StateStore(Path(self.tmp.name) / "svc_data2")
+
+        recorder = MagicMock()
+        recorder.is_recording = False
+
+        from backend.service import BackendService
+        svc = BackendService(
+            store=store,
+            recorder=recorder,
+            transcriber=MagicMock(),
+            translator=MagicMock(),
+        )
+
+        self.assertIsNotNone(
+            svc._auto_deduplicator._settings_provider,
+            "W1406 N1 CRIT: AutoDeduplicator._settings_provider должен быть задан в BackendService"
+        )
+        # Должен быть именно _get_runtime_setting — сравниваем по __func__ (bound method)
+        self.assertIs(
+            svc._auto_deduplicator._settings_provider.__func__,
+            svc._get_runtime_setting.__func__,
+            "settings_provider должен ссылаться на метод _get_runtime_setting"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
