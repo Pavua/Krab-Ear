@@ -408,7 +408,10 @@ class BackendService:
             max_copies=AUTO_BACKUP_MAX_COPIES,
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
-        self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
+        self._export_scheduler = ExportScheduler(
+            data_dir=self.store.data_dir,
+            settings_provider=lambda: self._settings_svc.cached_settings(),
+        )
         # Note: _transcription_counter is now a property that proxies to
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
