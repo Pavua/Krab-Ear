@@ -86,3 +86,4 @@ docs/llm-bench-results-*.json
 # Bench driver scripts previously contained hardcoded LM Studio tokens
 # (fixed to env-read, but files may regress). Keep local only — not in repo.
 scripts/r*_bench.py
+worktrees/
