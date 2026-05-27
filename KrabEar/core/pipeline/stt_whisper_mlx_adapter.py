@@ -128,6 +128,14 @@ class WhisperMLXAdapter(STTAdapterBase):
             else:
                 raise last_err or RuntimeError("mlx_whisper.transcribe failed")
 
+            # W63 rule: free MLX metal buffer cache after inference to prevent
+            # RAM growth on long sessions (same fix as engine.py line 545/920).
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except Exception:  # noqa: BLE001
+                pass  # MLX not installed or older version without clear_cache
+
         text: str = result.get("text", "") or ""
         # Whisper result may include segments with per-segment confidence-ish values.
         # No direct confidence score in mlx_whisper output — leave as None.
