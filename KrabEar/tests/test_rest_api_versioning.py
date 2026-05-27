@@ -149,38 +149,75 @@ class TestV1PathBehaviour(unittest.TestCase):
 
 
 # ============================================================================
-# 2. /v2/* paths — currently unregistered
+# 2. /v2/* paths — catch-all returns 501 Not Implemented (W1357)
 # ============================================================================
 
 @unittest.skipIf(_SKIP, "REST server deps unavailable")
 class TestV2PathBehaviour(unittest.TestCase):
-    """v2 is declared in APIVersion but no /v2/* blueprint is registered yet.
+    """v2 is declared in APIVersion — the catch-all handler returns 501.
 
-    The server should return 404 (Flask default for unknown routes), NOT 500.
-    X-API-Version MAY be v2 or absent — we only assert no crash.
+    Per W1350 F3 MED fix (wave1357): clients hitting any /v2/* path receive
+    501 Not Implemented (not 404) because the version is listed in
+    SUPPORTED_VERSIONS.  The response must include an explanatory JSON body.
     """
 
     def setUp(self):
         self.client = _get_client()
 
-    # test_v2_path_returns_200_or_404
-    def test_v2_readiness_returns_404(self):
-        """GET /v2/readiness is unregistered — expect 404, not 500."""
-        resp = self.client.get("/v2/readiness")
+    def test_v2_route_returns_501_not_404(self):
+        """GET /v2/transcribe must return 501, not 404 (W1350 F3 MED)."""
+        resp = self.client.get("/v2/transcribe")
         self.assertEqual(
-            resp.status_code, 404,
-            f"/v2/readiness should 404 (no v2 blueprint registered), got {resp.status_code}",
+            resp.status_code, 501,
+            f"Expected 501 from /v2/transcribe (V2 catch-all), got {resp.status_code}",
         )
 
-    def test_v2_vocabulary_returns_404(self):
-        """GET /v2/vocabulary — no v2 blueprint — 404."""
-        resp = self.client.get("/v2/vocabulary")
-        self.assertEqual(resp.status_code, 404)
+    def test_v2_response_includes_explanation(self):
+        """POST /v2/stt/transcribe 501 response must include JSON explanation."""
+        resp = self.client.post("/v2/stt/transcribe")
+        self.assertEqual(resp.status_code, 501)
+        data = resp.get_json()
+        self.assertIsNotNone(data, "501 response must be JSON")
+        self.assertIn("error", data, "JSON body must contain 'error' key")
+        self.assertIn("V2", data["error"], "error message must mention 'V2'")
+        # Must include planned_routes list so clients know what to expect
+        self.assertIn("planned_routes", data, "JSON body must contain 'planned_routes'")
+        self.assertIsInstance(data["planned_routes"], list)
 
-    def test_v2_404_does_not_return_500(self):
-        """v2 unknown route must never return 500."""
+    def test_v1_routes_still_200(self):
+        """GET /v1/vocabulary must still return 200 after V2 catch-all added."""
+        resp = self.client.get("/v1/vocabulary")
+        self.assertEqual(
+            resp.status_code, 200,
+            f"V1 routes must not be affected by V2 catch-all, got {resp.status_code}",
+        )
+
+    # Legacy assertions updated for 501 behaviour
+    def test_v2_readiness_returns_501(self):
+        """GET /v2/readiness returns 501 (V2 declared but not implemented)."""
+        resp = self.client.get("/v2/readiness")
+        self.assertEqual(
+            resp.status_code, 501,
+            f"/v2/readiness should 501 via catch-all, got {resp.status_code}",
+        )
+
+    def test_v2_vocabulary_returns_501(self):
+        """GET /v2/vocabulary — V2 catch-all — 501."""
+        resp = self.client.get("/v2/vocabulary")
+        self.assertEqual(resp.status_code, 501)
+
+    def test_v2_501_does_not_return_500(self):
+        """v2 catch-all route must never return 500."""
         resp = self.client.get("/v2/anything")
         self.assertNotEqual(resp.status_code, 500)
+
+    def test_v2_use_instead_points_to_v1(self):
+        """501 response must include 'use_instead' field pointing to /v1/."""
+        resp = self.client.get("/v2/events")
+        data = resp.get_json()
+        self.assertIsNotNone(data)
+        self.assertIn("use_instead", data)
+        self.assertIn("v1", data["use_instead"])
 
 
 # ============================================================================

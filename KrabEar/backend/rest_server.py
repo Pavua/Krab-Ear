@@ -1034,6 +1034,44 @@ def events_stream():
 # path without duplicate-route errors from flask-smorest
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# V2 catch-all — APIVersion.V2 is listed in SUPPORTED_VERSIONS but no V2
+# routes are implemented yet.  Without this handler Flask returns 404, which
+# misleads clients into thinking "this path simply doesn't exist".  501 is
+# the correct HTTP status for "the server recognises the request but has not
+# implemented it".  (W1350 F3 MED fix — wave1357)
+# ---------------------------------------------------------------------------
+
+_V2_PLANNED_ROUTES = [
+    "GET  /v2/stt/transcribe",
+    "POST /v2/stt/transcribe",
+    "GET  /v2/vocabulary",
+    "POST /v2/vocabulary",
+    "GET  /v2/readiness",
+    "GET  /v2/events",
+]
+
+
+@app.route("/v2/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@app.route("/v2/<path:subpath>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+def v2_not_implemented(subpath):
+    """Catch-all for /v2/* — returns 501 Not Implemented.
+
+    V2 is declared in SUPPORTED_VERSIONS (api_versioning.py) but no V2 routes
+    have shipped yet.  Clients that hit any /v2/* path receive a clear 501
+    instead of a confusing 404, along with a list of planned V2 routes.
+    """
+    return jsonify({
+        "error": "V2 API not yet implemented",
+        "message": (
+            "APIVersion.V2 is declared as supported but no V2 routes have "
+            "been released.  Use /v1/* routes until V2 ships."
+        ),
+        "planned_routes": _V2_PLANNED_ROUTES,
+        "use_instead": "/v1/",
+    }), 501
+
+
 # Register blueprints
 api.register_blueprint(monitoring_blp)
 api.register_blueprint(v1_blp)
