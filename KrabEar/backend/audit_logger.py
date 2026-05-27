@@ -25,6 +25,7 @@ logger = logging.getLogger("KrabEar.Backend.AuditLogger")
 #   C — файловые пути (transcribe_paths, export_timeline_*, configure_obsidian_sync, …)
 #   D — персональные данные / calendar / messaging
 #   E — пресеты/импорт настроек (могут содержать credentials из файла)
+#   F — webhook и аутентификация (W1353 F2+F3 MED additions)
 _SENSITIVE_METHODS = frozenset({
     # --- A: настройки содержат credentials ---
     "set_settings",                      # voice_gateway_api_key, hf_token, api_keys, …
@@ -32,6 +33,7 @@ _SENSITIVE_METHODS = frozenset({
     "apply_profile_preset",              # применяет набор settings (credentials possible)
     "import_settings",                   # импортирует settings.json — может содержать секреты
     "restore_settings_backup",           # восстанавливает settings с credentials
+    "create_manual_settings_backup",     # бэкап содержит credentials
     "apply_config_preset",               # возвращает settings_patch с credentials
     "create_config_preset",              # сохраняет произвольный settings_patch
     # --- B: полный текст транскрипций ---
@@ -56,6 +58,7 @@ _SENSITIVE_METHODS = frozenset({
     "live_subs_ingest",                  # params: audio_b64 (base64 PCM chunks — большой объём)
     "semantic_search",                   # params: query (текст поиска)
     "check_hotwords",                    # params: text (транскрипция)
+    "set_translation_glossary_item",     # params: user glossary entry (personal vocabulary)
     # --- C: файловые пути ---
     "transcribe_paths",                  # params: paths (список файловых путей)
     "transcribe_paths_async",            # params: paths
@@ -80,8 +83,14 @@ _SENSITIVE_METHODS = frozenset({
     "create_calendar_event",             # params: title, start_time, end_time, notes
     "call_session_create",               # params: phone_number (phone PII)
     "call_session_add_transcript",       # params: text (call transcript)
-    # --- E: webhook URLs (могут содержать API-токены в URL) ---
+    # --- E/F: webhook URLs и аутентификация (могут содержать API-токены/secrets) ---
     "register_webhook",                  # params: url (может быть webhook secret URL)
+    "set_webhook_secret",                # params: secret (HMAC-secret для webhook)
+    "set_rest_auth_token",               # params: Bearer-токен
+    "enable_rest_auth",                  # активирует auth с токеном
+    "disable_rest_auth",                 # деактивирует auth
+    "set_signing_secret",                # params: HMAC-secret для IPC-подписи
+    "configure_request_signing",         # params: signing config с секретами
 })
 
 _KEEP_DAYS = 7
