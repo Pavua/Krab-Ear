@@ -1717,18 +1717,20 @@ class AudioEngine:
             else:
                 candidates = [self._SENSEVOICE_MARKER]
 
-        # --- WhisperX adapter: additive попытка ПОСЛЕ SenseVoice, перед max candidates ---
+        # --- WhisperX adapter: additive попытка ПОСЛЕ SenseVoice И Parakeet ---
         # Chain order (когда всё включено):
-        #   balanced → SenseVoice → WhisperX → max-candidates whisper-large-v3
-        # Маркер вставляется на позицию 2 (после balanced и SenseVoice marker если они есть).
+        #   balanced → Parakeet → SenseVoice → WhisperX → max-candidates whisper-large-v3
+        # Маркер вставляется ПОСЛЕ последнего из двух маркеров (PARAKEET_MARKER или
+        # SENSEVOICE_MARKER), что бы ни было включено. Если ни один не присутствует —
+        # позиция по умолчанию 1 (после balanced). W1303 F1 HIGH fix.
         # При сбое маркер помечается как недоступный, chain продолжается на whisper'ах.
         if settings.WHISPERX_ENABLED and self._WHISPERX_MARKER not in self._unavailable_models:
-            # Находим позицию вставки: сразу за последним adapter-маркером или после balanced.
+            # Находим позицию вставки: после последнего из PARAKEET / SENSEVOICE маркеров.
+            _wx_anchor_markers = {self._PARAKEET_MARKER, self._SENSEVOICE_MARKER}
             insert_pos = 1
             for i, c in enumerate(candidates):
-                if c == self._SENSEVOICE_MARKER:
+                if c in _wx_anchor_markers:
                     insert_pos = i + 1
-                    break
             candidates = candidates[:insert_pos] + [self._WHISPERX_MARKER] + candidates[insert_pos:]
 
         # --- Voxtral adapter: позиция 5 (после WhisperX, перед max-candidates) ---
