@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,16 +57,28 @@ class CollectionManager:
                 if isinstance(loaded, dict) and "collections" in loaded:
                     self._data = loaded
         except Exception as exc:
-            logger.warning("Не удалось загрузить коллекции: %s", exc)
+            logger.warning(
+                "Не удалось загрузить коллекции — начинаем с пустого состояния: %s",
+                exc,
+                exc_info=True,
+            )
 
     def _save(self) -> None:
-        """Сохраняет коллекции в файл."""
+        """Атомарно сохраняет коллекции в файл (tmp + fsync + rename).
+
+        Запись через временный файл рядом с целевым предотвращает повреждение
+        collections.json при сбое в середине записи.
+        """
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
-            self._collections_path.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            tmp = self._collections_path.with_suffix(
+                self._collections_path.suffix + ".tmp"
             )
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._data, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._collections_path)
         except Exception as exc:
             logger.error("Не удалось сохранить коллекции: %s", exc)
 

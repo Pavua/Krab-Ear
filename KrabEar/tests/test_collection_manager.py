@@ -311,5 +311,77 @@ class CollectionManagerIPCHandlersTestCase(unittest.TestCase):
         self.assertEqual(col["item_count"], 5)
 
 
+class CollectionManagerAtomicSaveTestCase(unittest.TestCase):
+    """Тесты атомарной записи _save() — W964 / W954 F1 MED.
+
+    Проверяем, что tmp-файл убирается после успешной записи и что повреждённый
+    основной файл не обнуляет данные уже загруженного менеджера.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = CollectionManager(store=self._store)
+
+    def test_atomic_save_no_partial_file(self) -> None:
+        """После успешного _save() временный .tmp файл не остаётся на диске."""
+        self._mgr.create_collection("АтомарнаяЗапись")
+        tmp_path = Path(self._tmpdir) / "collections.json.tmp"
+        # Временный файл должен исчезнуть после атомарного rename.
+        self.assertFalse(
+            tmp_path.exists(),
+            "Временный .tmp файл не должен оставаться после успешной записи",
+        )
+        # Финальный файл должен быть валидным JSON.
+        final_path = Path(self._tmpdir) / "collections.json"
+        self.assertTrue(final_path.exists())
+        data = json.loads(final_path.read_text(encoding="utf-8"))
+        self.assertIn("АтомарнаяЗапись", data["collections"])
+
+    def test_corrupt_file_does_not_affect_loaded_manager(self) -> None:
+        """Повреждение файла после загрузки не уничтожает данные в памяти."""
+        self._mgr.create_collection("ВПамяти")
+        # Портим файл напрямую — эмулируем обрыв другим процессом.
+        corrupt_path = Path(self._tmpdir) / "collections.json"
+        corrupt_path.write_text("{INVALID JSON", encoding="utf-8")
+        # Уже загруженный менеджер всё ещё знает о коллекции.
+        names = [c["name"] for c in self._mgr.list_collections()]
+        self.assertIn(
+            "ВПамяти",
+            names,
+            "In-memory state должен оставаться нетронутым при повреждении файла на диске",
+        )
+
+    def test_load_logs_warning_on_corrupt_file(self) -> None:
+        """_load() должен логировать warning с exc_info при повреждённом файле."""
+        import logging
+
+        corrupt_path = Path(self._tmpdir) / "collections.json"
+        corrupt_path.write_text("{BAD", encoding="utf-8")
+
+        with self.assertLogs("KrabEar.Backend.CollectionManager", level=logging.WARNING) as cm:
+            # Создаём новый менеджер — он вызовет _load() на повреждённый файл.
+            CollectionManager(store=self._store)
+
+        # Хотя бы одно сообщение должно упоминать проблему загрузки.
+        self.assertTrue(
+            any("загрузить" in msg or "Не удалось" in msg for msg in cm.output),
+            f"Ожидали warning о неудачной загрузке, получили: {cm.output}",
+        )
+
+    def test_save_followed_by_fresh_load_round_trips(self) -> None:
+        """Данные, записанные атомарно, корректно считываются новым экземпляром."""
+        self._mgr.create_collection("РаундТрип", "описание теста")
+        self._store.add_fake_item("rt_id", "текст")
+        self._mgr.add_to_collection("РаундТрип", "rt_id")
+
+        # Создаём свежий менеджер — загружает файл с диска.
+        mgr2 = CollectionManager(store=self._store)
+        names = [c["name"] for c in mgr2.list_collections()]
+        self.assertIn("РаундТрип", names)
+        col = next(c for c in mgr2.list_collections() if c["name"] == "РаундТрип")
+        self.assertEqual(col["item_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
