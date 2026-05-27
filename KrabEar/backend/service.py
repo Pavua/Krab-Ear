@@ -390,7 +390,9 @@ class BackendService:
             start_time=self._start_time,
         )
         self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
-        self._error_reporter = ErrorReporter()
+        self._error_reporter = ErrorReporter(
+            settings_provider=self._cached_settings,
+        )
         self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
         self._cost_estimator = CostEstimator()
         self._audio_converter = AudioConverter()

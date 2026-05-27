@@ -11,7 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.error_reporter import ErrorReporter, ErrorRecord, VALID_CATEGORIES  # noqa: E402
+from backend.error_reporter import (  # noqa: E402
+    ErrorReporter,
+    ErrorRecord,
+    VALID_CATEGORIES,
+    _MAX_MESSAGE_LEN,
+    _MAX_CONTEXT_BYTES,
+)
 
 
 class ErrorReporterBasicTestCase(unittest.TestCase):
@@ -404,19 +410,93 @@ class ErrorReporterWave97TestCase(unittest.TestCase):
         d = recent[0].to_dict()
         self.assertIsInstance(d["message"], str)
 
-    # test_record_with_traceback_truncation
+    # test_record_with_traceback_truncation — updated for W977 F5 truncation fix
     def test_record_with_traceback_truncation(self) -> None:
-        """ErrorReporter converts message to str — very long strings are accepted without crash."""
+        """W977 F5: long tracebacks in message are truncated to _MAX_MESSAGE_LEN chars."""
         reporter = ErrorReporter()
         # Simulate a traceback stored in message field (common pattern)
         long_traceback = "Traceback (most recent call last):\n" + ("  File 'x.py', line 1, in <module>\n" * 100) + "RuntimeError: boom"
+        self.assertGreater(len(long_traceback), _MAX_MESSAGE_LEN, "pre-condition: traceback must exceed cap")
         rec = reporter.report_error("stt", "RuntimeError", long_traceback, context={"traceback_len": len(long_traceback)})
         self.assertIsInstance(rec.message, str)
-        self.assertEqual(rec.message, long_traceback)
-        self.assertEqual(rec.context["traceback_len"], len(long_traceback))
+        # W977 F5: message must be truncated
+        self.assertLessEqual(len(rec.message), _MAX_MESSAGE_LEN + len("... [truncated]"))
+        self.assertTrue(rec.message.endswith("... [truncated]"), f"expected truncation suffix, got: {rec.message[-30]!r}")
         # Buffer still works normally after long message
         stats = reporter.get_error_stats()
         self.assertEqual(stats["total"], 1)
+
+
+class ErrorReporterW987PIITestCase(unittest.TestCase):
+    """W977 F2+F3+F5 hardening tests (Wave 987)."""
+
+    # test_report_error_truncates_long_message (F2 + F5)
+    def test_report_error_truncates_long_message(self) -> None:
+        """Message longer than _MAX_MESSAGE_LEN is truncated with suffix."""
+        reporter = ErrorReporter()
+        long_msg = "x" * (_MAX_MESSAGE_LEN + 500)
+        rec = reporter.report_error("stt", "E", long_msg)
+        expected_len = _MAX_MESSAGE_LEN + len("... [truncated]")
+        self.assertEqual(len(rec.message), expected_len)
+        self.assertTrue(rec.message.endswith("... [truncated]"))
+        self.assertEqual(rec.message[:_MAX_MESSAGE_LEN], "x" * _MAX_MESSAGE_LEN)
+
+    # test_report_error_truncates_large_context (F2)
+    def test_report_error_truncates_large_context(self) -> None:
+        """Context exceeding _MAX_CONTEXT_BYTES JSON is replaced with a tombstone dict."""
+        reporter = ErrorReporter()
+        # Build a context whose JSON > _MAX_CONTEXT_BYTES
+        big_context = {"data": "y" * (_MAX_CONTEXT_BYTES + 1000)}
+        serialized_size = len(__import__("json").dumps(big_context, ensure_ascii=False))
+        self.assertGreater(serialized_size, _MAX_CONTEXT_BYTES, "pre-condition")
+        rec = reporter.report_error("llm", "E", "msg", context=big_context)
+        # Tombstone must be returned, not the original data
+        self.assertIn("truncated", rec.context)
+        self.assertTrue(rec.context["truncated"])
+        self.assertIn("original_size_bytes", rec.context)
+        self.assertEqual(rec.context["original_size_bytes"], serialized_size)
+        self.assertNotIn("data", rec.context)
+
+    # test_report_error_redacts_in_privacy_mode (F2)
+    def test_report_error_redacts_in_privacy_mode(self) -> None:
+        """privacy_mode_enabled=True: message becomes <redacted> and context is cleared."""
+        privacy_settings = {"privacy_mode_enabled": True}
+        reporter = ErrorReporter(settings_provider=lambda: privacy_settings)
+        rec = reporter.report_error(
+            "ipc",
+            "ValueError",
+            "user said: my name is Pavel",
+            context={"transcript": "my name is Pavel", "device": "mic"},
+        )
+        self.assertEqual(rec.message, "<redacted: privacy_mode>")
+        self.assertEqual(rec.context, {})
+        # component + error_type still present (non-PII)
+        self.assertEqual(rec.component, "ipc")
+        self.assertEqual(rec.error_type, "ValueError")
+
+    # test_get_error_report_total_in_buffer_under_lock (F3)
+    def test_get_error_report_total_in_buffer_under_lock(self) -> None:
+        """handle_get_error_report: total_in_buffer is consistent with returned errors list."""
+        reporter = ErrorReporter(max_size=20)
+        for i in range(10):
+            reporter.report_error("audio", "IOError", f"err {i}")
+
+        result = reporter.handle_get_error_report({"limit": 5})
+        errors = result["errors"]
+        total = result["total_in_buffer"]
+
+        # total_in_buffer reflects the actual buffer snapshot (10 errors)
+        self.assertEqual(total, 10)
+        # limit is applied to the returned list
+        self.assertEqual(len(errors), 5)
+        # total_in_buffer >= len(errors) always (it is the full buffer, not the slice)
+        self.assertGreaterEqual(total, len(errors))
+
+        # Verify atomicity: total_in_buffer must equal the true buffer length
+        # (no TOCTOU gap — both read in the same lock)
+        with reporter._lock:
+            real_total = len(reporter._buffer)
+        self.assertEqual(total, real_total)
 
 
 if __name__ == "__main__":
