@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import threading
@@ -18,6 +19,7 @@ logger = logging.getLogger("KrabEar.Backend.ArchiveManager")
 
 _ARCHIVE_SUBDIR = "archive"
 _ARCHIVE_FILE = "archive.ndjson"
+_ARCHIVE_LOCK_FILE = "archive.ndjson.lock"
 
 
 @dataclass
@@ -34,6 +36,9 @@ class ArchiveManager:
 
     Архив хранится в {data_dir}/archive/archive.ndjson отдельно от активной
     истории. Удалённые из активной истории записи могут быть восстановлены.
+
+    Файловая блокировка через fcntl.flock на archive.ndjson.lock обеспечивает
+    безопасность при одновременном доступе нескольких процессов к одному data_dir.
     """
 
     def __init__(self, store: Any) -> None:
@@ -41,9 +46,36 @@ class ArchiveManager:
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
-        self._lock = threading.Lock()
+        self._lock_path = self._archive_dir / _ARCHIVE_LOCK_FILE
+        self._thread_lock = threading.Lock()
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._archive_path.touch(exist_ok=True)
+        self._lock_path.touch(exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Файловая блокировка (межпроцессная)
+    # ------------------------------------------------------------------
+
+    def _flock(self):
+        """Контекстный менеджер: POSIX flock на archive.ndjson.lock.
+
+        Паттерн из state_store.py: отдельный lock-файл, чтобы избежать
+        stat-race на самом data-файле. Блокировка удерживается на всё
+        время записи.
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            self._lock_path.touch(exist_ok=True)
+            with self._lock_path.open("r+", encoding="utf-8") as lf:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+        return _ctx()
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
@@ -67,23 +99,24 @@ class ArchiveManager:
             logger.warning("Не удалось прочитать архив: %s", exc)
         return items
 
-    @staticmethod
-    def _append_ndjson(path: Path, payload: dict[str, Any]) -> None:
-        """Атомарный append JSON-строки."""
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    def _append_ndjson(self, path: Path, payload: dict[str, Any]) -> None:
+        """Атомарный append JSON-строки с fcntl.flock."""
+        with self._flock():
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _rewrite_archive(self, items: list[dict[str, Any]]) -> None:
-        """Перезаписывает файл архива атомарно через tmp-файл."""
+        """Перезаписывает файл архива атомарно через tmp-файл с fcntl.flock."""
         tmp = self._archive_path.with_suffix(".ndjson.tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as fh:
-                for item in items:
-                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
-            tmp.replace(self._archive_path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        with self._flock():
+            try:
+                with tmp.open("w", encoding="utf-8") as fh:
+                    for item in items:
+                        fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+                tmp.replace(self._archive_path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -114,7 +147,7 @@ class ArchiveManager:
             )
 
         archived_count = 0
-        with self._lock:
+        with self._thread_lock:
             for item_id in item_ids:
                 clean_id = str(item_id).strip()
                 if not clean_id:
@@ -191,7 +224,7 @@ class ArchiveManager:
         # Записи, успешно восстановленные в активную историю (для отката архива).
         restored_ids: set[str] = set()
 
-        with self._lock:
+        with self._thread_lock:
             all_archived = self._read_archive()
             found_ids: set[str] = set()
             remaining: list[dict[str, Any]] = []
@@ -253,7 +286,7 @@ class ArchiveManager:
             Список словарей записей с полем archived_at.
         """
         safe_limit = max(1, min(limit, 500))
-        with self._lock:
+        with self._thread_lock:
             items = self._read_archive()
         # Сортируем по archived_at (новые первыми)
         items_sorted = sorted(
@@ -274,7 +307,7 @@ class ArchiveManager:
             - newest_ts: временная метка самой новой записи (ISO8601) или None
             - archive_path: путь к файлу архива
         """
-        with self._lock:
+        with self._thread_lock:
             items = self._read_archive()
 
         total = len(items)
