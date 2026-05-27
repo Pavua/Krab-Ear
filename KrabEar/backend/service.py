@@ -2288,10 +2288,20 @@ def main() -> None:
     service = build_service(data_dir)
     server = IPCServer(socket_path=socket_path, service=service)
 
+    # W981: Wire GracefulShutdownHandler so all 6 shutdown steps run on SIGTERM.
+    # Must happen AFTER service + server are both created so that _ipc_server
+    # is accessible via service._ipc_server during shutdown.
+    service._ipc_server = server
+    service._shutdown_handler.register(service)  # installs SIGTERM + SIGINT
+
     def _signal_handler(signum: int, frame: Any) -> None:
         logger.info("Получен сигнал %s, завершаем backend", signum)
+        # Delegate to GracefulShutdownHandler which runs all 6 shutdown steps:
+        # vocabulary save, audit log flush, usage stats, playback stats,
+        # history compaction, IPC socket close.
+        service._shutdown_handler.shutdown()
+        # Ensure IPC server loop exits so serve_forever() returns.
         server.stop()
-        service.close()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -2299,6 +2309,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        # Idempotent: shutdown() is no-op if already called via signal handler.
+        service._shutdown_handler.shutdown()
         service.close()
 
 
