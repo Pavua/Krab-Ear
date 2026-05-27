@@ -123,6 +123,7 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
+from backend.text_processing_service import TextProcessingService
 
 import argparse
 from datetime import datetime, timedelta
@@ -437,7 +438,9 @@ class BackendService:
         self._metadata_enricher = MetadataEnricher()
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
-        self._auto_deduplicator = AutoDeduplicator()
+        self._auto_deduplicator = AutoDeduplicator(
+            settings_provider=self._get_runtime_setting,
+        )
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
@@ -3586,6 +3589,8 @@ end tell'''
             dict: total_scanned, duplicate_groups, duplicates.
         """
         params["_store"] = self.store
+        # W1406 N2: inject semantic_searcher so stale-embedding cleanup loop can run
+        params["_semantic_searcher"] = self._semantic_searcher
         return self._auto_deduplicator.handle_run_deduplication(params)
 
     def _handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:

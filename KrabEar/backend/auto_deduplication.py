@@ -15,7 +15,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 from core.duplicate_detector import DuplicateDetector
 
@@ -44,9 +44,15 @@ class AutoDeduplicator:
     Потокобезопасен: все счётчики защищены RLock.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings_provider: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
         self._detector = DuplicateDetector()
         self._lock = threading.RLock()
+        # Поставщик runtime-настроек: _get_runtime_setting(key, default) из BackendService.
+        # Если не задан — проверка режима приватности пропускается (небезопасно, только для тестов).
+        self._settings_provider = settings_provider
 
         # Статистика работы дедупликатора
         self._total_checked: int = 0
@@ -81,6 +87,16 @@ class AutoDeduplicator:
         """
         text = (text or "").strip()
         if not text:
+            return DedupResult(
+                is_duplicate=False,
+                duplicate_of=None,
+                similarity=0.0,
+                action_taken="kept",
+            )
+
+        # W1248: пропускаем дедупликацию в режиме приватности — сравнение текстов запрещено.
+        if self._privacy_mode_enabled():
+            logger.debug("check_duplicate: пропущено — активен режим приватности")
             return DedupResult(
                 is_duplicate=False,
                 duplicate_of=None,
@@ -256,6 +272,24 @@ class AutoDeduplicator:
             self._total_checked = 0
             self._duplicates_found = 0
             self._chars_saved = 0
+
+    # ------------------------------------------------------------------
+    # Внутренние вспомогательные методы
+    # ------------------------------------------------------------------
+
+    def _privacy_mode_enabled(self) -> bool:
+        """Возвращает True если включён режим приватности (запрещено сравнивать тексты).
+
+        Использует settings_provider (инжектированный из BackendService) для чтения
+        runtime-настройки 'privacy_mode'. Без провайдера — всегда False (не блокирует).
+        """
+        if self._settings_provider is None:
+            return False
+        try:
+            return bool(self._settings_provider("privacy_mode", False))
+        except Exception:
+            logger.warning("_privacy_mode_enabled: ошибка чтения настройки, считаем False")
+            return False
 
     # ------------------------------------------------------------------
     # IPC handlers
