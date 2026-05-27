@@ -11,13 +11,41 @@ from dataclasses import dataclass, field
 
 # ── Словари по языкам ────────────────────────────────────────────────────────
 
+# Multi-word negative phrases per language checked via substring match BEFORE
+# tokenization.  Phrases containing spaces cannot be matched by the per-word
+# tokenizer, so they live in a separate set.  Each matched phrase contributes
+# +1 to the negative count (and the phrase itself is added to indicators).
+# Phrases must not also appear in _NEGATIVE_WORDS to avoid double-counting.
+_NEGATIVE_PHRASES: dict[str, list[str]] = {
+    "ru": [
+        "не нравится",
+        "не нравятся",
+        "не нравилось",
+        "не нравилась",
+        "не люблю",
+        "не хочу",
+        "не могу",
+    ],
+    "es": [
+        "no me gusta",
+        "no me gustan",
+        "no quiero",
+    ],
+    "en": [
+        "don't like",
+        "do not like",
+        "can't stand",
+        "cannot stand",
+    ],
+}
+
 _NEGATIVE_WORDS: dict[str, list[str]] = {
     "ru": [
         "плохо", "ужасно", "нет", "не", "нельзя", "никогда", "невозможно",
         "провал", "ошибка", "неудача", "плохой", "ужасный", "отстой",
         "катастрофа", "беда", "кошмар", "хуже", "худший", "жуть",
         "ненавижу", "надоело", "бесит", "раздражает", "злой", "злость",
-        "злюсь", "не нравится", "отвратительно", "скучно",
+        "злюсь", "отвратительно", "скучно",
     ],
     "es": [
         "mal", "malo", "terrible", "no", "nunca", "imposible", "error",
@@ -116,10 +144,21 @@ class EmotionDetector:
         question_count = text.count("?")
         caps_ratio = self._compute_caps_ratio(text)
 
+        # ── Фразовый поиск (многословные паттерны) ───────────────────────────
+        # Must run BEFORE tokenization because tokenizer splits on whitespace
+        # and multi-word phrases like "не нравится" are lost as separate tokens.
+        text_lower = text.lower()
+        phrase_hits = self._match_phrases(text_lower, _NEGATIVE_PHRASES, lang)
+
         # ── Словарный поиск ──────────────────────────────────────────────────
         tokens = self._tokenize(text)
         neg_hits = self._match_words(tokens, _NEGATIVE_WORDS, lang)
         pos_hits = self._match_words(tokens, _POSITIVE_WORDS, lang)
+
+        # Merge phrase hits into neg_hits (deduplication by value)
+        for phrase in phrase_hits:
+            if phrase not in neg_hits:
+                neg_hits.append(phrase)
 
         # ── Логика классификации ─────────────────────────────────────────────
         indicators: list[str] = []
@@ -209,6 +248,23 @@ class EmotionDetector:
         """Разбивает текст на токены (слова), приводит к нижнему регистру."""
         raw = _RE_WORD_TOKENS.findall(text)
         return [w.lower() for w in raw if len(w) >= cls.MIN_WORD_LEN]
+
+    @staticmethod
+    def _match_phrases(text_lower: str, phrase_dict: dict[str, list[str]], lang: str) -> list[str]:
+        """Ищет многословные фразы через substring-поиск в тексте нижнего регистра.
+
+        Возвращает список найденных фраз-индикаторов (без дубликатов).
+        Каждая фраза засчитывается не более одного раза, даже если встречается
+        несколько раз в тексте.
+        """
+        candidates = phrase_dict.get(lang, [])
+        hits: list[str] = []
+        seen: set[str] = set()
+        for phrase in candidates:
+            if phrase in text_lower and phrase not in seen:
+                hits.append(phrase)
+                seen.add(phrase)
+        return hits
 
     @staticmethod
     def _match_words(tokens: list[str], word_dict: dict[str, list[str]], lang: str) -> list[str]:
