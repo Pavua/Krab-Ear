@@ -8,6 +8,11 @@
 - Персистентность реестра в {data_dir}/webhooks.json.
 - Статистику доставки на webhook.
 - SSRF-защита: блокируются localhost, RFC1918, link-local и mDNS адреса.
+- Защита от redirect-SSRF (W1349 F1): allow_redirects=False — все 3xx трактуются
+  как ошибка, redirect не следуется. Злоумышленник не может зарегистрировать
+  https://attacker.com/redir → 302 → http://127.0.0.1/admin обход.
+- Ограничение тела ответа: не более _MAX_RESPONSE_BYTES байт.
+- Privacy-mode gate: fire_webhook пропускается при включённом privacy mode.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import json
 import logging
 import threading
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +39,7 @@ _WEBHOOKS_FILE = "webhooks.json"
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 1.0  # 1s → 2s → 4s
 _REQUEST_TIMEOUT_SEC = 10
+_MAX_RESPONSE_BYTES = 64 * 1024  # 64 KB cap on response body (F2 fix)
 
 # ---------------------------------------------------------------------------
 # SSRF guard
@@ -89,6 +96,30 @@ def _is_safe_webhook_url(url: str, allow_local: bool = False) -> tuple[bool, str
     return True, None
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """HTTPRedirectHandler, который блокирует ВСЕ 3xx редиректы (allow_redirects=False).
+
+    W1349 F1 fix (Option 1): urllib.request.urlopen по умолчанию следует 3xx-редиректам.
+    Этот handler перехватывает любой редирект и возбуждает HTTPError с кодом редиректа,
+    так что вызывающий код видит статус 3xx вместо выполнения редиректа.
+
+    Это эквивалент requests.post(..., allow_redirects=False) для urllib.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise HTTPError(
+            req.full_url,
+            code,
+            f"Redirect blocked (allow_redirects=False): {newurl!r}",
+            headers,
+            fp,
+        )
+
+
+# Keep old name as alias for backwards compatibility with existing tests
+_SafeRedirectHandler = _NoRedirectHandler
+
+
 class WebhookManager:
     """Менеджер webhook-уведомлений Krab Ear.
 
@@ -115,6 +146,8 @@ class WebhookManager:
         self._webhooks: dict[str, dict[str, Any]] = {}
         # Статистика in-memory: webhook_id → {deliveries, failures, last_status, last_ts}
         self._stats: dict[str, dict[str, Any]] = {}
+        # Privacy mode: если True — fire_webhook не отправляет события (F3 gate)
+        self._privacy_mode: bool = False
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -186,6 +219,8 @@ class WebhookManager:
             "secret": secret,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "enabled": True,
+            # Persist allow_local so fire_webhook can pass it to _deliver_with_retry
+            "allow_local": allow_local,
         }
         with self._lock:
             self._webhooks[webhook_id] = entry
@@ -233,12 +268,30 @@ class WebhookManager:
                 })
         return result
 
+    def set_privacy_mode(self, enabled: bool) -> None:
+        """Включает / выключает privacy mode.
+
+        Когда privacy mode активен, fire_webhook пропускает все доставки
+        (события не покидают устройство). F3 gate fix.
+        """
+        self._privacy_mode = enabled
+        logger.info("WebhookManager: privacy_mode=%s", enabled)
+
     def fire_webhook(self, event_type: str, data: dict[str, Any]) -> None:
         """Отправляет событие всем подходящим webhook-ам (неблокирующий POST).
 
         Фильтрация: если у webhook указан список events, отправляем только
         если event_type в этом списке. Пустой список = принимает все события.
+
+        Privacy gate (F3): если включён privacy mode — события не отправляются.
         """
+        # F3: privacy mode gate — не отправлять события при включённом privacy mode
+        if self._privacy_mode:
+            logger.debug(
+                "WebhookManager: fire_webhook(%s) пропущен (privacy mode активен)", event_type
+            )
+            return
+
         payload = {
             "type": event_type,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -258,6 +311,7 @@ class WebhookManager:
             t = threading.Thread(
                 target=self._deliver_with_retry,
                 args=(wid, cfg["url"], cfg.get("secret", ""), body, event_type),
+                kwargs={"allow_local": cfg.get("allow_local", False)},
                 daemon=True,
             )
             t.start()
@@ -323,12 +377,13 @@ class WebhookManager:
         secret: str,
         body: bytes,
         event_type: str,
+        allow_local: bool = False,
     ) -> None:
         """Делает POST с retry (экспоненциальный backoff, до 3 попыток)."""
         last_status: int | str | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                last_status = self._post_once(url=url, body=body, secret=secret)
+                last_status = self._post_once(url=url, body=body, secret=secret, allow_local=allow_local)
                 logger.debug(
                     "WebhookManager: %s → %s HTTP %s (попытка %d)",
                     event_type, url, last_status, attempt,
@@ -336,6 +391,16 @@ class WebhookManager:
                 # 2xx — успех
                 if isinstance(last_status, int) and 200 <= last_status < 300:
                     self._record_success(webhook_id, last_status)
+                    return
+                # 3xx — W1349 F1: redirect не следуется (allow_redirects=False).
+                # Логируем предупреждение и считаем доставку неудачной.
+                if isinstance(last_status, int) and 300 <= last_status < 400:
+                    logger.warning(
+                        "WebhookManager: %s вернул %s (3xx redirect не следуется, "
+                        "возможная SSRF-попытка через redirect — игнорируем)",
+                        url, last_status,
+                    )
+                    self._record_failure(webhook_id, last_status)
                     return
                 # 4xx — не ретраить (постоянная ошибка клиента)
                 if isinstance(last_status, int) and 400 <= last_status < 500:
@@ -357,8 +422,13 @@ class WebhookManager:
 
         self._record_failure(webhook_id, last_status)
 
-    def _post_once(self, url: str, body: bytes, secret: str) -> int:
+    def _post_once(self, url: str, body: bytes, secret: str, allow_local: bool = False) -> int:
         """Выполняет один HTTP POST. Возвращает HTTP status code.
+
+        W1349 F1 fix: использует _NoRedirectHandler (allow_redirects=False) — все 3xx
+        возвращаются как статус без следования редиректу, предотвращая SSRF через
+        redirect chain (attacker.com/redir → 302 → 127.0.0.1/admin).
+        F2 fix: читает не более _MAX_RESPONSE_BYTES байт из тела ответа.
 
         Raises:
             URLError / Exception при сетевой ошибке.
@@ -373,8 +443,14 @@ class WebhookManager:
             headers["X-KrabEar-Signature"] = f"sha256={sig}"
 
         req = Request(url, data=body, headers=headers, method="POST")
+        # W1349 F1: _NoRedirectHandler blocks ALL 3xx redirects (allow_redirects=False).
+        # HTTPError with the 3xx code is raised — caught below and returned as status.
+        redirect_handler = _NoRedirectHandler()
+        opener = urllib.request.build_opener(redirect_handler)
         try:
-            with urlopen(req, timeout=_REQUEST_TIMEOUT_SEC) as resp:
+            with opener.open(req, timeout=_REQUEST_TIMEOUT_SEC) as resp:
+                # F2: ограничиваем чтение тела ответа (64 KB)
+                resp.read(_MAX_RESPONSE_BYTES)
                 return resp.status
         except HTTPError as exc:
             return exc.code

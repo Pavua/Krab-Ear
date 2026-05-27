@@ -183,7 +183,7 @@ class WebhookManagerFilterTestCase(unittest.TestCase):
         _wid2 = self._mgr.register_webhook("https://two.com/hook", events=["stt.failed"])  # noqa: F841
         calls_log: list[str] = []
 
-        def capture(webhook_id, url, secret, body, event_type):
+        def capture(webhook_id, url, secret, body, event_type, allow_local=False):
             calls_log.append(url)
 
         with patch.object(self._mgr, "_deliver_with_retry", side_effect=capture):
@@ -203,18 +203,23 @@ class WebhookManagerHmacTestCase(unittest.TestCase):
 
     # 16 — заголовок X-KrabEar-Signature присутствует при наличии секрета
     def test_signature_header_present_with_secret(self) -> None:
+        import unittest.mock as mock_mod
         sent_headers: dict[str, str] = {}
 
         class FakeResponse:
             status = 200
             def __enter__(self): return self
             def __exit__(self, *a): pass
+            def read(self, n=-1): return b""
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             sent_headers.update(req.headers)
             return FakeResponse()
 
-        with patch("backend.webhook_manager.urlopen", side_effect=fake_urlopen):
+        fake_opener = mock_mod.MagicMock()
+        fake_opener.open.side_effect = fake_open
+
+        with patch("backend.webhook_manager.urllib.request.build_opener", return_value=fake_opener):
             self._mgr._post_once(
                 url="https://example.com/hook",
                 body=b'{"type":"stt.final"}',
@@ -234,18 +239,23 @@ class WebhookManagerHmacTestCase(unittest.TestCase):
 
     # 17 — без секрета заголовок подписи не добавляется
     def test_no_signature_header_without_secret(self) -> None:
+        import unittest.mock as mock_mod
         sent_headers: dict[str, str] = {}
 
         class FakeResponse:
             status = 200
             def __enter__(self): return self
             def __exit__(self, *a): pass
+            def read(self, n=-1): return b""
 
-        def fake_urlopen(req, timeout=None):
+        def fake_open(req, timeout=None):
             sent_headers.update(req.headers)
             return FakeResponse()
 
-        with patch("backend.webhook_manager.urlopen", side_effect=fake_urlopen):
+        fake_opener = mock_mod.MagicMock()
+        fake_opener.open.side_effect = fake_open
+
+        with patch("backend.webhook_manager.urllib.request.build_opener", return_value=fake_opener):
             self._mgr._post_once(
                 url="https://example.com/hook",
                 body=b'{"type":"stt.final"}',
@@ -267,7 +277,7 @@ class WebhookManagerRetryTestCase(unittest.TestCase):
     def test_retries_on_5xx(self) -> None:
         attempt_count = [0]
 
-        def failing_post(url, body, secret):
+        def failing_post(url, body, secret, allow_local=False):
             attempt_count[0] += 1
             return 503  # Service Unavailable
 
@@ -283,7 +293,7 @@ class WebhookManagerRetryTestCase(unittest.TestCase):
     def test_no_retry_on_4xx(self) -> None:
         attempt_count = [0]
 
-        def client_error_post(url, body, secret):
+        def client_error_post(url, body, secret, allow_local=False):
             attempt_count[0] += 1
             return 400  # Bad Request
 
@@ -299,7 +309,7 @@ class WebhookManagerRetryTestCase(unittest.TestCase):
     def test_success_on_first_attempt_no_retry(self) -> None:
         attempt_count = [0]
 
-        def success_post(url, body, secret):
+        def success_post(url, body, secret, allow_local=False):
             attempt_count[0] += 1
             return 200
 
@@ -616,18 +626,15 @@ class WebhookManagerURLValidationTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._mgr.register_webhook("data:text/plain,hello", events=[])
 
-    # NOTE: WebhookManager does NOT block localhost URLs by scheme check alone —
-    # the current implementation only validates http/https prefix. Tests 45-46
-    # document the current behavior (no SSRF localhost block at register time).
-    # A future hardening pass could add IP/hostname checks.
-    def test_localhost_http_currently_accepted(self) -> None:
-        """Документирует текущее поведение: localhost http:// принимается регистратором.
+    # NOTE: WebhookManager blocks localhost URLs via SSRF guard (Wave 157+).
+    # W1355 updated this test from "currently accepted" to correctly asserting ValueError.
+    def test_localhost_http_blocked_by_ssrf_guard(self) -> None:
+        """localhost http:// отклоняется SSRF guard при регистрации (Wave 157+ behaviour).
 
-        Если в будущем добавят SSRF guard, этот тест нужно обновить на assertRaises(ValueError).
+        Использовать allow_local=True для dev/self-hosted окружений.
         """
-        # Should NOT raise with current implementation (no hostname SSRF check)
-        wid = self._mgr.register_webhook("http://localhost:9999/hook", events=[])
-        self.assertIsNotNone(wid)
+        with self.assertRaises(ValueError):
+            self._mgr.register_webhook("http://localhost:9999/hook", events=[])
 
 
 if __name__ == "__main__":
