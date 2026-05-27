@@ -152,6 +152,7 @@ def build_dispatch_table(
         "report_reconnect": svc._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
         "list_recent_errors": svc._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
         "clear_recent_errors": svc._handle_clear_recent_errors,  # очистить ring-буфер ошибок
+        "clear_unavailable_models": svc._handle_clear_unavailable_models,  # W1475: сбросить TTL blacklist недоступных STT-моделей (ops manual reset)
         "handle_error_action": svc._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
         "probe_llm_http": svc._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
         "warmup_stt": svc._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)

@@ -1318,6 +1318,30 @@ class BackendService:
         n = self._error_bus.clear()
         return {"cleared": n}
 
+    def _handle_clear_unavailable_models(self, params: dict) -> dict:
+        """W1475: Сбрасывает blacklist недоступных STT-моделей немедленно (TTL override).
+
+        Полезно после ручного устранения ошибки (например, OOM, timeout) — позволяет
+        вернуть адаптеры в chain без перезапуска backend. Возвращает список сброшенных
+        model_id и их возраст в секундах на момент сброса.
+
+        W1472 F4 MED: реализует TTL-пробой вручную — ops can force-unblock after fix.
+        """
+        import time as _time
+        engine = getattr(self.transcriber, "engine", None)
+        if engine is None:
+            return {"cleared": [], "error": "engine_not_available"}
+        unavail = getattr(engine, "_unavailable_models", None)
+        if unavail is None:
+            return {"cleared": [], "error": "unavailable_models_not_found"}
+        now = _time.monotonic()
+        cleared = [
+            {"model_id": mid, "age_sec": round(now - ts, 1)}
+            for mid, ts in list(unavail.items())
+        ]
+        unavail.clear()
+        return {"cleared": cleared, "count": len(cleared)}
+
     def _handle_send_diagnostics_to_sentry(self, params: dict) -> dict:
         """Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.
 
