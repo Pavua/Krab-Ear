@@ -87,6 +87,7 @@ _HANDLE_METHODS = [
     "_handle_list_normalization_profiles", "_handle_semantic_search",
     "_handle_semantic_search_status", "_handle_semantic_search_reindex",
     "_handle_get_privacy_audit_log", "_handle_clear_privacy_audit_log",
+    "_handle_clear_translation_cache",  # W1429: wire TranslationCache
     "_handle_get_stt_routing_decision", "_handle_get_audio_devices",
     "_handle_test_microphone", "_handle_send_to_telegram",
     "_handle_create_apple_note", "_handle_create_apple_reminder",

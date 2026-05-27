@@ -74,6 +74,7 @@ def build_dispatch_table(
         # VERIFIED: called from Swift (HistoryPanel)
         "remove_translation_glossary_item": svc._translation.handle_remove_translation_glossary_item,
         "get_glossary_suggestions": svc._translation.handle_get_glossary_suggestions,  # авто-обучение глоссария: предлагает пары source→target из истории
+        "clear_translation_cache": svc._handle_clear_translation_cache,  # очистить персистентный LRU-кэш переводов (W1429 wire fix)
         "suggest_medical_glossary_terms": svc._glossary_auto_learn.handle_suggest_medical_glossary_terms,  # мед. домен auto-learn: предлагает пары ES↔RU из истории переводов
         "apply_glossary_suggestions": svc._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
         "export_glossary_csv": svc._glossary_svc.handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
