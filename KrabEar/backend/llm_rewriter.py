@@ -823,7 +823,6 @@ class LLMRewriter:
                 # the circuit breaker eventually opens and stops hammering a misconfigured LM Studio.
                 self._circuit.record_failure()
                 self._last_error = "chatbot_response"
-                self._circuit.record_failure()
                 _add_bc(
                     category="rewriter",
                     message="rewrite_finish",
