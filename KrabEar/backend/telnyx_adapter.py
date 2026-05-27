@@ -18,15 +18,24 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# F3 (W1195): SSRF guard — reuse WebhookManager's validated URL checker.
+from backend.webhook_manager import _is_safe_webhook_url  # noqa: PLC2701
+
 logger = logging.getLogger("KrabEar.Backend.TelnyxAdapter")
 
 # Telnyx Call Control API v2
 TELNYX_API_BASE = "https://api.telnyx.com/v2"
 
-# Retry config: 3 attempts, exp backoff 1s/2s/4s, retry on 429 + 5xx
+# Retry config: 3 attempts, exp backoff 1s/2s/4s, retry on 5xx only.
+# 429 is excluded from urllib3 retry list to avoid double-sleep with our own
+# Retry-After handling in _handle_response (F1 fix — W1195).
 _RETRY_TOTAL = 3
 _RETRY_BACKOFF = 1.0  # seconds; urllib3 uses backoff_factor × (2 ** (attempt - 1))
-_RETRY_STATUS = frozenset([429, 500, 502, 503, 504])
+_RETRY_STATUS = frozenset([500, 502, 503, 504])
+
+# Maximum seconds we will sleep on a Telnyx 429 Retry-After header.
+# Prevents a MITM or misbehaving server from blocking the IPC thread forever.
+_RETRY_AFTER_MAX_SEC = 60.0
 
 # Минимальная пауза между попытками при 429 (если Retry-After не указан)
 _RATE_LIMIT_SLEEP_SEC = 2.0
@@ -34,10 +43,19 @@ _RATE_LIMIT_SLEEP_SEC = 2.0
 # Regex E.164: +<1-15 digits>
 _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
+# F2 (W1195): call_control_id regex — alphanumeric + hyphen/underscore, 1–128 chars.
+# Rejects path-traversal payloads like "../../other-resource".
+_CALL_CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
 
 def _is_valid_phone(number: str) -> bool:
     """Проверяет формат E.164."""
     return bool(_E164_RE.match(number or ""))
+
+
+def _is_valid_call_control_id(value: str) -> bool:
+    """Проверяет call_control_id на допустимые символы (предотвращает path traversal)."""
+    return bool(_CALL_CONTROL_ID_RE.match(value or ""))
 
 
 def _build_session() -> requests.Session:
@@ -171,8 +189,14 @@ class TelnyxAdapter:
             }
         if status == 429:
             retry_after = resp.headers.get("Retry-After")
-            wait = float(retry_after) if retry_after else _RATE_LIMIT_SLEEP_SEC
-            logger.warning("Telnyx rate limit hit, waiting %.1fs", wait)
+            # F1 (W1195): cap wait to _RETRY_AFTER_MAX_SEC to prevent an
+            # unbounded sleep caused by a huge or malicious Retry-After value.
+            try:
+                raw_wait = float(retry_after) if retry_after else _RATE_LIMIT_SLEEP_SEC
+            except (ValueError, TypeError):
+                raw_wait = _RATE_LIMIT_SLEEP_SEC
+            wait = max(0.0, min(raw_wait, _RETRY_AFTER_MAX_SEC))
+            logger.warning("Telnyx rate limit hit, waiting %.1fs (capped at %.0fs)", wait, _RETRY_AFTER_MAX_SEC)
             time.sleep(wait)
             return {
                 "ok": False,
@@ -243,6 +267,16 @@ class TelnyxAdapter:
         if call_control_id:
             payload["call_control_id"] = call_control_id
         if webhook_url:
+            # F3 (W1195): validate webhook_url against SSRF check before forwarding
+            # to Telnyx, preventing internal service exposure via callback URL.
+            safe, reject_reason = _is_safe_webhook_url(webhook_url)
+            if not safe:
+                logger.warning("Telnyx dial rejected webhook_url: %s (%s)", webhook_url, reject_reason)
+                return {
+                    "ok": False,
+                    "error": "unsafe_webhook_url",
+                    "message": f"webhook_url отклонён защитой SSRF: {reject_reason}",
+                }
             payload["webhook_url"] = webhook_url
 
         result = self._post("/calls", payload)
@@ -275,6 +309,12 @@ class TelnyxAdapter:
         if not call_control_id:
             return {"ok": False, "error": "missing_call_control_id"}
 
+        # F2 (W1195): reject call_control_id values that could enable path traversal.
+        if not _is_valid_call_control_id(call_control_id):
+            logger.warning("Telnyx hangup rejected: invalid call_control_id %r", call_control_id)
+            return {"ok": False, "error": "invalid_call_control_id",
+                    "message": "call_control_id содержит недопустимые символы"}
+
         result = self._post(
             f"/calls/{call_control_id}/actions/hangup",
             {},
@@ -295,6 +335,12 @@ class TelnyxAdapter:
 
         if not call_control_id:
             return {"ok": False, "error": "missing_call_control_id"}
+
+        # F2 (W1195): reject call_control_id values that could enable path traversal.
+        if not _is_valid_call_control_id(call_control_id):
+            logger.warning("Telnyx get_call_status rejected: invalid call_control_id %r", call_control_id)
+            return {"ok": False, "error": "invalid_call_control_id",
+                    "message": "call_control_id содержит недопустимые символы"}
 
         result = self._get(f"/calls/{call_control_id}")
         if not result["ok"]:
