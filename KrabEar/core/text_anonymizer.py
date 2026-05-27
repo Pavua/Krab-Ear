@@ -204,7 +204,18 @@ _BUILTIN_RULES_RAW: list[tuple] = [
         r"\b\d{16}\b",  # 0000000000000000
         "[КАРТА]",
     ),
-    # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр)
+    # ИНН юридического лица (10 цифр) — ДОЛЖЕН идти ДО passport,
+    # чтобы 10-значные ИНН ЮЛ не мислабелировались как [ПАСПОРТ].
+    # Контрольная цифра (позиция 10) проверяется в anonymize() через
+    # _passes_inn_checksum(); числа с невалидной КЦ падают сквозь
+    # на passport-правило.
+    (
+        "inn_org",
+        r"\b\d{10}\b",
+        "[ИНН]",
+    ),
+    # Паспортные номера РФ: серия 0000 № 000000 или 0000000000 (10 цифр).
+    # Ветка \d{10} срабатывает только если inn_org checksum НЕ прошёл.
     (
         "passport",
         r"\b(?:\d{4}[\s\-]\d{6}|\d{10})\b",
@@ -316,8 +327,10 @@ class TextAnonymizer:
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_luhn(digits):
                         continue
-                if name == "inn":
-                    # Validate ИНН control digit(s) — skip numbers that aren't valid ИНН
+                if name in ("inn", "inn_org"):
+                    # Validate ИНН control digit(s) — skip numbers that aren't valid ИНН.
+                    # inn_org (10-digit) must pass 10-digit checksum; invalid numbers
+                    # fall through to the passport rule below in the rule list.
                     digits = re.sub(r"[\s\-]", "", m.group(0))
                     if not _passes_inn_checksum(digits):
                         continue

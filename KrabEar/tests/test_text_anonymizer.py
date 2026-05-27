@@ -632,5 +632,103 @@ class TestTextAnonymizerConcurrent(unittest.TestCase):
             self.assertIsInstance(result, AnonymizeResult)
 
 
+class TestTextAnonymizerINNOrgW1476(unittest.TestCase):
+    """W1476: ИНН ЮЛ (10-digit org TIN) labelled as [ИНН], not [ПАСПОРТ].
+
+    Root cause of W1470 F1 HIGH: passport rule `\\d{10}` claimed any 10-digit
+    number before inn_org rule existed.  Fix: inn_org rule with checksum
+    validation runs BEFORE passport, so valid ИНН ЮЛ gets category 'inn_org'
+    and replacement '[ИНН]'.  Invalid 10-digit numbers (true passports, random
+    codes) fall through to passport.
+    """
+
+    def setUp(self) -> None:
+        self.a = TextAnonymizer()
+
+    # ── Core fix test (W1470 F1 HIGH) ───────────────────────────────────────
+
+    def test_inn_10_digit_labeled_inn_not_passport(self) -> None:
+        """7707083893 (Сбербанк ИНН ЮЛ) → category 'inn_org', token '[ИНН]'."""
+        result = self.a.anonymize("ИНН организации: 7707083893")
+        self.assertEqual(result.redaction_count, 1)
+        r = result.redactions[0]
+        self.assertEqual(r.category, "inn_org", "Expected inn_org, got " + r.category)
+        self.assertEqual(r.replacement, "[ИНН]")
+        self.assertNotIn("[ПАСПОРТ]", result.anonymized_text)
+        self.assertIn("[ИНН]", result.anonymized_text)
+
+    def test_inn_org_second_real_inn(self) -> None:
+        """7736207543 (Яндекс ИНН ЮЛ) → inn_org."""
+        result = self.a.anonymize("Поставщик ИНН 7736207543")
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "inn_org")
+
+    def test_inn_org_in_sentence(self) -> None:
+        """ИНН ЮЛ embedded in natural text → redacted as inn_org."""
+        result = self.a.anonymize("Контрагент ООО «Ромашка», ИНН 7707083893, просит оплату.")
+        categories = [r.category for r in result.redactions]
+        self.assertIn("inn_org", categories)
+        self.assertNotIn("passport", categories)
+
+    # ── Fall-through: invalid checksum → passport ────────────────────────────
+
+    def test_inn_checksum_invalid_falls_through_to_passport(self) -> None:
+        """10-digit number with invalid INN checksum → category 'passport'."""
+        # 1234567890 fails INN checksum (verified above)
+        result = self.a.anonymize("Паспорт серии номер 1234567890")
+        self.assertEqual(result.redaction_count, 1)
+        r = result.redactions[0]
+        self.assertEqual(r.category, "passport",
+                         f"Expected passport fallthrough, got {r.category}")
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+
+    def test_passport_space_format_still_works(self) -> None:
+        """Паспорт формата '1234 567890' (с пробелом) → passport, not inn."""
+        result = self.a.anonymize("Паспорт: 1234 567890")
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "passport")
+        self.assertIn("[ПАСПОРТ]", result.anonymized_text)
+
+    def test_passport_dash_format_still_works(self) -> None:
+        """Паспорт формата '1234-567890' (с дефисом) → passport."""
+        result = self.a.anonymize("Серия-номер 1234-567890")
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "passport")
+
+    # ── Selective rules ──────────────────────────────────────────────────────
+
+    def test_passport_10_digit_still_works_when_inn_disabled(self) -> None:
+        """When rules=['passport'], valid ИНН ЮЛ falls back to passport rule."""
+        # With inn_org disabled, 7707083893 is matched by passport's \\d{10}
+        result = self.a.anonymize("7707083893", rules=["passport"])
+        self.assertEqual(result.redaction_count, 1)
+        self.assertEqual(result.redactions[0].category, "passport")
+
+    def test_inn_org_rule_in_list_rules(self) -> None:
+        """'inn_org' appears in list_rules()."""
+        rules = self.a.list_rules()
+        self.assertIn("inn_org", rules)
+
+    def test_inn_org_appears_before_passport_in_rules(self) -> None:
+        """inn_org is listed before passport (rule priority matters)."""
+        rules = self.a.list_rules()
+        self.assertIn("inn_org", rules)
+        self.assertIn("passport", rules)
+        self.assertLess(rules.index("inn_org"), rules.index("passport"),
+                        "inn_org must precede passport in rule list")
+
+    # ── No false positives ───────────────────────────────────────────────────
+
+    def test_8_digit_number_not_inn_org(self) -> None:
+        """8-digit number does not match inn_org (wrong length)."""
+        result = self.a.anonymize("Артикул 87654321", rules=["inn_org"])
+        self.assertEqual(result.redaction_count, 0)
+
+    def test_11_digit_number_not_inn_org(self) -> None:
+        """11-digit number does not match inn_org (wrong length)."""
+        result = self.a.anonymize("12345678901 тест", rules=["inn_org"])
+        self.assertEqual(result.redaction_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
