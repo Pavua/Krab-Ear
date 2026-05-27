@@ -680,32 +680,41 @@ class TestAudioLangIDMxClearCacheW1117(unittest.TestCase):
         )
 
     def test_mx_clear_cache_finally_block_present_in_source(self):
-        """AST-проверка: finally-блок с mx.clear_cache() присутствует в _run_detect.
+        """AST-проверка: mx.clear_cache() вызывается в _detect_with_mlx.finally (под mlx_lock).
 
-        Этот тест работает даже без реального mlx.core. Верифицирует структуру кода
-        напрямую, не полагаясь на runtime patching mlx.core.
+        W1465 fix: outer finally в _run_detect УДАЛЁН (нарушал MLX thread-safety).
+        Correct call site — _detect_with_mlx.finally (INSIDE mlx_lock context).
+
+        Тест верифицирует:
+        1. _run_detect НЕ содержит finally с clear_cache (W1462 regression guard).
+        2. _detect_with_mlx содержит finally с clear_cache (W1367 compliance).
         """
         import ast
         import inspect
         import textwrap
 
-        source = textwrap.dedent(inspect.getsource(AudioLanguageID._run_detect))
-        tree = ast.parse(source)
+        # 1. _run_detect must NOT have a finally with clear_cache
+        source_run = textwrap.dedent(inspect.getsource(AudioLanguageID._run_detect))
+        tree_run = ast.parse(source_run)
+        for try_node in ast.walk(tree_run):
+            if not isinstance(try_node, ast.Try) or not try_node.finalbody:
+                continue
+            for finally_stmt in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
+                if isinstance(finally_stmt, ast.Call):
+                    if isinstance(finally_stmt.func, ast.Attribute):
+                        if finally_stmt.func.attr == "clear_cache":
+                            self.fail(
+                                "_run_detect содержит finally с clear_cache() — "
+                                "W1462 regression: outer call нарушает MLX thread-safety."
+                            )
 
-        # Ищем Try ноды с finally-блоком
-        try_nodes_with_finally = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Try) and node.finalbody
-        ]
-        self.assertGreater(
-            len(try_nodes_with_finally),
-            0,
-            "_run_detect должен содержать try/finally блок для mx.clear_cache()"
-        )
-
-        # Проверяем что в finally есть вызов clear_cache
+        # 2. _detect_with_mlx must have a finally with clear_cache
+        source_inner = textwrap.dedent(inspect.getsource(AudioLanguageID._detect_with_mlx))
+        tree_inner = ast.parse(source_inner)
         found_clear_cache = False
-        for try_node in try_nodes_with_finally:
+        for try_node in ast.walk(tree_inner):
+            if not isinstance(try_node, ast.Try) or not try_node.finalbody:
+                continue
             for finally_stmt in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
                 if isinstance(finally_stmt, ast.Call):
                     if isinstance(finally_stmt.func, ast.Attribute):
@@ -715,7 +724,8 @@ class TestAudioLangIDMxClearCacheW1117(unittest.TestCase):
 
         self.assertTrue(
             found_clear_cache,
-            "_run_detect finally-блок должен вызывать .clear_cache() (Wave 63 compliance)"
+            "_detect_with_mlx должен содержать finally с clear_cache() "
+            "(W1367 addition — правильное место под mlx_lock)"
         )
 
     def test_mx_clear_cache_soft_fail_when_mlx_core_absent(self):
