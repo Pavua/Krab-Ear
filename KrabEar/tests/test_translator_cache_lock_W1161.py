@@ -246,18 +246,16 @@ class StubTranslatorWithSettings(StubTranslator):
 
 class TestPrivacyModeClearsCache(unittest.TestCase):
     def test_privacy_mode_false_to_true_clears_cache(self):
-        """Toggling privacy_mode False→True must wipe the cache."""
+        """Toggling privacy_mode False→True must wipe the cache (W1319 explicit API)."""
         t = StubTranslatorWithSettings(initial_privacy=False)
         t.translate(text="hello", mode="en_to_es", network_mode="offline_default")
         self.assertGreater(len(t._cache), 0, "Pre-condition: cache must be populated")
 
-        # Toggle privacy mode ON.
-        t._privacy_mode = True
-        t.translate(text="test cache clear", mode="en_to_es", network_mode="offline_default")
+        # Use W1319 explicit API to signal the privacy_mode transition.
+        t._check_privacy_mode_changed(False)  # init tracking
+        t._check_privacy_mode_changed(True)   # transition → clear
 
-        # Cache should have been cleared on first translate() after toggle.
-        # It will contain at most the entry just added by that call.
-        # Most importantly, the "hello" entry should be gone.
+        # Cache should have been cleared on the privacy_mode transition.
         found_hello = any(
             "hello" in key[3] for key in t._cache.keys()
         )
@@ -302,13 +300,12 @@ class TestPrivacyModeClearsCache(unittest.TestCase):
         self.assertGreater(len(t._cache), 0)
 
     def test_last_privacy_mode_updated_after_check(self):
-        """_last_privacy_mode must be updated to reflect the current state after each check."""
+        """_last_privacy_mode must be updated to reflect the current state after each check (W1319 explicit API)."""
         t = StubTranslatorWithSettings(initial_privacy=False)
-        t.translate(text="hello", mode="en_to_es", network_mode="offline_default")
+        t._check_privacy_mode_changed(False)  # init: sets _last_privacy_mode = False
         self.assertFalse(t._last_privacy_mode)
 
-        t._privacy_mode = True
-        t.translate(text="world", mode="en_to_es", network_mode="offline_default")
+        t._check_privacy_mode_changed(True)   # transition False→True
         self.assertTrue(t._last_privacy_mode,
                         "_last_privacy_mode must be updated after privacy_mode enable")
 
