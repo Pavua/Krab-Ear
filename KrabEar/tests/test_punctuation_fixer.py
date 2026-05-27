@@ -280,5 +280,82 @@ class TestPunctuationFixerWave132(unittest.TestCase):
             self.assertTrue(len(result) > 0, f"Пустой результат для idx={idx}")
 
 
+class TestPunctuationFixerW1377DottedAbbrev(unittest.TestCase):
+    """W1374 F2 MED: PunctuationFixer must NOT corrupt dotted abbreviations and version strings."""
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    # ── Аббревиатуры сохраняются ────────────────────────────────────────────
+
+    def test_т_е_preserved(self):
+        """т.е. не должна превращаться в 'Т.Е.' или разрушаться."""
+        result = self.fixer.fix("Он пришёл, т.е. появился.", language="ru")
+        # Аббревиатура должна остаться нетронутой (без лишних пробелов внутри)
+        self.assertIn("т.е.", result, f"Аббревиатура т.е. разрушена: {result!r}")
+
+    def test_т_к_preserved(self):
+        """т.к. (так как) не должна разрушаться."""
+        result = self.fixer.fix("Хорошо, т.к. погода отличная.", language="ru")
+        self.assertIn("т.к.", result, f"Аббревиатура т.к. разрушена: {result!r}")
+
+    def test_т_д_preserved(self):
+        """т.д. (так далее) не должна разрушаться."""
+        result = self.fixer.fix("Купи хлеб, молоко и т.д.", language="ru")
+        self.assertIn("т.д.", result, f"Аббревиатура т.д. разрушена: {result!r}")
+
+    def test_сша_войска_no_extra_period(self):
+        """США.Войска не должна получать лишний пробел/точку → США. Войска."""
+        # Это легитимный случай: США завершает аббревиатуру перед новым словом с заглавной
+        # Ожидаем "США. Войска" (пробел вставляется, это правильно для нового предложения)
+        text = "США.Войска вошли в город."
+        result = self.fixer.fix(text, language="ru")
+        # НЕ должно быть двойной точки "США.."
+        self.assertNotIn("США..", result, f"Двойная точка недопустима: {result!r}")
+
+    # ── Версионные строки сохраняются ────────────────────────────────────────
+
+    def test_version_v1_0_beta_preserved(self):
+        """Версия v1.0.Beta не должна разрушаться."""
+        result = self.fixer.fix("Обновление v1.0.Beta вышло.", language="ru")
+        # Версионная строка должна остаться нетронутой (без лишних пробелов)
+        self.assertIn("v1.0", result, f"Версионная строка v1.0 разрушена: {result!r}")
+        # НЕ должно быть "1.0. Beta" или "1.0 .Beta"
+        self.assertNotIn("1.0. Beta", result, f"Версия разбита пробелом: {result!r}")
+        self.assertNotIn("1.0 .Beta", result, f"Версия разбита пробелом: {result!r}")
+
+    def test_version_2_5_1_preserved(self):
+        """Версия 2.5.1 не должна разрушаться."""
+        result = self.fixer.fix("Текущая версия 2.5.1 стабильна.", language="ru")
+        self.assertIn("2.5", result, f"Версионная строка 2.5 разрушена: {result!r}")
+        self.assertNotIn("2.5. 1", result, f"Версия разбита пробелом: {result!r}")
+
+    def test_version_digit_dot_uppercase_no_extra_space(self):
+        """Цифра перед точкой → не добавляем пробел (версии и числа)."""
+        result = self.fixer.fix("Версия 3.Alpha тестируется.", language="ru")
+        self.assertNotIn("3. Alpha", result, f"Пробел не должен быть вставлен после '3.': {result!r}")
+
+    # ── Нормальные предложения всё ещё получают пробел ─────────────────────
+
+    def test_normal_sentence_split_works(self):
+        """'Это.Хорошо' → получает пробел (обычное предложение без аббревиатур)."""
+        result = self.fixer.fix("Это.Хорошо", language="ru")
+        # "Хорошо" — заглавная без признаков аббревиатуры, пробел должен вставиться
+        self.assertIn("Это. Хорошо", result, f"Пробел должен был вставиться: {result!r}")
+
+    def test_multiple_sentences_split_works(self):
+        """Два предложения без пробела → пробел вставляется."""
+        result = self.fixer.fix("Первое.Второе предложение.", language="ru")
+        self.assertIn(". Второе", result, f"Пробел между предложениями должен быть: {result!r}")
+
+    # ── Инициалы ────────────────────────────────────────────────────────────
+
+    def test_initial_single_letter_preserved(self):
+        """Однобуквенная аббревиатура (инициал) 'А.Б.' не разрушается пробелами."""
+        result = self.fixer.fix("Иванов А.Б. пришёл.", language="ru")
+        # Пробел внутри инициалов не должен добавляться
+        self.assertNotIn("А. Б", result, f"Инициалы не должны разбиваться: {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

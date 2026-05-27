@@ -17,7 +17,70 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 
 # Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
 _NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
+
+# Отсутствие пробела после точки перед заглавной буквой —
+# НО только там, где это не аббревиатура и не версия (см. _should_add_space_after_period).
 _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
+
+# Набор русских точечных аббревиатур (всё в нижнем регистре для регистронезависимого сравнения).
+# Шаблон «X.Y.» — перед совпадением с _NO_SPACE_AFTER_PERIOD_RE нужно проверить левый контекст.
+_DOTTED_ABBREV_RU = frozenset({
+    "т.е", "т.к", "т.д", "т.п", "и.т.д", "и.т.п",
+    "г", "ул", "пр", "пер", "бул",
+    "проф", "д-р", "др", "им",
+    "акад", "доц", "проф",
+    "рис", "табл", "стр", "гл", "ч", "п", "пп",
+    "кг", "км", "см", "мм",
+    "млн", "млрд", "тыс",
+    "mr", "mrs", "ms", "dr", "prof", "st",
+})
+
+# Регулярное выражение для определения версионных строк (digits.digits...)
+# Например: v1.0, 1.0.3, v2.5.Beta
+_VERSION_RE = re.compile(r"\d+\.\d+")
+
+
+def _no_space_after_period_sub(m: re.Match) -> str:  # type: ignore[type-arg]
+    """Callback для _NO_SPACE_AFTER_PERIOD_RE.
+
+    Добавляет пробел после точки перед заглавной буквой, но пропускает:
+    - Точечные аббревиатуры (т.е., т.к., США., ул. и т.д.).
+    - Строки версий (v1.0, 1.0.Beta, 2.3.1).
+    """
+    full_text = m.string
+    start = m.start()
+
+    # --- Проверка 1: версионная строка ---
+    # Смотрим назад, нет ли перед точкой цифры → значит, это part of a version like 1.0.Beta
+    if start > 0 and full_text[start - 1].isdigit():
+        return m.group(0)  # не добавляем пробел
+
+    # --- Проверка 2: аббревиатура вида «букв.» или «т.е.» ---
+    # Находим начало «слова» перед текущей точкой
+    word_end = start
+    word_start = word_end
+    while word_start > 0 and (full_text[word_start - 1].isalpha() or full_text[word_start - 1] == "."):
+        word_start -= 1
+    candidate = full_text[word_start:word_end].lower().rstrip(".")
+    if candidate in _DOTTED_ABBREV_RU:
+        return m.group(0)  # не добавляем пробел
+
+    # --- Проверка 3: одиночная буква перед точкой (инициал / однобуквенная аббревиатура) ---
+    # Паттерн «A.B» → скорее всего инициалы/аббревиатура, пропускаем
+    if start > 0 and full_text[start - 1].isalpha():
+        # Определяем длину «буквенной группы» перед точкой
+        seg_end = start
+        seg_start = seg_end
+        while seg_start > 0 and full_text[seg_start - 1].isalpha():
+            seg_start -= 1
+        seg_len = seg_end - seg_start
+        # Одна буква → инициал или аббревиатура-буква (типа «г.Москва»)
+        if seg_len == 1:
+            return m.group(0)
+        # Проверяем что буква перед точкой идёт после точки (шаблон «т.е.» → уже поймано выше)
+
+    # --- Добавляем пробел ---
+    return m.group(1) + " " + m.group(2)
 
 # Множественные пробелы
 _MULTI_SPACE_RE = re.compile(r"  +")
@@ -70,7 +133,7 @@ class PunctuationFixer:
         result = _MULTI_SPACE_RE.sub(" ", result)
         result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
         result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
-        result = _NO_SPACE_AFTER_PERIOD_RE.sub(r"\1 \2", result)
+        result = _NO_SPACE_AFTER_PERIOD_RE.sub(_no_space_after_period_sub, result)
         result = _CAPITALIZE_AFTER_SENT_RE.sub(lambda m: m.group(1) + m.group(2).upper(), result)
 
         if language == "ru":
