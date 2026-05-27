@@ -20,7 +20,7 @@ from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
 from backend.settings_backup import SENSITIVE_FIELDS as _SETTINGS_SENSITIVE_FIELDS
 from backend.settings_backup import SettingsBackup
-from backend.settings_validator import SettingsValidator
+from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
 
 _log = logging.getLogger(__name__)
 
@@ -596,6 +596,38 @@ class SettingsService:
 
         old_settings = self.cached_settings()
         restored = self._backup.restore_backup(backup_id)
+
+        # W1427 F2: migrate old-schema backups forward before validation.
+        backup_version = str(restored.get("schema_version", "1.0"))
+        if backup_version != CURRENT_SCHEMA_VERSION:
+            try:
+                restored = self._validator.migrate(
+                    restored, from_version=backup_version, to_version=CURRENT_SCHEMA_VERSION
+                )
+            except Exception as _mig_exc:
+                _log.warning(
+                    "handle_restore_settings_backup: migration %s→%s failed for backup '%s': %s",
+                    backup_version, CURRENT_SCHEMA_VERSION, backup_id, _mig_exc,
+                )
+                return {
+                    "ok": False,
+                    "error": "Backup validation failed",
+                    "details": f"Schema migration {backup_version}→{CURRENT_SCHEMA_VERSION} failed: {_mig_exc}",
+                }
+
+        # W1427 F2: validate restored data before saving — reject corrupt/malformed backups.
+        vr = self._validator.validate(restored)
+        if not vr.valid:
+            _log.warning(
+                "handle_restore_settings_backup: validation rejected backup '%s': %s",
+                backup_id, vr.errors,
+            )
+            return {
+                "ok": False,
+                "error": "Backup validation failed",
+                "details": vr.errors,
+            }
+        restored = vr.fixed
 
         # Detect credential fields present in current settings but missing from backup.
         current = self.cached_settings()
