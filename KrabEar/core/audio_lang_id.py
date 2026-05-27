@@ -22,6 +22,13 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+try:
+    import mlx.core as mx  # type: ignore[import]
+    _HAS_MLX = True
+except ImportError:
+    _HAS_MLX = False
+    mx = None  # type: ignore[assignment]
+
 from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
@@ -210,6 +217,23 @@ class AudioLanguageID:
         """Внутренний метод LID внутри mlx_lock() контекста.
 
         Загружает модель (кешируется), строит log-mel, вызывает detect_language().
+        W63 rule: mx.clear_cache() вызывается в finally после любого пути inference
+        (успех, ошибка mel, ошибка detect_language) — предотвращает утечку MLX Metal
+        буферов на длинных сессиях (W1358 F2).
+        """
+        try:
+            return self._run_lid_inference(mlx_whisper, audio_16k)
+        finally:
+            # W63 rule: free MLX Metal buffers after every LID inference to
+            # prevent memory accumulation over long sessions (W1358 F2).
+            if _HAS_MLX:
+                mx.clear_cache()
+
+    def _run_lid_inference(self, mlx_whisper: Any, audio_16k: np.ndarray) -> Optional[str]:
+        """Выполняет загрузку модели, построение mel и detect_language.
+
+        Вызывается из _detect_with_mlx(), которая оборачивает вызов в try/finally
+        для гарантированного вызова mx.clear_cache().
         """
         model_path = self._get_model_path()
 
