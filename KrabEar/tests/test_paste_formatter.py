@@ -508,5 +508,77 @@ class TestPasteFormatterWave114(unittest.TestCase):
         self.assertEqual(result, text)
 
 
+class TestPasteFormatterW1053Fixes(unittest.TestCase):
+    """Wave 1053 — fixes for W1051 findings F1+F3+F4."""
+
+    def setUp(self):
+        self.formatter = PasteFormatter(data_dir=None)
+
+    # F1 HIGH: Telegram 4096-char limit must be enforced
+    def test_telegram_format_enforces_4096_limit(self):
+        """_fmt_telegram must cap output at ≤4000 chars (Bot API 4096 hard limit)."""
+        # Build a text clearly over 4096 characters
+        long_text = ("Это очень длинный текст для проверки лимита Telegram. " * 100).strip()
+        self.assertGreater(len(long_text), 4096, "pre-condition: input must exceed 4096 chars")
+
+        result = _fmt_telegram(long_text)
+
+        self.assertLessEqual(
+            len(result),
+            4001,  # 4000 cap + 1 for ellipsis char «…»
+            f"Telegram output must not exceed 4000+1 chars, got {len(result)}",
+        )
+        self.assertIn("…", result, "Truncated output should end with ellipsis")
+
+    def test_telegram_format_short_text_not_truncated(self):
+        """Short text (well under 4096) must pass through without truncation."""
+        short = "Привет, как дела"
+        result = _fmt_telegram(short)
+        self.assertNotIn("…", result)
+        self.assertEqual(result, short)
+
+    # F3 MED: prepend/append must be accounted for before applying max_length
+    def test_max_length_accounts_for_prepend_append(self):
+        """Final output must not exceed max_length when prepend/append are present.
+
+        Old bug: max_length was applied to body-only text, then prepend/append
+        were concatenated → final string could exceed max_length by full affix length.
+        New behaviour: prepend/append added first, then max_length caps the whole thing.
+        """
+        body = "слово " * 50  # ~300 chars
+        prepend = "HEADER"
+        append = "FOOTER"
+        max_len = 50
+
+        result = _apply_rules(body, {"prepend": prepend, "append": append, "max_length": max_len})
+
+        self.assertLessEqual(
+            len(result),
+            max_len + 1,  # +1 for the «…» ellipsis character
+            f"Output length {len(result)} exceeds max_length {max_len} + 1 (ellipsis)",
+        )
+
+    def test_prepend_append_present_in_output_within_limit(self):
+        """When text fits within max_length after affixes, both affixes are visible."""
+        result = _apply_rules("hi", {"prepend": "A", "append": "B", "max_length": 100})
+        self.assertIn("A", result)
+        self.assertIn("B", result)
+
+    # F4 LOW: max_length=0 must return empty string, not be silently skipped
+    def test_max_length_zero_explicit_returns_empty(self):
+        """max_length=0 must truncate the text to an empty string.
+
+        Old bug: `if max_len:` treated 0 as falsy, skipping the cap entirely.
+        """
+        result = _apply_rules("некоторый текст", {"max_length": 0})
+        self.assertEqual(result, "", f"max_length=0 should yield empty string, got {result!r}")
+
+    def test_max_length_none_leaves_text_unchanged(self):
+        """Absent max_length key must not truncate anything."""
+        text = "слово " * 100
+        result = _apply_rules(text.strip(), {})
+        self.assertNotIn("…", result)
+
+
 if __name__ == "__main__":
     unittest.main()
