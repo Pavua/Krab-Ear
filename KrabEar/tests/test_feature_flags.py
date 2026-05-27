@@ -463,6 +463,32 @@ class TestFeatureFlagsWave98(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ff.handle_set_feature_flag({"flag_name": "pipeline_v2", "enabled": 1})
 
+    def test_atomic_save_no_partial_file(self) -> None:
+        """W988/W979-F1: _save() использует tmp+fsync+rename — нет частичного файла.
+
+        Проверяем что после set_flag:
+        - целевой файл существует и содержит валидный JSON;
+        - tmp-файл (.json.tmp) не остался на диске (cleanup после успешного rename).
+        """
+        self.ff.set_flag("pipeline_v2", True)
+
+        flags_path = self.ff._flags_path
+        tmp_path = flags_path.with_suffix(flags_path.suffix + ".tmp")
+
+        # Целевой файл должен существовать и содержать валидный JSON
+        self.assertTrue(flags_path.exists(), "feature_flags.json должен существовать после set_flag")
+        import json as _json
+        with open(flags_path, encoding="utf-8") as fh:
+            data = _json.load(fh)
+        self.assertIn("pipeline_v2", data)
+        self.assertTrue(data["pipeline_v2"])
+
+        # Tmp-файл не должен оставаться после успешного сохранения
+        self.assertFalse(
+            tmp_path.exists(),
+            f"Временный файл {tmp_path.name} не должен оставаться после успешного _save()",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
