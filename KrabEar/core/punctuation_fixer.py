@@ -15,8 +15,9 @@ logger = logging.getLogger("KrabEar.PunctuationFixer")
 # Пробел перед знаками препинания (,.:;!?)
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 
-# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
-_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
+# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби, не «, не URL)
+# ':' включён, но (?!/) исключает URL-схемы (http:/, https:/, file:/ и т.п.)
+_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»]|:(?!/))([^\s\d»\"')\]])")
 _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
 
 # STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —

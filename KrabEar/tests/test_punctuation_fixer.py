@@ -348,5 +348,29 @@ class TestPunctuationFixerW1348RuleOrder(unittest.TestCase):
                                  f"[{lang}] '{text}' → forbidden {forbidden!r} in {result!r}")
 
 
+class TestPunctuationFixerColonW1376(unittest.TestCase):
+    """W1374 F1 HIGH — colon symmetry fix tests."""
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_space_added_after_colon_before_letter(self):
+        """'план:первый' → space inserted after colon before letter."""
+        result = self.fixer.fix("план:первый", language="ru")
+        self.assertIn(": ", result, f"Ожидается пробел после двоеточия: {result!r}")
+        self.assertNotIn(":п", result, f"Буква не должна прилипать к двоеточию: {result!r}")
+
+    def test_no_space_added_after_existing_colon_space(self):
+        """'план: первый' already has space after colon — must not double it."""
+        result = self.fixer.fix("план: первый пункт.", language="ru")
+        self.assertNotIn(":  ", result, f"Не должно быть двойного пробела после двоеточия: {result!r}")
+
+    def test_colon_no_corruption_in_url_like_text(self):
+        """'https://example.com' must pass through without modification of the '://'."""
+        text = "Ссылка https://example.com работает."
+        result = self.fixer.fix(text, language="ru")
+        self.assertIn("https://example.com", result, f"URL не должен меняться: {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
