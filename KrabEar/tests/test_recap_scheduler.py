@@ -577,5 +577,182 @@ class TestWave138RecapScheduler(unittest.TestCase):
             self.assertIn("2026-05-19", subject)
 
 
+# ---------------------------------------------------------------------------
+# Тест 9 (W933): runtime settings_provider — изменение часа без рестарта
+# ---------------------------------------------------------------------------
+
+class TestW933RuntimeSettingsProvider(unittest.TestCase):
+    """W922 H2 fix — settings_provider перечитывается каждый тик.
+
+    Проверяет, что после изменения recap_time_hour через settings_provider
+    (эквивалент IPC set_settings) следующий вызов _refresh_settings() + _should_send()
+    использует новое значение часа без перезапуска backend.
+    """
+
+    def _make_scheduler_with_provider(
+        self,
+        tmpdir: Path,
+        initial_hour: int = 20,
+        provider_dict: Optional[dict] = None,
+    ):
+        """Создаёт RecapScheduler с settings_provider."""
+        sender = MagicMock(spec=EmailSender)
+        store = MagicMock()
+        digest_gen = MagicMock()
+        digest_gen.generate_digest.return_value = _make_fake_digest()
+
+        # Mutable container so the lambda captures by reference
+        live_settings: dict = provider_dict if provider_dict is not None else {}
+
+        sched = RecapScheduler(
+            email_sender=sender,
+            digest_generator=digest_gen,
+            store=store,
+            data_dir=tmpdir,
+            recap_email_to="test@example.com",
+            recap_time_hour=initial_hour,
+            enabled=True,
+            check_interval_sec=1,
+            settings_provider=lambda: live_settings,
+        )
+        return sched, sender, live_settings
+
+    def test_hour_change_picked_up_on_next_tick(self):
+        """Изменение recap_time_hour в settings_provider видно после _refresh_settings()."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings: dict = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+            }
+            sched, _, _ = self._make_scheduler_with_provider(
+                tmpdir, initial_hour=20, provider_dict=live_settings
+            )
+
+            # Hour=20 → should_send at 20:00
+            now_20 = datetime(2026, 5, 26, 20, 0, 0)
+            sched._refresh_settings()
+            self.assertTrue(sched._should_send(now_20), "должен отправлять в 20:00")
+
+            # IPC set_settings({"recap_time_hour": 8}) — imitate runtime change
+            live_settings["recap_time_hour"] = 8
+
+            # Before refresh: still thinks it's hour=20
+            # (already updated in previous refresh, but let's check refresh effect)
+            sched._refresh_settings()
+
+            # Hour=8 now → should NOT send at 20:00
+            self.assertFalse(
+                sched._should_send(now_20),
+                "после изменения часа на 8 не должен отправлять в 20:00",
+            )
+            # But should send at 08:00
+            now_08 = datetime(2026, 5, 26, 8, 0, 0)
+            self.assertTrue(
+                sched._should_send(now_08),
+                "должен отправлять в 08:00 после смены часа",
+            )
+
+    def test_enabled_toggle_picked_up_on_next_tick(self):
+        """Изменение recap_enabled=False в settings_provider отключает отправку."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings: dict = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "test@example.com",
+            }
+            sched, _, _ = self._make_scheduler_with_provider(
+                tmpdir, initial_hour=20, provider_dict=live_settings
+            )
+
+            now_20 = datetime(2026, 5, 26, 20, 0, 0)
+            sched._refresh_settings()
+            self.assertTrue(sched._should_send(now_20))
+
+            # Disable via IPC-equivalent mutation
+            live_settings["recap_enabled"] = False
+            sched._refresh_settings()
+
+            self.assertFalse(
+                sched._should_send(now_20),
+                "после отключения recap_enabled не должен отправлять",
+            )
+
+    def test_email_to_change_picked_up_on_next_tick(self):
+        """Изменение recap_email_to в settings_provider обновляет адрес получателя."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            live_settings: dict = {
+                "recap_enabled": True,
+                "recap_time_hour": 20,
+                "recap_email_to": "old@example.com",
+            }
+            sched, _, _ = self._make_scheduler_with_provider(
+                tmpdir, initial_hour=20, provider_dict=live_settings
+            )
+
+            sched._refresh_settings()
+            self.assertEqual(sched.recap_email_to, "old@example.com")
+
+            live_settings["recap_email_to"] = "new@example.com"
+            sched._refresh_settings()
+            self.assertEqual(sched.recap_email_to, "new@example.com")
+
+    def test_no_settings_provider_uses_constructor_defaults(self):
+        """Без settings_provider конструкторные defaults остаются стабильными."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sender = MagicMock(spec=EmailSender)
+            store = MagicMock()
+            digest_gen = MagicMock()
+            digest_gen.generate_digest.return_value = _make_fake_digest()
+
+            sched = RecapScheduler(
+                email_sender=sender,
+                digest_generator=digest_gen,
+                store=store,
+                data_dir=tmpdir,
+                recap_email_to="fixed@example.com",
+                recap_time_hour=15,
+                enabled=True,
+                # No settings_provider
+            )
+
+            sched._refresh_settings()
+            self.assertEqual(sched.recap_time_hour, 15)
+            self.assertEqual(sched.recap_email_to, "fixed@example.com")
+            self.assertTrue(sched.enabled)
+
+    def test_settings_provider_exception_falls_back_to_defaults(self):
+        """Если settings_provider бросает исключение — используются constructor defaults."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            sender = MagicMock(spec=EmailSender)
+            store = MagicMock()
+            digest_gen = MagicMock()
+            digest_gen.generate_digest.return_value = _make_fake_digest()
+
+            def broken_provider():
+                raise RuntimeError("settings DB unavailable")
+
+            sched = RecapScheduler(
+                email_sender=sender,
+                digest_generator=digest_gen,
+                store=store,
+                data_dir=tmpdir,
+                recap_email_to="fallback@example.com",
+                recap_time_hour=18,
+                enabled=True,
+                settings_provider=broken_provider,
+            )
+
+            # Should not raise; should fall back to constructor defaults
+            sched._refresh_settings()
+            self.assertEqual(sched.recap_time_hour, 18)
+            self.assertEqual(sched.recap_email_to, "fallback@example.com")
+
+
 if __name__ == "__main__":
     unittest.main()

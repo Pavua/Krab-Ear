@@ -421,7 +421,9 @@ class BackendService:
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
-        # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting)
+        # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting).
+        # settings_provider wired so IPC set_settings() takes effect on the
+        # next scheduler tick without a backend restart (W922 H2 fix).
         self._recap_scheduler = RecapScheduler(
             email_sender=EmailSender.from_settings(settings),
             digest_generator=self._daily_digest,
@@ -430,6 +432,7 @@ class BackendService:
             recap_email_to=settings.RECAP_EMAIL_TO,
             recap_time_hour=settings.RECAP_TIME_HOUR,
             enabled=settings.RECAP_EMAIL_ENABLED,
+            settings_provider=lambda: self._settings_svc.cached_settings(),
         )
         if settings.RECAP_EMAIL_ENABLED:
             self._recap_scheduler.start()
