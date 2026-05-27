@@ -280,5 +280,73 @@ class TestPunctuationFixerWave132(unittest.TestCase):
             self.assertTrue(len(result) > 0, f"Пустой результат для idx={idx}")
 
 
+class TestPunctuationFixerW1348RuleOrder(unittest.TestCase):
+    """Regression tests for W1348 R1 HIGH: rule-ordering bug.
+
+    Bug: step 'remove-space-before-punct' ran BEFORE 'add-space-after-punct',
+    so spaces introduced by the add-step were never cleaned up.
+    Fix: swap order — add-space-after first, then remove-space-before.
+    """
+
+    def setUp(self):
+        self.fixer = PunctuationFixer()
+
+    def test_quoted_string_followed_by_period(self):
+        """'Он сказал «стоп».' must NOT produce 'Он сказал «стоп» .'
+
+        Before the fix the pipeline was:
+          1. remove space before '»' (no-op here)
+          2. add space after '»' because next char is '.' → «стоп» .
+          Step 1 already done → the new space before '.' was never removed.
+        After the fix (add-space first, then remove-space):
+          1. add space after '»' → «стоп» .
+          2. remove space before '.' → «стоп».
+        """
+        result = self.fixer.fix("Он сказал «стоп».", language="ru")
+        self.assertNotIn("» .", result, f"Пробел перед точкой после » недопустим: {result!r}")
+        self.assertIn("».", result, f"Ожидается '».' без пробела: {result!r}")
+
+    def test_idempotency_single_pass(self):
+        """Single fix() call must produce the same result as two consecutive calls.
+
+        This verifies that the pipeline is effectively idempotent — no further
+        clean-up is needed after one pass.
+        """
+        samples = [
+            ("Он сказал «стоп».", "ru"),
+            ("привет,мир!", "ru"),
+            ("тест . конец", "ru"),
+            ("cómo estás?", "es"),
+            ("Привет , как дела.", "ru"),
+        ]
+        for text, lang in samples:
+            once = self.fixer.fix(text, language=lang)
+            twice = self.fixer.fix(once, language=lang)
+            self.assertEqual(once, twice,
+                             f"fix() не идемпотентен для {text!r}: "
+                             f"once={once!r}, twice={twice!r}")
+
+    def test_ru_es_en_no_regression(self):
+        """Canonical samples for RU/ES/EN still produce expected output after reorder."""
+        cases = [
+            # (input, language, substring_expected, substring_forbidden)
+            ("привет , как дела", "ru", "Привет,", " ,"),
+            ("Раз,два,три", "ru", ", ", None),
+            ("я думаю", "ru", "Я", " я "),
+            ("Привет . Мир", "ru", "Привет.", " ."),
+            ("hola mundo", "es", "Hola", None),
+            ("cómo estás?", "es", "¿", None),
+            ("Он сказал «стоп».", "ru", "».", "» ."),
+        ]
+        for text, lang, expected, forbidden in cases:
+            result = self.fixer.fix(text, language=lang)
+            if expected:
+                self.assertIn(expected, result,
+                              f"[{lang}] '{text}' → expected {expected!r} in {result!r}")
+            if forbidden:
+                self.assertNotIn(forbidden, result,
+                                 f"[{lang}] '{text}' → forbidden {forbidden!r} in {result!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

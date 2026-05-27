@@ -67,10 +67,13 @@ class PunctuationFixer:
         result = text
 
         # Общие правила (применяются для всех языков)
+        # Порядок важен: сначала добавить пробелы после знаков (шаг A),
+        # затем убрать пробелы перед знаками (шаг B) — иначе пробелы,
+        # введённые шагом A, не попадут под очистку шага B (W1348 R1).
         result = _MULTI_SPACE_RE.sub(" ", result)
-        result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
         result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
         result = _NO_SPACE_AFTER_PERIOD_RE.sub(r"\1 \2", result)
+        result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
         result = _CAPITALIZE_AFTER_SENT_RE.sub(lambda m: m.group(1) + m.group(2).upper(), result)
 
         if language == "ru":
