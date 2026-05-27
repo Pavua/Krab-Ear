@@ -25,8 +25,10 @@ DEFAULT_VERSION = APIVersion.V1
 # Versions that are deprecated, mapped to their sunset ISO-8601 date.
 DEPRECATED_VERSIONS: dict[APIVersion, str] = {}
 
-# All versions the server understands.
-SUPPORTED_VERSIONS = [APIVersion.V1, APIVersion.V2]
+# All versions the server actively serves.
+# NOTE: APIVersion.V2 is defined in the enum for future use but is NOT yet
+# implemented — /v2/* routes return 501 Not Implemented.  Only V1 is served.
+SUPPORTED_VERSIONS: tuple[APIVersion, ...] = (APIVersion.V1,)
 
 
 def get_api_version(req=None) -> APIVersion:
@@ -71,13 +73,15 @@ def get_api_version(req=None) -> APIVersion:
 
 
 def api_version_header():
-    """Flask ``after_request`` handler that adds ``X-API-Version`` to every response.
+    """Return a Flask ``after_request`` handler that stamps ``X-API-Version`` on every response.
 
-    Register with::
+    Usage::
 
-        app.after_request(api_version_header)
+        app.after_request(api_version_header())
 
-    The header value reflects whichever version was resolved for the request.
+    Note the call parentheses — this factory returns the inner ``handler``
+    function which Flask then invokes per request.  The header value reflects
+    whichever version was resolved for that request via :func:`get_api_version`.
     """
     def handler(response: Response) -> Response:
         try:

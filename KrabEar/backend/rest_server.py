@@ -1078,6 +1078,29 @@ api.register_blueprint(v1_blp)
 
 
 # ---------------------------------------------------------------------------
+# API v2 stub — 501 Not Implemented
+#
+# APIVersion.V2 is listed in the enum for future expansion, but no v2
+# Blueprint or routes are registered yet.  Without this catch-all, Flask
+# would return 404 NOT FOUND which incorrectly implies the resource might
+# exist elsewhere.  501 is the correct response: the server understands the
+# request but has not implemented the requested API version.
+# ---------------------------------------------------------------------------
+
+@app.route("/v2/", defaults={"p": ""}, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+@app.route("/v2/<path:p>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+def v2_not_implemented(p):
+    """Catch-all for /v2/* — returns 501 until v2 is implemented."""
+    response = jsonify({
+        "error": "API v2 not yet implemented",
+        "supported_versions": ["v1"],
+    })
+    response.status_code = 501
+    response.headers["X-API-Version"] = "v2"
+    return response
+
+
+# ---------------------------------------------------------------------------
 # WebSocket live-streaming endpoint
 # ---------------------------------------------------------------------------
 
