@@ -511,5 +511,84 @@ class TestTranscriptVersionManagerWave103(unittest.TestCase):
                          "version_num должны быть монотонными без пропусков")
 
 
+class TestTranscriptVersioningW1410(unittest.TestCase):
+    """W1410 F1+F2: empty guard, size cap, reverted_from persistence."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.manager = TranscriptVersionManager(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_save_version_skips_empty_text(self) -> None:
+        """save_version с пустым текстом возвращает None и ничего не пишет в NDJSON."""
+        result_empty = self.manager.save_version("item_e", "", "manual")
+        self.assertIsNone(result_empty)
+
+        result_blank = self.manager.save_version("item_e", "   ", "manual")
+        self.assertIsNone(result_blank)
+
+        # Убеждаемся, что никакой записи в NDJSON не создано
+        versions = self.manager.get_versions("item_e")
+        self.assertEqual(versions, [])
+
+    def test_save_version_truncates_too_large_text(self) -> None:
+        """save_version обрезает текст, превышающий _MAX_TEXT_BYTES (1 МБ)."""
+        from backend.transcript_versioning import _MAX_TEXT_BYTES
+
+        # Генерируем строку чуть больше 1 МБ в UTF-8 (ASCII символы = 1 байт каждый)
+        large_text = "A" * (_MAX_TEXT_BYTES + 500)
+        result = self.manager.save_version("item_big", large_text, "manual")
+
+        self.assertIsNotNone(result)
+        # Текст должен быть обрезан и содержать суффикс
+        self.assertIn("[TRUNCATED]", result["text"])
+        # Результирующий текст должен быть меньше или равен исходному
+        self.assertLessEqual(len(result["text"].encode("utf-8")), _MAX_TEXT_BYTES + 100)
+
+        # Убеждаемся, что запись персистируется
+        versions = self.manager.get_versions("item_big")
+        self.assertEqual(len(versions), 1)
+        self.assertIn("[TRUNCATED]", versions[0]["text"])
+
+    def test_revert_persists_reverted_from_field(self) -> None:
+        """revert_to_version включает reverted_from в сохранённую NDJSON-запись."""
+        import json as _json
+        from pathlib import Path
+
+        self.manager.save_version("item_rv", "Original", "stt_raw")
+        self.manager.save_version("item_rv", "Edited", "manual")
+        reverted = self.manager.revert_to_version("item_rv", 1)
+
+        # Возвращаемый dict должен содержать reverted_from
+        self.assertEqual(reverted["reverted_from"], 1)
+
+        # NDJSON файл должен содержать reverted_from в последней строке
+        versions_file = Path(self.temp_dir.name) / "transcript_versions.ndjson"
+        lines = [l.strip() for l in versions_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        last_record = _json.loads(lines[-1])
+        self.assertIn("reverted_from", last_record)
+        self.assertEqual(last_record["reverted_from"], 1)
+
+    def test_reverted_from_visible_after_reload(self) -> None:
+        """reverted_from поле видно в get_versions после перезагрузки менеджера."""
+        self.manager.save_version("item_reload", "Original", "stt_raw")
+        self.manager.save_version("item_reload", "Edited", "manual")
+        self.manager.revert_to_version("item_reload", 1)
+
+        # Перезагружаем менеджер с того же data_dir
+        reloaded = TranscriptVersionManager(self.temp_dir.name)
+        versions = reloaded.get_versions("item_reload")
+
+        # Всего 3 версии: Original, Edited, Reverted
+        self.assertEqual(len(versions), 3)
+        # Версия 3 (самая новая, первая при sort desc) должна иметь reverted_from
+        newest = versions[0]
+        self.assertEqual(newest["version_num"], 3)
+        self.assertIn("reverted_from", newest)
+        self.assertEqual(newest["reverted_from"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
