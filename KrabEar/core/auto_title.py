@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from core.text_anonymizer import TextAnonymizer
+
 
 # ── Стоп-слова и приветствия ─────────────────────────────────────────────────
 
@@ -60,8 +62,15 @@ class AutoTitleGenerator:
     - Для очень коротких текстов (<5 слов) использует текст as-is
     """
 
+    # ── Константа для «полностью редактированного» заголовка ─────────────────
+
+    _REDACTED_TOKEN_RE = re.compile(
+        r"^[\s\[\]А-ЯA-ZЁАТЛФОНМК_]+$",  # только токены вида [ТЕЛЕФОН], [EMAIL], …
+        re.IGNORECASE,
+    )
+
     def __init__(self) -> None:
-        pass
+        self._anonymizer = TextAnonymizer()
 
     # ── Основной публичный API ────────────────────────────────────────────────
 
@@ -78,8 +87,12 @@ class AutoTitleGenerator:
         if not text or not text.strip():
             return "Запись"
 
+        # Анонимизируем PII до извлечения заголовка — телефоны/email не должны
+        # становиться заголовками и попадать в history.ndjson / Obsidian.
+        safe_text = self._anonymizer.anonymize(text).anonymized_text
+
         # Извлекаем первую значимую фразу из текста
-        candidate = self._extract_first_meaningful_phrase(text)
+        candidate = self._extract_first_meaningful_phrase(safe_text)
 
         if not candidate:
             return "Запись"
@@ -89,6 +102,11 @@ class AutoTitleGenerator:
 
         # Капитализируем первую букву
         title = self._capitalize_first(title)
+
+        # Если весь кандидат состоит только из PII-токенов ([ТЕЛЕФОН], [EMAIL] …),
+        # вернуть дату-заглушку вместо бессмысленного «[Телефон]» в истории.
+        if title and self._is_fully_redacted(title):
+            return "Запись"
 
         return title or "Запись"
 
@@ -238,6 +256,17 @@ class AutoTitleGenerator:
         if not text:
             return text
         return text[0].upper() + text[1:]
+
+    def _is_fully_redacted(self, title: str) -> bool:
+        """Возвращает True, если заголовок состоит ТОЛЬКО из PII-токенов.
+
+        Пример: «[ТЕЛЕФОН]» или «[EMAIL] [ТЕЛЕФОН]» → True.
+        «Позвони на [ТЕЛЕФОН]» → False (есть обычный текст).
+        """
+        # Убираем пробелы и сами токены — если ничего не остаётся, заголовок
+        # полностью состоит из PII-плейсхолдеров.
+        without_tokens = re.sub(r"\[[^\]]+\]", "", title).strip()
+        return len(without_tokens) == 0
 
     def _format_date(self, timestamp: str) -> str:
         """Форматирует timestamp в строку YYYY-MM-DD."""

@@ -418,5 +418,57 @@ class TestWave117AutoTitle(unittest.TestCase):
             self.assertGreater(len(title), 0)
 
 
+class TestPIIAnonymizationInTitle(unittest.TestCase):
+    """W1013 F3 — PII в начале транскрипта не должны попадать в заголовок (W1023)."""
+
+    def setUp(self) -> None:
+        self.gen = AutoTitleGenerator()
+
+    def test_phone_at_start_redacted_in_title(self):
+        """Телефон в начале транскрипта не становится заголовком."""
+        text = "+7 (999) 123-45-67 — перезвони мне сегодня вечером по поводу встречи."
+        title = self.gen.generate_title(text)
+        # Сырой телефон не должен попасть в заголовок
+        self.assertNotIn("+7", title, f"Телефон не должен быть в заголовке: {title!r}")
+        self.assertNotIn("999", title, f"Цифры телефона не должны быть в заголовке: {title!r}")
+
+    def test_email_at_start_redacted_in_title(self):
+        """Email в начале транскрипта не становится заголовком."""
+        text = "user@example.com написал что встреча перенесена на пятницу."
+        title = self.gen.generate_title(text)
+        self.assertNotIn("@", title, f"Email не должен быть в заголовке: {title!r}")
+        self.assertNotIn("user@example.com", title, f"Email не должен быть в заголовке: {title!r}")
+
+    def test_normal_text_unaffected(self):
+        """Обычный текст без PII генерирует заголовок без изменений."""
+        text = "Сегодня обсуждаем архитектуру нового микросервиса для обработки платежей."
+        title = self.gen.generate_title(text)
+        self.assertIn("Сегодня", title, f"Обычный текст должен остаться: {title!r}")
+        self.assertTrue(title[0].isupper(), f"Заголовок должен начинаться с заглавной: {title!r}")
+
+    def test_fully_redacted_falls_back_to_generic(self):
+        """Если весь кандидат — PII-токены, возвращается дата-заглушка «Запись»."""
+        # Только телефон без другого текста
+        text = "+7 (999) 123-45-67"
+        title = self.gen.generate_title(text)
+        # Не должно содержать сырой телефон
+        self.assertNotIn("+7", title, f"Телефон не должен быть в заголовке: {title!r}")
+        # Должен вернуть что-то осмысленное
+        self.assertIsInstance(title, str)
+        self.assertGreater(len(title), 0)
+
+    def test_phone_mid_text_not_in_title(self):
+        """Телефон в середине фразы также анонимизируется."""
+        text = "Позвоните по номеру +7 (999) 123-45-67 до конца рабочего дня."
+        title = self.gen.generate_title(text)
+        self.assertNotIn("+7", title, f"Телефон не должен быть в заголовке: {title!r}")
+
+    def test_email_only_falls_back_to_generic(self):
+        """Текст только из email возвращает «Запись»."""
+        text = "info@krabear.ru"
+        title = self.gen.generate_title(text)
+        self.assertNotIn("@", title, f"Email не должен быть в заголовке: {title!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
