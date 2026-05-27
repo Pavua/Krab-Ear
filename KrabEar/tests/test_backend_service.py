@@ -2185,5 +2185,123 @@ class ListLlmModelsTestCase(unittest.TestCase):
         self.assertEqual(len(models), 2)
 
 
+class FeatureFlagsInitOrderTestCase(unittest.TestCase):
+    """W1481 N4 HIGH: _feature_flags must be initialised before _llm_rewriter injection.
+
+    Guard against regression where someone adds
+    ``self._llm_rewriter._feature_flags = self._feature_flags``
+    in service.__init__ BEFORE ``self._feature_flags = FeatureFlags(...)`` is executed,
+    which raises AttributeError on every direct BackendService() instantiation.
+    """
+
+    def _make_service(self) -> "BackendService":
+        import shutil
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = StateStore(Path(tmp) / "data")
+        return BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+
+    def test_backend_service_initializes_without_attribute_error(self) -> None:
+        """BackendService() must not raise AttributeError on instantiation.
+
+        Regression guard for W1481 N4: if _feature_flags wiring is placed before
+        FeatureFlags() construction the interpreter raises AttributeError because
+        self._feature_flags does not exist yet.
+        """
+        try:
+            svc = self._make_service()
+        except AttributeError as exc:
+            self.fail(
+                f"BackendService.__init__ raised AttributeError — likely "
+                f"_feature_flags referenced before it was initialised: {exc}"
+            )
+        self.assertTrue(hasattr(svc, "_feature_flags"), "_feature_flags must exist after __init__")
+
+    def test_feature_flags_injected_into_llm_rewriter(self) -> None:
+        """After init, _llm_rewriter._feature_flags must point to self._feature_flags.
+
+        Validates W979 F4 wiring: rewrite() reads _feature_flags via getattr; the
+        attribute must be the FeatureFlags instance owned by BackendService so that
+        IPC set_feature_flag changes are reflected immediately during rewrite().
+        """
+        svc = self._make_service()
+        if svc._llm_rewriter is None:
+            self.skipTest("LLM rewriter disabled (LLM_ENABLED=False) — skip wiring check")
+        self.assertIs(
+            svc._llm_rewriter._feature_flags,
+            svc._feature_flags,
+            "_llm_rewriter._feature_flags must be the same object as _feature_flags",
+        )
+
+    def test_feature_flags_assigned_before_llm_rewriter_inject(self) -> None:
+        """AST-level regression: _feature_flags must be assigned before the injection line.
+
+        Parses service.py and checks that the ``self._feature_flags = FeatureFlags(...)``
+        assignment appears at a lower line number than any
+        ``self._llm_rewriter._feature_flags = ...`` assignment, catching copy-paste
+        mistakes before they reach production (W1481 N4 regression guard).
+        """
+        import ast
+
+        service_path = Path(__file__).resolve().parents[1] / "backend" / "service.py"
+        source = service_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Walk the __init__ method body only
+        init_body = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "BackendService":
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "__init__":
+                        init_body = item
+                        break
+
+        self.assertIsNotNone(init_body, "BackendService.__init__ not found in service.py")
+
+        ff_init_line = None
+        ff_inject_line = None
+
+        for node in ast.walk(init_body):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    # self._feature_flags = FeatureFlags(...)
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and target.attr == "_feature_flags"
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                    ):
+                        ff_init_line = node.lineno
+                    # self._llm_rewriter._feature_flags = ...
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and target.attr == "_feature_flags"
+                        and isinstance(target.value, ast.Attribute)
+                        and target.value.attr == "_llm_rewriter"
+                    ):
+                        ff_inject_line = node.lineno
+
+        # If there is no injection line, wiring is absent — nothing to order-check
+        if ff_inject_line is None:
+            return
+
+        self.assertIsNotNone(
+            ff_init_line,
+            "self._feature_flags = FeatureFlags(...) assignment not found in __init__",
+        )
+        self.assertLess(
+            ff_init_line,
+            ff_inject_line,
+            f"self._feature_flags initialised at line {ff_init_line} but "
+            f"self._llm_rewriter._feature_flags injection is at line {ff_inject_line} — "
+            "injection must come AFTER initialisation (W1481 N4 regression)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
