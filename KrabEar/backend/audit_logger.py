@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,16 @@ _KEEP_DAYS = 7
 class AuditLogger:
     """Логирует IPC-запросы в append-only NDJSON файлы с ежедневной ротацией."""
 
+    # Cleanup runs at most once per this many seconds to avoid per-call glob overhead.
+    _CLEANUP_INTERVAL_S: float = 60.0
+
     def __init__(self, data_dir: str | os.PathLike) -> None:
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._current_date: str = ""
         self._file_handle = None
+        self._last_cleanup_ts: float = 0.0
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -88,7 +93,10 @@ class AuditLogger:
             except Exception:
                 logger.exception("Ошибка записи в audit log")
 
-        self._cleanup_old_files()
+            now = time.monotonic()
+            if now - self._last_cleanup_ts >= self._CLEANUP_INTERVAL_S:
+                self._last_cleanup_ts = now
+                self._cleanup_old_files()
 
     def get_audit_log(
         self,
