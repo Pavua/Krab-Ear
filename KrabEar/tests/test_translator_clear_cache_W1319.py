@@ -52,10 +52,11 @@ class TranslatorClearCacheMemoryTestCase(unittest.TestCase):
         )
 
     def test_clear_cache_no_disk_layer_is_noop(self) -> None:
-        """clear_cache() is safe when _translation_cache is not injected."""
+        """clear_cache() is safe when _translation_cache is None (not injected)."""
         translator = Translator()
-        # Ensure _translation_cache is NOT set (no AttributeError expected).
-        self.assertFalse(hasattr(translator, "_translation_cache"))
+        # W1429: _translation_cache is now explicitly declared as None in __init__.
+        # The attribute exists but is None — no disk layer active.
+        self.assertIsNone(translator._translation_cache)
         translator._cache[("m", "n", "o", "p")] = _make_ok_result()
 
         # Must not raise even without a disk layer.

@@ -106,49 +106,13 @@ class Translator:
         # W1145 F1 HIGH — lock для thread-safe доступа к _cache.
         self._cache_lock = threading.Lock()
         # W1145 F2 HIGH — отслеживаем предыдущее состояние privacy_mode чтобы сбрасывать кэш
-        # при переходе False→True.
-        self._last_privacy_mode: bool = False
+        # при переходе. None = «ещё не инициализировано» (нет сброса на первом вызове).
+        self._last_privacy_mode: bool | None = None
         # Phase B.2 — error_bus late-injection (same pattern as LLMRewriter / AudioEngine)
-        # W1190 — _translation_cache late-injection (set by BackendService after init)
+        # W1190/W1429 — _translation_cache late-injection (set by BackendService after init).
+        # Когда задан, успешные переводы персистируются на диск и переживают перезапуск.
+        self._translation_cache: Any | None = None  # type: TranslationCache | None
         # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
-
-    def clear_cache(self) -> None:
-        """Очищает оба слоя кэша: in-memory LRU и персистентный диск-кэш (W1313 F2).
-
-        Вызывается при переходе в privacy_mode и при явных IPC-запросах очистки.
-        Если `_translation_cache` (W1190 disk-layer) не привязан — пропускаем его
-        без ошибки (late-injection pattern, аналогично `_error_bus`).
-        """
-        # 1. Очистить in-memory LRU.
-        self._cache.clear()
-        logger.debug("Translator: in-memory translation cache cleared")
-        # 2. Очистить disk-persistent layer (late-injected, may be absent).
-        translation_cache = getattr(self, "_translation_cache", None)
-        if translation_cache is not None:
-            try:
-                translation_cache.clear()
-                logger.debug("Translator: disk translation_cache cleared")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
-
-    def _check_privacy_mode_changed(self, privacy_mode_enabled: bool) -> None:
-        """Обнаруживает переход privacy_mode и сбрасывает оба слоя кэша (W1313 F2).
-
-        Паттерн: вызывать перед каждым переводом передавая текущее значение флага.
-        При первом вызове просто сохраняет состояние (нет «прошлого» для сравнения).
-        """
-        last = getattr(self, "_last_privacy_mode", None)
-        self._last_privacy_mode = privacy_mode_enabled  # type: ignore[attr-defined]
-        if last is None:
-            # Первый вызов — только инициализация трекинга, не триггерим очистку.
-            return
-        if last != privacy_mode_enabled:
-            logger.info(
-                "Translator: privacy_mode transition %s→%s — wiping both cache layers",
-                last,
-                privacy_mode_enabled,
-            )
-            self.clear_cache()
 
     def _push_error(self, code: str, message_debug: str, severity: str | None = None) -> None:
         """Push KrabError to attached ErrorBus if available. Late-injected attribute."""
@@ -182,33 +146,62 @@ class Translator:
             logger.exception("error_bus.push failed for code=%s", code)
 
     def clear_cache(self) -> None:
-        """Атомарно очищает кэш переводов. Идемпотентен — безопасно вызывать многократно."""
+        """Очищает оба слоя кэша: in-memory LRU и персистентный диск-кэш.
+
+        W1313 F2 / W1429: thread-safe через _cache_lock. Если _translation_cache
+        не инжектирован — пропускаем без ошибки (late-injection pattern).
+        """
         with self._cache_lock:
             self._cache.clear()
+        logger.debug("Translator: in-memory translation cache cleared")
+        # Очистить disk-persistent layer (late-injected, may be None).
+        tc = self._translation_cache
+        if tc is not None:
+            try:
+                tc.clear()
+                logger.debug("Translator: disk translation_cache cleared")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Translator: disk translation_cache.clear() failed: %s", exc)
 
-    def _check_privacy_mode_changed(self) -> None:
-        """Определяет переход privacy_mode False→True и сбрасывает кэш.
+    def _check_privacy_mode_changed(self, privacy_mode_enabled: bool | None = None) -> None:
+        """Определяет переход privacy_mode и сбрасывает оба слоя кэша.
 
-        Вызывается в начале каждого translate() чтобы гарантировать, что данные,
-        накопленные до включения режима приватности, не утекают через кэш.
+        W1313 F2 / W1429: поддерживает два режима вызова:
+        - Без аргумента (из translate()): читает текущее значение через
+          _settings_getter (late-injected). Если getter не задан — no-op.
+        - С bool аргументом (из тестов/BackendService): использует переданное значение.
+          Первый вызов с новым значением только инициализирует трекинг без сброса.
         """
-        error_bus = getattr(self, "_error_bus", None)
-        if error_bus is None:
-            # Без error_bus не можем получить runtime-настройки — пропускаем проверку.
-            return
-        try:
-            # BackendService инжектирует _settings_getter при подключении error_bus.
+        if privacy_mode_enabled is None:
+            # Режим без аргумента: читаем из runtime-настроек через _settings_getter.
             getter = getattr(self, "_settings_getter", None)
             if getter is None:
                 return
-            current = bool(getter("privacy_mode_enabled", False))
-        except Exception:
-            return
-        if current and not self._last_privacy_mode:
-            # Переход False→True: сбрасываем накопленные переводы.
-            self.clear_cache()
-            logger.info("Translator cache cleared on privacy_mode enable")
-        self._last_privacy_mode = current
+            try:
+                current = bool(getter("privacy_mode_enabled", False))
+            except Exception:
+                return
+            last = self._last_privacy_mode
+            self._last_privacy_mode = current
+            if last is None:
+                return  # первый вызов — только инициализация
+            if current and not last:
+                # Переход False→True: сбрасываем накопленные переводы.
+                self.clear_cache()
+                logger.info("Translator cache cleared on privacy_mode enable")
+        else:
+            # Режим с явным аргументом: W1313 F2 паттерн с first-call guard.
+            last = getattr(self, "_last_privacy_mode", None)
+            self._last_privacy_mode = privacy_mode_enabled
+            if last is None:
+                return  # первый вызов — только инициализация
+            if last != privacy_mode_enabled:
+                logger.info(
+                    "Translator: privacy_mode transition %s→%s — wiping both cache layers",
+                    last,
+                    privacy_mode_enabled,
+                )
+                self.clear_cache()
 
     def translate(
         self,
@@ -306,6 +299,34 @@ class Translator:
         if cached is not None:
             return self._apply_glossary_to_result(cached, safe_glossary)
 
+        # W1429: персистентный кэш — проверяем после промаха in-memory кэша.
+        # Ключ использует normalized_mode/style/network_mode для изоляции режимов.
+        # Только successful (status="ok") результаты хранятся на диске.
+        # Значение закодировано как "src_lang\x00tgt_lang\x00engine\x00translated_text".
+        _tc = self._translation_cache
+        if _tc is not None:
+            _persistent_hit = _tc.get(
+                text=clean_text,
+                source=normalized_mode,
+                target=normalized_style,
+                engine="persistent",
+                network_mode=normalized_network_mode,
+            )
+            if _persistent_hit is not None:
+                parts = _persistent_hit.split("\x00", 3)
+                if len(parts) == 4:
+                    src_lang, tgt_lang, orig_engine, translated_text = parts
+                    restored = TranslationResult(
+                        text=translated_text,
+                        status="ok",
+                        source_lang=src_lang,
+                        target_lang=tgt_lang,
+                        mode=normalized_mode,
+                        engine=orig_engine + "_cached",
+                    )
+                    self._cache_set(cache_key, restored)
+                    return self._apply_glossary_to_result(restored, safe_glossary)
+
         if normalized_mode == "off":
             result = TranslationResult(
                 text="",
@@ -325,6 +346,19 @@ class Translator:
                 translation_style=normalized_style,
             )
             self._cache_set(cache_key, result)
+            # W1429: персистируем успешный билингвальный перевод
+            if result.ok and result.text and _tc is not None:
+                try:
+                    _tc.put(
+                        text=clean_text,
+                        source=normalized_mode,
+                        target=normalized_style,
+                        engine="persistent",
+                        network_mode=normalized_network_mode,
+                        result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass  # кэш не критичен
             return self._apply_glossary_to_result(result, safe_glossary)
 
         result = self._translate_single_mode(
@@ -334,6 +368,19 @@ class Translator:
             translation_style=normalized_style,
         )
         self._cache_set(cache_key, result)
+        # W1429: персистируем успешные переводы для выживания между перезапусками
+        if result.ok and result.text and _tc is not None:
+            try:
+                _tc.put(
+                    text=clean_text,
+                    source=normalized_mode,
+                    target=normalized_style,
+                    engine="persistent",
+                    network_mode=normalized_network_mode,
+                    result=f"{result.source_lang}\x00{result.target_lang}\x00{result.engine}\x00{result.text}",
+                )
+            except Exception:  # noqa: BLE001
+                pass  # кэш не критичен
         return self._apply_glossary_to_result(result, safe_glossary)
 
     def _translate_single_mode(
