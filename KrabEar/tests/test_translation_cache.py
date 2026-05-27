@@ -129,7 +129,10 @@ class TestTranslationCachePersistence(unittest.TestCase):
         with open(cache_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertIsInstance(data, dict)
-        self.assertEqual(len(data), 1)
+        # v2 format: {"version": 2, "entries": {...}} — two top-level keys
+        self.assertEqual(data.get("version"), 2, "файл должен быть v2 формата")
+        self.assertIn("entries", data, "v2 формат должен содержать 'entries'")
+        self.assertEqual(len(data["entries"]), 1, "должна быть 1 запись в entries")
 
 
 class TestTranslationCacheEviction(unittest.TestCase):
@@ -623,6 +626,199 @@ class TestTranslationCacheNetworkModeKey(unittest.TestCase):
         # Пустой режим — miss (не смешивается с именованными режимами)
         self.assertIsNone(
             cache2.get("text", "en", "ru", "hf_marian", network_mode=""),
+        )
+
+
+class TestTranslationCacheUnifiedW1394(unittest.TestCase):
+    """W1394 unified tests: fsync (W938) + TOCTOU lock (W1371 F3) + v2 format.
+
+    Covers all four requirements:
+      1. os.fsync() called before os.replace (W938 F2)
+      2. Atomic tmp+rename persist pattern preserved
+      3. network_mode in key — different modes → different entries (W1371 F2 / W1313)
+      4. put() holds lock across _persist_locked() — no TOCTOU (W1371 F3 / W938 F5)
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    # ── 1. fsync is called before os.replace ────────────────────────────
+
+    def test_translation_cache_persist_fsync_called(self) -> None:
+        """os.fsync() must be called on the tmp file fd before os.replace."""
+        import unittest.mock as mock
+
+        cache = TranslationCache(data_dir=self._tmp)
+        fsync_calls: list = []
+
+        real_fsync = os.fsync
+
+        def recording_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+            real_fsync(fd)
+
+        with mock.patch("os.fsync", side_effect=recording_fsync):
+            cache.put("hello", "en", "ru", "eng", "привет", network_mode="offline_strict")
+
+        self.assertGreater(
+            len(fsync_calls), 0,
+            "os.fsync() должен вызываться при persist — W938 F2",
+        )
+
+    # ── 2. Atomic tmp+rename pattern ────────────────────────────────────
+
+    def test_translation_cache_persist_atomic_tmp_rename(self) -> None:
+        """Persist must write to a .tmp file first, then os.replace to final path."""
+        import unittest.mock as mock
+
+        cache = TranslationCache(data_dir=self._tmp)
+        rename_calls: list = []
+
+        real_replace = os.replace
+
+        def recording_replace(src: str, dst: str) -> None:
+            rename_calls.append((src, dst))
+            real_replace(src, dst)
+
+        with mock.patch("os.replace", side_effect=recording_replace):
+            cache.put("test", "en", "ru", "eng", "тест")
+
+        self.assertEqual(len(rename_calls), 1, "ровно один os.replace при одном put()")
+        src, dst = rename_calls[0]
+        self.assertTrue(src.endswith(".tmp"), f"src должен быть .tmp файлом, got: {src}")
+        self.assertFalse(dst.endswith(".tmp"), f"dst не должен быть .tmp файлом, got: {dst}")
+        # После rename финальный файл существует, .tmp удалён
+        self.assertTrue(os.path.exists(dst), "финальный файл должен существовать после os.replace")
+        self.assertFalse(os.path.exists(src), ".tmp файл должен быть удалён после os.replace")
+
+    # ── 3. network_mode in key ───────────────────────────────────────────
+
+    def test_translation_cache_network_mode_in_key(self) -> None:
+        """Different network_modes produce independent cache entries."""
+        cache = TranslationCache(data_dir=self._tmp)
+        cache.put("hello", "en", "ru", "eng", "offline_value", network_mode="offline_strict")
+        cache.put("hello", "en", "ru", "eng", "online_value", network_mode="online_opt_in")
+
+        self.assertEqual(
+            cache.get("hello", "en", "ru", "eng", network_mode="offline_strict"),
+            "offline_value",
+            "offline_strict должен вернуть своё значение",
+        )
+        self.assertEqual(
+            cache.get("hello", "en", "ru", "eng", network_mode="online_opt_in"),
+            "online_value",
+            "online_opt_in должен вернуть своё значение",
+        )
+        # Cross-mode должен быть miss
+        self.assertIsNone(
+            cache.get("hello", "en", "ru", "eng", network_mode="other_mode"),
+            "unknown network_mode должен быть cache miss",
+        )
+
+    def test_translation_cache_network_mode_persisted_in_v2_format(self) -> None:
+        """v2 format persists entries; reload preserves network_mode isolation."""
+        cache1 = TranslationCache(data_dir=self._tmp)
+        cache1.put("word", "en", "ru", "eng", "слово_offline", network_mode="offline_strict")
+        cache1.put("word", "en", "ru", "eng", "слово_online", network_mode="online_opt_in")
+
+        # Verify v2 format on disk
+        cache_path = os.path.join(self._tmp, "translation_cache.json")
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(data.get("version"), 2, "Файл должен быть в формате v2")
+        self.assertIn("entries", data, "v2 формат должен содержать 'entries'")
+
+        # Reload preserves isolation
+        cache2 = TranslationCache(data_dir=self._tmp)
+        self.assertEqual(
+            cache2.get("word", "en", "ru", "eng", network_mode="offline_strict"),
+            "слово_offline",
+        )
+        self.assertEqual(
+            cache2.get("word", "en", "ru", "eng", network_mode="online_opt_in"),
+            "слово_online",
+        )
+
+    # ── 4. TOCTOU: put() holds lock across _persist_locked() ────────────
+
+    def test_translation_cache_put_under_lock_no_toctou(self) -> None:
+        """Two concurrent put() calls must not interleave on the .tmp file.
+
+        Strategy: intercept os.replace to record serialization order;
+        verify no two writes overlap (i.e. lock is held across the full
+        put → persist path).
+        """
+        import unittest.mock as mock
+
+        cache = TranslationCache(data_dir=self._tmp)
+        active_writers: list = []
+        max_concurrent = [0]
+        lock_check = threading.Lock()
+
+        real_open = open
+        real_replace = os.replace
+
+        class TrackingFile:
+            """Wraps a file handle and tracks concurrent open tmp writers."""
+
+            def __init__(self, fh):  # type: ignore[no-untyped-def]
+                self._fh = fh
+                with lock_check:
+                    active_writers.append(1)
+                    max_concurrent[0] = max(max_concurrent[0], len(active_writers))
+
+            def write(self, data):  # type: ignore[no-untyped-def]
+                return self._fh.write(data)
+
+            def flush(self) -> None:
+                self._fh.flush()
+
+            def fileno(self) -> int:
+                return self._fh.fileno()
+
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            def __exit__(self, *args):  # type: ignore[no-untyped-def]
+                with lock_check:
+                    active_writers.pop()
+                self._fh.__exit__(*args)
+
+        def patched_open(path, mode="r", **kwargs):  # type: ignore[no-untyped-def]
+            fh = real_open(path, mode, **kwargs)
+            if isinstance(path, str) and path.endswith(".tmp") and "w" in mode:
+                return TrackingFile(fh)
+            return fh
+
+        results = []
+        errors: list = []
+
+        def worker(value: str) -> None:
+            try:
+                cache.put("key", "en", "ru", "eng", value, network_mode="offline_strict")
+                results.append(value)
+            except Exception as exc:
+                errors.append(exc)
+
+        # Patch open and run concurrent puts
+        with mock.patch("builtins.open", side_effect=patched_open):
+            threads = [threading.Thread(target=worker, args=(f"value_{i}",)) for i in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(len(errors), 0, f"Ошибки при конкурентных put(): {errors}")
+        self.assertEqual(len(results), 5, "Все 5 put() должны завершиться")
+        # If lock is properly held across persist, max concurrent tmp writers = 1
+        self.assertEqual(
+            max_concurrent[0], 1,
+            f"Максимум 1 одновременный tmp-writer (lock обеспечивает TOCTOU safety), "
+            f"наблюдалось: {max_concurrent[0]}",
         )
 
 
