@@ -26,6 +26,13 @@ from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
+# Флаг наличия MLX (проверяется один раз при загрузке модуля)
+try:
+    import mlx.core as _mlx_core  # noqa: F401
+    _HAS_MLX = True
+except ImportError:
+    _HAS_MLX = False
+
 
 class AudioLanguageID:
     """Определяет язык аудио через mlx-whisper encoder (без decoder).
@@ -41,6 +48,22 @@ class AudioLanguageID:
 
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
+
+    @classmethod
+    def clear_model_cache(cls) -> None:
+        """Сбрасывает Python-ссылку на модель и освобождает Metal GPU буферы.
+
+        W1405 F2 MED: drop Python reference + flush Metal cache через mx.clear_cache().
+        Без явного mx.clear_cache() Metal буферы (~300-500 MB) от вытесненной модели
+        остаются до следующего inference finally-блока — нелетерминированная утечка.
+        """
+        cls._model_cache.clear()
+        if _HAS_MLX:
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except Exception:
+                pass  # MLX не установлен или старая версия без clear_cache
 
     def __init__(
         self,
