@@ -95,6 +95,25 @@ class TestFormalProfile(unittest.TestCase):
         result = self.reg.apply_profile(text, "formal")
         self.assertTrue(result[0].isupper(), f"Expected uppercase start: {result!r}")
 
+    def test_es_accented_word_capitalized_at_sentence_start(self):
+        """W1050 F4: Spanish accented chars (é, ñ) must be capitalized after sentence end."""
+        # Two sentences starting with accented Spanish letters
+        text = "él dijo algo. ñoñería es rara."
+        result = self.reg.apply_profile(text, "formal")
+        # First word: "él" → "Él"
+        self.assertTrue(
+            result.startswith("Él") or result[0] == "É",
+            f"Expected 'Él' at start, got: {result!r}",
+        )
+        # After period+space: "ñoñería" → "Ñoñería"
+        self.assertIn("Ñ", result, f"Expected 'Ñ' after sentence break, got: {result!r}")
+
+    def test_ru_lowercase_at_start_capitalized(self):
+        """Regression: Russian lowercase first letter is still capitalized (W1058)."""
+        text = "привет мир. как дела."
+        result = self.reg.apply_profile(text, "formal")
+        self.assertTrue(result[0].isupper(), f"Expected uppercase RU start: {result!r}")
+
 
 class TestTelegramProfile(unittest.TestCase):
 
