@@ -106,5 +106,8 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # Added W860 F1 — dedicated disk.critical code (previously missing from
             # registry; _push_disk_critical_error fell back to empty user_msg_ru).
             "disk.critical",
+            # Added W905 F2 — startup.stt_model_cache_miss: STT model not yet in
+            # HF cache at startup; pushed by startup diagnostics / engine init path.
+            "startup.stt_model_cache_miss",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)

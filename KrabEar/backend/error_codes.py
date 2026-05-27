@@ -633,6 +633,23 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 60,
     },
 
+    # ── Wave 82 / W905 F2: startup codes ─────────────────────────────────────
+
+    # startup.stt_model_cache_miss — STT model files are not yet present in
+    # HuggingFace cache at startup (first launch or cache cleared). Whisper
+    # and GigaAM adapters require cache pre-population; without it they fall
+    # back to the next model in chain. Info severity — this resolves
+    # automatically on next transcription once the model downloads. Dedupe
+    # 3600s so it surfaces only once per hour.
+    "startup.stt_model_cache_miss": {
+        "user_msg_ru": "STT модель ещё не загружена в кэш HuggingFace",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 3600,
+    },
+
     # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────
 
     # rewriter.lm_studio_stream_gpu_lost — LM Studio returned HTTP 500 with
