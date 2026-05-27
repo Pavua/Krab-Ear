@@ -2244,13 +2244,25 @@ def main() -> None:
 
     configure_logging(data_dir)
 
+    # W1199 (W1193 F1 HIGH): Load settings from disk BEFORE init_sentry so that
+    # privacy_mode_enabled=True users are never enrolled in Sentry telemetry —
+    # even on first process launch before the IPC socket is ready.
+    _startup_settings: dict = {}
+    try:
+        _startup_store = StateStore(data_dir=data_dir)
+        _startup_settings = _startup_store.load_settings() or {}
+    except Exception as _se:  # noqa: BLE001
+        logger.warning("main: failed to pre-load settings for Sentry guard: %s", _se)
+
     # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
     # W704: release string читается из Info.plist через get_release_string()
     # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
+    # W1199: settings= passed so privacy_mode_enabled guard is honoured at startup.
     sentry_ok = init_sentry(
         dsn=settings.SENTRY_DSN or None,
         environment=settings.SENTRY_ENVIRONMENT,
         release=get_release_string(),
+        settings=_startup_settings,
     )
     if sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
