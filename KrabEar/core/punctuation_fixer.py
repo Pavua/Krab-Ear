@@ -19,6 +19,12 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 _NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
 _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
 
+# STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
+# common Whisper output like "dime.como".  Only applied in ES mode.
+# Excludes abbreviation-style runs (e.g. "e.g.", "U.S.A") by requiring the
+# character BEFORE the period to be a word character (not already a digit).
+_NO_SPACE_AFTER_SENT_LOWER_ES_RE = re.compile(r"([.!?])([a-záéíóúüñ¿¡])", re.IGNORECASE)
+
 # Множественные пробелы
 _MULTI_SPACE_RE = re.compile(r"  +")
 
@@ -105,6 +111,12 @@ class PunctuationFixer:
     def _fix_spanish(self, text: str) -> str:
         """Правила, специфичные для испанского языка."""
         result = text
+
+        # Нормализация STT «без пробела после знака»: Whisper иногда выводит
+        # "dime.como te llamas?" (без пробела после точки перед строчной буквой).
+        # Вставляем пробел, чтобы сплиттер предложений мог корректно разбить текст.
+        # Применяется только для ES, до marker-insertion.
+        result = _NO_SPACE_AFTER_SENT_LOWER_ES_RE.sub(r"\1 \2", result)
 
         # Капитализировать первое слово
         if result and result[0].islower():
