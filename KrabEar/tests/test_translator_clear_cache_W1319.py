@@ -159,5 +159,40 @@ class TranslatorPrivacyModeClearTestCase(unittest.TestCase):
         mock_disk_cache.clear.assert_not_called()
 
 
+class TranslatorNoDuplicateDefinitionsTestCase(unittest.TestCase):
+    """W1428 — translator.py must not contain duplicate method definitions inside Translator."""
+
+    def test_no_duplicate_definitions_in_translator_py(self) -> None:
+        """AST scan: each method name inside the Translator class appears exactly once."""
+        import ast
+        import collections
+
+        translator_path = PROJECT_ROOT / "backend" / "translator.py"
+        source = translator_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(translator_path))
+
+        # Find the Translator class node.
+        translator_class = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "Translator":
+                translator_class = node
+                break
+
+        self.assertIsNotNone(translator_class, "Translator class not found in translator.py")
+
+        # Collect all direct method definitions (FunctionDef / AsyncFunctionDef).
+        method_counts: collections.Counter[str] = collections.Counter()
+        for item in translator_class.body:  # type: ignore[union-attr]
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                method_counts[item.name] += 1
+
+        duplicates = {name: count for name, count in method_counts.items() if count > 1}
+        self.assertEqual(
+            {},
+            duplicates,
+            f"Duplicate method definitions found in Translator class: {duplicates}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
