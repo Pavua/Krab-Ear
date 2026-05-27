@@ -121,7 +121,9 @@ from backend.observability import (
     init_sentry,
     install_signal_handlers,
 )
+from backend.audit_logger import AuditLogger
 from backend.calendar_link import CalendarLinker
+from backend.text_processing_service import TextProcessingService
 from backend.privacy_audit import get_privacy_audit_logger
 from backend.text_processing_service import TextProcessingService
 
@@ -555,6 +557,9 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+
+        # Audit log — IPC-request trace (W1381)
+        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -1225,6 +1230,8 @@ class BackendService:
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             "clear_privacy_audit_log": self._handle_clear_privacy_audit_log,  # удалить файл privacy audit log
+            # --- IPC audit log (W1381) ---
+            "get_audit_log": self._handle_get_audit_log,  # последние записи IPC audit log; privacy_mode блокирует
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- Default STT hotwords seed ---
@@ -2361,6 +2368,36 @@ class BackendService:
         audit = get_privacy_audit_logger()
         audit.clear()
         return {"ok": True}
+
+    # --- IPC audit log (W1381) ---
+
+    def _handle_get_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние записи IPC audit log для операторов/отладки.
+
+        Параметры:
+            days_back — количество дней для выборки (default 7, range 1–90).
+            limit     — максимальное число записей (default 200).
+
+        Возвращает:
+            entries — список записей {ts, method, params_keys, success, duration_ms}.
+            reason  — «privacy_mode» когда данные недоступны.
+        """
+        # Privacy mode: возвращаем пустой ответ без утечки метаданных
+        if self._cached_settings().get("privacy_mode_enabled", False):
+            return {"ok": True, "entries": [], "reason": "privacy_mode"}
+
+        raw_days = params.get("days_back", 7)
+        try:
+            days_back = int(raw_days)
+        except (TypeError, ValueError):
+            days_back = 7
+        days_back = max(1, min(days_back, 90))
+
+        limit = int(params.get("limit", 200))
+        limit = max(1, min(limit, 1000))
+
+        entries = self._audit_logger.get_audit_log(limit=limit)
+        return {"ok": True, "entries": entries}
 
     # --- D.2.3: Scored STT routing decision ---
 
