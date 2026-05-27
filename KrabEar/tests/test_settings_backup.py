@@ -383,5 +383,78 @@ class TestSettingsBackupConcurrent(unittest.TestCase):
         self.assertLessEqual(len(files), MAX_BACKUPS)
 
 
+# ---------------------------------------------------------------------------
+# W1454: handle_restore_settings_backup must raise ValueError not return ok=False dict
+# ---------------------------------------------------------------------------
+
+class TestRestoreSettingsBackupRaisesW1454(unittest.TestCase):
+    """W1448 F1 HIGH: handle_restore_settings_backup must raise ValueError on
+    migration/validation failure, not silently return {"ok": False, ...} which
+    the IPC wrapper would wrap as ok=True."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.backup_mgr = SettingsBackup(backup_dir=Path(self.tmp))
+        self.store = _make_store()
+        self.svc = SettingsService(store=self.store, backup=self.backup_mgr)
+
+    def test_restore_invalid_raises_valueerror_not_dict(self):
+        """Validation failure must raise ValueError, not return a dict with ok=False."""
+        from unittest.mock import patch
+        from backend.settings_validator import ValidationResult
+
+        # Create a real backup so restore_backup finds the file
+        backup_id = self.backup_mgr.create_backup(dict(_BASE_SETTINGS), reason="test")
+
+        # Make validation reject the restored data
+        bad_result = ValidationResult(valid=False, errors=["unknown_key: not allowed"])
+        with patch.object(self.svc._validator, "validate", return_value=bad_result):
+            with self.assertRaises(ValueError) as ctx:
+                self.svc.handle_restore_settings_backup({"backup_id": backup_id})
+        self.assertIn("Backup validation failed", str(ctx.exception))
+
+    def test_restore_migration_failure_raises(self):
+        """Schema migration failure must raise ValueError, not return ok=False dict."""
+        from unittest.mock import patch
+        from backend.settings_validator import CURRENT_SCHEMA_VERSION
+
+        # Write a backup that looks like an old schema version
+        import json, time
+        old_data = dict(_BASE_SETTINGS)
+        old_data["schema_version"] = "1.0"
+        ts = int(time.time() * 1000)
+        backup_id = f"test_migration_{ts}"
+        backup_path = Path(self.tmp) / f"{backup_id}.json"
+        backup_path.write_text(json.dumps(old_data))
+
+        # Build a side_effect that only raises when the *backup* migration runs
+        # (not on any internal cached_settings calls). We detect by checking
+        # whether the caller is migrating from_version="1.0" to current.
+        real_migrate = self.svc._validator.migrate.__func__
+
+        def _selective_raise(settings: dict, from_version: str, to_version: str) -> dict:
+            if settings.get("schema_version") == "1.0" and from_version == "1.0":
+                # This is the backup's migration — should raise
+                raise RuntimeError("incompatible")
+            return real_migrate(self.svc._validator, settings, from_version, to_version)
+
+        with patch.object(self.svc._validator, "migrate", side_effect=_selective_raise):
+            with self.assertRaises(ValueError) as ctx:
+                self.svc.handle_restore_settings_backup({"backup_id": backup_id})
+        self.assertIn("migration", str(ctx.exception).lower())
+
+    def test_restore_valid_returns_success_dict(self):
+        """Valid backup restore must still return a success dict (not raise)."""
+        backup_data = dict(_BASE_SETTINGS)
+        backup_data["quality_profile"] = "max"
+        backup_id = self.backup_mgr.create_backup(backup_data, reason="w1454_ok")
+
+        result = self.svc.handle_restore_settings_backup({"backup_id": backup_id})
+        self.assertIn("backup_id", result)
+        self.assertEqual(result["backup_id"], backup_id)
+        self.assertNotIn("ok", result,
+                         "Handler must not return ok=False dict — should raise instead")
+
+
 if __name__ == "__main__":
     unittest.main()
