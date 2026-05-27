@@ -456,5 +456,83 @@ class RecordingChainBackendServiceDispatchTestCase(unittest.TestCase):
                          "Unexpected Swift caller found — update this test")
 
 
+class RecordingChainW1046FixTestCase(unittest.TestCase):
+    """W1039 F1+F5: limit guard + delete_all_chains (privacy-purge cascade)."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._mgr = RecordingChainManager(store=self._store)
+
+    # --- F1: negative limit guard ---
+
+    def test_list_chains_negative_limit_returns_empty(self) -> None:
+        """list_chains(limit=-1) must return [] not N-1 items (W1039 F1)."""
+        for i in range(5):
+            self._mgr.start_chain(f"Chain {i}")
+        result = self._mgr.list_chains(limit=-1)
+        self.assertEqual(result, [], "Negative limit must produce empty list, not data leak")
+
+    def test_list_chains_zero_limit_returns_empty(self) -> None:
+        """list_chains(limit=0) returns empty list."""
+        self._mgr.start_chain("Single chain")
+        result = self._mgr.list_chains(limit=0)
+        self.assertEqual(result, [])
+
+    def test_list_chains_large_limit_capped_at_1000(self) -> None:
+        """list_chains(limit=999999) is capped at 1000 max items."""
+        for i in range(5):
+            self._mgr.start_chain(f"Chain {i}")
+        # Just verify it doesn't crash and returns ≤1000
+        result = self._mgr.list_chains(limit=999999)
+        self.assertLessEqual(len(result), 1000)
+        self.assertEqual(len(result), 5)
+
+    def test_list_chains_normal_limit_still_works(self) -> None:
+        """list_chains with positive limit retains previous behaviour."""
+        for i in range(5):
+            self._mgr.start_chain(f"Chain {i}")
+        result = self._mgr.list_chains(limit=3)
+        self.assertEqual(len(result), 3)
+
+    # --- F5: delete_all_chains (privacy-purge cascade) ---
+
+    def test_delete_all_chains_clears_all(self) -> None:
+        """delete_all_chains() removes all chains and returns count."""
+        for i in range(4):
+            self._mgr.start_chain(f"Chain {i}")
+        deleted = self._mgr.delete_all_chains()
+        self.assertEqual(deleted, 4)
+        self.assertEqual(self._mgr.list_chains(), [])
+
+    def test_delete_all_chains_idempotent(self) -> None:
+        """delete_all_chains() on an empty store returns 0 and doesn't crash."""
+        deleted = self._mgr.delete_all_chains()
+        self.assertEqual(deleted, 0)
+        self.assertEqual(self._mgr.list_chains(), [])
+
+    def test_delete_all_chains_persists_empty_state(self) -> None:
+        """delete_all_chains() writes empty chains.json; reload sees no chains."""
+        self._mgr.start_chain("Persisted chain")
+        self._mgr.delete_all_chains()
+        # Reload from disk
+        mgr2 = RecordingChainManager(store=self._store)
+        self.assertEqual(mgr2.list_chains(), [])
+
+    def test_privacy_purge_cascades_recording_chains(self) -> None:
+        """After delete_all_chains, no chain data remains (F5 cascade test)."""
+        cid = self._mgr.start_chain("Secret meeting")
+        self._mgr.add_to_chain(cid, "item-secret-1")
+        self._mgr.add_to_chain(cid, "item-secret-2")
+        # Simulate privacy purge cascade
+        count = self._mgr.delete_all_chains()
+        self.assertEqual(count, 1)
+        # Chain is gone
+        with self.assertRaises(KeyError):
+            self._mgr.get_chain(cid)
+        # No chains remain
+        self.assertEqual(self._mgr.list_chains(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1691,14 +1691,18 @@ class BackendService:
         }
 
     def _handle_clear_privacy_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Удаляет файл privacy audit log. Идемпотентен.
+        """Удаляет файл privacy audit log и все цепочки записей. Идемпотентен.
+
+        Cascade: recording_chains.json также очищается при privacy-purge (W1039 F5).
 
         Возвращает:
             ok — всегда True.
+            chains_deleted — количество удалённых цепочек.
         """
         audit = get_privacy_audit_logger()
         audit.clear()
-        return {"ok": True}
+        chains_deleted = self._chains.delete_all_chains()
+        return {"ok": True, "chains_deleted": chains_deleted}
 
     # --- D.2.3: Scored STT routing decision ---
 
