@@ -18,7 +18,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from backend.state_store import StateStore
@@ -52,6 +52,7 @@ class BulkReprocessor:
         version_manager: "TranscriptVersionManager",
         event_bus: "EventBus | None" = None,
         batch_size: int = 5,
+        is_recording_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.store = store
         self.transcriber = transcriber
@@ -59,6 +60,7 @@ class BulkReprocessor:
         self.event_bus = event_bus
         self.batch_size = max(1, int(batch_size))
         self._cancel_event = threading.Event()
+        self._is_recording_fn = is_recording_fn
 
     def cancel(self) -> None:
         """Запрашивает отмену текущего запуска (проверяется между записями)."""
@@ -158,6 +160,11 @@ class BulkReprocessor:
                 "cancelled": bool,
             }
         """
+        # Guard: refuse to run while active recording is in progress.
+        # Competing with an ongoing recording for MLX GPU → potential SIGSEGV (PR #71 class).
+        if self._is_recording_fn is not None and self._is_recording_fn():
+            raise RuntimeError("bulk_reprocess refused: active recording in progress")
+
         self._reset_cancel()
         errors: list[str] = []
         reprocessed = 0
@@ -235,12 +242,16 @@ class BulkReprocessor:
             # Реальное перетранскрибирование.
             try:
                 audio_data = self._load_audio(audio_path)
-                result = self.transcriber.transcribe(
-                    audio_data,
-                    quality_profile="balanced",
-                    cleanup_profile="soft",
-                    lang_hint=item.source_lang or None,
-                )
+                # Defense-in-depth: serialise MLX GPU access even if the caller
+                # didn't inject is_recording_fn.  Per project rule (PR #71).
+                from core.mlx_lock import mlx_lock
+                with mlx_lock():
+                    result = self.transcriber.transcribe(
+                        audio_data,
+                        quality_profile="balanced",
+                        cleanup_profile="soft",
+                        lang_hint=item.source_lang or None,
+                    )
                 new_text = str(result.get("text") or "").strip()
                 new_confidence = float(result.get("confidence") or 0.0)
 
