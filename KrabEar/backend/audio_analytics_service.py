@@ -126,7 +126,7 @@ class AudioAnalyticsService:
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды качества распознавания за последние N дней."""
         _t0 = time.monotonic()
-        days = int(params.get("days", 30))
+        days = max(1, int(params.get("days", 30)))
         try:
             try:
                 with self._store._lock():
