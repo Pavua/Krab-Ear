@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,9 +35,14 @@ class PlaybackTracker:
     }
     """
 
-    def __init__(self, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        privacy_mode_enabled: bool = False,
+    ) -> None:
         self._lock = threading.Lock()
         self._stats: dict[str, dict[str, Any]] = {}
+        self._privacy_mode_enabled: bool = privacy_mode_enabled
         if data_dir is not None:
             self._path: Path | None = Path(data_dir) / _PLAYBACK_FILE
             self._load()
@@ -69,12 +75,24 @@ class PlaybackTracker:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._path.with_suffix(".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self._stats, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            tmp_path.replace(self._path)
+            payload = json.dumps(self._stats, ensure_ascii=False, indent=2)
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=self._path.parent,
+                prefix=".playback_stats_tmp_",
+                suffix=".json",
+            )
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, self._path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as exc:
             _log.warning("Не удалось сохранить статистику воспроизведения: %s", exc)
 
@@ -82,16 +100,32 @@ class PlaybackTracker:
     # Публичный API
     # ------------------------------------------------------------------
 
+    def set_privacy_mode(self, enabled: bool) -> None:
+        """Устанавливает режим конфиденциальности.
+
+        Когда privacy_mode=True, record_playback() ничего не записывает и не
+        сохраняет на диск (персистентность отключена для защиты приватности).
+        """
+        self._privacy_mode_enabled = bool(enabled)
+
     def record_playback(self, item_id: str, duration_listened_sec: float = 0.0) -> None:
         """Регистрирует событие воспроизведения записи.
 
         Args:
             item_id: идентификатор записи истории.
             duration_listened_sec: сколько секунд прослушано в этот раз (≥ 0).
+
+        Note:
+            Если privacy_mode_enabled=True — вызов игнорируется полностью
+            (событие не записывается и не сохраняется на диск).
         """
         item_id = str(item_id).strip()
         if not item_id:
             raise ValueError("item_id не может быть пустым")
+        # F3: privacy gate — skip recording entirely when privacy mode is on.
+        if self._privacy_mode_enabled:
+            _log.debug("record_playback: пропуск (privacy_mode=True) для item_id=%r", item_id)
+            return
         duration = max(0.0, float(duration_listened_sec))
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -189,6 +223,28 @@ class PlaybackTracker:
             cursor = next_cursor
 
         return result[:limit]
+
+    def remove_stats(self, item_id: str) -> bool:
+        """Удаляет статистику воспроизведения для указанной записи.
+
+        Вызывать после удаления соответствующей записи из истории, чтобы
+        не накапливать осиротевшие ключи в playback_stats.json.
+
+        Args:
+            item_id: идентификатор записи истории.
+
+        Returns:
+            True если ключ существовал и был удалён, False если ключ не найден.
+        """
+        item_id = str(item_id).strip()
+        if not item_id:
+            return False
+        with self._lock:
+            if item_id not in self._stats:
+                return False
+            del self._stats[item_id]
+            self._save()
+        return True
 
     # ------------------------------------------------------------------
     # IPC-обработчики

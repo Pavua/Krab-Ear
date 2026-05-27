@@ -24,6 +24,7 @@ from backend.summary_profiles import SummaryProfileManager
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
+    from backend.playback_tracker import PlaybackTracker
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
@@ -80,6 +81,7 @@ class HistoryService:
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
         auto_glossary_builder: Any | None = None,
+        playback_tracker: "PlaybackTracker | None" = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -90,6 +92,8 @@ class HistoryService:
         # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
         # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
         self._auto_glossary = auto_glossary_builder
+        # PlaybackTracker для каскадного удаления статистики воспроизведения (F4 W1343).
+        self._playback_tracker = playback_tracker
         # SpeakerManager для резолва псевдонимов спикеров в экспортах (опционально).
         self._speaker_manager = None
         # SemanticSearcher для чистки индекса при удалении записей (опционально).
@@ -327,6 +331,9 @@ class HistoryService:
                 logger.warning(
                     "semantic_search: не удалось удалить запись из индекса: %s", _exc
                 )
+        # F4 W1343: cascade-delete orphan playback stats to prevent accumulation.
+        if self._playback_tracker is not None:
+            self._playback_tracker.remove_stats(item_id)
         add_breadcrumb(
             category="history",
             message="delete_history_item",
