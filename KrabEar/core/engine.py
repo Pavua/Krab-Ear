@@ -14,6 +14,7 @@ import re as _re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
@@ -339,24 +340,31 @@ class AudioEngine:
         self._unavailable_models: set[str] = set()
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
+        # RLock сериализует concurrent lazy-init — двойная проверка (double-checked
+        # locking) в _load_diarization_pipeline предотвращает двойную загрузку pipeline'а
+        # (~3 GB) при одновременных вызовах из IPC-потока и REST-сервера (W1227 F1 HIGH).
+        self._diarization_load_lock: threading.RLock = threading.RLock()
 
         # SenseVoice adapter state (lazy-loaded FunASR pipeline).
         # Если funasr не установлен или модель не грузится — адаптер навсегда
         # отключается через _sensevoice_load_error, whisper chain продолжает жить.
         self._sensevoice_model = None  # type: ignore[var-annotated]
         self._sensevoice_load_error: str | None = None
+        self._sensevoice_load_lock: threading.RLock = threading.RLock()
 
         # Parakeet-TDT-1.1B adapter state (lazy-loaded NeMo ASR model).
         # Если nemo не установлен или модель не грузится — адаптер навсегда
         # отключается через _parakeet_load_error, whisper chain продолжает жить.
         self._parakeet_model = None  # type: ignore[var-annotated]
         self._parakeet_load_error: str | None = None
+        self._parakeet_load_lock: threading.RLock = threading.RLock()
 
         # WhisperX adapter state (Phase 4.3, lazy-loaded).
         # Если whisperx не установлен или модель не грузится — адаптер навсегда
         # отключается через _whisperx_load_error, chain продолжает жить.
         self._whisperx_model = None  # type: ignore[var-annotated]
         self._whisperx_load_error: str | None = None
+        self._whisperx_load_lock: threading.RLock = threading.RLock()
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -389,8 +397,6 @@ class AudioEngine:
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
         # subprocess'а — он проксирует через BackendService IPC (Wave 69).
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
-            import threading
-
             def _warmup_bg() -> None:
                 try:
                     self._router.warmup_gigaam()
@@ -2090,6 +2096,7 @@ class AudioEngine:
 
     def _load_sensevoice_model(self) -> Any:
         """Ленивая загрузка SenseVoice pipeline. Raises если funasr недоступен."""
+        # Fast-path: без блокировки.
         if self._sensevoice_model is not None:
             return self._sensevoice_model
         if self._sensevoice_load_error:
@@ -2100,20 +2107,28 @@ class AudioEngine:
                 "(установите: pip install funasr)"
             )
             raise RuntimeError(self._sensevoice_load_error)
-        with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
-            try:
-                # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
-                # default. Pytorch сам выберет MPS если модель будет это поддерживать.
-                self._sensevoice_model = _SenseVoiceAutoModel(
-                    model=settings.SENSEVOICE_MODEL,
-                    trust_remote_code=True,
-                    disable_update=True,
-                )
-            except Exception as exc:
-                self._sensevoice_load_error = f"Не удалось загрузить SenseVoice: {exc}"
+
+        with self._sensevoice_load_lock:
+            # Re-check после получения блокировки.
+            if self._sensevoice_model is not None:
+                return self._sensevoice_model
+            if self._sensevoice_load_error:
                 raise RuntimeError(self._sensevoice_load_error)
-            logger.info("SenseVoice модель загружена: %s", settings.SENSEVOICE_MODEL)
-            return self._sensevoice_model
+
+            with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
+                try:
+                    # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
+                    # default. Pytorch сам выберет MPS если модель будет это поддерживать.
+                    self._sensevoice_model = _SenseVoiceAutoModel(
+                        model=settings.SENSEVOICE_MODEL,
+                        trust_remote_code=True,
+                        disable_update=True,
+                    )
+                except Exception as exc:
+                    self._sensevoice_load_error = f"Не удалось загрузить SenseVoice: {exc}"
+                    raise RuntimeError(self._sensevoice_load_error)
+                logger.info("SenseVoice модель загружена: %s", settings.SENSEVOICE_MODEL)
+                return self._sensevoice_model
 
     @staticmethod
     def _parse_sensevoice_output(raw_text: str) -> tuple[str, str | None, str | None]:
@@ -2204,6 +2219,7 @@ class AudioEngine:
 
     def _load_parakeet_model(self) -> Any:
         """Ленивая загрузка Parakeet-TDT модели через NeMo. Raises если nemo недоступен."""
+        # Fast-path: без блокировки.
         if self._parakeet_model is not None:
             return self._parakeet_model
         if self._parakeet_load_error:
@@ -2214,20 +2230,28 @@ class AudioEngine:
                 "(установите: pip install nemo-toolkit[asr])"
             )
             raise RuntimeError(self._parakeet_load_error)
-        with _profiler.start_span(f"model_load_{_short_model_name(settings.PARAKEET_MODEL)}"):
-            try:
-                # NeMo from_pretrained скачивает веса с HuggingFace/NVIDIA NGC.
-                # Устройство определяется автоматически: MPS на Apple Silicon,
-                # CUDA на NVIDIA GPU, CPU fallback. NeMo сам управляет инференсом.
-                model = _nemo_asr.models.ASRModel.from_pretrained(
-                    model_name=settings.PARAKEET_MODEL,
-                )
-                self._parakeet_model = model
-            except Exception as exc:
-                self._parakeet_load_error = f"Не удалось загрузить Parakeet: {exc}"
+
+        with self._parakeet_load_lock:
+            # Re-check после получения блокировки.
+            if self._parakeet_model is not None:
+                return self._parakeet_model
+            if self._parakeet_load_error:
                 raise RuntimeError(self._parakeet_load_error)
-            logger.info("Parakeet модель загружена: %s", settings.PARAKEET_MODEL)
-            return self._parakeet_model
+
+            with _profiler.start_span(f"model_load_{_short_model_name(settings.PARAKEET_MODEL)}"):
+                try:
+                    # NeMo from_pretrained скачивает веса с HuggingFace/NVIDIA NGC.
+                    # Устройство определяется автоматически: MPS на Apple Silicon,
+                    # CUDA на NVIDIA GPU, CPU fallback. NeMo сам управляет инференсом.
+                    model = _nemo_asr.models.ASRModel.from_pretrained(
+                        model_name=settings.PARAKEET_MODEL,
+                    )
+                    self._parakeet_model = model
+                except Exception as exc:
+                    self._parakeet_load_error = f"Не удалось загрузить Parakeet: {exc}"
+                    raise RuntimeError(self._parakeet_load_error)
+                logger.info("Parakeet модель загружена: %s", settings.PARAKEET_MODEL)
+                return self._parakeet_model
 
     def _transcribe_parakeet(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через Parakeet-TDT-1.1B (NVIDIA NeMo).
@@ -2295,6 +2319,7 @@ class AudioEngine:
         """Ленивая загрузка WhisperX pipeline. Raises если whisperx недоступен."""
         # Используем getattr для совместимости с тестами, которые создают движок через
         # AudioEngine.__new__() без вызова __init__ (паттерн из SenseVoice/Parakeet тестов).
+        # Fast-path: без блокировки.
         if getattr(self, "_whisperx_model", None) is not None:
             return self._whisperx_model
         if getattr(self, "_whisperx_load_error", None):
@@ -2306,36 +2331,43 @@ class AudioEngine:
             )
             raise RuntimeError(self._whisperx_load_error)
 
-        device = settings.WHISPERX_DEVICE
-        # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
-        # Если запрошен mps но недоступен — безопасный fallback на cpu.
-        if device == "mps" and torch is not None:
-            try:
-                import torch as _torch
-                if not _torch.backends.mps.is_available():
-                    logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
-                    device = "cpu"
-            except Exception:
-                device = "cpu"
-        elif torch is None:
-            device = "cpu"
-
-        # compute_type: на cpu/mps рекомендуется "float32" или "int8".
-        # "float16" работает только на CUDA; на MPS может вызвать ошибку.
-        compute_type = "float32" if device in ("cpu", "mps") else "float16"
-
-        with _profiler.start_span(f"model_load_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"):
-            try:
-                self._whisperx_model = _whisperx.load_model(
-                    settings.WHISPERX_MODEL,
-                    device=device,
-                    compute_type=compute_type,
-                )
-            except Exception as exc:
-                self._whisperx_load_error = f"Не удалось загрузить WhisperX: {exc}"
+        with getattr(self, "_whisperx_load_lock", threading.RLock()):
+            # Re-check после получения блокировки.
+            if getattr(self, "_whisperx_model", None) is not None:
+                return self._whisperx_model
+            if getattr(self, "_whisperx_load_error", None):
                 raise RuntimeError(self._whisperx_load_error)
-        logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
-        return self._whisperx_model
+
+            device = settings.WHISPERX_DEVICE
+            # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
+            # Если запрошен mps но недоступен — безопасный fallback на cpu.
+            if device == "mps" and torch is not None:
+                try:
+                    import torch as _torch
+                    if not _torch.backends.mps.is_available():
+                        logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
+                        device = "cpu"
+                except Exception:
+                    device = "cpu"
+            elif torch is None:
+                device = "cpu"
+
+            # compute_type: на cpu/mps рекомендуется "float32" или "int8".
+            # "float16" работает только на CUDA; на MPS может вызвать ошибку.
+            compute_type = "float32" if device in ("cpu", "mps") else "float16"
+
+            with _profiler.start_span(f"model_load_whisperx_{_short_model_name(settings.WHISPERX_MODEL)}"):
+                try:
+                    self._whisperx_model = _whisperx.load_model(
+                        settings.WHISPERX_MODEL,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                except Exception as exc:
+                    self._whisperx_load_error = f"Не удалось загрузить WhisperX: {exc}"
+                    raise RuntimeError(self._whisperx_load_error)
+            logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
+            return self._whisperx_model
 
     def _transcribe_whisperx(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через WhisperX с word-level timestamps и diarization.
@@ -2977,29 +3009,41 @@ class AudioEngine:
         return None
 
     def _load_diarization_pipeline(self) -> Pipeline:
-        """Ленивая загрузка pyannote pipeline с токеном Hugging Face."""
+        """Ленивая загрузка pyannote pipeline с токеном Hugging Face.
+
+        Использует double-checked locking чтобы предотвратить двойную загрузку
+        (~3 GB) при конкурентных вызовах из IPC-потока и REST-сервера (W1227 F1 HIGH).
+        """
+        # Fast-path: без блокировки (pipeline уже загружен или ошибка зафиксирована).
         if self._diarization_pipeline is not None:
             return self._diarization_pipeline
         if self._diarization_load_error:
             raise RuntimeError(self._diarization_load_error)
 
-        hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
-
-        # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
-        # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
-        # Span фиксируется только при первом реальном load'е (guard выше гарантирует
-        # что повторные вызовы сразу возвращают кэш).
-        with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
-            try:
-                kwargs = {"token": hf_token} if hf_token else {}
-                self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-            except Exception as e:
-                self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
+        with self._diarization_load_lock:
+            # Re-check после получения блокировки: другой поток мог уже загрузить.
+            if self._diarization_pipeline is not None:
+                return self._diarization_pipeline
+            if self._diarization_load_error:
                 raise RuntimeError(self._diarization_load_error)
-            diarization_device = self._resolve_diarization_device()
-            self._diarization_pipeline.to(diarization_device)
-            logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-            return self._diarization_pipeline
+
+            hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
+
+            # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
+            # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
+            # Span фиксируется только при первом реальном load'е (guard выше гарантирует
+            # что повторные вызовы сразу возвращают кэш).
+            with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
+                try:
+                    kwargs = {"token": hf_token} if hf_token else {}
+                    self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
+                except Exception as e:
+                    self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
+                    raise RuntimeError(self._diarization_load_error)
+                diarization_device = self._resolve_diarization_device()
+                self._diarization_pipeline.to(diarization_device)
+                logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
+                return self._diarization_pipeline
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:
