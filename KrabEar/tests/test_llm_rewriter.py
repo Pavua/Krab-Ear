@@ -846,40 +846,36 @@ class LLMRewriter503JitRetryTestCase(unittest.TestCase):
             mock.json.return_value = {"choices": [{"message": {"content": content}}]}
         return mock
 
-    @patch("backend.llm_rewriter.time.sleep")
-    def test_jit_retry_503_succeeds(self, mock_sleep):
+    def test_jit_retry_503_succeeds(self):
+        # W1146 F2: 503 backoff now uses shutdown_event.wait(), not time.sleep().
+        # Patch event.wait to return False (no shutdown) so the retry fires.
         rewritten = "Исправленный текст готов."
         self.rewriter._session.post = MagicMock(
             side_effect=[self._resp(503), self._resp(200, rewritten)]
         )
-        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        with patch.object(self.rewriter._shutdown_event, "wait", return_value=False):
+            result = self.rewriter.rewrite("исходный текст для проверки retry")
         self.assertTrue(result.ok)
         self.assertEqual(result.text_or_fallback("raw"), rewritten)
         self.assertIsNotNone(result.latency_ms)
-        # Use assertIn instead of assert_called_once_with to guard against spurious
-        # time.sleep() calls from background threads of unrelated BackendService
-        # instances in the same xdist worker (patch targets the shared time module).
-        from unittest.mock import call as _call
-        self.assertIn(_call(10), mock_sleep.call_args_list,
-                      "Expected time.sleep(10) to be called by 503 JIT retry path")
         self.assertEqual(self.rewriter._circuit.state, "closed")
 
-    @patch("backend.llm_rewriter.time.sleep")
-    def test_jit_retry_503_then_503_fails(self, mock_sleep):
+    def test_jit_retry_503_then_503_fails(self):
         self.rewriter._session.post = MagicMock(
             side_effect=[self._resp(503), self._resp(503)]
         )
-        result = self.rewriter.rewrite("исходный текст для проверки retry")
+        with patch.object(self.rewriter._shutdown_event, "wait", return_value=False):
+            result = self.rewriter.rewrite("исходный текст для проверки retry")
         self.assertFalse(result.ok)
         self.assertTrue(result.fallback_reason.startswith("http_503"))
         self.assertEqual(self.rewriter._circuit._consecutive_failures, 1)
 
-    @patch("backend.llm_rewriter.time.sleep")
-    def test_jit_retry_503_no_recursion(self, mock_sleep):
+    def test_jit_retry_503_no_recursion(self):
         self.rewriter._session.post = MagicMock(
             side_effect=[self._resp(503), self._resp(503)]
         )
-        self.rewriter.rewrite("исходный текст для проверки retry")
+        with patch.object(self.rewriter._shutdown_event, "wait", return_value=False):
+            self.rewriter.rewrite("исходный текст для проверки retry")
         self.assertEqual(self.rewriter._session.post.call_count, 2)
 
 

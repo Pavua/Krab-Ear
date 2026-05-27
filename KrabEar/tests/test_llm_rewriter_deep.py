@@ -324,12 +324,20 @@ class TestChatbotPhrasesBlacklistChecked(unittest.TestCase):
         return self.rw.rewrite("а" * 60)
 
     def test_all_markers_in_registry_are_rejected(self):
-        """Every marker in _CHATBOT_MARKERS triggers chatbot_response when at start of output."""
+        """Every marker in _CHATBOT_MARKERS triggers chatbot_response when at start of output.
+
+        Each subTest uses a fresh LLMRewriter so that accumulated chatbot failures from
+        previous markers don't open the circuit breaker and cause circuit_open instead
+        of chatbot_response (W1146 F1: chatbot guard now calls record_failure()).
+        """
         for marker in _CHATBOT_MARKERS:
             with self.subTest(marker=marker):
-                # Append enough chars to avoid length guard
-                content = marker + " " + "б" * 50
-                result = self._call(content)
+                # Fresh rewriter per marker — circuit state is independent per subTest
+                rw = _make_rewriter()
+                rw._session.post = MagicMock(
+                    return_value=_ok_resp(marker + " " + "б" * 50)
+                )
+                result = rw.rewrite("а" * 60)
                 self.assertFalse(
                     result.ok,
                     f"Marker {marker!r} should have triggered chatbot rejection"

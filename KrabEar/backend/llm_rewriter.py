@@ -576,6 +576,8 @@ class LLMRewriter:
                 "model=%s base_url=%s",
                 self._model, self._base_url,
             )
+            # W1146 F2: use shutdown_event.wait() so IPC thread releases immediately on shutdown
+            # instead of blocking for the full 10 s sleep duration.
             if self._shutdown_event.wait(timeout=10.0):
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="shutdown", latency_ms=None
@@ -632,6 +634,7 @@ class LLMRewriter:
                 "sleeping 2s and retrying once model=%s base_url=%s",
                 self._model, self._base_url,
             )
+            # W1146 F2: interruptible wait — exits immediately on shutdown signal
             if self._shutdown_event.wait(timeout=2.0):
                 return LLMRewriteResult(
                     ok=False, text=None, fallback_reason="shutdown", latency_ms=None
@@ -815,6 +818,9 @@ class LLMRewriter:
                     "LLM chatbot detected (starts with '%s'), falling back to original",
                     marker,
                 )
+                # W1146 F1: record_failure so circuit opens after repeated chatbot streaks.
+                # Chatbot mode = unusable output — treat identically to a real failure so
+                # the circuit breaker eventually opens and stops hammering a misconfigured LM Studio.
                 self._circuit.record_failure()
                 self._last_error = "chatbot_response"
                 self._circuit.record_failure()
