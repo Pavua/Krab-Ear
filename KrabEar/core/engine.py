@@ -473,6 +473,12 @@ class AudioEngine:
 
     def _punctuation_pass_allowed(self) -> bool:
         """Runtime check: включён ли punctuation-only LLM pass."""
+        # Privacy mode blocks ANY LLM call including punctuation pass
+        try:
+            if self._settings_get("privacy_mode_enabled", False):
+                return False
+        except Exception:
+            pass
         if self._llm_rewriter is None:
             return False
         return bool(self._settings_get("stt_punctuation_llm_pass_enabled", False))
