@@ -59,6 +59,11 @@ app.after_request(api_version_header())
 # ---------------------------------------------------------------------------
 # CORS — разрешает кросс-доменные запросы из браузера.
 # Список origins берётся из KRAB_EAR_CORS_ORIGINS (по умолчанию "*").
+#
+# F2 MED fix (W1207): when origins == "*", force supports_credentials=False.
+# Combining wildcard origin + supports_credentials=True allows any browser
+# tab on the same machine to make credentialed cross-origin fetches (cookies,
+# auth headers), which defeats the localhost-only binding security posture.
 # ---------------------------------------------------------------------------
 
 
@@ -69,10 +74,22 @@ def _parse_cors_origins(raw: str):
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+_cors_origins = _parse_cors_origins(settings.CORS_ORIGINS)
+_cors_credentials = True
+if _cors_origins == "*":
+    # Wildcard origin + credentials is forbidden by the CORS spec (browsers
+    # refuse it) and is a security misconfiguration — force credentials off.
+    _cors_credentials = False
+    logger.warning(
+        "CORS_ORIGINS='*' with supports_credentials=True is unsafe and "
+        "violates the CORS spec. Forcing supports_credentials=False. "
+        "Set CORS_ORIGINS to an explicit list to enable credentialed requests."
+    )
+
 CORS(
     app,
-    origins=_parse_cors_origins(settings.CORS_ORIGINS),
-    supports_credentials=True,
+    origins=_cors_origins,
+    supports_credentials=_cors_credentials,
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
     expose_headers=["X-Request-ID", "Retry-After"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -624,7 +641,17 @@ def _build_dashboard_html() -> str:
     version = health_data.get("version", "unknown")
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     py_version = platform.python_version()
-    platform_str = platform.platform()
+    # F3 LOW fix (W1207): mask OS build details — expose only the OS family
+    # (darwin / linux / win32) to avoid leaking kernel version and build strings.
+    _raw_platform = platform.system().lower()
+    if "darwin" in _raw_platform:
+        platform_str = "darwin"
+    elif "linux" in _raw_platform:
+        platform_str = "linux"
+    elif "windows" in _raw_platform or "win32" in _raw_platform:
+        platform_str = "win32"
+    else:
+        platform_str = "unknown"
 
     # Build health check rows
     check_rows = ""
@@ -956,6 +983,19 @@ def add_vocabulary(args):
     return {"status": "ok", "count": len(updated)}
 
 
+def _load_settings_field(key: str, default):
+    """Read a single field from settings.json via the shared StateStore.
+
+    Falls back gracefully to *default* on any read/parse error so that
+    callers are never blocked by a corrupt settings file.
+    """
+    try:
+        s = store.load_settings()
+        return s.get(key, default)
+    except Exception:
+        return default
+
+
 @v1_blp.route("/stt/transcribe", methods=["POST"])
 @v1_blp.response(200, TranscribeResponseSchema)
 @limiter.limit("10 per minute")
@@ -971,7 +1011,14 @@ def transcribe_audio():
         - lang_hint: ISO 639-1 code (optional, auto-detected when omitted)
         - vocabulary: comma-separated hint words (optional)
         - chat_id + message_id: idempotency key pair (optional)
+
+    Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
+    mode is active (privacy_mode_enabled=true in settings.json).
     """
+    # F6: privacy mode guard — block transcription writes when privacy is on
+    if _load_settings_field("privacy_mode_enabled", False):
+        return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
+
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
 
