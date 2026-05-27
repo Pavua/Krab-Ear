@@ -285,7 +285,7 @@ class RecordingCoreService:
             if hasattr(self.recorder, "snapshot_rms")
             else 0.0
         )
-        active_session = self._session_tracker._active_session
+        active_session = self._session_tracker.get_active_session()
         session_id = (active_session.get("session_id", "__live__") if active_session else "__live__")
         elapsed_sec = 0.0
         if hasattr(self.recorder, "get_duration_sec"):

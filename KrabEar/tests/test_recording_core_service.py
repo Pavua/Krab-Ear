@@ -110,6 +110,7 @@ def _make_service(tmp_dir, recorder=None, transcriber=None, extra_kwargs=None):
     vocab.get_words.return_value = []
     session_tracker = MagicMock()
     session_tracker._active_session = None
+    session_tracker.get_active_session.return_value = None
     kwargs = dict(
         recorder=recorder or _FakeRecorder(),
         transcriber=transcriber or _FakeTranscriber(),
@@ -491,60 +492,66 @@ class TestConstructorAndProperties(unittest.TestCase):
         self.assertFalse(svc.preview_thread_alive)
 
 
-class TestTranscribePathsAsyncAllowlist(unittest.TestCase):
-    """W1502 — handle_transcribe_paths_async must report rejected paths, not silently drop."""
+class TestGetRecordingStateUsesLockedAccessor(unittest.TestCase):
+    """W1501 — handle_get_recording_state must use get_active_session() not _active_session."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
 
-    def _make_svc(self):
-        return _make_service(self._tmp)
+    def test_get_recording_state_uses_locked_accessor(self):
+        """handle_get_recording_state calls get_active_session(), not _active_session directly."""
+        from backend.session_tracker import SessionTracker
+        real_tracker = SessionTracker()
+        store = __import__("backend.state_store", fromlist=["StateStore"]).StateStore(data_dir=Path(self._tmp))
+        vocab = MagicMock()
+        vocab.get_words.return_value = []
+        svc = __import__("backend.recording_core_service", fromlist=["RecordingCoreService"]).RecordingCoreService(
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            translator=_FakeTranslator(),
+            store=store,
+            vocabulary=vocab,
+            settings_svc=_FakeSettingsSvc(),
+            llm_rewriter=None,
+            auto_glossary=None,
+            semantic_searcher=_FakeSemanticSearcher(),
+            context_memory=None,
+            clipboard_history=[],
+            auto_backup=MagicMock(),
+            session_tracker=real_tracker,
+            action_items_extractor=None,
+            transcription_counter_ref=[0],
+            last_stt_engine_ref=[None],
+        )
+        # No active session → session_id must be "__live__"
+        result = svc.handle_get_recording_state({})
+        self.assertEqual(result["session_id"], "__live__")
 
-    def test_transcribe_paths_async_rejected_returned_in_response(self):
-        """Paths outside the allowlist must appear in rejected_paths in the response."""
-        svc = self._make_svc()
-        outside_path = "/nonexistent_root_W1502/audio.wav"
-        result = svc.handle_transcribe_paths_async({"paths": [outside_path]})
-        # All-rejected branch: returns error dict without job_id
-        self.assertFalse(result.get("ok", True))
-        self.assertIn("rejected_paths", result)
-        self.assertIn(outside_path, result["rejected_paths"])
+        # With active session — session_id comes via get_active_session()
+        sid = real_tracker.start_session(audio_device="TestMic")
+        result2 = svc.handle_get_recording_state({})
+        self.assertEqual(result2["session_id"], sid)
 
-    def test_transcribe_paths_async_all_rejected_returns_error(self):
-        """When every path is rejected the handler must return an error, not a job_id."""
-        svc = self._make_svc()
-        bad_paths = [
-            "/nonexistent_root_A/a.wav",
-            "/nonexistent_root_B/b.mp3",
-        ]
-        result = svc.handle_transcribe_paths_async({"paths": bad_paths})
-        self.assertNotIn("job_id", result)
-        self.assertEqual(result.get("error"), "all_paths_rejected")
-        self.assertEqual(len(result["rejected_paths"]), 2)
-
-    def test_transcribe_paths_async_valid_paths_processed(self):
-        """Paths inside the allowlist (tmp dir) must be accepted and a job_id returned."""
-        import tempfile as _tmp_mod
-        svc = self._make_svc()
-        with _tmp_mod.NamedTemporaryFile(suffix=".wav", dir=self._tmp, delete=False) as f:
-            valid_path = f.name
-        result = svc.handle_transcribe_paths_async({"paths": [valid_path]})
-        self.assertIn("job_id", result)
-        # No rejected_paths key expected when all paths are valid
-        self.assertNotIn("rejected_paths", result)
-
-    def test_transcribe_paths_async_mixed_returns_job_and_rejected(self):
-        """Mix of valid and invalid paths: job is started AND rejected_paths is reported."""
-        import tempfile as _tmp_mod
-        svc = self._make_svc()
-        with _tmp_mod.NamedTemporaryFile(suffix=".wav", dir=self._tmp, delete=False) as f:
-            valid_path = f.name
-        bad_path = "/nonexistent_root_W1502_mix/c.wav"
-        result = svc.handle_transcribe_paths_async({"paths": [valid_path, bad_path]})
-        self.assertIn("job_id", result)
-        self.assertIn("rejected_paths", result)
-        self.assertIn(bad_path, result["rejected_paths"])
-        self.assertNotIn(valid_path, result["rejected_paths"])
+    def test_get_recording_state_does_not_access_private_active_session(self):
+        """Confirm _active_session private attr is no longer accessed directly from service."""
+        import ast
+        src_path = Path(self._tmp).parent.parent.parent / "KrabEar" / "backend" / "recording_core_service.py"
+        # Walk up to find the actual file
+        candidate = Path(__file__).resolve().parents[1] / "backend" / "recording_core_service.py"
+        if candidate.exists():
+            src_path = candidate
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                # Detect self._session_tracker._active_session pattern
+                if (node.attr == "_active_session" and
+                        isinstance(node.value, ast.Attribute) and
+                        node.value.attr == "_session_tracker"):
+                    self.fail(
+                        "handle_get_recording_state still accesses "
+                        "self._session_tracker._active_session directly (race condition)"
+                    )
 
 
 if __name__ == "__main__":

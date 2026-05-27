@@ -180,6 +180,11 @@ class SessionTracker:
             "paste_ok_rate": round(paste_ok / total, 4),
         }
 
+    def get_active_session(self) -> Optional[dict[str, Any]]:
+        """Возвращает копию активной сессии или None под защитой блокировки."""
+        with self._lock:
+            return dict(self._active_session) if self._active_session else None
+
     # ------------------------------------------------------------------
     # Персистентность
     # ------------------------------------------------------------------
