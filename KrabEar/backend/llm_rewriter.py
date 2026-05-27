@@ -799,6 +799,7 @@ class LLMRewriter:
                 )
                 self._circuit.record_failure()
                 self._last_error = "chatbot_response"
+                self._circuit.record_failure()
                 _add_bc(
                     category="rewriter",
                     message="rewrite_finish",
