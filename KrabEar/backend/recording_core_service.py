@@ -1222,6 +1222,12 @@ class RecordingCoreService:
             word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
             speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
         )
+        # Инвалидируем кэш автоглоссария — новые слова сразу используются в STT-промпте.
+        if self._auto_glossary is not None:
+            try:
+                self._auto_glossary.invalidate()
+            except Exception as _ag_inv_exc:
+                logger.warning("auto_glossary invalidate error after stop_recording persist: %s", _ag_inv_exc)
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1468,6 +1474,12 @@ class RecordingCoreService:
                         else None
                     ),
                 )
+                # Инвалидируем кэш автоглоссария после persist импортированного файла.
+                if self._auto_glossary is not None:
+                    try:
+                        self._auto_glossary.invalidate()
+                    except Exception as _ag_inv_exc2:
+                        logger.warning("auto_glossary invalidate error after transcribe_paths persist: %s", _ag_inv_exc2)
 
                 summary: str | None = None
                 if len(final_text) > 500:
