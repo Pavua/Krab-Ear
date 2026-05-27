@@ -80,8 +80,10 @@ class TestLockContention(unittest.TestCase):
 
                 t1 = threading.Thread(target=run_sync, args=(items_a,))
                 t2 = threading.Thread(target=run_sync, args=(items_b,))
-                t1.start(); t2.start()
-                t1.join(timeout=10); t2.join(timeout=10)
+                t1.start()
+                t2.start()
+                t1.join(timeout=10)
+                t2.join(timeout=10)
 
                 self.assertFalse(errors, f"Unexpected errors: {errors}")
                 self.assertEqual(len(results), 2)

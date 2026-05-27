@@ -9,6 +9,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 _SKIP_TORCH_TRITON_CI = os.environ.get("CI") == "true"

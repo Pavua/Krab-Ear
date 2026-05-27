@@ -258,7 +258,7 @@ class TestSmartSilenceSkipperFailureFallback(unittest.TestCase):
                     pass  # soft-fail — используем оригинальное аудио
 
         np.testing.assert_array_equal(result_audio, original_audio,
-                                       "Оригинальное аудио должно быть сохранено после soft-fail")
+                                      "Оригинальное аудио должно быть сохранено после soft-fail")
 
 
 # ---------------------------------------------------------------------------

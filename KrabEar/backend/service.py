@@ -59,7 +59,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
-from backend.period_comparison import compare_periods as _compare_periods_fn
+
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
 from core.config import settings
@@ -100,12 +100,7 @@ from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
 from backend.ipc_throttle import IPCThrottle
 from backend.input_sanitizer import InputSanitizer
-from backend.ipc_constants import (
-    IPC_SOCKET_BACKLOG,
-    IPC_SOCKET_TIMEOUT_SEC,
-    IPC_MAX_MESSAGE_BYTES,
-    IPC_SOCKET_PERMISSIONS,
-)
+
 from backend.export_scheduler import ExportScheduler
 from backend.call_cost_estimator import CallCostEstimator
 from backend.call_silence_probe import CallSilenceProbe
@@ -114,9 +109,9 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
-from backend.performance_profiler import profiler as performance_profiler
+
 from backend.paste_app_memory import PasteAppMemory
-from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
+from backend.telegram_bridge import TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
@@ -136,20 +131,15 @@ from backend.llm_ops_service import LLMOpsService
 
 import argparse
 import collections
-from datetime import datetime, timedelta
-import json
 import logging
 import os
 from pathlib import Path
-import re
 import signal
-import socket
 import subprocess
-import platform
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 # Обеспечиваем корректный импорт модулей KrabEar при запуске как standalone скрипта.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]

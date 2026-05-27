@@ -382,8 +382,6 @@ class TestConcurrentProcess(unittest.TestCase):
 
     def test_concurrent_process(self):
         """Несколько потоков вызывают process() одновременно — нет гонок/сбоев."""
-        import threading
-
         proc = _make_proc()
         errors: list[Exception] = []
         results: list[str] = []

@@ -129,7 +129,7 @@ class TestGainNormalizerPipeline(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _build_mock_settings(gain_enabled: bool = True, denoise_enabled: bool = False,
-                          vad_enabled: bool = False) -> MagicMock:
+                         vad_enabled: bool = False) -> MagicMock:
     s = MagicMock()
     s.STT_GAIN_NORMALIZE_ENABLED = gain_enabled
     s.STT_DENOISE_ENABLED = denoise_enabled

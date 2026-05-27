@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from urllib.error import HTTPError
 
 logger = logging.getLogger("KrabEar.Backend.WebhookManager")

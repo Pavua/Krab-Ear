@@ -65,6 +65,7 @@ def _ts_le(a: str, b: str) -> bool:
     except (ValueError, TypeError):
         return a <= b
 
+
 logger = logging.getLogger("KrabEar.Backend.ObsidianSync")
 
 _SYNC_STATE_FILE = "obsidian_sync.json"
