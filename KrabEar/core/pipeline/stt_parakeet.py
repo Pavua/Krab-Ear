@@ -143,16 +143,27 @@ class ParakeetSTTAdapter(STTAdapterBase):
                 "ParakeetSTTAdapter: model unavailable (load previously failed)"
             )
 
-        # Serialize MLX GPU access to prevent concurrent Metal hash table
-        # corruption with Whisper MLX (same race that caused SIGSEGV, PR #71).
+        # Serialize MLX GPU access at two levels:
+        #   outer: mlx_inter_process_lock() — POSIX flock across OS processes
+        #          (REST server + IPC server running concurrently).  Active only
+        #          when KRAB_EAR_MLX_INTER_PROCESS_LOCK=1; no-op otherwise.
+        #   inner: mlx_lock() — intra-process RLock across threads.
+        # Both are needed here because parakeet-mlx uses MLX (Metal GPU) for
+        # inference, unlike NeMo/PyTorch-based adapters (SenseVoice, GigaAM)
+        # which run on PyTorch+MPS and therefore don't need either lock.
+        # Same dual-lock pattern as mlx_whisper in AudioEngine._transcribe_mlx()
+        # — see core/mlx_inter_lock.py usage note and PR #71 for rationale.
         try:
+            from core.mlx_inter_lock import mlx_inter_process_lock
             from core.mlx_lock import mlx_lock
         except ImportError:
             import contextlib
+            mlx_inter_process_lock = contextlib.nullcontext  # type: ignore[assignment]
             mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
 
-        with mlx_lock():
-            raw_result = self._model.transcribe(audio)
+        with mlx_inter_process_lock():
+            with mlx_lock():
+                raw_result = self._model.transcribe(audio)
 
         # Build unified STTResult from AlignedResult.
         text: str = (raw_result.text or "").strip()

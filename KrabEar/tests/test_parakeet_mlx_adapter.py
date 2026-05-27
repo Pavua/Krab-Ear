@@ -223,6 +223,85 @@ class TestParakeetMLXTranscribe(unittest.TestCase):
         self.assertGreater(len(entered), 0, "mlx_lock was never entered")
         self.assertEqual(len(entered), len(exited), "mlx_lock was entered but not exited")
 
+    def test_parakeet_mlx_path_holds_intra_process_lock(self):
+        """W1217 F2: mlx_lock (intra-process RLock) is acquired during transcribe()."""
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        lock_entries = []
+
+        class TrackingIntraLock:
+            def __enter__(self):
+                lock_entries.append("intra")
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch("core.mlx_lock.mlx_lock", TrackingIntraLock, create=True):
+                with patch(
+                    "core.mlx_inter_lock.mlx_inter_process_lock",
+                    contextlib.nullcontext,
+                    create=True,
+                ):
+                    adapter.transcribe(audio)
+
+        self.assertIn(
+            "intra",
+            lock_entries,
+            "mlx_lock (intra-process) was not entered during transcribe()",
+        )
+
+    def test_parakeet_mlx_path_holds_inter_process_lock_when_enabled(self):
+        """W1217 F2: mlx_inter_process_lock (cross-process flock) is acquired during
+        transcribe() as the outer lock wrapping mlx_lock."""
+        import numpy as np
+        adapter, fake_module, _ = self._make_adapter()
+        audio = np.zeros(16000, dtype="float32")
+
+        call_order: list[str] = []
+
+        class TrackingInterLock:
+            def __enter__(self):
+                call_order.append("inter_enter")
+                return self
+
+            def __exit__(self, *args):
+                call_order.append("inter_exit")
+                return False
+
+        class TrackingIntraLock:
+            def __enter__(self):
+                call_order.append("intra_enter")
+                return self
+
+            def __exit__(self, *args):
+                call_order.append("intra_exit")
+                return False
+
+        with patch("core.pipeline.stt_parakeet._try_import_parakeet", return_value=fake_module):
+            with patch(
+                "core.mlx_inter_lock.mlx_inter_process_lock",
+                TrackingInterLock,
+                create=True,
+            ):
+                with patch("core.mlx_lock.mlx_lock", TrackingIntraLock, create=True):
+                    adapter.transcribe(audio)
+
+        self.assertIn("inter_enter", call_order, "mlx_inter_process_lock was not entered")
+        self.assertIn("intra_enter", call_order, "mlx_lock was not entered")
+        # Outer (inter) must be entered before inner (intra)
+        self.assertLess(
+            call_order.index("inter_enter"),
+            call_order.index("intra_enter"),
+            "mlx_inter_process_lock must be the OUTER lock (entered before mlx_lock)",
+        )
+        # Both must be properly exited
+        self.assertIn("inter_exit", call_order, "mlx_inter_process_lock was not exited")
+        self.assertIn("intra_exit", call_order, "mlx_lock was not exited")
+
     def test_transcribe_raises_runtime_error_on_model_load_failure(self):
         import numpy as np
         fake_module = types.ModuleType("parakeet_mlx")
