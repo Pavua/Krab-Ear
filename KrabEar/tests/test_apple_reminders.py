@@ -155,5 +155,28 @@ class TestCreateAppleReminder(unittest.TestCase):
         self.assertEqual(result.get("error"), "osascript timeout")
 
 
+    # ------------------------------------------------------------------
+    # test_apple_reminder_backslash_in_title_safe  (W1052 regression)
+    # ------------------------------------------------------------------
+    def test_apple_reminder_backslash_in_title_safe(self):
+        """Backslash in title must be doubled; naïve replace misses this.
+
+        Without _escape_as_str(), a title like 'C:\\path' stays as 'C:\\path' in
+        the script — the backslash then escapes the next char in AppleScript.
+        _escape_as_str() first doubles backslashes so the script literal is safe.
+        """
+        proc = _make_completed_process(returncode=0)
+        with patch("subprocess.run", return_value=proc) as mock_run:
+            result = _call_create_apple_reminder(
+                self.service,
+                {"title": 'C:\\path', "body": 'line\\nbreak'},
+            )
+
+        self.assertTrue(result.get("ok"), result.get("error"))
+        script = mock_run.call_args[0][0][2]
+        self.assertIn("C:\\\\path", script)
+        self.assertIn("line\\\\nbreak", script)
+
+
 if __name__ == "__main__":
     unittest.main()

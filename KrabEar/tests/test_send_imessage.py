@@ -152,5 +152,29 @@ class TestSendImessage(unittest.TestCase):
         self.assertEqual(result.get("error"), "Messages not running")
 
 
+    # ------------------------------------------------------------------
+    # test_imessage_backslash_in_body_safe  (W1052 regression)
+    # ------------------------------------------------------------------
+    def test_imessage_backslash_in_body_safe(self):
+        """Backslash in body must be doubled; naïve replace misses this.
+
+        Without _escape_as_str(), sending 'path\\file' keeps a lone backslash in
+        the AppleScript literal, which would escape the next character and corrupt
+        the string. _escape_as_str() doubles backslashes before escaping quotes.
+        """
+        proc = _make_completed_process(returncode=0)
+        with patch("subprocess.run", return_value=proc) as mock_run:
+            result = _call_send_imessage(
+                self.service,
+                {"recipient": "+79001234567", "body": 'path\\file and "quoted"'},
+            )
+
+        self.assertTrue(result.get("ok"), result.get("error"))
+        script = mock_run.call_args[0][0][2]
+        # Backslash must be doubled and quote must be escaped
+        self.assertIn("path\\\\file", script)
+        self.assertIn('\\"quoted\\"', script)
+
+
 if __name__ == "__main__":
     unittest.main()

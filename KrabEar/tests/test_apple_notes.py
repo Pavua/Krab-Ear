@@ -158,5 +158,31 @@ class TestCreateAppleNote(unittest.TestCase):
         self.assertEqual(result.get("error"), "Notes не открылись")
 
 
+    # ------------------------------------------------------------------
+    # test_apple_note_backslash_in_title_safe  (W1052 regression)
+    # ------------------------------------------------------------------
+    def test_apple_note_backslash_in_title_safe(self):
+        """Backslash in title must be doubled before quote-escaping.
+
+        Naïve .replace('"', '\\"') skips backslash escaping, so a title like
+        'path\\note' would become 'path\\note' unchanged — which in AppleScript
+        means the backslash escapes the next char. With _escape_as_str() the
+        backslash itself is first doubled to '\\\\', making the resulting script
+        literal safe.
+        """
+        proc = _make_completed_process(returncode=0)
+        with patch("subprocess.run", return_value=proc) as mock_run:
+            result = _call_create_apple_note(
+                self.service,
+                {"title": 'path\\note', "body": 'line1\\nline2'},
+            )
+
+        self.assertTrue(result.get("ok"), result.get("error"))
+        script = mock_run.call_args[0][0][2]
+        # Backslash must be doubled in the emitted AppleScript
+        self.assertIn("path\\\\note", script)
+        self.assertIn("line1\\\\nline2", script)
+
+
 if __name__ == "__main__":
     unittest.main()
