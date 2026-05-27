@@ -1943,7 +1943,8 @@ class AudioEngine:
                     # branches — prevents GPU stall from blocking IPC indefinitely.
                     _adapter_timeout = getattr(settings, "TRANSCRIBE_TIMEOUT_SEC", 120)
                     with _profiler.start_span(span_name):
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        try:
                             _fut = _pool.submit(adapter_fn)
                             try:
                                 adapter_result = _fut.result(timeout=_adapter_timeout)
@@ -1952,6 +1953,8 @@ class AudioEngine:
                                 raise TimeoutError(
                                     f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
                                 )
+                        finally:
+                            _pool.shutdown(wait=False)
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
