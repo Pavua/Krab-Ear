@@ -364,5 +364,82 @@ class TestTimeoutRespected(unittest.TestCase):
             self.assertTrue(t.daemon, "worker thread must be a daemon thread")
 
 
+# ---------------------------------------------------------------------------
+# Wave 1188: JSON injection + URL injection guards
+# ---------------------------------------------------------------------------
+
+class TestJsonAndUrlInjectionGuards(unittest.TestCase):
+    """W1179 F1 MED — json.dumps body + urllib.parse.quote URL + length cap."""
+
+    def test_load_model_quotes_special_chars_in_json(self):
+        """model_id with double-quotes must produce valid JSON body, not a broken f-string."""
+        evil_id = 'model"name"with"quotes'
+        resp = _fake_response(200)
+        captured_body: list[bytes] = []
+
+        def fake_urlopen(req, timeout=None):
+            captured_body.append(req.data)
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _try_rest_load(BASE_URL, evil_id)
+
+        self.assertEqual(len(captured_body), 1, "urlopen should be called exactly once")
+        body = captured_body[0]
+        self.assertIsNotNone(body, "request body must not be None")
+        # Must parse as valid JSON
+        import json as _json
+        try:
+            parsed = _json.loads(body.decode())
+        except _json.JSONDecodeError as exc:
+            self.fail(f"Request body is not valid JSON: {exc!r}  body={body!r}")
+        self.assertEqual(parsed.get("model"), evil_id,
+                         "Parsed 'model' field must equal the original model_id exactly")
+
+    def test_unload_model_quotes_special_chars_in_url(self):
+        """model_id with special URL chars must be percent-encoded in the unload URL path."""
+        evil_id = "model/with/slashes and spaces"
+        resp = _fake_response(200)
+        captured_url: list[str] = []
+
+        def fake_urlopen(req, timeout=None):
+            captured_url.append(req.full_url)
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _try_rest_unload(BASE_URL, evil_id)
+
+        self.assertEqual(len(captured_url), 1)
+        url = captured_url[0]
+        # Raw special chars must NOT appear unencoded in the URL path segment
+        self.assertNotIn(" ", url, "spaces must be percent-encoded in the URL")
+        self.assertIn("%2F", url, "forward slashes in model_id must be percent-encoded")
+        self.assertIn("unload", url, "URL must still end with /unload")
+
+    def test_load_model_rejects_overlong_id(self):
+        """model_id longer than 256 chars must be rejected; no network call made."""
+        overlong_id = "x" * 257
+        with patch("urllib.request.urlopen") as mock_open:
+            load_model_async(BASE_URL, overlong_id)
+            _wait_for_thread(f"LMStudio-load-{overlong_id[:20]}", timeout=1.0)
+        mock_open.assert_not_called()
+
+    def test_unload_model_rejects_overlong_id(self):
+        """model_id longer than 256 chars must be rejected for unload too; no network call."""
+        overlong_id = "y" * 300
+        with patch("urllib.request.urlopen") as mock_open:
+            unload_model_async(BASE_URL, overlong_id)
+            _wait_for_thread(f"LMStudio-unload-{overlong_id[:20]}", timeout=1.0)
+        mock_open.assert_not_called()
+
+    def test_load_model_accepts_exactly_256_chars(self):
+        """model_id of exactly 256 chars must be accepted (boundary value)."""
+        boundary_id = "a" * 256
+        resp = _fake_response(200)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            _try_rest_load(BASE_URL, boundary_id)
+        mock_open.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
