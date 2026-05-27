@@ -667,4 +667,45 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "severity": "warn",
         "dedupe_seconds": 180,
     },
+
+    # ── Wave 82: 3 codes claimed shipped by W910/W486-W510 but never added ──
+    # W1231 F1 CRITICAL: callsites use ERROR_REGISTRY.get(code, {}) so they
+    # silently degraded to empty user_msg_ru, wrong dedupe windows, actionable=False.
+
+    # disk.critical — DiskSpaceMonitor crossed the hard threshold (DISK_CRITICAL_GB).
+    # More severe than disk.low_space (warn). Requires immediate user action.
+    # action_id open_disk_settings lets user navigate to storage management.
+    "disk.critical": {
+        "user_msg_ru": "Критически мало места на диске. Освободите место для продолжения работы.",
+        "actionable": True,
+        "action_id": "open_disk_settings",
+        "action_label": "Открыть настройки диска",
+        "severity": "critical",
+        "dedupe_seconds": 300,
+    },
+
+    # system.proc_cmdline_permission — /proc/*/cmdline (or macOS equivalent) not
+    # readable due to missing entitlement / sandboxing. Affects startup_diagnostics
+    # and system_monitor process-listing. No recovery action possible from UI.
+    "system.proc_cmdline_permission": {
+        "user_msg_ru": "Нет прав на чтение информации о процессах. Некоторые диагностики недоступны.",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 3600,
+    },
+
+    # startup.stt_model_cache_miss — HuggingFace model cache miss at startup:
+    # the STT model file is not present in the local cache directory and must be
+    # downloaded (or the cache path is misconfigured). Fires in startup_diagnostics.
+    # No recovery action from UI; user must run model download manually.
+    "startup.stt_model_cache_miss": {
+        "user_msg_ru": "STT модель ещё не загружена в кэш HuggingFace",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 3600,
+    },
 }
