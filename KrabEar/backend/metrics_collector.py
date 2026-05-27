@@ -4,6 +4,7 @@
 с последующей агрегацией в квантили (p50, p95, p99).
 """
 
+import math
 import threading
 import logging
 import time
@@ -35,7 +36,19 @@ class MetricsCollector:
         return len(self.error_events)
 
     def record(self, latency_ms: float, confidence: float, is_error: bool = False) -> None:
-        """Записывает результат выполнения одного запроса."""
+        """Записывает результат выполнения одного запроса.
+
+        Не-конечные значения (NaN, Inf) молча отбрасываются, чтобы не
+        испортить numpy-квантили и json.dumps результата get_summary().
+        """
+        if not is_error and (
+            not math.isfinite(latency_ms) or not math.isfinite(confidence)
+        ):
+            logger.debug(
+                "metrics_collector: dropped non-finite sample",
+                extra={"latency_ms": latency_ms, "confidence": confidence},
+            )
+            return
         with self._lock:
             self.total_requests += 1
             if is_error:
@@ -74,22 +87,24 @@ class MetricsCollector:
                     "status": "waiting_data"
                 }
 
-            # Расчет квантилей и средних значений через numpy
+            # Расчет квантилей и средних значений через numpy.
+            # nanpercentile используется как защита от случайных не-конечных
+            # значений — они игнорируются вместо того, чтобы ронять json.dumps.
             summary = {
                 "total_requests": self.total_requests,
                 "error_rate": self._error_rate(len(lats)),
                 "window_size": len(lats),
                 "stt_metrics": {
                     "latency_ms": {
-                        "p50": round(float(np.percentile(lats, 50)), 2),
-                        "p95": round(float(np.percentile(lats, 95)), 2),
-                        "p99": round(float(np.percentile(lats, 99)), 2),
-                        "avg": round(float(np.mean(lats)), 2)
+                        "p50": round(float(np.nanpercentile(lats, 50)), 2),
+                        "p95": round(float(np.nanpercentile(lats, 95)), 2),
+                        "p99": round(float(np.nanpercentile(lats, 99)), 2),
+                        "avg": round(float(np.nanmean(lats)), 2)
                     },
                     "confidence": {
-                        "avg": round(float(np.mean(confs)), 3),
-                        "min": round(float(np.min(confs)), 3),
-                        "max": round(float(np.max(confs)), 3)
+                        "avg": round(float(np.nanmean(confs)), 3),
+                        "min": round(float(np.nanmin(confs)), 3),
+                        "max": round(float(np.nanmax(confs)), 3)
                     }
                 }
             }
