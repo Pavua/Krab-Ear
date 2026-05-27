@@ -54,8 +54,12 @@ def _stem_ru(word: str) -> str:
     return word
 
 
-# Precompiled regex for tokenization — called on every history item and every query
-_RE_TOKEN = re.compile(r"[а-яёa-z0-9]+")
+# Precompiled regex for tokenization — called on every history item and every query.
+# \w with re.UNICODE covers all Unicode word characters (letters, digits, _),
+# correctly handling Spanish diacritics (á é í ó ú ñ ü), Russian (а-яё), etc.
+# Previously r"[а-яёa-z0-9]+" excluded accented chars, causing e.g.
+# "Comunicación" → ['comunicaci', 'n'] (unsearchable).
+_RE_TOKEN = re.compile(r"\w+", re.UNICODE)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -130,6 +134,7 @@ class SearchIndex:
 
     def search(self, query: str, limit: int = 50) -> list[SearchResult]:
         """Возвращает список SearchResult, отсортированных по убыванию score."""
+        limit = max(0, limit)  # guard against negative limit (W1036 F5)
         query = query.strip()
         if not query:
             return []
