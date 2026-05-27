@@ -147,6 +147,10 @@ class LLMHttpProbe:
             logger.debug("LLMHttpProbe: settings_provider raised, skipping tick")
             return
 
+        if settings.get("privacy_mode_enabled", False):
+            # Privacy mode active — do not probe LM Studio (no outbound calls)
+            return
+
         if not settings.get("llm_rewrite_enabled", False):
             # Feature disabled — skip probe entirely, don't change state
             return
