@@ -90,6 +90,8 @@ class TextScoringService:
         Returns:
             {"terms": [{"term", "score", "frequency", "language", "category"}, ...]}
         """
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "terms": [], "reason": "privacy_mode_active"}
         text = params.get("text", "")
         language = params.get("language", "ru")
         if not text:

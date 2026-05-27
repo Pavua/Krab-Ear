@@ -170,6 +170,38 @@ class TestExtractTerms(unittest.TestCase):
         self.assertEqual(result["terms"][0]["term"], "краб")
         self.assertEqual(result["terms"][2]["term"], "голос")
 
+    def test_extract_terms_empty_in_privacy_mode(self) -> None:
+        """Privacy mode guard: returns empty terms, does not call extractor."""
+        fake_extractor = MagicMock()
+        fake_extractor.extract_terms.return_value = [_fake_term()]
+
+        def get_setting(key, default):
+            if key == "privacy_mode_enabled":
+                return True
+            return default
+
+        svc = _make_service(term_extractor=fake_extractor, get_runtime_setting=get_setting)
+        result = svc.handle_extract_terms({"text": "секретный текст"})
+        fake_extractor.extract_terms.assert_not_called()
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result["terms"], [])
+        self.assertEqual(result["reason"], "privacy_mode_active")
+
+    def test_extract_terms_not_blocked_when_privacy_mode_off(self) -> None:
+        """Privacy mode off: extractor is called normally."""
+        fake_extractor = MagicMock()
+        fake_extractor.extract_terms.return_value = [_fake_term()]
+
+        def get_setting(key, default):
+            if key == "privacy_mode_enabled":
+                return False
+            return default
+
+        svc = _make_service(term_extractor=fake_extractor, get_runtime_setting=get_setting)
+        result = svc.handle_extract_terms({"text": "обычный текст"})
+        fake_extractor.extract_terms.assert_called_once()
+        self.assertEqual(len(result["terms"]), 1)
+
 
 # ---------------------------------------------------------------------------
 # handle_generate_auto_title
