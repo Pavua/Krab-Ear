@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime
 from typing import Any
@@ -86,7 +87,32 @@ class RecordingMerger:
 
         Возвращает словарь новой записи.
         Генерирует ValueError при < 2 записях или если часть ID не найдена.
+
+        Idempotency: при delete_originals=False повторный вызов с теми же
+        item_ids возвращает уже существующую объединённую запись без создания
+        дубликата. Ключ идемпотентности хранится в метаданных записи как
+        ``merge_key``. При delete_originals=True проверка пропускается — вызов
+        всегда создаёт новую запись (оригиналы уже удалены).
         """
+        # --- Idempotency guard (только когда оригиналы не удаляются) ---
+        merge_key = hashlib.sha256(
+            ",".join(sorted(item_ids)).encode()
+        ).hexdigest()[:16]
+
+        if not delete_originals:
+            existing = self._find_by_merge_key(merge_key, store)
+            if existing is not None:
+                logger.info(
+                    "Идемпотентный merge: merge_key=%s уже существует → %s",
+                    merge_key,
+                    existing.id,
+                )
+                result = existing.to_dict()
+                result["merged_from"] = list(sorted(item_ids))
+                result["deleted_originals"] = False
+                result["idempotent"] = True
+                return result
+
         items = self._load_items(item_ids, store)
         merged_data = self._build_merged_data(items, separator)
 
@@ -268,6 +294,29 @@ class RecordingMerger:
     # ------------------------------------------------------------------
     # Приватные хелперы
     # ------------------------------------------------------------------
+
+    def _find_by_merge_key(self, merge_key: str, store: Any) -> Any | None:
+        """Ищет существующую объединённую запись с данным merge_key в store.
+
+        Использует ``get_merged_item_by_key`` если оно доступно (быстрый путь),
+        иначе делает полный перебор через ``get_history_items``.
+        Возвращает первый найденный элемент или None.
+        """
+        # Быстрый путь — некоторые реализации store предоставляют индексированный доступ
+        if hasattr(store, "get_merged_item_by_key"):
+            return store.get_merged_item_by_key(merge_key)
+
+        # Медленный путь — полный перебор
+        if hasattr(store, "get_history_items"):
+            try:
+                all_items = store.get_history_items()
+            except Exception:
+                return None
+            for item in (all_items or []):
+                item_meta = getattr(item, "merge_key", None)
+                if item_meta == merge_key:
+                    return item
+        return None
 
     def _extract_ids(self, params: dict[str, Any]) -> list[str]:
         raw = params.get("item_ids")

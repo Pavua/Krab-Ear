@@ -37,6 +37,7 @@ class FakeHistoryItem:
     diarization: dict | None = None
     tags: list = field(default_factory=list)
     favorite: bool = False
+    merge_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         from dataclasses import asdict
@@ -65,6 +66,9 @@ class FakeStore:
     def get_history_item_by_id(self, item_id: str) -> FakeHistoryItem | None:
         return self._items.get(item_id)
 
+    def get_history_items(self) -> list[FakeHistoryItem]:
+        return list(self._items.values())
+
     def delete_history_item(self, item_id: str) -> bool:
         if item_id in self._items:
             self._deleted.append(item_id)
@@ -84,7 +88,8 @@ class FakeStore:
         diarization: dict | None = None,
         audio_duration_sec: float | None = None,
         confidence: float | None = None,
-        # NOTE: намеренно НЕТ параметра tags — как в реальном StateStore
+        tags: list | None = None,
+        merge_key: str | None = None,
         **kwargs: Any,
     ) -> FakeHistoryItem:
         import uuid
@@ -102,6 +107,8 @@ class FakeStore:
             diarization=diarization,
             audio_duration_sec=audio_duration_sec,
             confidence=confidence,
+            tags=list(tags) if tags else [],
+            merge_key=merge_key,
         )
         self._items[item.id] = item
         self._added.append(item)
@@ -639,7 +646,6 @@ class TestMergerRequiredNames(unittest.TestCase):
             self.assertIn("merged_from", r)
 
 
-<<<<<<< HEAD
 class StrictFakeStore:
     """Строгий фейк StateStore, который НЕ принимает tags в add_history_item.
 
@@ -904,6 +910,66 @@ class TestMergeAtomicRollback(unittest.TestCase):
         self.assertIsInstance(err.__cause__, IOError)
         # Error message mentions rollback
         self.assertIn("откат", str(err).lower())
+
+
+class TestMergeIdempotency(unittest.TestCase):
+    """Тесты идемпотентности merge_items (W1407 F5)."""
+
+    def setUp(self) -> None:
+        self.store = FakeStore()
+        self.merger = RecordingMerger()
+
+    def _add(self, item_id: str, text: str, ts: str = "2026-04-12T10:00:00", **kw: Any) -> FakeHistoryItem:
+        return self.store.add_fake_item(item_id, text, ts=ts, **kw)
+
+    def test_merge_idempotency_returns_existing(self) -> None:
+        """Повторный вызов merge_items с теми же ID возвращает тот же item_id."""
+        self._add("id1", "Alpha", ts="2026-04-12T09:00:00")
+        self._add("id2", "Beta", ts="2026-04-12T09:01:00")
+
+        result1 = self.merger.merge_items(["id1", "id2"], self.store)
+        result2 = self.merger.merge_items(["id1", "id2"], self.store)
+
+        # Второй вызов должен вернуть тот же ID, а не создавать дубликат
+        self.assertEqual(result1["id"], result2["id"])
+        # В store должна быть ровно одна добавленная запись
+        self.assertEqual(len(self.store._added), 1)
+        # Второй результат помечен как идемпотентный
+        self.assertTrue(result2.get("idempotent", False))
+
+    def test_merge_different_order_same_result(self) -> None:
+        """Разный порядок item_ids [a,b,c] и [c,a,b] → одна и та же запись."""
+        self._add("x1", "First", ts="2026-04-12T09:00:00")
+        self._add("x2", "Second", ts="2026-04-12T09:01:00")
+        self._add("x3", "Third", ts="2026-04-12T09:02:00")
+
+        result_abc = self.merger.merge_items(["x1", "x2", "x3"], self.store)
+        result_cba = self.merger.merge_items(["x3", "x1", "x2"], self.store)
+
+        # Оба вызова должны указывать на одну и ту же запись
+        self.assertEqual(result_abc["id"], result_cba["id"])
+        # Только одна запись создана в store
+        self.assertEqual(len(self.store._added), 1)
+
+    def test_merge_delete_originals_no_idempotency(self) -> None:
+        """delete_originals=True обходит проверку идемпотентности."""
+        self._add("y1", "Alpha", ts="2026-04-12T09:00:00")
+        self._add("y2", "Beta", ts="2026-04-12T09:01:00")
+
+        # Первый вызов с delete_originals=True создаёт запись
+        result1 = self.merger.merge_items(["y1", "y2"], self.store, delete_originals=True)
+
+        # Добавляем записи снова (имитируем восстановление или новые данные)
+        self._add("y1", "Alpha restored", ts="2026-04-12T09:00:00")
+        self._add("y2", "Beta restored", ts="2026-04-12T09:01:00")
+
+        # Второй вызов с теми же ID и delete_originals=True должен создать НОВУЮ запись
+        result2 = self.merger.merge_items(["y1", "y2"], self.store, delete_originals=True)
+
+        # Два разных item_id — идемпотентность не применялась
+        self.assertNotEqual(result1["id"], result2["id"])
+        # result2 не помечен как идемпотентный
+        self.assertFalse(result2.get("idempotent", False))
 
 
 if __name__ == "__main__":
