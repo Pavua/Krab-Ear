@@ -19,6 +19,8 @@ logger = logging.getLogger("KrabEar.Backend.TranscriptVersioning")
 # Допустимые источники версии
 VALID_SOURCES = frozenset({"stt_raw", "stt_cleaned", "llm_rewrite", "manual", "import"})
 _VERSIONS_FILE = "transcript_versions.ndjson"
+# W1410 F1: максимальный размер текста версии (1 МБ в байтах UTF-8)
+_MAX_TEXT_BYTES = 1_000_000
 
 
 class TranscriptVersionManager:
@@ -94,9 +96,16 @@ class TranscriptVersionManager:
             raise ValueError("item_id не может быть пустым")
         if not isinstance(text, str):
             raise ValueError("text должен быть строкой")
+        # W1410 F1: пропускаем пустые строки
+        if not text or not text.strip():
+            return None  # type: ignore[return-value]
         source = str(source).strip()
         if source not in VALID_SOURCES:
             raise ValueError(f"Недопустимый source {source!r}. Допустимые: {sorted(VALID_SOURCES)}")
+
+        # W1410 F1: ограничиваем размер текста до _MAX_TEXT_BYTES
+        if len(text.encode("utf-8")) > _MAX_TEXT_BYTES:
+            text = text[:50000] + "...[TRUNCATED]"
 
         with self._lock:
             all_records = self._read_all()
@@ -166,13 +175,33 @@ class TranscriptVersionManager:
             KeyError: если указанная версия не найдена.
         """
         target = self.get_version(item_id, version_num)
-        new_version = self.save_version(
-            item_id=item_id,
-            text=target["text"],
-            source="manual",
-        )
-        new_version["reverted_from"] = version_num
-        return new_version
+        revert_text = target["text"]
+        item_id = str(item_id).strip()
+        source = "manual"
+
+        # W1410 F2: persist reverted_from into the NDJSON record (not just the return dict)
+        if not isinstance(revert_text, str):
+            raise ValueError("text должен быть строкой")
+        if not revert_text or not revert_text.strip():
+            raise ValueError("Текст целевой версии пустой — откат невозможен")
+
+        # Truncate if needed (same guard as save_version)
+        if len(revert_text.encode("utf-8")) > _MAX_TEXT_BYTES:
+            revert_text = revert_text[:50000] + "...[TRUNCATED]"
+
+        with self._lock:
+            all_records = self._read_all()
+            next_num = self._next_version_num(item_id, all_records)
+            record: dict[str, Any] = {
+                "item_id": item_id,
+                "version_num": next_num,
+                "text": revert_text,
+                "source": source,
+                "reverted_from": version_num,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._append(record)
+            return dict(record)
 
     def diff_versions(self, item_id: str, v1: int, v2: int) -> dict[str, Any]:
         """Возвращает текстовый diff между двумя версиями.
