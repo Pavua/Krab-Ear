@@ -309,6 +309,63 @@ class SrtExportValidationTestCase(unittest.TestCase):
         self.assertIn("1\n", content)
         self.assertIn("Простой текст без диаризации", content)
 
+    def test_srt_export_contiguous_sequence_with_empty_turns(self) -> None:
+        """SRT sequence numbers must be contiguous (1,2,3) even when empty turns are skipped.
+
+        Regression test for W1426 F4 LOW: enumerate(turns, start=1) + continue
+        produced gaps (1, 3, 4) which broke many SRT players.
+        """
+        diar = {
+            "enabled": True,
+            "speaker_turns": [
+                {"speaker": "SPEAKER_00", "text": "Первый сегмент", "start": 0.0, "end": 2.0},
+                {"speaker": "SPEAKER_01", "text": "", "start": 2.5, "end": 3.0},  # empty — skip
+                {"speaker": "SPEAKER_00", "text": "Третий сегмент", "start": 3.5, "end": 5.0},
+                {"speaker": "SPEAKER_01", "text": "Четвёртый сегмент", "start": 5.5, "end": 7.0},
+            ],
+        }
+        item_id = "srt-contiguous-empty-001"
+        _write_ndjson_item(
+            self.store,
+            id=item_id,
+            ts="2026-05-27T10:00:00+00:00",
+            text="Первый сегмент Третий сегмент Четвёртый сегмент",
+            diarization=diar,
+        )
+        result = self.svc.handle_export_history_srt({"id": item_id})
+        content = result["content"]
+        lines = content.split("\n")
+        # Extract sequence number lines: lines that are pure integers
+        seq_nums = [int(ln.strip()) for ln in lines if ln.strip().isdigit()]
+        # Should have exactly 3 segments (empty turn skipped)
+        self.assertEqual(seq_nums, [1, 2, 3],
+                         f"Expected contiguous [1,2,3], got {seq_nums}. SRT:\n{content}")
+
+    def test_srt_export_contiguous_sequence_all_filled(self) -> None:
+        """SRT sequence numbers are 1,2,3 when all turns have text (baseline check)."""
+        diar = {
+            "enabled": True,
+            "speaker_turns": [
+                {"speaker": "SPEAKER_00", "text": "Первый", "start": 0.0, "end": 1.0},
+                {"speaker": "SPEAKER_01", "text": "Второй", "start": 1.5, "end": 2.5},
+                {"speaker": "SPEAKER_00", "text": "Третий", "start": 3.0, "end": 4.0},
+            ],
+        }
+        item_id = "srt-contiguous-full-001"
+        _write_ndjson_item(
+            self.store,
+            id=item_id,
+            ts="2026-05-27T11:00:00+00:00",
+            text="Первый Второй Третий",
+            diarization=diar,
+        )
+        result = self.svc.handle_export_history_srt({"id": item_id})
+        content = result["content"]
+        lines = content.split("\n")
+        seq_nums = [int(ln.strip()) for ln in lines if ln.strip().isdigit()]
+        self.assertEqual(seq_nums, [1, 2, 3],
+                         f"Expected contiguous [1,2,3], got {seq_nums}. SRT:\n{content}")
+
 
 # ===========================================================================
 # 4. Markdown export validation
