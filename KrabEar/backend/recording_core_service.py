@@ -194,8 +194,13 @@ class RecordingCoreService:
             except Exception:
                 logger.exception("Не удалось запустить RealtimePartialTranscriber")
                 self._rt_partial = None
-        # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF via realtime_silence_filter_enabled)
+        # W1385 F1 MED: clear stale RSF state from any previous recording unconditionally.
+        # If RSF was toggled off between recordings, _last_silence_ranges may still hold
+        # timestamps from the prior session — applying them to fresh audio corrupts STT input.
+        self._last_silence_ranges = []
         self._rsf = None
+
+        # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF via realtime_silence_filter_enabled)
         if bool(settings.get("realtime_silence_filter_enabled", False)):
             try:
                 self._rsf = RealtimeSilenceFilter(
@@ -973,8 +978,18 @@ class RecordingCoreService:
             },
         )
 
-        # W1325 F1 HIGH: pass silence_ranges captured from RealtimeSilenceFilter
-        _silence_ranges = getattr(self, "_last_silence_ranges", None) or None
+        # W1325 F1 HIGH: pass silence_ranges captured from RealtimeSilenceFilter.
+        # W1385 F1 MED defensive: if RSF is disabled in current settings, force empty ranges
+        # so no stale timestamps from a previous recording can corrupt this transcription.
+        # (handle_start_recording always clears _last_silence_ranges to [] on entry, but this
+        #  guard is a belt-and-suspenders safeguard for settings toggled mid-flight.)
+        _rsf_enabled = bool(
+            self._settings_svc.cached_settings().get("realtime_silence_filter_enabled", False)
+        )
+        if not _rsf_enabled:
+            _silence_ranges: list[tuple[float, float]] | None = None
+        else:
+            _silence_ranges = getattr(self, "_last_silence_ranges", None) or None
 
         transcribe_payload = self.transcriber.transcribe(
             audio,
