@@ -672,11 +672,9 @@ class SettingsService:
                     "handle_restore_settings_backup: migration %s→%s failed for backup '%s': %s",
                     backup_version, CURRENT_SCHEMA_VERSION, backup_id, _mig_exc,
                 )
-                return {
-                    "ok": False,
-                    "error": "Backup validation failed",
-                    "details": f"Schema migration {backup_version}→{CURRENT_SCHEMA_VERSION} failed: {_mig_exc}",
-                }
+                raise ValueError(
+                    f"Backup validation failed: Schema migration {backup_version}→{CURRENT_SCHEMA_VERSION} failed: {_mig_exc}"
+                )
 
         # W1427 F2: validate restored data before saving — reject corrupt/malformed backups.
         vr = self._validator.validate(restored)
@@ -685,11 +683,7 @@ class SettingsService:
                 "handle_restore_settings_backup: validation rejected backup '%s': %s",
                 backup_id, vr.errors,
             )
-            return {
-                "ok": False,
-                "error": "Backup validation failed",
-                "details": vr.errors,
-            }
+            raise ValueError(f"Backup validation failed: {vr.errors}")
         restored = vr.fixed
 
         # Detect credential fields present in current settings but missing from backup.
