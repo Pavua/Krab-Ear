@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 from core.pipeline.context import PipelineContext
 from core.pipeline.factory import create_default_pipeline
+from core.pipeline.stage_cache import StageCache
 
 logger = logging.getLogger("KrabEar.Pipeline.Bridge")
 
@@ -66,11 +67,16 @@ def transcribe_v2(
         translation_mode=translation_mode,
     )
 
+    # W1263 F3: instantiate StageCache and pass to PipelineExecutor via factory.
+    # The cache enables LRU result reuse across repeated calls with the same audio.
+    stage_cache = StageCache()
+
     pipeline = create_default_pipeline(
         engine=engine,
         llm_rewriter=llm_rewriter,
         translator=translator,
         diarization_fn=diarization_fn,
+        stage_cache=stage_cache,
     )
 
     try:

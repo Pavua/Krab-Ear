@@ -54,7 +54,7 @@ class TranslationStage:
             )
         except Exception as exc:
             logger.error("TranslationStage unexpected error: %s", exc)
-            ctx.errors.append(f"translation_unexpected: {exc}")
+            ctx.errors.append(f"translation: {exc}")
             return ctx
 
         if result.ok:
@@ -66,6 +66,6 @@ class TranslationStage:
             )
         else:
             logger.debug("Translation failed/skipped: status=%s", result.status)
-            ctx.errors.append(f"translation_failed: {result.status}")
+            ctx.errors.append(f"translation: {result.status}")
 
         return ctx
