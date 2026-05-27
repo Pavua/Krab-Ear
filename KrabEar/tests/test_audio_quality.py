@@ -398,5 +398,58 @@ class TestNanInfJSONSafety(unittest.TestCase):
         json.dumps(d)  # must not raise
 
 
+class TestW1510SNRRegressionTypicalMicAmplitudes(unittest.TestCase):
+    """W1510 regression tests — SNR estimate must be correct for typical laptop mic amplitudes.
+
+    W1477 changed _SILENCE_RMS_THRESHOLD from 0.001 → 0.01; the `* 10` in
+    _estimate_snr then yielded 0.1, marking ALL frames of a clean 0.02–0.14
+    amplitude signal as noise floor → SNR=0 dB → score="poor".
+    After W1510 decoupling (_SNR_NOISE_FLOOR_THRESHOLD = 0.01) the quiet_mask
+    threshold stays at 0.01, so a clean 0.05-amplitude signal correctly yields
+    NO quiet-frame matches, falls through to the CV-based path, and returns a
+    high SNR.
+    """
+
+    def test_estimate_snr_at_typical_voice_amplitude_0_05(self):
+        """Чистая синусоида 0.05 амп (типичный laptop mic) → SNR > 20 dB, не 0."""
+        signal = _sine(amplitude=0.05, duration=2.0)
+        report = AudioQualityAnalyzer().analyze(signal, SR)
+        self.assertGreater(
+            report.snr_estimate_db, 20.0,
+            msg=(
+                f"SNR для чистого сигнала 0.05 должен быть > 20 dB, "
+                f"получено {report.snr_estimate_db:.2f} dB. "
+                "Регрессия W1477 (silence_threshold * 10 = 0.1 помечал все фреймы как шум)."
+            ),
+        )
+
+    def test_estimate_snr_at_quiet_voice_0_02(self):
+        """Чистая синусоида 0.02 амп (тихий голос) → SNR > 0 dB, не 0."""
+        signal = _sine(amplitude=0.02, duration=2.0)
+        report = AudioQualityAnalyzer().analyze(signal, SR)
+        self.assertGreater(
+            report.snr_estimate_db, 0.0,
+            msg=(
+                f"SNR для чистого сигнала 0.02 должен быть > 0 dB, "
+                f"получено {report.snr_estimate_db:.2f} dB. "
+                "Регрессия W1477 возвращала 0 для amplitude < 0.141."
+            ),
+        )
+
+    def test_estimate_snr_loud_voice_0_3_works(self):
+        """Регрессия — сильный сигнал 0.3 (старый тест) должен по-прежнему работать."""
+        signal = _sine(amplitude=0.3, duration=2.0)
+        noise = _noise(duration=2.0, amplitude=0.001)
+        audio = signal + noise
+        report = AudioQualityAnalyzer().analyze(audio, SR)
+        self.assertGreater(
+            report.snr_estimate_db, 20.0,
+            msg=(
+                f"SNR для сигнала 0.3 с малым шумом должен быть > 20 dB, "
+                f"получено {report.snr_estimate_db:.2f} dB."
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
