@@ -215,3 +215,9 @@ class PlaybackTracker:
         limit = int(params.get("limit", 10))
         items = self.get_most_replayed(limit=limit)
         return {"items": items, "count": len(items)}
+
+    def handle_get_never_played(self, params: dict[str, Any], store: Any) -> dict[str, Any]:
+        """IPC: get_never_played — записи истории, которые ни разу не воспроизводились."""
+        limit = int(params.get("limit", 50))
+        items = self.get_never_played(store=store, limit=limit)
+        return {"items": items, "count": len(items)}

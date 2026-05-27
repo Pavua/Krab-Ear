@@ -1614,6 +1614,15 @@ class BackendService:
         stats["enabled"] = True
         return stats
 
+    def _handle_get_never_played(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: get_never_played — записи истории, которые ни разу не воспроизводились.
+
+        Privacy mode gate: в режиме конфиденциальности доступ к истории заблокирован.
+        """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"items": [], "count": 0, "privacy_mode": True}
+        return self._playback_tracker.handle_get_never_played(params, store=self.store)
+
     def _handle_get_recording_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delegated to AnalyticsService (W773 extraction)."""
         return self._analytics_svc.handle_get_recording_stats(params)
