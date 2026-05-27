@@ -62,7 +62,7 @@ _HALLUCINATION_PATTERNS = frozenset({
     "субтитры от",
     "субтитры подготовил",
     "редактор субтитров",
-    "корректор",
+    "корректор субтитров",
     "thanks for watching",
     "subscribe",
     "like and subscribe",

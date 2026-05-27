@@ -605,5 +605,36 @@ class TestAutoGlossaryWave133(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ── TestHallucinationPatternCorrekctor (W1402 F3 LOW) ─────────────────────────
+
+class TestHallucinationPatternCorrectorW1402(unittest.TestCase):
+    """Проверяет, что bare 'корректор' НЕ является паттерном галлюцинации,
+    но 'корректор субтитров' по-прежнему фильтруется (W1402 F3 LOW)."""
+
+    def setUp(self):
+        from core.auto_glossary import _looks_like_hallucination
+        self._check = _looks_like_hallucination
+
+    def test_corrector_alone_not_filtered(self):
+        """'Я работаю корректором' — содержит обычное слово, не галлюцинация."""
+        # Одиночное слово 'корректором' (словоформа) не должно быть отфильтровано.
+        # _looks_like_hallucination проверяет term целиком, а не подстроки слова.
+        self.assertFalse(
+            self._check("корректором"),
+            "Bare 'корректором' должен проходить фильтр галлюцинаций",
+        )
+        self.assertFalse(
+            self._check("корректор"),
+            "Bare 'корректор' должен проходить фильтр галлюцинаций",
+        )
+
+    def test_corrector_subtitles_still_filtered(self):
+        """'корректор субтитров' — известный Whisper artefact, должен фильтроваться."""
+        self.assertTrue(
+            self._check("корректор субтитров"),
+            "'корректор субтитров' должен быть отфильтрован как галлюцинация",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
