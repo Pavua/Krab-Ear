@@ -33,10 +33,17 @@ MAX_RECORDING_SAMPLES = 16000 * 60 * 60 * 4  # 4 hours @ 16 kHz
 class AudioRecorder:
     """Потокобезопасный рекордер c режимом start/stop."""
 
-    def __init__(self, sample_rate: int = 16000, channels: int = 1, on_audio_level: Callable[[float], None] | None = None) -> None:
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        channels: int = 1,
+        on_audio_level: Callable[[float], None] | None = None,
+        device: "int | str | None" = None,
+    ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_size = int(self.sample_rate * 0.1)
+        self._device: "int | str | None" = device
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -103,6 +110,26 @@ class AudioRecorder:
                     audio = np.array([], dtype=np.float32)
         return audio, duration
 
+    def set_device(self, device: "int | str | None") -> None:
+        """Устанавливает аудиоустройство для следующей записи.
+
+        Валидирует существование устройства при ненулевом значении.
+        Изменение вступает в силу при следующем вызове start() — текущая
+        запись не прерывается.
+
+        Raises:
+            ValueError: если устройство не найдено в списке sounddevice.
+        """
+        if device is not None and sd is not None:
+            try:
+                sd.query_devices(device, "input")
+            except Exception as exc:
+                raise ValueError(
+                    f"AudioRecorder: устройство {device!r} не найдено: {exc}"
+                ) from exc
+        with self._lock:
+            self._device = device
+
     def get_duration_sec(self) -> float:
         """Возвращает длительность текущей записи в секундах."""
         with self._lock:
@@ -164,13 +191,18 @@ class AudioRecorder:
 
     def _worker(self) -> None:
         """Фоновый цикл чтения чанков из микрофона."""
+        with self._lock:
+            device = self._device
         try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype="float32",
-                blocksize=self.chunk_size,
-            ) as stream:
+            stream_kwargs: dict = {
+                "samplerate": self.sample_rate,
+                "channels": self.channels,
+                "dtype": "float32",
+                "blocksize": self.chunk_size,
+            }
+            if device is not None:
+                stream_kwargs["device"] = device
+            with sd.InputStream(**stream_kwargs) as stream:
                 last_level_emit_at = 0.0
                 while not self._stop_event.is_set():
                     data, overflowed = stream.read(self.chunk_size)

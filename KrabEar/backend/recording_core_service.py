@@ -139,6 +139,19 @@ class RecordingCoreService:
     # ------------------------------------------------------------------ #
 
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Apply selected_input_device from settings before starting (W1327 F2 HIGH).
+        # Uses cached_settings() — runtime-safe per Wave 58 lesson.
+        _settings_pre = self._settings_svc.cached_settings()
+        _selected_device = _settings_pre.get("selected_input_device", None)
+        if _selected_device is not None and hasattr(self.recorder, "set_device"):
+            try:
+                self.recorder.set_device(_selected_device)
+            except Exception as _dev_err:
+                logger.warning(
+                    "Не удалось применить аудиоустройство %r: %s",
+                    _selected_device,
+                    _dev_err,
+                )
         started = self.recorder.start()
         if not started:
             with self._preview_lock:
