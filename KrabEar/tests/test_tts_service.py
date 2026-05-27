@@ -441,5 +441,166 @@ class TTSEngineRoutingTestCase(unittest.TestCase):
         self.assertEqual(len(results), 5)
 
 
+# ── W1221 / W1215 F1+F2+F3 regression tests ───────────────────────────────────
+
+class TorchHubTrustRepoTestCase(unittest.TestCase):
+    """W1215 F1: torch.hub.load must receive trust_repo=True to avoid interactive
+    consent prompt hanging in headless launchd daemon (no TTY)."""
+
+    @patch("backend.tts_service.settings")
+    def test_torch_hub_load_passes_trust_repo_true(self, mock_settings: MagicMock) -> None:
+        """_load_silero must call torch.hub.load with trust_repo=True."""
+        mock_settings.TTS_SILERO_MODEL = "v4_ru"
+
+        mock_torch = MagicMock()
+        fake_model = MagicMock()
+        fake_model.to.return_value = fake_model
+        mock_torch.device.return_value = "cpu"
+        mock_torch.hub.load.return_value = (fake_model, [], 22050, "", MagicMock())
+
+        import backend.tts_service as tts_mod
+        with patch.dict("sys.modules", {"torch": mock_torch}):
+            # Re-import so the lazy import inside the function picks up our mock
+            from importlib import import_module
+            import importlib
+            # Call _load_silero directly
+            result = tts_mod._load_silero("v4_ru")
+
+        # Verify trust_repo=True was passed
+        call_kwargs = mock_torch.hub.load.call_args
+        self.assertIsNotNone(call_kwargs)
+        kwargs = call_kwargs[1] if call_kwargs[1] else {}
+        all_args = {**kwargs}
+        # trust_repo can be positional arg[4] or keyword
+        self.assertTrue(
+            all_args.get("trust_repo") is True,
+            f"trust_repo=True not found in call kwargs: {call_kwargs}",
+        )
+
+
+class SileroVoiceAllowlistTestCase(unittest.TestCase):
+    """W1215 F2: Silero voice must be validated against the v4 speaker allowlist."""
+
+    def _make_silero_tuple(self) -> tuple:
+        """Build a fake Silero tuple for injecting into TTSService."""
+        import io
+        import wave
+
+        def fake_apply_tts(**kwargs):
+            import unittest.mock as um
+            tensor = um.MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = __import__(
+                "array"
+            ).array("f", [0.0] * 100)
+            return tensor
+
+        fake_model = MagicMock()
+        return (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+
+    @patch("backend.tts_service.settings")
+    def test_invalid_silero_voice_rejected(self, mock_settings: MagicMock) -> None:
+        """An unknown voice name must fall back to 'xenia' with a warning."""
+        mock_settings.TTS_SILERO_VOICE = "totally_unknown_voice"
+        mock_settings.TTS_ENABLED = True
+        mock_settings.TTS_FALLBACK_SAY = False
+
+        import numpy as np
+
+        svc = TTSService()
+        svc._silero_attempted = True
+
+        # Minimal fake apply_tts that records the speaker keyword
+        captured_speaker: list[str] = []
+
+        def fake_apply_tts(texts, model, sample_rate, symbols, device, speaker):
+            captured_speaker.append(speaker)
+            arr = np.zeros(100, dtype=np.float32)
+            tensor = MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = arr
+            return tensor
+
+        fake_model = MagicMock()
+        svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+
+        with patch("backend.tts_service.logger") as mock_logger:
+            result = svc._synthesize_silero("Hello", voice="totally_unknown_voice")
+
+        # The speaker actually passed to apply_tts must be "xenia" (the safe fallback)
+        self.assertTrue(len(captured_speaker) > 0)
+        self.assertEqual(captured_speaker[0], "xenia")
+        # A warning must have been logged
+        mock_logger.warning.assert_called()
+
+    @patch("backend.tts_service.settings")
+    def test_valid_silero_voice_accepted(self, mock_settings: MagicMock) -> None:
+        """A valid voice from the allowlist must be passed through unchanged."""
+        import numpy as np
+
+        for valid_voice in ("baya", "kseniya", "xenia", "eugene", "random"):
+            mock_settings.TTS_SILERO_VOICE = valid_voice
+
+            svc = TTSService()
+            svc._silero_attempted = True
+
+            captured_speaker: list[str] = []
+
+            def fake_apply_tts(texts, model, sample_rate, symbols, device, speaker):
+                captured_speaker.append(speaker)
+                arr = np.zeros(100, dtype=np.float32)
+                tensor = MagicMock()
+                tensor.squeeze.return_value.cpu.return_value.numpy.return_value = arr
+                return tensor
+
+            fake_model = MagicMock()
+            svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+
+            svc._synthesize_silero("Тест", voice=valid_voice)
+
+            self.assertTrue(len(captured_speaker) > 0, f"voice={valid_voice} not captured")
+            self.assertEqual(
+                captured_speaker[0],
+                valid_voice,
+                f"Valid voice {valid_voice!r} was unexpectedly replaced",
+            )
+            captured_speaker.clear()
+
+
+class SileroTextLengthCapTestCase(unittest.TestCase):
+    """W1215 F3: text longer than 5000 chars must be truncated before Silero synthesis."""
+
+    @patch("backend.tts_service.settings")
+    def test_text_above_5000_chars_truncated(self, mock_settings: MagicMock) -> None:
+        """Text > 5000 chars must be truncated to exactly 5000 chars passed to apply_tts."""
+        import numpy as np
+
+        mock_settings.TTS_SILERO_VOICE = "xenia"
+
+        svc = TTSService()
+        svc._silero_attempted = True
+
+        captured_texts: list[list[str]] = []
+
+        def fake_apply_tts(texts, model, sample_rate, symbols, device, speaker):
+            captured_texts.append(list(texts))
+            arr = np.zeros(100, dtype=np.float32)
+            tensor = MagicMock()
+            tensor.squeeze.return_value.cpu.return_value.numpy.return_value = arr
+            return tensor
+
+        fake_model = MagicMock()
+        svc._silero = (fake_model, [], 22050, "", fake_apply_tts, "cpu")
+
+        long_text = "а" * 6000  # 6000 chars > 5000 limit
+        with patch("backend.tts_service.logger") as mock_logger:
+            result = svc._synthesize_silero(long_text, voice="xenia")
+
+        # Verify the text was truncated to 5000 chars
+        self.assertEqual(len(captured_texts), 1)
+        self.assertEqual(len(captured_texts[0]), 1)
+        self.assertEqual(len(captured_texts[0][0]), 5000)
+        # A warning must have been logged about truncation
+        mock_logger.warning.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()
