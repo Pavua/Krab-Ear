@@ -1024,10 +1024,7 @@ class AudioEngine:
                 _report("diarize")
             diarization = self._maybe_run_diarization(audio_data, segments, is_preview=is_preview, diarize=diarize)
 
-            # После STT + diarization — освобождаем MLX промежуточные массивы.
-            # MLX держит Metal-буферы пока Python GC не удалит ссылки на mx.array.
-            import gc as _gc
-            _gc.collect()
+            # После STT + diarization — освобождаем MLX Metal cache (W63).
             # H2: явный flush MLX Metal cache — без этого GPU буферы остаются в
             # Metal heap и backend не возвращается к baseline RSS после каждого STT.
             try:
