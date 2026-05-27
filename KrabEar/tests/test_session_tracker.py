@@ -351,5 +351,78 @@ class TestSessionTrackerRequiredCases(unittest.TestCase):
         self.assertEqual(len(sessions), 10)
 
 
+class TestSessionTrackerGetActiveSessionW1501(unittest.TestCase):
+    """W1501 — get_active_session() locked accessor tests."""
+
+    def setUp(self):
+        self.tracker = SessionTracker()
+
+    def test_get_active_session_returns_none_initially(self):
+        self.assertIsNone(self.tracker.get_active_session())
+
+    def test_get_active_session_returns_dict_after_start(self):
+        sid = self.tracker.start_session(audio_device="TestMic", quality_preset="max")
+        active = self.tracker.get_active_session()
+        self.assertIsNotNone(active)
+        self.assertEqual(active["session_id"], sid)
+        self.assertEqual(active["audio_device"], "TestMic")
+        self.assertEqual(active["quality_preset"], "max")
+
+    def test_get_active_session_returns_none_after_end(self):
+        self.tracker.start_session()
+        self.tracker.end_session({"duration_sec": 1.0})
+        self.assertIsNone(self.tracker.get_active_session())
+
+    def test_get_active_session_returns_copy_not_reference(self):
+        """Mutating the returned dict must not affect internal state."""
+        self.tracker.start_session(audio_device="OrigMic")
+        copy = self.tracker.get_active_session()
+        copy["audio_device"] = "Tampered"
+        # Internal state should be unchanged
+        copy2 = self.tracker.get_active_session()
+        self.assertEqual(copy2["audio_device"], "OrigMic")
+
+    def test_session_tracker_get_active_session_thread_safe(self):
+        """Concurrent readers and writer must not raise or produce torn reads."""
+        import threading
+
+        errors = []
+        results = []
+        lock = threading.Lock()
+        stop_event = threading.Event()
+
+        def reader():
+            while not stop_event.is_set():
+                try:
+                    val = self.tracker.get_active_session()
+                    with lock:
+                        results.append(val)
+                except Exception as exc:
+                    with lock:
+                        errors.append(exc)
+
+        def writer():
+            for i in range(20):
+                self.tracker.start_session(audio_device=f"Dev-{i}")
+                self.tracker.end_session({"duration_sec": float(i)})
+
+        readers = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
+        writer_thread = threading.Thread(target=writer)
+        for r in readers:
+            r.start()
+        writer_thread.start()
+        writer_thread.join()
+        stop_event.set()
+        for r in readers:
+            r.join(timeout=2.0)
+
+        self.assertEqual(errors, [], f"Thread errors: {errors}")
+        # Each result must be None or a valid dict with expected keys
+        for val in results:
+            if val is not None:
+                self.assertIn("session_id", val)
+                self.assertIn("audio_device", val)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,6 +110,7 @@ def _make_service(tmp_dir, recorder=None, transcriber=None, extra_kwargs=None):
     vocab.get_words.return_value = []
     session_tracker = MagicMock()
     session_tracker._active_session = None
+    session_tracker.get_active_session.return_value = None
     kwargs = dict(
         recorder=recorder or _FakeRecorder(),
         transcriber=transcriber or _FakeTranscriber(),
@@ -489,6 +490,68 @@ class TestConstructorAndProperties(unittest.TestCase):
         self.assertEqual(svc.preview_error_count, 0)
         self.assertIsNone(svc.preview_error_last_reset_ts)
         self.assertFalse(svc.preview_thread_alive)
+
+
+class TestGetRecordingStateUsesLockedAccessor(unittest.TestCase):
+    """W1501 — handle_get_recording_state must use get_active_session() not _active_session."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_get_recording_state_uses_locked_accessor(self):
+        """handle_get_recording_state calls get_active_session(), not _active_session directly."""
+        from backend.session_tracker import SessionTracker
+        real_tracker = SessionTracker()
+        store = __import__("backend.state_store", fromlist=["StateStore"]).StateStore(data_dir=Path(self._tmp))
+        vocab = MagicMock()
+        vocab.get_words.return_value = []
+        svc = __import__("backend.recording_core_service", fromlist=["RecordingCoreService"]).RecordingCoreService(
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            translator=_FakeTranslator(),
+            store=store,
+            vocabulary=vocab,
+            settings_svc=_FakeSettingsSvc(),
+            llm_rewriter=None,
+            auto_glossary=None,
+            semantic_searcher=_FakeSemanticSearcher(),
+            context_memory=None,
+            clipboard_history=[],
+            auto_backup=MagicMock(),
+            session_tracker=real_tracker,
+            action_items_extractor=None,
+            transcription_counter_ref=[0],
+            last_stt_engine_ref=[None],
+        )
+        # No active session → session_id must be "__live__"
+        result = svc.handle_get_recording_state({})
+        self.assertEqual(result["session_id"], "__live__")
+
+        # With active session — session_id comes via get_active_session()
+        sid = real_tracker.start_session(audio_device="TestMic")
+        result2 = svc.handle_get_recording_state({})
+        self.assertEqual(result2["session_id"], sid)
+
+    def test_get_recording_state_does_not_access_private_active_session(self):
+        """Confirm _active_session private attr is no longer accessed directly from service."""
+        import ast
+        src_path = Path(self._tmp).parent.parent.parent / "KrabEar" / "backend" / "recording_core_service.py"
+        # Walk up to find the actual file
+        candidate = Path(__file__).resolve().parents[1] / "backend" / "recording_core_service.py"
+        if candidate.exists():
+            src_path = candidate
+        source = src_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                # Detect self._session_tracker._active_session pattern
+                if (node.attr == "_active_session" and
+                        isinstance(node.value, ast.Attribute) and
+                        node.value.attr == "_session_tracker"):
+                    self.fail(
+                        "handle_get_recording_state still accesses "
+                        "self._session_tracker._active_session directly (race condition)"
+                    )
 
 
 if __name__ == "__main__":
