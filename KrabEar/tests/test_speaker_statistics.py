@@ -570,5 +570,42 @@ class TestRequiredScenarios(unittest.TestCase):
         self.assertEqual(result["speakers"]["SPEAKER_00"]["total_words"], 1)
 
 
+# ---------------------------------------------------------------------------
+# Тест 9: проверка что get_speaker_statistics зарегистрирован в dispatch-таблице
+# (W956 — wire fix; ранее W955 подтвердил regression: метод существует, но не зарегистрирован)
+# ---------------------------------------------------------------------------
+
+class TestGetSpeakerStatisticsWired(unittest.TestCase):
+    """Проверяем, что IPC-метод get_speaker_statistics присутствует в dispatch-таблице
+    BackendService и корректно вызывает SpeakerStatisticsAnalyzer.handle_get_speaker_statistics.
+    """
+
+    def test_get_speaker_statistics_wired(self) -> None:
+        """get_speaker_statistics должен быть в dispatch-таблице BackendService."""
+        import ast
+        import os
+
+        service_path = os.path.join(
+            str(Path(__file__).resolve().parents[2]),
+            "KrabEar", "backend", "service.py",
+        )
+        with open(service_path, encoding="utf-8") as fh:
+            source = fh.read()
+
+        self.assertIn(
+            '"get_speaker_statistics"',
+            source,
+            "get_speaker_statistics отсутствует в dispatch-таблице service.py — "
+            "W956 fix не применён или был случайно удалён.",
+        )
+        # Убеждаемся, что dispatch ссылается на правильный метод extracted-сервиса.
+        self.assertIn(
+            "handle_get_speaker_statistics",
+            source,
+            "handle_get_speaker_statistics не упоминается в service.py — "
+            "extracted service не подключён.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
