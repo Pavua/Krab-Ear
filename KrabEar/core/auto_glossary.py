@@ -13,7 +13,7 @@ import logging
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.term_extractor import TermExtractor, _is_stop_word
 
@@ -85,6 +85,34 @@ _INSTRUCTION_VERBS = frozenset({
     "проверь", "проверьте",
     "переведи", "переведите",
 })
+
+
+# Слова-заполнители, с которых часто начинаются биграммы на рубеже предложений
+# (sentence-start fillers). Биграмм, начинающийся с любого из этих токенов,
+# не является реальным термином и не должен попадать в Whisper prompt.
+# Примеры: "Хорошо давайте", "Okay well", "Entonces bueno".
+_FILLER_STARTERS: frozenset = frozenset({
+    # RU
+    "хорошо", "давайте", "давай", "ладно", "итак", "значит",
+    "слушайте", "слушай", "понятно", "понял",
+    # ES
+    "entonces", "bueno", "vale", "oye", "mira", "veamos",
+    # EN
+    "okay", "ok", "well", "right", "so", "anyway", "alright",
+})
+
+
+def _starts_with_filler(term: str) -> bool:
+    """True если первый токен термина — слово-заполнитель (sentence-start filler).
+
+    Защищает Whisper prompt от биграммов типа "Хорошо давайте" или "Okay well",
+    которые проходят `_is_capitalized_or_multiword` только потому что первое
+    слово написано с заглавной буквы на рубеже предложения (F3, W1288).
+    """
+    if not term:
+        return False
+    first_token = term.split()[0].lower()
+    return first_token in _FILLER_STARTERS
 
 
 def _looks_like_hallucination(term: str) -> bool:
@@ -195,11 +223,15 @@ class AutoGlossaryBuilder:
         term_extractor: Optional[TermExtractor] = None,
         data_dir: Optional[Path] = None,
         refresh_hours: float = 6.0,
+        settings_provider: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         self._store = store
         self._extractor = term_extractor or TermExtractor()
         self._data_dir = data_dir
         self._refresh_hours = refresh_hours
+        # Callable that returns the current runtime settings dict.
+        # Used to honour privacy_mode_enabled at build-time (F4, W1288).
+        self._settings_provider = settings_provider
 
         # In-memory cache
         self._cache: List[str] = []
@@ -229,6 +261,17 @@ class AutoGlossaryBuilder:
         Returns:
             Список строк-терминов (не более top_n), отсортированных по частоте.
         """
+        # Privacy guard (F4, W1288): when privacy_mode_enabled is True, skip
+        # disk persist and return empty list — no user data leaves local scope.
+        if self._settings_provider is not None:
+            try:
+                current_settings = self._settings_provider()
+                if current_settings.get("privacy_mode_enabled", False):
+                    logger.debug("auto_glossary: privacy mode enabled — returning empty")
+                    return []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto_glossary: settings_provider error: %s", exc)
+
         if not force and self._is_cache_valid():
             logger.debug("auto_glossary: cache hit (%d terms)", len(self._cache))
             return list(self._cache[:top_n])
@@ -243,7 +286,18 @@ class AutoGlossaryBuilder:
         self._cache = terms
         self._cache_built_at = time.time()
 
-        if self._data_dir:
+        # Skip disk persist when privacy mode is active (checked again in case
+        # settings changed between the top check and here — belt-and-suspenders).
+        _privacy_active = False
+        if self._settings_provider is not None:
+            try:
+                _privacy_active = bool(
+                    self._settings_provider().get("privacy_mode_enabled", False)
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        if self._data_dir and not _privacy_active:
             self._save_cache_to_disk()
 
         return list(terms)
@@ -315,6 +369,11 @@ class AutoGlossaryBuilder:
                 if len(et.term) < 3:
                     continue
                 if not _is_capitalized_or_multiword(et.term):
+                    continue
+                # F3 (W1288): skip bigrams whose first token is a sentence-start
+                # filler — e.g. "Хорошо давайте" passes _is_capitalized_or_multiword
+                # only because the word is capitalised at sentence start.
+                if _starts_with_filler(et.term):
                     continue
                 if _looks_like_hallucination(et.term):
                     # Защита от self-poisoning loop: не подбираем Whisper
