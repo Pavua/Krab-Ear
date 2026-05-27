@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -201,6 +202,11 @@ class AutoGlossaryBuilder:
         self._data_dir = data_dir
         self._refresh_hours = refresh_hours
 
+        # Thread-safety lock — guards _cache and _cache_built_at to prevent
+        # TOCTOU races between concurrent build()/invalidate() calls on IPC
+        # threads (W1402 F1 MED).
+        self._lock = threading.RLock()
+
         # In-memory cache
         self._cache: List[str] = []
         self._cache_built_at: float = 0.0  # Unix epoch
@@ -220,6 +226,9 @@ class AutoGlossaryBuilder:
         """Возвращает список top-N часто-используемых терминов из истории.
 
         Результат кэшируется. При force=True — пересчитывает принудительно.
+        Потокобезопасен: все обращения к _cache/_cache_built_at защищены
+        self._lock (RLock), что исключает TOCTOU-гонку между build(force=True)
+        и invalidate() на параллельных IPC-потоках.
 
         Args:
             window_days: горизонт истории в днях.
@@ -229,40 +238,49 @@ class AutoGlossaryBuilder:
         Returns:
             Список строк-терминов (не более top_n), отсортированных по частоте.
         """
-        if not force and self._is_cache_valid():
-            logger.debug("auto_glossary: cache hit (%d terms)", len(self._cache))
-            return list(self._cache[:top_n])
+        with self._lock:
+            if not force and self._is_cache_valid():
+                logger.debug("auto_glossary: cache hit (%d terms)", len(self._cache))
+                return list(self._cache[:top_n])
 
         logger.info(
             "auto_glossary: building from history (window=%dd, top_n=%d)",
             window_days,
             top_n,
         )
+        # _build_from_history is CPU/IO-bound; run outside the lock so that
+        # concurrent get_cached() / invalidate() calls are not blocked during
+        # the potentially slow history scan.
         terms = self._build_from_history(window_days=window_days, top_n=top_n)
 
-        self._cache = terms
-        self._cache_built_at = time.time()
-
-        if self._data_dir:
-            self._save_cache_to_disk()
+        with self._lock:
+            self._cache = terms
+            self._cache_built_at = time.time()
+            if self._data_dir:
+                self._save_cache_to_disk()
 
         return list(terms)
 
     def get_cached(self) -> List[str]:
         """Возвращает текущий кэш без пересчёта (может быть пустым)."""
-        return list(self._cache)
+        with self._lock:
+            return list(self._cache)
 
     def invalidate(self) -> None:
         """Сбрасывает кэш — следующий вызов build() пересчитает глоссарий."""
-        self._cache = []
-        self._cache_built_at = 0.0
-        if self._data_dir:
-            self._save_cache_to_disk()
+        with self._lock:
+            self._cache = []
+            self._cache_built_at = 0.0
+            if self._data_dir:
+                self._save_cache_to_disk()
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
 
     def _is_cache_valid(self) -> bool:
-        """Возвращает True если кэш существует и не устарел."""
+        """Возвращает True если кэш существует и не устарел.
+
+        Caller must hold self._lock.
+        """
         if not self._cache:
             return False
         age_hours = (time.time() - self._cache_built_at) / 3600.0
@@ -343,13 +361,54 @@ class AutoGlossaryBuilder:
         return self._data_dir / AUTO_GLOSSARY_CACHE_FILE
 
     def _load_cache_from_disk(self) -> None:
-        """Загружает кэш с диска (при старте сервиса)."""
+        """Загружает кэш с диска (при старте сервиса).
+
+        Validates that ``terms`` is a list of dicts with at least a ``term``
+        key (W1402 F2 LOW).  Corrupted entries are skipped; an invalid
+        top-level type triggers a warning and falls back to an empty cache.
+        """
         path = self._cache_path()
         if not path or not path.exists():
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            self._cache = data.get("terms", [])
+            raw_terms = data.get("terms", [])
+
+            # F2 LOW: validate that terms is a list; reject non-list payloads.
+            if not isinstance(raw_terms, list):
+                logger.warning(
+                    "auto_glossary: disk cache has invalid 'terms' type %s — ignoring",
+                    type(raw_terms).__name__,
+                )
+                self._cache = []
+                self._cache_built_at = 0.0
+                return
+
+            # Accept both plain strings (legacy format) and dicts with a
+            # 'term' key (future enriched format).  Skip entries that are
+            # dicts but lack a 'term' key, or entries that are neither a str
+            # nor a dict.
+            validated: List[str] = []
+            skipped = 0
+            for entry in raw_terms:
+                if isinstance(entry, str):
+                    validated.append(entry)
+                elif isinstance(entry, dict):
+                    term_val = entry.get("term")
+                    if isinstance(term_val, str):
+                        validated.append(term_val)
+                    else:
+                        skipped += 1
+                else:
+                    skipped += 1
+
+            if skipped:
+                logger.warning(
+                    "auto_glossary: skipped %d corrupted term entries from disk cache",
+                    skipped,
+                )
+
+            self._cache = validated
             self._cache_built_at = float(data.get("built_at", 0.0))
             logger.debug(
                 "auto_glossary: loaded %d terms from disk (age=%.1fh)",

@@ -605,5 +605,99 @@ class TestAutoGlossaryWave133(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ── TestAutoGlossaryW1417 — RLock + type-validation fixes ─────────────────────
+
+class TestAutoGlossaryW1417(unittest.TestCase):
+    """Tests for W1402 F1 MED (TOCTOU RLock) and F2 LOW (type validation)."""
+
+    # ── F1 MED: concurrent build + invalidate ────────────────────────────────
+
+    def test_concurrent_build_and_invalidate_safe(self):
+        """10 threads alternating build(force=True) and invalidate() must not
+        corrupt the cache or raise exceptions (W1402 F1 MED)."""
+        import concurrent.futures
+        import random
+
+        items = [_make_item("Python Django Flask TensorFlow популярен")]
+        store = _FakeStore(items=items)
+        builder = AutoGlossaryBuilder(store=store, refresh_hours=0.0)
+
+        errors = []
+
+        def _worker():
+            try:
+                if random.random() < 0.5:
+                    builder.build(force=True)
+                else:
+                    builder.invalidate()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            futs = [pool.submit(_worker) for _ in range(50)]
+            for f in concurrent.futures.as_completed(futs):
+                f.result()
+
+        self.assertEqual(errors, [], f"Concurrent build/invalidate raised: {errors}")
+        # Cache must be a list (possibly empty) after the storm
+        self.assertIsInstance(builder.get_cached(), list)
+
+    # ── F2 LOW: type validation in _load_cache_from_disk ────────────────────
+
+    def test_load_cache_invalid_type_returns_empty(self):
+        """A disk cache with 'terms': 123 (not a list) must be rejected; the
+        builder falls back to an empty cache (W1402 F2 LOW)."""
+        import tempfile
+        import shutil
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            # Write a payload where 'terms' is an integer, not a list
+            cache_file.write_text(
+                json.dumps({"terms": 123, "built_at": time.time()}),
+                encoding="utf-8",
+            )
+            store = _FakeStore(items=[])
+            builder = AutoGlossaryBuilder(store=store, data_dir=Path(tmpdir))
+            # Must not crash and must return empty cache
+            self.assertEqual(builder.get_cached(), [])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_load_cache_corrupted_entries_skipped(self):
+        """A disk cache where some term entries are not strings or valid dicts
+        must have those entries skipped; valid string entries are kept
+        (W1402 F2 LOW)."""
+        import tempfile
+        import shutil
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cache_file = Path(tmpdir) / "auto_glossary.json"
+            # Mix of valid strings, a valid dict, a dict without 'term', and
+            # a plain integer — invalid entries must be skipped
+            cache_file.write_text(
+                json.dumps({
+                    "terms": [
+                        "ValidTerm",           # valid plain string
+                        {"term": "DictTerm"},  # valid dict format
+                        {"no_term_key": "x"},  # dict missing 'term' → skip
+                        42,                    # integer → skip
+                        None,                  # NoneType → skip
+                    ],
+                    "built_at": time.time(),
+                }),
+                encoding="utf-8",
+            )
+            store = _FakeStore(items=[])
+            builder = AutoGlossaryBuilder(store=store, data_dir=Path(tmpdir))
+            cached = builder.get_cached()
+            # Only 'ValidTerm' and 'DictTerm' should survive
+            self.assertIn("ValidTerm", cached)
+            self.assertIn("DictTerm", cached)
+            self.assertEqual(len(cached), 2)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
