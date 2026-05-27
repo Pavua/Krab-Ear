@@ -27,6 +27,49 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
+# ---------------------------------------------------------------------------
+# Module-level export path allowlist (W1432 / W1426-F3 HIGH)
+# ---------------------------------------------------------------------------
+# These roots define where IPC callers may write export files.  The list is
+# intentionally permissive enough for common user workflows while preventing
+# writes to sensitive directories (e.g. ~/.ssh, ~/Library/Keychains, /etc).
+# Note: data_dir is NOT included here because it is only known at runtime;
+# the instance method _resolve_export_dir additionally allows data_dir.
+
+_EXPORT_ALLOWED_ROOTS: list[Path] = [
+    Path.home() / "Documents",
+    Path.home() / "Desktop",
+    Path.home() / "Downloads",
+    Path("/tmp"),
+    Path("/private/tmp"),
+]
+
+
+def _is_safe_export_dir(out_dir: Path) -> bool:
+    """Return True if *out_dir* is within one of the module-level allowed roots.
+
+    Expands user home (``~``) and resolves symlinks before comparison so that
+    path-traversal payloads like ``~/Documents/../../../../etc`` are caught.
+
+    This function intentionally does NOT include ``data_dir`` because that is
+    only available inside a ``HistoryService`` instance.  Use
+    ``HistoryService._resolve_export_dir`` when an instance is available, as
+    it additionally permits the app data directory.
+
+    >>> _is_safe_export_dir(Path("/tmp/krab_export"))
+    True
+    >>> _is_safe_export_dir(Path("/etc/passwd").parent)
+    False
+    """
+    resolved = out_dir.expanduser().resolve()
+    for root in _EXPORT_ALLOWED_ROOTS:
+        try:
+            resolved.relative_to(root.expanduser().resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
 
 class HistoryService:
     """Обработчики IPC-команд для истории транскрипций."""
