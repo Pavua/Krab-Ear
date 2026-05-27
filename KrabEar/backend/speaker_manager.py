@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 from pathlib import Path
@@ -27,6 +28,7 @@ _log = logging.getLogger("KrabEar.Backend.SpeakerManager")
 _SPEAKER_TAG_RE = re.compile(r"\[(SPEAKER_\d+)\]")
 
 _EMBEDDING_DIM = 512
+_MAX_EMBEDDING_FLOATS = 1024
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -304,6 +306,20 @@ class SpeakerManager:
         emb_raw = params.get("embedding")
         if not isinstance(emb_raw, list) or len(emb_raw) == 0:
             raise ValueError("Параметр embedding обязателен (list[float])")
+        if len(emb_raw) > _MAX_EMBEDDING_FLOATS:
+            raise ValueError(
+                f"Embedding слишком длинный: {len(emb_raw)} элементов "
+                f"(максимум {_MAX_EMBEDDING_FLOATS})"
+            )
+        for i, x in enumerate(emb_raw):
+            if not isinstance(x, (int, float)) or isinstance(x, bool):
+                raise ValueError(
+                    f"Embedding[{i}] не является числом: {type(x).__name__}"
+                )
+            if not math.isfinite(x):
+                raise ValueError(
+                    f"Embedding[{i}] содержит не конечное значение: {x}"
+                )
         sid = self.register_speaker(name, np.array(emb_raw, dtype=np.float32))
         return {"speaker_id": sid, "name": name}
 
