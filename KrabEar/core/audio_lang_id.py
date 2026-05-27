@@ -214,6 +214,9 @@ class AudioLanguageID:
 
         Использует mlx_whisper.audio.log_mel_spectrogram + detect_language.
         При любой ошибке возвращает None.
+
+        Wave 63 compliance: mx.clear_cache() вызывается в finally-блоке после
+        каждого inference (success или exception) для освобождения Metal-буферов.
         """
         try:
             import mlx_whisper  # type: ignore[import]
@@ -221,12 +224,21 @@ class AudioLanguageID:
             logger.debug("AudioLanguageID: mlx_whisper не установлен → skip")
             return None
 
+        result = None
         try:
             with mlx_lock():
-                return self._detect_with_mlx(mlx_whisper, audio_16k)
+                result = self._detect_with_mlx(mlx_whisper, audio_16k)
         except Exception as exc:
             logger.warning("AudioLanguageID: inference failed: %s", exc)
-            return None
+        finally:
+            # W63: освобождаем Metal-буферы после каждого MLX encoder pass.
+            # Без этого Metal heap накапливается между записями (W1109 F2 MED).
+            try:
+                import mlx.core as _mx  # type: ignore[import]
+                _mx.clear_cache()
+            except (ImportError, AttributeError):
+                pass  # mlx.core не установлен или старая версия без clear_cache
+        return result
 
     def _detect_with_mlx(self, mlx_whisper: Any, audio_16k: np.ndarray) -> Optional[str]:
         """Внутренний метод LID внутри mlx_lock() контекста.

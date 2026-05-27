@@ -573,5 +573,213 @@ class TestAudioLangIDEmptyAudioHandled(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ---------------------------------------------------------------------------
+# W1117 — Wave 63 compliance: mx.clear_cache() called after each MLX inference
+# ---------------------------------------------------------------------------
+
+def _try_import_mlx_core():
+    """Вспомогательная функция — возвращает mlx.core или None если не установлен."""
+    try:
+        import mlx.core as _mx  # type: ignore[import]
+        return _mx
+    except (ImportError, AttributeError):
+        return None
+
+
+class TestAudioLangIDMxClearCacheW1117(unittest.TestCase):
+    """test_mx_clear_cache_called_after_detect — W63 Wave compliance (W1109 F2).
+
+    Verifies that mx.clear_cache() is called after every _detect_with_mlx call,
+    both on the success path and the exception path, preventing Metal buffer
+    accumulation across recordings.
+
+    Strategy: patch the `clear_cache` attribute on the already-imported mlx.core
+    module object (if available), or verify the code path via AST inspection if
+    mlx.core is not installed. This avoids the nanobind double-registration crash
+    that occurs when replacing the entire mlx.core in sys.modules.
+    """
+
+    def setUp(self):
+        AudioLanguageID._model_cache.clear()
+
+    def _make_mlx_mock(self, lang_result="ru"):
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = (lang_result, {lang_result: 0.95})
+        return mock_mlx
+
+    def test_mx_clear_cache_called_on_success_via_attribute_patch(self):
+        """mx.clear_cache() вызывается после успешного inference.
+
+        Патчим атрибут `clear_cache` на уже загруженном mlx.core объекте
+        (вместо замены всего модуля в sys.modules, что вызывает nanobind crash).
+        """
+        lid = AudioLanguageID()
+        mock_mlx = self._make_mlx_mock("ru")
+
+        mx_core = _try_import_mlx_core()
+        if mx_core is None:
+            self.skipTest("mlx.core не установлен — тест пропущен")
+
+        # Патчим атрибут clear_cache непосредственно на объекте модуля
+        original_clear_cache = getattr(mx_core, "clear_cache", None)
+        call_count = {"n": 0}
+
+        def fake_clear_cache():
+            call_count["n"] += 1
+
+        try:
+            mx_core.clear_cache = fake_clear_cache
+            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+                result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+        finally:
+            # Восстанавливаем оригинал
+            if original_clear_cache is not None:
+                mx_core.clear_cache = original_clear_cache
+
+        self.assertEqual(result, "ru")
+        self.assertGreater(
+            call_count["n"],
+            0,
+            "mx.clear_cache() должен быть вызван хотя бы один раз после inference"
+        )
+
+    def test_mx_clear_cache_called_on_exception_path_via_attribute_patch(self):
+        """mx.clear_cache() вызывается даже когда detect_language бросает исключение."""
+        lid = AudioLanguageID()
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.side_effect = RuntimeError("GPU error")
+
+        mx_core = _try_import_mlx_core()
+        if mx_core is None:
+            self.skipTest("mlx.core не установлен — тест пропущен")
+
+        original_clear_cache = getattr(mx_core, "clear_cache", None)
+        call_count = {"n": 0}
+
+        def fake_clear_cache():
+            call_count["n"] += 1
+
+        try:
+            mx_core.clear_cache = fake_clear_cache
+            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+                result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+        finally:
+            if original_clear_cache is not None:
+                mx_core.clear_cache = original_clear_cache
+
+        self.assertIsNone(result)
+        self.assertGreater(
+            call_count["n"],
+            0,
+            "mx.clear_cache() должен вызываться в finally даже при исключении в detect_language"
+        )
+
+    def test_mx_clear_cache_finally_block_present_in_source(self):
+        """AST-проверка: finally-блок с mx.clear_cache() присутствует в _run_detect.
+
+        Этот тест работает даже без реального mlx.core. Верифицирует структуру кода
+        напрямую, не полагаясь на runtime patching mlx.core.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        source = textwrap.dedent(inspect.getsource(AudioLanguageID._run_detect))
+        tree = ast.parse(source)
+
+        # Ищем Try ноды с finally-блоком
+        try_nodes_with_finally = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Try) and node.finalbody
+        ]
+        self.assertGreater(
+            len(try_nodes_with_finally),
+            0,
+            "_run_detect должен содержать try/finally блок для mx.clear_cache()"
+        )
+
+        # Проверяем что в finally есть вызов clear_cache
+        found_clear_cache = False
+        for try_node in try_nodes_with_finally:
+            for finally_stmt in ast.walk(ast.Module(body=try_node.finalbody, type_ignores=[])):
+                if isinstance(finally_stmt, ast.Call):
+                    if isinstance(finally_stmt.func, ast.Attribute):
+                        if finally_stmt.func.attr == "clear_cache":
+                            found_clear_cache = True
+                            break
+
+        self.assertTrue(
+            found_clear_cache,
+            "_run_detect finally-блок должен вызывать .clear_cache() (Wave 63 compliance)"
+        )
+
+    def test_mx_clear_cache_soft_fail_when_mlx_core_absent(self):
+        """Когда mlx.core недоступен (AttributeError на clear_cache), soft-fail.
+
+        Симулируем отсутствие clear_cache на уже загруженном mlx.core объекте
+        (вместо удаления модуля из sys.modules — это вызывает nanobind crash при
+        повторном импорте).
+        """
+        mx_core = _try_import_mlx_core()
+        if mx_core is None:
+            # mlx.core не установлен вообще — код уже soft-fails через ImportError
+            self.skipTest("mlx.core не установлен — soft-fail через ImportError уже покрыт")
+
+        lid = AudioLanguageID()
+        mock_mlx = self._make_mlx_mock("es")
+
+        # Временно удаляем атрибут clear_cache чтобы симулировать AttributeError
+        original = getattr(mx_core, "clear_cache", None)
+        try:
+            if hasattr(mx_core, "clear_cache"):
+                del mx_core.clear_cache  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            self.skipTest("Не удалось удалить clear_cache для теста soft-fail")
+
+        try:
+            with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+                try:
+                    result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+                except Exception as exc:
+                    self.fail(f"AttributeError при отсутствии clear_cache должен быть проигнорирован: {exc}")
+        finally:
+            if original is not None:
+                mx_core.clear_cache = original  # type: ignore[attr-defined]
+
+    def test_mx_clear_cache_not_called_when_audio_too_short(self):
+        """Для слишком короткого аудио (до inference) clear_cache не вызывается."""
+        mx_core = _try_import_mlx_core()
+        if mx_core is None:
+            self.skipTest("mlx.core не установлен — тест пропущен")
+
+        lid = AudioLanguageID()
+        original_clear_cache = getattr(mx_core, "clear_cache", None)
+        call_count = {"n": 0}
+
+        def fake_clear_cache():
+            call_count["n"] += 1
+
+        try:
+            mx_core.clear_cache = fake_clear_cache
+            # 0.5 секунды — меньше min_frames, inference не запускается
+            result = lid.detect(_speech(seconds=0.5), sample_rate=16000)
+        finally:
+            if original_clear_cache is not None:
+                mx_core.clear_cache = original_clear_cache
+
+        self.assertIsNone(result)
+        # clear_cache не должен вызываться если inference вообще не запускался
+        self.assertEqual(
+            call_count["n"],
+            0,
+            "mx.clear_cache() не должен вызываться если inference не запускался"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
