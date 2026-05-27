@@ -74,6 +74,8 @@ _BOOL_FIELDS: dict[str, bool] = {
     "notify_on_llm_failure": True,
     "notify_on_import_complete": True,
     "notify_sound_enabled": True,
+    "privacy_mode_enabled": False,
+    "stt_hotwords_enabled": True,
 }
 
 # Миграционные таблицы: (from_version, to_version) → список операций

@@ -284,6 +284,15 @@ class SettingsService:
             w.strip() for w in raw_hotwords if str(w).strip()
         ))
         settings["stt_hotwords_enabled"] = bool(settings.get("stt_hotwords_enabled", True))
+        settings["privacy_mode_enabled"] = self._coerce_bool(
+            settings.get("privacy_mode_enabled", False), default=False
+        )
+        settings["llm_rewrite_enabled"] = self._coerce_bool(
+            settings.get("llm_rewrite_enabled", False), default=False
+        )
+        settings["auto_save_transcripts"] = self._coerce_bool(
+            settings.get("auto_save_transcripts", False), default=False
+        )
 
         # Final validation pass before persisting — raises on hard errors
         try:
