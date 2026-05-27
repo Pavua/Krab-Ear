@@ -311,8 +311,6 @@ class BackendService:
         # Wire error_bus into rewriter so it can push timeout/connection/etc errors
         if self._llm_rewriter is not None:
             self._llm_rewriter._error_bus = self._error_bus
-            # W979 F4: wire feature_flags so rewrite() respects llm_rewrite flag at runtime
-            self._llm_rewriter._feature_flags = self._feature_flags
 
         # Wire error_bus into transcriber for diarization.no_token and related push
         if self.transcriber is not None:
@@ -537,6 +535,11 @@ class BackendService:
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
         self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
+        # W979 F4 / W1481 N4 HIGH: wire feature_flags into rewriter HERE — after
+        # FeatureFlags() is constructed above.  Must NOT be wired earlier (e.g.
+        # alongside _error_bus ~line 255) because _feature_flags doesn't exist yet.
+        if self._llm_rewriter is not None:
+            self._llm_rewriter._feature_flags = self._feature_flags
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
