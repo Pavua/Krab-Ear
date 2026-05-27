@@ -34,13 +34,6 @@ from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
-# Флаг наличия MLX (проверяется один раз при загрузке модуля)
-try:
-    import mlx.core as _mlx_core  # noqa: F401
-    _HAS_MLX = True
-except ImportError:
-    _HAS_MLX = False
-
 
 class AudioLanguageID:
     """Определяет язык аудио через mlx-whisper encoder (без decoder).
@@ -66,8 +59,14 @@ class AudioLanguageID:
         W1405 F2 MED: drop Python reference + flush Metal cache через mx.clear_cache().
         Без явного mx.clear_cache() Metal буферы (~300-500 MB) от вытесненной модели
         остаются до следующего inference finally-блока — нелетерминированная утечка.
+
+        Также вызывается из _on_settings_saved_lang_id hook когда MODEL_BALANCED меняется,
+        чтобы следующий detect() перезагрузил модель с новым путём.
+        Безопасно вызывать конкурентно с detect() — защищено _cache_lock.
         """
-        cls._model_cache.clear()
+        with cls._cache_lock:
+            cls._model_cache.clear()
+        logger.debug("AudioLanguageID._model_cache очищен по запросу hook'а")
         if _HAS_MLX:
             try:
                 import mlx.core as mx
@@ -86,18 +85,6 @@ class AudioLanguageID:
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
-
-    @classmethod
-    def clear_model_cache(cls) -> None:
-        """Вытесняет кешированную модель LID.
-
-        Вызывается из _on_settings_saved_lang_id hook когда MODEL_BALANCED меняется,
-        чтобы следующий detect() перезагрузил модель с новым путём.
-        Безопасно вызывать конкурентно с detect() — защищено _cache_lock.
-        """
-        with cls._cache_lock:
-            cls._model_cache.clear()
-        logger.debug("AudioLanguageID._model_cache очищен по запросу hook'а")
 
     def detect(
         self,
