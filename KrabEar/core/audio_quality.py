@@ -37,11 +37,6 @@ _SILENCE_RMS_THRESHOLD = 0.001  # RMS фрейма ниже этого → ти�
 _MIN_DURATION_SEC = 0.5         # минимальная длительность для полноценного анализа
 
 
-def _safe_float(v: float) -> float:
-    """Заменяет NaN/Inf нулём — защита от JSON-serialization failure."""
-    return v if math.isfinite(v) else 0.0
-
-
 @dataclass
 class AudioQualityReport:
     """Результат анализа качества аудио."""
