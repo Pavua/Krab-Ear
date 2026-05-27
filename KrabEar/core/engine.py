@@ -882,11 +882,24 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
-            # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
+            # 2.4 Адаптивное шумоподавление (применяется только к numpy-массивам,
+            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
+            # ВАЖНО: Denoiser должен видеть исходный audio ДО обнуления RSF-диапазонов,
+            # иначе шумовой профиль (W1080 percentile) будет вычислен по нулевым
+            # семплам → заниженный noise floor → недостаточное подавление при strong-mode.
+            if (
+                settings.STT_DENOISE_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                audio_data = self._maybe_denoise(audio_data)
+
+            # 2.5 Обнуление диапазонов тишины от RealtimeSilenceFilter.
             # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
-            # 2.4 Silence ranges pre-processing (от RealtimeSilenceFilter).
             # Обнуляем семплы в помеченных диапазонах тишины — Whisper обрабатывает
             # нулевые блоки быстрее, с меньшим количеством галлюцинаций.
+            # Выполняется ПОСЛЕ Denoiser: denoiser уже обработал реальный шум,
+            # RSF-маска применяется к очищенному сигналу.
             if silence_ranges and isinstance(audio_data, np.ndarray) and not is_preview:
                 try:
                     from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
@@ -897,15 +910,6 @@ class AudioEngine:
                     )
                 except Exception:
                     logger.debug("transcribe: ошибка применения silence_ranges, пропускаем")
-
-            # 2.5 Адаптивное шумоподавление (применяется только к numpy-массивам,
-            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
-            if (
-                settings.STT_DENOISE_ENABLED
-                and not is_preview
-                and isinstance(audio_data, np.ndarray)
-            ):
-                audio_data = self._maybe_denoise(audio_data)
 
             # 2.6 Нормализация усиления (GainNormalizer.auto_gain).
             # Выравнивает тихие записи до -20 дБFS RMS, ограничивает громкие
@@ -949,6 +953,7 @@ class AudioEngine:
                     )
                 except Exception:
                     logger.exception("smart_silence_skipper: failed, continuing with original audio")
+
 
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
