@@ -11,6 +11,20 @@ from datetime import datetime
 from typing import Any
 import uuid
 
+# Canonical set of field names that HistoryItem explicitly models.
+# Used by from_dict to capture all *other* keys into _extra for forward-compat.
+_HISTORY_ITEM_KNOWN_FIELDS: frozenset[str] = frozenset({
+    "id", "ts", "text", "paste_status", "source_text", "translated_text",
+    "translation_mode", "source_lang", "target_lang", "translation_status",
+    "translation_engine", "chat_id", "message_id", "cleaned_text",
+    "llm_applied", "llm_latency_ms", "diarization", "audio_duration_sec",
+    "confidence", "tags", "favorite", "emotion", "word_timestamps",
+    "speaker_turns", "audio_path", "is_protected", "reasoning",
+    "action_items", "decisions", "questions",
+    # _extra itself must not be treated as an "extra" key
+    "_extra",
+})
+
 
 @dataclass(slots=True)
 class HistoryItem:
@@ -72,6 +86,10 @@ class HistoryItem:
     decisions: list | None = None
     # Open questions identified in the transcript. None = не извлекались.
     questions: list | None = None
+    # Forward-compat sidecar: unknown fields written by a newer binary are
+    # captured here on deserialisation and written back verbatim on to_dict,
+    # so compaction under an older build never silently drops them.
+    _extra: dict = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -140,12 +158,29 @@ class HistoryItem:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Преобразует dataclass в сериализуемый словарь."""
-        return asdict(self)
+        """Преобразует dataclass в сериализуемый словарь.
+
+        Unknown fields captured in ``_extra`` are merged back at the top level
+        so that round-trip serialisation (e.g. during compaction) never loses
+        fields written by a newer binary version.  Known fields always take
+        precedence over any same-named key in ``_extra``.
+        """
+        base = asdict(self)
+        # Remove the internal sidecar key — it should not appear as "_extra"
+        # in the persisted NDJSON record.
+        extra = base.pop("_extra", {}) or {}
+        # Merge: extra first so known fields win on collision.
+        return {**extra, **base}
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "HistoryItem":
-        """Восстанавливает запись из JSON-словаря с мягкой валидацией."""
+        """Восстанавливает запись из JSON-словаря с мягкой валидацией.
+
+        Any key not listed in ``_HISTORY_ITEM_KNOWN_FIELDS`` is captured into
+        the ``_extra`` sidecar so that forward-compat fields written by a newer
+        binary survive round-trips through compaction on an older build.
+        """
+        extra = {k: v for k, v in payload.items() if k not in _HISTORY_ITEM_KNOWN_FIELDS}
         return cls(
             id=str(payload.get("id", "")).strip(),
             ts=str(payload.get("ts", "")).strip(),
@@ -177,6 +212,7 @@ class HistoryItem:
             action_items=payload.get("action_items") if isinstance(payload.get("action_items"), list) else None,
             decisions=payload.get("decisions") if isinstance(payload.get("decisions"), list) else None,
             questions=payload.get("questions") if isinstance(payload.get("questions"), list) else None,
+            _extra=extra,
         )
 
 
