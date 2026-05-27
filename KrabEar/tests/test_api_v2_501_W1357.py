@@ -158,7 +158,8 @@ def _build_flask_test_app():
             "response": lambda self, *a, **kw: (lambda f: f),
             "arguments": lambda self, *a, **kw: (lambda f: f),
         })
-        abort_fn = lambda *a, **kw: (_ for _ in ()).throw(Exception("abort"))
+        def abort_fn(*a, **kw):
+            raise Exception("abort")
         sm = _stub_module("flask_smorest", Api=Api_cls, Blueprint=Blueprint_cls, abort=abort_fn)
 
     if "flask_sock" not in sys.modules:

@@ -320,7 +320,6 @@ class TestConcurrentAdd(unittest.TestCase):
     """Конкурентное добавление паттернов должно быть потокобезопасным."""
 
     def test_concurrent_add_no_duplicates(self):
-        import threading
         mgr = HallucinationManager()
         errors: list[Exception] = []
         added: list[str] = []
@@ -347,7 +346,6 @@ class TestConcurrentAdd(unittest.TestCase):
         self.assertEqual(len(custom), len(added))
 
     def test_concurrent_add_and_remove_safe(self):
-        import threading
         mgr = HallucinationManager()
         # Pre-populate patterns
         for i in range(10):

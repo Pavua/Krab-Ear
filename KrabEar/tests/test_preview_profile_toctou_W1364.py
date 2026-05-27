@@ -173,7 +173,7 @@ class ConcurrentPreviewAndTranscribeTests(unittest.TestCase):
                 original_transcribe = self.fake_engine.transcribe
 
                 def capturing_transcribe(audio_data, *, cleanup_profile="soft",
-                                          is_preview=False, **kwargs):
+                                         is_preview=False, **kwargs):
                     if is_preview:
                         preview_profile_at_call.append(self.fake_engine.quality_profile)
                     else:
