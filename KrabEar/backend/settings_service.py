@@ -146,6 +146,12 @@ class SettingsService:
             )
             try:
                 self.store.save_settings(migrated)
+                self.invalidate_cache()
+                _log.info(
+                    "settings: migrated schema %s → %s, invalidated cache",
+                    stored_version,
+                    CURRENT_SCHEMA_VERSION,
+                )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("settings_service: migration write-back failed: %s", exc)
         return migrated

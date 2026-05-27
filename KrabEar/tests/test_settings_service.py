@@ -764,6 +764,69 @@ class TestMigrationRunsAtLoadTime(unittest.TestCase):
         except Exception as exc:  # noqa: BLE001
             self.fail(f"cached_settings() raised unexpectedly: {exc}")
 
+    def test_maybe_migrate_invalidates_cache_after_writeback(self):
+        """W1448 F2: _maybe_migrate() должен инвалидировать кэш после записи миграции на диск.
+
+        Сценарий: после write-back мигрированных настроек _cache должен быть сброшен
+        (чтобы следующий вызов cached_settings() перечитал свежие данные с диска, а не
+        вернул стale v1.0 из кэша, заполненного до save_settings()).
+        """
+        store = self._make_v1_store()
+        svc = SettingsService(store=store)
+
+        # Pre-populate the cache with raw v1.0 data (simulating a stale entry
+        # that would exist if invalidate_cache() were NOT called after write-back).
+        svc._cache = {"schema_version": "1.0", "quality_profile": "max", "stale": True}
+        svc._cache_ts = 1.0  # non-zero so TTL check would think cache is warm
+
+        # Now call cached_settings() — it should detect v1.0, migrate, write-back,
+        # and then invalidate the cache.  After invalidation the fresh data from
+        # store.load_settings is used, so the returned dict reflects v2.0 data.
+        result = svc.cached_settings()
+
+        # Cache must have been invalidated during migration write-back.
+        # The simplest observable side-effect: save_settings was called (migration
+        # happened) AND the returned settings contain the migrated key.
+        store.save_settings.assert_called_once()
+        self.assertIn("history_policy", result,
+                      "cache должен быть инвалидирован и перезагружен с мигрированными данными")
+        self.assertNotIn("stale", result,
+                         "stale кэш не должен быть виден после invalidate_cache()")
+
+    def test_maybe_migrate_no_invalidate_on_no_change(self):
+        """W1448 F2: _maybe_migrate() НЕ должен инвалидировать кэш, если миграция не нужна.
+
+        Когда settings уже на CURRENT_SCHEMA_VERSION, _maybe_migrate() возвращает raw
+        без каких-либо побочных эффектов — invalidate_cache() вызываться не должен.
+        """
+        store = _make_store()
+        # Explicitly set current schema version so no migration is triggered.
+        from backend.settings_validator import CURRENT_SCHEMA_VERSION
+        v2_settings = dict(store._current)
+        v2_settings["schema_version"] = CURRENT_SCHEMA_VERSION
+        store.load_settings.return_value = dict(v2_settings)
+
+        svc = SettingsService(store=store)
+
+        # Prime the cache
+        svc.cached_settings()
+        store.save_settings.assert_not_called()
+
+        # Capture cache state
+        cached_before = svc._cache
+        ts_before = svc._cache_ts
+
+        # Call again — still within TTL (no mock clock, but cache is warm)
+        svc.cached_settings()
+
+        # save_settings still not called — no migration write-back
+        store.save_settings.assert_not_called()
+        # Cache object identity: same reference (no invalidation occurred)
+        self.assertIs(svc._cache, cached_before,
+                      "_cache не должен меняться при отсутствии миграции")
+        self.assertEqual(svc._cache_ts, ts_before,
+                         "_cache_ts не должен меняться при отсутствии миграции")
+
 
 if __name__ == "__main__":
     unittest.main()
