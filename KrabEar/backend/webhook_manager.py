@@ -8,7 +8,9 @@
 - Персистентность реестра в {data_dir}/webhooks.json.
 - Статистику доставки на webhook.
 - SSRF-защита: блокируются localhost, RFC1918, link-local и mDNS адреса.
-- Защита от redirect-SSRF: каждый redirect re-validates URL через _is_safe_webhook_url.
+- Защита от redirect-SSRF (W1349 F1): allow_redirects=False — все 3xx трактуются
+  как ошибка, redirect не следуется. Злоумышленник не может зарегистрировать
+  https://attacker.com/redir → 302 → http://127.0.0.1/admin обход.
 - Ограничение тела ответа: не более _MAX_RESPONSE_BYTES байт.
 - Privacy-mode gate: fire_webhook пропускается при включённом privacy mode.
 """
@@ -94,29 +96,28 @@ def _is_safe_webhook_url(url: str, allow_local: bool = False) -> tuple[bool, str
     return True, None
 
 
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """HTTPRedirectHandler, который re-validates каждый redirect URL через SSRF guard.
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """HTTPRedirectHandler, который блокирует ВСЕ 3xx редиректы (allow_redirects=False).
 
-    W1349 F1 fix: urllib.request.urlopen по умолчанию следует 3xx-редиректам,
-    обходя hostname/IP проверку регистрации. Этот handler перехватывает каждый
-    redirect и блокирует его, если целевой URL не прошёл _is_safe_webhook_url.
+    W1349 F1 fix (Option 1): urllib.request.urlopen по умолчанию следует 3xx-редиректам.
+    Этот handler перехватывает любой редирект и возбуждает HTTPError с кодом редиректа,
+    так что вызывающий код видит статус 3xx вместо выполнения редиректа.
+
+    Это эквивалент requests.post(..., allow_redirects=False) для urllib.
     """
 
-    def __init__(self, allow_local: bool = False) -> None:
-        super().__init__()
-        self._allow_local = allow_local
-
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        safe, reason = _is_safe_webhook_url(newurl, allow_local=self._allow_local)
-        if not safe:
-            raise HTTPError(
-                req.full_url,
-                code,
-                f"Redirect заблокирован SSRF-защитой ({reason}): {newurl!r}",
-                headers,
-                fp,
-            )
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        raise HTTPError(
+            req.full_url,
+            code,
+            f"Redirect blocked (allow_redirects=False): {newurl!r}",
+            headers,
+            fp,
+        )
+
+
+# Keep old name as alias for backwards compatibility with existing tests
+_SafeRedirectHandler = _NoRedirectHandler
 
 
 class WebhookManager:
@@ -391,6 +392,16 @@ class WebhookManager:
                 if isinstance(last_status, int) and 200 <= last_status < 300:
                     self._record_success(webhook_id, last_status)
                     return
+                # 3xx — W1349 F1: redirect не следуется (allow_redirects=False).
+                # Логируем предупреждение и считаем доставку неудачной.
+                if isinstance(last_status, int) and 300 <= last_status < 400:
+                    logger.warning(
+                        "WebhookManager: %s вернул %s (3xx redirect не следуется, "
+                        "возможная SSRF-попытка через redirect — игнорируем)",
+                        url, last_status,
+                    )
+                    self._record_failure(webhook_id, last_status)
+                    return
                 # 4xx — не ретраить (постоянная ошибка клиента)
                 if isinstance(last_status, int) and 400 <= last_status < 500:
                     logger.warning(
@@ -414,7 +425,9 @@ class WebhookManager:
     def _post_once(self, url: str, body: bytes, secret: str, allow_local: bool = False) -> int:
         """Выполняет один HTTP POST. Возвращает HTTP status code.
 
-        F1 fix: использует _SafeRedirectHandler для re-validation каждого redirect.
+        W1349 F1 fix: использует _NoRedirectHandler (allow_redirects=False) — все 3xx
+        возвращаются как статус без следования редиректу, предотвращая SSRF через
+        redirect chain (attacker.com/redir → 302 → 127.0.0.1/admin).
         F2 fix: читает не более _MAX_RESPONSE_BYTES байт из тела ответа.
 
         Raises:
@@ -430,8 +443,9 @@ class WebhookManager:
             headers["X-KrabEar-Signature"] = f"sha256={sig}"
 
         req = Request(url, data=body, headers=headers, method="POST")
-        # F1: custom opener с _SafeRedirectHandler — блокирует редиректы к unsafe URL
-        redirect_handler = _SafeRedirectHandler(allow_local=allow_local)
+        # W1349 F1: _NoRedirectHandler blocks ALL 3xx redirects (allow_redirects=False).
+        # HTTPError with the 3xx code is raised — caught below and returned as status.
+        redirect_handler = _NoRedirectHandler()
         opener = urllib.request.build_opener(redirect_handler)
         try:
             with opener.open(req, timeout=_REQUEST_TIMEOUT_SEC) as resp:

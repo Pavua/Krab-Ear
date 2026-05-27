@@ -1,7 +1,7 @@
 """Unit-тесты для W1349 F1+F2+F3 fixes в WebhookManager.
 
 W1355:
-- F1 MED: SSRF via HTTP redirect — _SafeRedirectHandler re-validates each redirect URL.
+- F1 MED: SSRF via HTTP redirect — allow_redirects=False (_NoRedirectHandler blocks all 3xx).
 - F2 LOW: response body size cap (_MAX_RESPONSE_BYTES = 64 KB).
 - F3 LOW: privacy_mode gate in fire_webhook.
 """
@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.webhook_manager import (  # noqa: E402
     WebhookManager,
     _SafeRedirectHandler,
+    _NoRedirectHandler,
     _MAX_RESPONSE_BYTES,
     _is_safe_webhook_url,
 )
@@ -44,14 +45,14 @@ def _fake_response(status: int = 200, body: bytes = b"ok") -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# F1: redirect SSRF tests
+# F1: redirect SSRF tests (Option 1 — all redirects blocked)
 # ---------------------------------------------------------------------------
 
-class SafeRedirectHandlerTestCase(unittest.TestCase):
-    """_SafeRedirectHandler blocks redirects to unsafe URLs and allows safe ones."""
+class NoRedirectHandlerTestCase(unittest.TestCase):
+    """_NoRedirectHandler (alias _SafeRedirectHandler) blocks ALL 3xx redirects."""
 
-    def _make_handler(self, allow_local: bool = False) -> _SafeRedirectHandler:
-        return _SafeRedirectHandler(allow_local=allow_local)
+    def _make_handler(self) -> _NoRedirectHandler:
+        return _NoRedirectHandler()
 
     def _make_req(self, url: str = "http://example.com/hook") -> MagicMock:
         req = MagicMock()
@@ -62,7 +63,7 @@ class SafeRedirectHandlerTestCase(unittest.TestCase):
         return MagicMock()
 
     def test_redirect_to_loopback_blocked(self) -> None:
-        """Redirect to 127.0.0.1 must raise HTTPError (F1 fix)."""
+        """Redirect to 127.0.0.1 must raise HTTPError (allow_redirects=False)."""
         handler = self._make_handler()
         req = self._make_req()
         fp = MagicMock()
@@ -71,7 +72,7 @@ class SafeRedirectHandlerTestCase(unittest.TestCase):
         with self.assertRaises(HTTPError) as ctx:
             handler.redirect_request(req, fp, 302, "Found", headers, "http://127.0.0.1/internal")
 
-        self.assertIn("SSRF", str(ctx.exception.reason))
+        self.assertIn("allow_redirects=False", str(ctx.exception.reason))
 
     def test_redirect_to_localhost_blocked(self) -> None:
         """Redirect to localhost must be blocked."""
@@ -93,65 +94,31 @@ class SafeRedirectHandlerTestCase(unittest.TestCase):
         with self.assertRaises(HTTPError):
             handler.redirect_request(req, fp, 302, "Found", headers, "http://192.168.1.1/secret")
 
-    def test_redirect_chain_revalidated(self) -> None:
-        """Second redirect in chain to unsafe URL is also blocked."""
+    def test_redirect_to_public_url_also_blocked(self) -> None:
+        """Option 1: even redirects to public URLs are blocked (all 3xx rejected)."""
         handler = self._make_handler()
-        req1 = self._make_req("http://public.example.com/hop1")
+        req = self._make_req()
         fp = MagicMock()
         headers = self._make_headers()
 
-        # First redirect to another safe public URL — should NOT raise
-        # (we call redirect_request but need super().redirect_request to work;
-        #  since super() will try to build a new Request, we just verify
-        #  that a safe URL doesn't raise before reaching super())
-        safe_ok, _ = _is_safe_webhook_url("http://safe.example.com/hop2")
-        self.assertTrue(safe_ok)
+        # All redirects are blocked — no exceptions for "safe" URLs
+        with self.assertRaises(HTTPError):
+            handler.redirect_request(req, fp, 302, "Found", headers, "https://safe.example.com/hop")
 
-        # Second redirect to loopback — must be blocked
-        req2 = self._make_req("http://safe.example.com/hop2")
+    def test_redirect_to_attacker_via_chain_blocked(self) -> None:
+        """Second redirect in chain — also blocked (all 3xx are errors)."""
+        handler = self._make_handler()
+        req = self._make_req("http://safe.example.com/hop2")
+        fp = MagicMock()
+        headers = self._make_headers()
+
         with self.assertRaises(HTTPError) as ctx:
-            handler.redirect_request(req2, fp, 302, "Found", headers, "http://10.0.0.1/internal")
-        self.assertIn("SSRF", str(ctx.exception.reason))
+            handler.redirect_request(req, fp, 302, "Found", headers, "http://10.0.0.1/internal")
+        self.assertIn("allow_redirects=False", str(ctx.exception.reason))
 
-    def test_redirect_to_safe_url_not_blocked(self) -> None:
-        """Redirect to a public URL must NOT raise (allow_local=False)."""
-        handler = self._make_handler()
-        req = self._make_req()
-        fp = MagicMock()
-        headers = self._make_headers()
-
-        # super().redirect_request will try to build a real Request — just verify
-        # that _is_safe_webhook_url passes for a safe URL (no HTTPError raised by us)
-        safe, reason = _is_safe_webhook_url("https://hooks.example.com/callback")
-        self.assertTrue(safe)
-        self.assertIsNone(reason)
-
-    def test_redirect_allow_local_bypasses_guard(self) -> None:
-        """With allow_local=True, redirect to loopback is NOT blocked by our SSRF guard.
-
-        The _SafeRedirectHandler._allow_local flag causes _is_safe_webhook_url to return True,
-        so our code does NOT raise HTTPError. Any HTTPError that follows comes from super()
-        internals (e.g., 302 re-raise) — not from our SSRF guard.
-        We verify this by checking the error reason does NOT contain 'SSRF'.
-        """
-        handler = self._make_handler(allow_local=True)
-        req = self._make_req()
-        fp = MagicMock()
-        headers = self._make_headers()
-
-        try:
-            handler.redirect_request(req, fp, 302, "Found", headers, "http://127.0.0.1/ok")
-        except HTTPError as exc:
-            # If HTTPError is raised, it must NOT come from our SSRF guard
-            reason = str(exc.reason) if exc.reason else ""
-            self.assertNotIn(
-                "SSRF",
-                reason,
-                f"SSRF guard blocked allow_local=True redirect unexpectedly: {exc}",
-            )
-        except Exception:
-            # Other exceptions from super() mock internals are acceptable
-            pass
+    def test_safe_redirect_handler_is_alias_for_no_redirect(self) -> None:
+        """_SafeRedirectHandler must be the same class as _NoRedirectHandler."""
+        self.assertIs(_SafeRedirectHandler, _NoRedirectHandler)
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +148,8 @@ class ResponseBodyCapTestCase(unittest.TestCase):
         """_MAX_RESPONSE_BYTES must equal 64 * 1024."""
         self.assertEqual(_MAX_RESPONSE_BYTES, 64 * 1024)
 
-    def test_post_once_uses_safe_redirect_handler(self) -> None:
-        """_post_once builds opener with _SafeRedirectHandler, not bare urlopen."""
+    def test_post_once_uses_no_redirect_handler(self) -> None:
+        """_post_once builds opener with _NoRedirectHandler (allow_redirects=False)."""
         mgr = _make_manager()
         resp_mock = _fake_response(status=200)
 
@@ -192,11 +159,11 @@ class ResponseBodyCapTestCase(unittest.TestCase):
         with patch("backend.webhook_manager.urllib.request.build_opener", return_value=opener_mock) as mock_build:
             mgr._post_once(url="http://example.com/hook", body=b"{}", secret="")
 
-        # Verify build_opener was called with a _SafeRedirectHandler instance
+        # Verify build_opener was called with a _NoRedirectHandler instance
         mock_build.assert_called_once()
         args, _ = mock_build.call_args
         self.assertEqual(len(args), 1)
-        self.assertIsInstance(args[0], _SafeRedirectHandler)
+        self.assertIsInstance(args[0], _NoRedirectHandler)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +248,104 @@ class PrivacyModeGateTestCase(unittest.TestCase):
                 mgr.fire_webhook("test.event", {})
 
         self.assertGreater(len(called), 0)
+
+
+# ---------------------------------------------------------------------------
+# Option 1 allow_redirects=False contract tests (required by W1355 spec)
+# ---------------------------------------------------------------------------
+
+class AllowRedirectsFalseTestCase(unittest.TestCase):
+    """Verifies allow_redirects=False semantics: 3xx responses are treated as failures."""
+
+    def test_webhook_redirect_3xx_not_followed(self) -> None:
+        """3xx response must NOT be followed — _deliver_with_retry treats it as failure.
+
+        Simulates the SSRF scenario: attacker registers https://attacker.com/redir
+        which returns 302. The delivery must record a failure and NOT follow.
+        """
+        mgr = _make_manager()
+
+        # _post_once returns 302 (NoRedirectHandler raises HTTPError 302 → caught → 302)
+        with patch.object(mgr, "_post_once", return_value=302):
+            with patch.object(mgr, "_record_failure") as mock_fail:
+                with patch.object(mgr, "_record_success") as mock_ok:
+                    # Register a webhook so we have an ID
+                    mgr._webhooks["test-id"] = {
+                        "url": "https://attacker.com/redir",
+                        "events": [],
+                        "secret": "",
+                        "enabled": True,
+                        "allow_local": False,
+                    }
+                    mgr._deliver_with_retry(
+                        webhook_id="test-id",
+                        url="https://attacker.com/redir",
+                        secret="",
+                        body=b'{"type":"test"}',
+                        event_type="test.event",
+                    )
+
+        # 3xx must record failure, not success
+        mock_ok.assert_not_called()
+        mock_fail.assert_called_once()
+        status_arg = mock_fail.call_args[0][1]
+        self.assertEqual(status_arg, 302)
+
+    def test_webhook_redirect_logs_warning_and_fails(self) -> None:
+        """3xx response must emit a warning log containing SSRF or redirect mention."""
+        mgr = _make_manager()
+        mgr._webhooks["test-id"] = {
+            "url": "https://attacker.com/redir",
+            "events": [],
+            "secret": "",
+            "enabled": True,
+            "allow_local": False,
+        }
+
+        with patch.object(mgr, "_post_once", return_value=301):
+            with self.assertLogs("KrabEar.Backend.WebhookManager", level="WARNING") as log_ctx:
+                mgr._deliver_with_retry(
+                    webhook_id="test-id",
+                    url="https://attacker.com/redir",
+                    secret="",
+                    body=b"{}",
+                    event_type="test.event",
+                )
+
+        # At least one WARNING must mention redirect or 3xx
+        warning_messages = " ".join(log_ctx.output)
+        self.assertTrue(
+            "redirect" in warning_messages.lower() or "3xx" in warning_messages.lower(),
+            f"Expected redirect/3xx warning in logs, got: {warning_messages}",
+        )
+
+    def test_webhook_2xx_success_unchanged(self) -> None:
+        """2xx responses must still be treated as successful deliveries (no regression)."""
+        mgr = _make_manager()
+        mgr._webhooks["test-id"] = {
+            "url": "https://hooks.example.com/cb",
+            "events": [],
+            "secret": "",
+            "enabled": True,
+            "allow_local": False,
+        }
+
+        with patch.object(mgr, "_post_once", return_value=200):
+            with patch.object(mgr, "_record_success") as mock_ok:
+                with patch.object(mgr, "_record_failure") as mock_fail:
+                    mgr._deliver_with_retry(
+                        webhook_id="test-id",
+                        url="https://hooks.example.com/cb",
+                        secret="",
+                        body=b'{"type":"test"}',
+                        event_type="test.event",
+                    )
+
+        # 2xx must succeed
+        mock_ok.assert_called_once()
+        mock_fail.assert_not_called()
+        status_arg = mock_ok.call_args[0][1]
+        self.assertEqual(status_arg, 200)
 
 
 if __name__ == "__main__":
