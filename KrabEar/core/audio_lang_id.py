@@ -160,12 +160,20 @@ class AudioLanguageID:
             return True  # graceful: если config недоступен — работаем
 
     def _get_preview_sec(self) -> float:
-        """Возвращает длину preview из settings или default 5.0s."""
+        """Возвращает длину preview из settings или default 5.0s.
+
+        W1438 F4 MED: preview_sec=0 or None produces an empty audio slice
+        which is zero-padded to 30s silence and fed to LID — returns garbage.
+        Guard ensures minimum 1.0 second regardless of caller or settings value.
+        """
+        _MIN_PREVIEW_SEC = 1.0
         if self._preview_sec is not None:
-            return self._preview_sec
+            raw = float(self._preview_sec)
+            return max(_MIN_PREVIEW_SEC, raw)
         try:
             from core.config import settings
-            return float(getattr(settings, "STT_AUDIO_LANG_ID_PREVIEW_SEC", 5.0))
+            raw = float(getattr(settings, "STT_AUDIO_LANG_ID_PREVIEW_SEC", 5.0))
+            return max(_MIN_PREVIEW_SEC, raw)
         except Exception:
             return 5.0
 
