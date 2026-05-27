@@ -49,12 +49,16 @@ class FakeLLMRewriter:
 class FakeTranscriber:
     """Фейк Transcriber для тестов."""
 
-    def __init__(self, current_model: str = "mlx-community/whisper-small-mlx", cached: bool = True) -> None:
+    def __init__(
+        self,
+        current_model: str | None = "mlx-community/whisper-small-mlx",
+        cached: bool = True,
+    ) -> None:
         self.engine = FakeEngine(current_model=current_model, cached=cached)
 
 
 class FakeEngine:
-    def __init__(self, current_model: str, cached: bool) -> None:
+    def __init__(self, current_model: str | None, cached: bool) -> None:
         self.current_model = current_model
         self.quality_profile = "balanced"
         if cached:
@@ -136,6 +140,57 @@ class TestSttModelCheck(unittest.TestCase):
         result = checker._check_stt_model()
         # Должен вернуть статус без исключения
         self.assertIn("status", result)
+
+    # W963 / W953-F1: warming_up cases ----------------------------------------
+
+    def test_health_check_reports_warming_up_pre_stt_load(self) -> None:
+        """W953 F1: engine.current_model=None + not cached → status 'warming_up', not 'ok'."""
+        transcriber = FakeTranscriber(current_model=None, cached=False)
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "warming_up",
+                         "Must not report 'ok' when STT model is not loaded yet")
+        self.assertIsNone(result["model"])
+        self.assertFalse(result["cached"])
+
+    def test_health_check_warming_up_yields_degraded_overall(self) -> None:
+        """W953 F1: warming_up STT → overall status must be 'degraded', not 'healthy'."""
+        transcriber = FakeTranscriber(current_model=None, cached=False)
+        checker = HealthChecker(
+            store=self.store,
+            transcriber=transcriber,
+            llm_rewriter=FakeLLMRewriter(circuit_state="closed"),
+        )
+        result = checker.check_all()
+        self.assertEqual(result["checks"]["stt_model"]["status"], "warming_up")
+        self.assertEqual(result["status"], "degraded",
+                         "warming_up in any subsystem must surface as 'degraded' overall")
+
+    def test_aggregate_status_warming_up_gives_degraded(self) -> None:
+        """_aggregate_status treats 'warming_up' same as 'warning' → degraded."""
+        checks = {
+            "stt_model": {"status": "warming_up"},
+            "llm": {"status": "ok"},
+            "disk_space": {"status": "ok"},
+            "history_store": {"status": "ok"},
+            "audio_devices": {"status": "ok"},
+        }
+        checker = HealthChecker(store=self.store)
+        self.assertEqual(checker._aggregate_status(checks), "degraded")
+
+    def test_stt_ok_when_current_model_set_and_cached(self) -> None:
+        """Loaded + cached → still 'ok' (regression guard)."""
+        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx", cached=True)
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "ok")
+
+    def test_stt_ok_when_current_model_set_not_cached(self) -> None:
+        """Loaded but evicted from cache → still 'ok' (model IS known)."""
+        transcriber = FakeTranscriber(current_model="mlx-community/whisper-small-mlx", cached=False)
+        checker = HealthChecker(store=self.store, transcriber=transcriber)
+        result = checker._check_stt_model()
+        self.assertEqual(result["status"], "ok")
 
 
 class TestLLMCheck(unittest.TestCase):
