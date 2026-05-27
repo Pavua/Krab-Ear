@@ -12,6 +12,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import random
 import string
 import threading
@@ -30,6 +31,12 @@ _SHARES_INDEX_FILE = "shares_index.json"
 
 # Default TTL: 7 days in hours
 DEFAULT_SHARE_TTL_HOURS: int = 168
+
+# Maximum allowed TTL (1 week) — prevents TTL safety cap bypass (W1242 F2)
+_MAX_TTL_HOURS: float = 168.0
+
+# Maximum number of item_ids per share request (W1242 F3)
+_MAX_SHARE_ITEMS: int = 100
 
 SUPPORTED_FORMATS = ("markdown", "text", "json")
 
@@ -160,6 +167,8 @@ class SharingManager:
             expires_at=expires_at,
             is_revoked=False,
         )
+        # Track whether any real items were resolved (used for F5 warning)
+        package._items_resolved = len(items)  # type: ignore[attr-defined]
 
         self._persist_package(package)
         return package
@@ -241,17 +250,47 @@ class SharingManager:
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise RuntimeError("Параметр 'item_ids' должен быть непустым списком")
+
+        # F3 MED: cap item_ids at _MAX_SHARE_ITEMS (W1242)
+        if len(item_ids) > _MAX_SHARE_ITEMS:
+            raise RuntimeError(
+                f"Слишком много item_ids: {len(item_ids)} > {_MAX_SHARE_ITEMS}"
+            )
+
         fmt = str(params.get("format", "markdown")).strip()
         include_translation = bool(params.get("include_translation", True))
+
+        # F2 MED: validate ttl_hours — must be finite, clamp to [0, _MAX_TTL_HOURS] (W1242)
         ttl_hours_raw = params.get("ttl_hours")
-        ttl_hours: Optional[float] = float(ttl_hours_raw) if ttl_hours_raw is not None else None
+        ttl_hours: Optional[float]
+        if ttl_hours_raw is None:
+            ttl_hours = 1.0  # default 1 hour when not specified
+        else:
+            try:
+                ttl_hours = float(ttl_hours_raw)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"Недопустимое значение ttl_hours: {ttl_hours_raw!r}"
+                )
+            if not math.isfinite(ttl_hours):
+                raise RuntimeError(
+                    f"ttl_hours должен быть конечным числом, получено: {ttl_hours_raw!r}"
+                )
+            ttl_hours = max(0.0, min(ttl_hours, _MAX_TTL_HOURS))
+
         package = self.prepare_share(
             item_ids,
             format=fmt,
             include_translation=include_translation,
             ttl_hours=ttl_hours,
         )
-        return package.to_dict()
+        result = package.to_dict()
+
+        # F5 LOW: warn when no items resolved (all item_ids missing/deleted) (W1242)
+        if getattr(package, "_items_resolved", None) == 0:
+            result["warning"] = "no_items_found"
+
+        return result
 
     def handle_list_shared(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: список сохранённых пакетов."""
