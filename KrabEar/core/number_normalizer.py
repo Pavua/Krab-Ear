@@ -207,6 +207,32 @@ _ES_UNIT_WORDS: Dict[str, str] = {
     "segundos": " s", "segundo": " s",
 }
 
+# Порядковые прилагательные испанского языка → суффикс + число
+# Формат: слово → (суффикс_ординала, число)
+# Используем º для мужского рода / ª для женского — по умолчанию º
+_ES_ORDINAL_SUFFIXES: Dict[str, Tuple[str, int]] = {
+    # 1
+    "primero": (".º", 1), "primer": (".º", 1), "primera": (".ª", 1),
+    # 2
+    "segundo": (".º", 2), "segunda": (".ª", 2),
+    # 3
+    "tercero": (".º", 3), "tercer": (".º", 3), "tercera": (".ª", 3),
+    # 4
+    "cuarto": (".º", 4), "cuarta": (".ª", 4),
+    # 5
+    "quinto": (".º", 5), "quinta": (".ª", 5),
+    # 6
+    "sexto": (".º", 6), "sexta": (".ª", 6),
+    # 7
+    "séptimo": (".º", 7), "septimo": (".º", 7), "séptima": (".ª", 7), "septima": (".ª", 7),
+    # 8
+    "octavo": (".º", 8), "octava": (".ª", 8),
+    # 9
+    "noveno": (".º", 9), "novena": (".ª", 9),
+    # 10
+    "décimo": (".º", 10), "decimo": (".º", 10), "décima": (".ª", 10), "decima": (".ª", 10),
+}
+
 
 # ---------------------------------------------------------------------------
 # Английские числительные
@@ -500,7 +526,17 @@ class NumberNormalizer:
     # ------------------------------------------------------------------
 
     def _normalize_es(self, text: str) -> str:
+        # 1. Порядковые числительные (primero, segundo, tercero, ...)
+        text = self._replace_ordinals_es(text)
+        # 2. Количественные числительные + опциональные единицы
         text = self._replace_cardinals_es(text)
+        return text
+
+    def _replace_ordinals_es(self, text: str) -> str:
+        for word, (suffix, value) in _ES_ORDINAL_SUFFIXES.items():
+            pattern = r"(?<!\w)" + re.escape(word) + r"(?!\w)"
+            replacement = f"{value}{suffix}"
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         return text
 
     def _replace_cardinals_es(self, text: str) -> str:
