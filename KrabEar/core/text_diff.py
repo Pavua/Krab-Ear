@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from typing import List
+
+# Strips leading/trailing punctuation from a word before comparison.
+# Uses Unicode \w so Cyrillic and other scripts are handled correctly.
+STRIP_PUNCT_RE = re.compile(r"^[^\w]+|[^\w]+$")
 
 
 @dataclass
@@ -38,12 +43,22 @@ class TextDiffAnalyzer:
     и построения списка изменений.
     """
 
-    def compute_diff(self, original: str, rewritten: str) -> TextDiffResult:
+    def compute_diff(
+        self,
+        original: str,
+        rewritten: str,
+        strip_punctuation: bool = True,
+    ) -> TextDiffResult:
         """Сравнивает original и rewritten на уровне слов.
 
         Args:
             original: исходный текст (до LLM rewrite)
             rewritten: итоговый текст (после LLM rewrite)
+            strip_punctuation: если True (по умолчанию), убирает ведущую/
+                хвостовую пунктуацию из каждого слова перед сравнением.
+                Это предотвращает ложные «removed/added» при пунктуационных
+                LLM-правках («дела?» == «дела» при strip=True).
+                Передайте False для сохранения старого поведения.
 
         Returns:
             TextDiffResult с полным описанием изменений.
@@ -51,12 +66,20 @@ class TextDiffAnalyzer:
         orig_words = (original or "").split()
         new_words = (rewritten or "").split()
 
+        # Normalize words for comparison when strip_punctuation is enabled.
+        if strip_punctuation:
+            cmp_orig = [STRIP_PUNCT_RE.sub("", w) for w in orig_words]
+            cmp_new = [STRIP_PUNCT_RE.sub("", w) for w in new_words]
+        else:
+            cmp_orig = orig_words
+            cmp_new = new_words
+
         # Similarity ratio на уровне символов для более точной метрики
         char_matcher = difflib.SequenceMatcher(None, original or "", rewritten or "")
         similarity_ratio = round(char_matcher.ratio(), 4)
 
-        # Word-level diff через SequenceMatcher
-        word_matcher = difflib.SequenceMatcher(None, orig_words, new_words)
+        # Word-level diff через SequenceMatcher (на нормализованных словах)
+        word_matcher = difflib.SequenceMatcher(None, cmp_orig, cmp_new)
         changes: List[DiffChange] = []
         words_added = 0
         words_removed = 0
