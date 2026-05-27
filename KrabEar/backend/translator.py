@@ -117,6 +117,12 @@ class Translator:
         # W1190/W1429 — _translation_cache late-injection (set by BackendService after init).
         # Когда задан, успешные переводы персистируются на диск и переживают перезапуск.
         self._translation_cache: Any | None = None  # type: TranslationCache | None
+        # W1492 F3 HIGH — _settings_getter late-injection (set by BackendService after init).
+        # Callable[[str, Any], Any] that reads runtime settings; used by
+        # _check_privacy_mode_changed() on every translate() call to detect privacy-mode
+        # transitions. When None (e.g. unit-test stubs that don't inject), the check is
+        # a no-op — safe but privacy transitions will not be detected.
+        self._settings_getter: Any | None = None  # type: Callable[[str, Any], Any] | None
         # W1319 — _last_privacy_mode tracks last seen privacy_mode to detect transitions
 
     def clear_cache(self) -> None:
