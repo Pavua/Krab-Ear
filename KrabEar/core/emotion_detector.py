@@ -88,6 +88,16 @@ _POSITIVE_WORDS: dict[str, list[str]] = {
 # Precompiled regex for tokenization — called on every _tokenize() invocation
 _RE_WORD_TOKENS = re.compile(r"[А-Яа-яёЁA-Za-zÀ-ÿ]+")
 
+# Паттерн технических лог-строк: «error 404», «Exception», «Traceback», «stack trace»
+# и т.п.  Если текст совпадает — эмоциональный анализ пропускается (W1383 F3 MED).
+_TECH_LOG_PATTERN = re.compile(
+    r"(?:^|\s)(?:error|fail|warn|debug)\s+\d+"     # «error 404», «warn 500»
+    r"|exception"                                   # «Exception», «NullPointerException»
+    r"|stack\s*trace"                               # «stack trace», «stacktrace»
+    r"|traceback",                                  # Python «Traceback (most recent call last)»
+    re.IGNORECASE,
+)
+
 # ── Dataclass результата ──────────────────────────────────────────────────────
 
 
@@ -142,6 +152,15 @@ class EmotionDetector:
                 primary_emotion="neutral",
                 confidence=0.0,
                 indicators=[],
+            )
+
+        # Пропускаем эмоциональный анализ для технических лог-строк —
+        # слова «error» / «fail» в «error 404» не несут эмоциональной окраски.
+        if _TECH_LOG_PATTERN.search(text):
+            return EmotionResult(
+                primary_emotion="neutral",
+                confidence=0.5,
+                indicators=["tech_log_pattern"],
             )
 
         lang = language.lower().split("-")[0]  # «ru-RU» → «ru»
