@@ -41,6 +41,28 @@ AUTO_DEDUP_ENABLED: bool = False
 _JACCARD_LOW: float = 0.7
 _JACCARD_HIGH: float = 0.85
 
+# Максимальное расстояние (секунды) между временными метками двух записей,
+# при котором они считаются кандидатами на дедупликацию.
+# Восстановлено из DuplicateDetector.DEFAULT_TIME_WINDOW_SECONDS (W1481 N3 HIGH).
+_DEDUP_WINDOW_SEC: int = 60
+
+
+def _parse_ts(ts_value: Any) -> float | None:
+    """Извлекает Unix-timestamp из поля записи истории (ts / timestamp / created_at).
+
+    Returns:
+        float (Unix seconds) или None если парсинг не удался.
+    """
+    if ts_value is None:
+        return None
+    if isinstance(ts_value, (int, float)):
+        return float(ts_value)
+    try:
+        dt = datetime.fromisoformat(str(ts_value).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
 
 def _text_similarity(text_a: str, text_b: str) -> float:
     """Гибридное вычисление сходства двух текстов.
@@ -208,10 +230,24 @@ class AutoDeduplicator:
             # Сравниваем новый текст с каждой записью через гибридный алгоритм.
             # _text_similarity исправляет F1: SequenceMatcher character-level давал
             # ~0.91 для коротких текстов с общим префиксом и для case-only различий.
+            #
+            # Фильтр по временному окну (W1481 N3 HIGH):
+            # Сравниваем только с записями в пределах _DEDUP_WINDOW_SEC секунд.
+            # W1245 Jaccard rewrite убрал делегирование в DuplicateDetector.find_duplicates,
+            # которое само применяло 60-секундное окно — здесь восстанавливаем эту логику.
+            new_ts = _parse_ts(timestamp)
             for item in items:
                 candidate_text = str(item.get("text") or item.get("transcript") or "").strip()
                 if not candidate_text:
                     continue
+
+                # Пропускаем записи за пределами временного окна
+                if new_ts is not None:
+                    item_ts = _parse_ts(
+                        item.get("ts") or item.get("timestamp") or item.get("created_at")
+                    )
+                    if item_ts is not None and abs(new_ts - item_ts) > _DEDUP_WINDOW_SEC:
+                        continue
 
                 sim = _text_similarity(text, candidate_text)
                 if sim >= threshold and sim > best_similarity:
