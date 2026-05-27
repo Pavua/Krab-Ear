@@ -485,7 +485,13 @@ class TestWave138RecapScheduler(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_concurrent_trigger_idempotent(self):
-        """Одновременный вызов send_recap из нескольких потоков не вызывает краш."""
+        """Одновременный вызов send_recap из 5 потоков отправляет письмо ровно 1 раз.
+
+        W922 H1: TOCTOU race — два конкурирующих вызова могли оба пройти
+        _should_send до того, как один из них запишет last_sent_date, что
+        приводило к двойной отправке. После фикса (tentative _sending_date
+        маркер под lock) ровно один поток выигрывает гонку.
+        """
         import threading
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,6 +523,17 @@ class TestWave138RecapScheduler(unittest.TestCase):
                 self.assertIn("sent", r)
                 self.assertIn("date", r)
                 self.assertIn("error", r)
+
+            # W922 H1 TOCTOU fix: ровно ОДНА отправка email (не 2-5)
+            self.assertEqual(
+                sender.send.call_count,
+                1,
+                f"Ожидалась 1 отправка, получено {sender.send.call_count} "
+                f"(TOCTOU race не устранена)",
+            )
+            # Ровно один результат с sent=True
+            sent_results = [r for r in results if r["sent"]]
+            self.assertEqual(len(sent_results), 1, "Ожидался ровно 1 успешный результат")
 
     def test_start_is_idempotent(self):
         """Повторный вызов start() не создаёт дополнительных потоков."""
