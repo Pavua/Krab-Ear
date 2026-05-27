@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.Backend.OpenWakeWordAdapter")
 
@@ -33,6 +33,13 @@ _BUILTIN_MODELS: list[str] = [
 # Имя директории для пользовательских .onnx / .tflite моделей
 _CUSTOM_MODELS_DIR = "wake_word_models"
 
+# Минимальный допустимый порог (F1 — covert mic tap guard)
+_THRESHOLD_MIN: float = 0.05
+_THRESHOLD_MAX: float = 1.0
+
+# Таймаут загрузки модели OWW (секунды) — F4 download timeout guard
+_MODEL_LOAD_TIMEOUT_SEC: float = 30.0
+
 
 class OpenWakeWordAdapter:
     """Адаптер openWakeWord для Krab Ear.
@@ -43,7 +50,11 @@ class OpenWakeWordAdapter:
     - Graceful stub-режим если openwakeword не установлен.
     """
 
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
+    ) -> None:
         self._data_dir = Path(data_dir)
         self._custom_dir = self._data_dir / _CUSTOM_MODELS_DIR
         self._lock = threading.Lock()
@@ -53,6 +64,8 @@ class OpenWakeWordAdapter:
         self._on_detected: Callable[[str, float], None] | None = None
         self._active_model: str | None = None
         self._oww_available = self._check_lib_available()
+        # F2: callable to read runtime settings (e.g. privacy_mode_enabled)
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
 
     # ------------------------------------------------------------------
     # Проверка наличия библиотеки
@@ -205,9 +218,37 @@ class OpenWakeWordAdapter:
         """IPC: запустить wake word detection.
 
         Параметры: model (str), threshold (float, optional).
+
+        Security guards (W1205):
+          F2 — возвращает skipped если privacy_mode_enabled.
+          F1 — порог < 0 отклоняется; < 0.05 зажимается к 0.05; > 1.0 зажимается к 1.0.
         """
+        # F2: privacy mode guard — do not open mic tap in privacy mode
+        if self._settings_get("privacy_mode_enabled", False):
+            logger.info(
+                "OpenWakeWordAdapter.handle_wake_word_start: "
+                "пропущен — privacy_mode_enabled=True"
+            )
+            return {"ok": True, "skipped": "privacy_mode"}
+
         model_name = str(params.get("model", "hey_jarvis"))
-        threshold = float(params.get("threshold", 0.5))
+
+        # F1: threshold validation and clamping
+        try:
+            raw_threshold = float(params.get("threshold", 0.5))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "threshold должен быть числом"}
+
+        if raw_threshold < 0:
+            return {"ok": False, "error": "threshold не может быть отрицательным"}
+
+        threshold = max(_THRESHOLD_MIN, min(_THRESHOLD_MAX, raw_threshold))
+        if threshold != raw_threshold:
+            logger.warning(
+                "OpenWakeWordAdapter: threshold %.4f зажат к %.4f",
+                raw_threshold,
+                threshold,
+            )
 
         def _on_detected(name: str, score: float) -> None:
             logger.info(
@@ -261,16 +302,89 @@ class OpenWakeWordAdapter:
         )
 
     def _load_model(self, model_name: str, model_path: str | None) -> Any:
-        """Загружает openwakeword.Model."""
+        """Загружает openwakeword.Model.
+
+        Security guards (W1205):
+          F3 — отклоняет symlink-пути и пути вне data_dir.
+          F4 — таймаут загрузки модели (_MODEL_LOAD_TIMEOUT_SEC) для HF download.
+        """
         try:
             from openwakeword.model import Model as OWWModel  # type: ignore[import]
         except ImportError:
             raise RuntimeError("openwakeword не установлен")
 
         if model_path is not None:
-            return OWWModel(wakeword_models=[model_path])
+            # F3: symlink and path-escape check
+            path = Path(model_path)
+            if path.is_symlink():
+                raise ValueError(
+                    f"Путь к модели является symlink и отклонён: {model_path}"
+                )
+            try:
+                resolved = path.resolve()
+                data_dir_resolved = self._data_dir.resolve()
+                resolved.relative_to(data_dir_resolved)
+            except ValueError:
+                raise ValueError(
+                    f"Путь к модели выходит за пределы data_dir: {model_path}"
+                )
+
+            # F4: wrap load in a thread with timeout to guard against slow HF downloads
+            logger.info(
+                "OpenWakeWordAdapter: загрузка кастомной модели %r (таймаут %.0fs)",
+                model_path,
+                _MODEL_LOAD_TIMEOUT_SEC,
+            )
+            result: list[Any] = []
+            exc_holder: list[BaseException] = []
+
+            def _load() -> None:
+                try:
+                    result.append(OWWModel(wakeword_models=[model_path]))
+                except Exception as e:  # noqa: BLE001
+                    exc_holder.append(e)
+
+            t = threading.Thread(target=_load, daemon=True)
+            t.start()
+            t.join(timeout=_MODEL_LOAD_TIMEOUT_SEC)
+            if t.is_alive():
+                raise RuntimeError(
+                    f"Загрузка модели {model_name!r} превысила таймаут "
+                    f"{_MODEL_LOAD_TIMEOUT_SEC:.0f}s"
+                )
+            if exc_holder:
+                raise exc_holder[0]
+            logger.info("OpenWakeWordAdapter: кастомная модель %r загружена", model_path)
+            return result[0]
+
         # Встроенная модель — openWakeWord скачает при первом запуске
-        return OWWModel(wakeword_models=[model_name])
+        logger.info(
+            "OpenWakeWordAdapter: загрузка встроенной модели %r (таймаут %.0fs, "
+            "возможна загрузка с HF)",
+            model_name,
+            _MODEL_LOAD_TIMEOUT_SEC,
+        )
+        result = []
+        exc_holder = []
+
+        def _load_builtin() -> None:
+            try:
+                result.append(OWWModel(wakeword_models=[model_name]))
+            except Exception as e:  # noqa: BLE001
+                exc_holder.append(e)
+
+        t = threading.Thread(target=_load_builtin, daemon=True)
+        t.start()
+        t.join(timeout=_MODEL_LOAD_TIMEOUT_SEC)
+        if t.is_alive():
+            raise RuntimeError(
+                f"Загрузка встроенной модели {model_name!r} превысила таймаут "
+                f"{_MODEL_LOAD_TIMEOUT_SEC:.0f}s (возможно зависание HF download)"
+            )
+        if exc_holder:
+            raise exc_holder[0]
+        logger.info("OpenWakeWordAdapter: встроенная модель %r загружена", model_name)
+        return result[0]
 
     def _listen_loop(
         self,
