@@ -513,10 +513,16 @@ class SettingsService:
                 continue
             merged[key] = value
 
-        # Validate the merged result
+        # Validate the merged result — reject hard errors before persisting (W1427 F1)
         vr = self._validator.validate(merged)
         if not vr.valid:
-            errors.extend(vr.errors)
+            _log.warning(
+                "import_settings: validation failed, %d error(s), refusing save",
+                len(vr.errors),
+            )
+            raise ValueError(
+                f"Настройки содержат ошибки: {'; '.join(vr.errors)}"
+            )
         if vr.warnings:
             for w in vr.warnings:
                 _log.warning("import_settings: %s", w)

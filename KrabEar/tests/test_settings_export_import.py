@@ -20,8 +20,9 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -216,6 +217,81 @@ class TestImportSettings(unittest.TestCase):
 
         # After import, quality_profile should be restored to "balanced"
         self.assertEqual(svc.store._current.get("quality_profile"), "balanced")
+
+
+# ---------------------------------------------------------------------------
+# W1427 F1 HIGH — import_settings must NOT persist when validation fails
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FakeValidationResult:
+    """Lightweight stub for ValidationResult used in W1427 tests."""
+    valid: bool
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    fixed: dict = field(default_factory=dict)
+
+
+class TestImportSettingsValidationGuard(unittest.TestCase):
+    """W1427 F1 HIGH: handle_import_settings must reject invalid settings before save."""
+
+    def _svc(self) -> SettingsService:
+        return SettingsService(store=_make_store())
+
+    def _write_json(self, tmp: str, data: dict) -> str:
+        p = str(Path(tmp) / "import.json")
+        with open(p, "w") as f:
+            json.dump(data, f)
+        return p
+
+    def test_import_settings_rejects_invalid_no_save(self):
+        """When validator returns valid=False, save_settings must NOT be called (W1427 F1)."""
+        svc = self._svc()
+        invalid_vr = _FakeValidationResult(
+            valid=False,
+            errors=["quality_profile: invalid value 'bad_profile'"],
+            fixed={"quality_profile": "balanced"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write_json(tmp, {"quality_profile": "bad_profile"})
+            with patch.object(svc._validator, "validate", return_value=invalid_vr):
+                with self.assertRaises(ValueError):
+                    svc.handle_import_settings({"file": p})
+        # save_settings must not have been called
+        svc.store.save_settings.assert_not_called()
+
+    def test_import_settings_valid_saves_normally(self):
+        """When validator returns valid=True, save_settings IS called (happy path)."""
+        svc = self._svc()
+        good_vr = _FakeValidationResult(
+            valid=True,
+            errors=[],
+            fixed={"quality_profile": "max", "cleanup_profile": "soft"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write_json(tmp, {"quality_profile": "max"})
+            with patch.object(svc._validator, "validate", return_value=good_vr):
+                result = svc.handle_import_settings({"file": p})
+        svc.store.save_settings.assert_called_once()
+        self.assertIn("imported", result)
+
+    def test_import_settings_returns_validation_errors(self):
+        """ValueError message must contain the validation error text (W1427 F1)."""
+        svc = self._svc()
+        err_msg = "quality_profile: invalid value 'bad_profile'"
+        invalid_vr = _FakeValidationResult(
+            valid=False,
+            errors=[err_msg],
+            fixed={"quality_profile": "balanced"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write_json(tmp, {"quality_profile": "bad_profile"})
+            with patch.object(svc._validator, "validate", return_value=invalid_vr):
+                try:
+                    svc.handle_import_settings({"file": p})
+                    self.fail("Expected ValueError was not raised")
+                except ValueError as exc:
+                    self.assertIn(err_msg, str(exc))
 
 
 if __name__ == "__main__":
