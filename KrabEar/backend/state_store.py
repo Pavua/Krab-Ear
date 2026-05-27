@@ -522,13 +522,21 @@ class StateStore:
         return True
 
     def import_history_ndjson(self, path: Path) -> dict[str, int]:
-        """Импортирует записи истории из NDJSON без дублей по `id`."""
+        """Импортирует записи истории из NDJSON без дублей по `id`.
+
+        W1471 F2 (MED): dedup-множество включает как существующие активные id,
+        так и tombstone-id (tombstone_ids), чтобы удалённые записи не могли
+        воскреснуть после компактирования (когда tombstones вычищены, а id
+        уже не числится в iter_history_items_unlocked).
+        """
         source_path = path.expanduser().resolve()
         if not source_path.exists() or not source_path.is_file():
             raise RuntimeError("Файл импорта не найден")
 
         with self._lock():
-            known_ids = {item.id for item in self._iter_history_items_unlocked()}
+            existing_ids = {item.id for item in self._iter_history_items_unlocked()}
+            tombstone_ids = self._load_tombstone_ids_unlocked()
+            skip_ids = existing_ids | tombstone_ids
             imported = 0
             skipped = 0
             errors = 0
@@ -544,12 +552,12 @@ class StateStore:
                     errors += 1
                     continue
 
-                if item.id in known_ids:
+                if item.id in skip_ids:
                     skipped += 1
                     continue
 
                 self._append_ndjson(self.history_path, item.to_dict())
-                known_ids.add(item.id)
+                skip_ids.add(item.id)
                 imported += 1
 
         return {"imported": imported, "skipped": skipped, "errors": errors}
@@ -735,6 +743,11 @@ class StateStore:
     ) -> dict[str, Any]:
         """Удаляет записи истории старше days дней (tombstone-удаление).
 
+        W1471 F1 (MED): весь метод выполняется в одном критическом разделе —
+        снимок + фильтрация + tombstone-запись — чтобы устранить TOCTOU-окно,
+        в котором конкурирующий import_history_ndjson / add_history_item мог
+        вставить запись между снимком и циклом удаления.
+
         Args:
             days: Записи старше этого числа дней будут удалены (>= 1).
             dry_run: Если True - возвращает количество, но не удаляет.
@@ -750,25 +763,25 @@ class StateStore:
         with self._lock():
             active = self._load_active_items_unlocked()
 
-        to_delete = [
-            item
-            for item in active
-            if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
-        ]
+            to_delete = [
+                item
+                for item in active
+                if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
+            ]
 
-        oldest_age_days = None
-        if active:
-            oldest_ts_str = min(
-                (item.ts for item in active if item.ts), default=None
-            )
-            if oldest_ts_str:
-                oldest_dt = datetime.fromisoformat(oldest_ts_str)
-                oldest_age_days = (datetime.now() - oldest_dt).days
+            oldest_age_days = None
+            if active:
+                oldest_ts_str = min(
+                    (item.ts for item in active if item.ts), default=None
+                )
+                if oldest_ts_str:
+                    oldest_dt = datetime.fromisoformat(oldest_ts_str)
+                    oldest_age_days = (datetime.now() - oldest_dt).days
 
-        if not dry_run:
-            for item in to_delete:
-                if item.id:
-                    self.delete_history_item(item.id)
+            if not dry_run:
+                for item in to_delete:
+                    if item.id:
+                        self._append_ndjson(self.tombstones_path, {"id": item.id})
 
         return {
             "deleted_count": len(to_delete),
@@ -1212,6 +1225,14 @@ class StateStore:
             if item_id:
                 deleted.add(item_id)
         return deleted
+
+    def _load_tombstone_ids_unlocked(self) -> set[str]:
+        """Alias for _load_deleted_ids_unlocked — returns tombstoned (deleted) IDs.
+
+        Used by import_history_ndjson (W1471 F2) to prevent resurrection of
+        tombstoned items after compaction clears the tombstone journal.
+        """
+        return self._load_deleted_ids_unlocked()
 
     def _load_status_overrides_unlocked(self) -> dict[str, str]:
         """Собирает последние значения paste_status по id."""
