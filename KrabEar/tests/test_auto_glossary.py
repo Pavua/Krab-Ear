@@ -636,5 +636,97 @@ class TestHallucinationPatternCorrectorW1402(unittest.TestCase):
         )
 
 
+# ── TestAutoGlossaryLoadCacheDictValidation (W1450 F1 HIGH) ──────────────────
+# Covers strict type validation in _load_cache_from_disk() — prevents
+# KeyError: slice(None, 30, None) when "terms" is a dict instead of a list.
+
+class TestAutoGlossaryLoadCacheDictValidation(unittest.TestCase):
+    """_load_cache_from_disk() strict type validation (W1450 F1 HIGH)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp()
+        self._data_dir = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_cache(self, payload: dict) -> None:
+        cache_file = self._data_dir / "auto_glossary.json"
+        cache_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _make_builder(self) -> AutoGlossaryBuilder:
+        store = _FakeStore(items=[])
+        return AutoGlossaryBuilder(store=store, data_dir=self._data_dir)
+
+    def test_load_dict_terms_returns_empty(self):
+        """When 'terms' is a dict, cache must be [] (no KeyError on slice)."""
+        self._write_cache({"terms": {"python": 3, "django": 2}, "built_at": time.time()})
+        builder = self._make_builder()
+        self.assertEqual(builder.get_cached(), [])
+
+    def test_load_mixed_valid_and_garbage_filtered(self):
+        """Mixed list: strings kept, dicts with 'term' key kept, rest dropped."""
+        self._write_cache({
+            "terms": [
+                "Python",           # valid string
+                {"term": "Django"}, # valid dict format
+                42,                 # int — garbage, must be dropped
+                None,               # None — garbage, must be dropped
+                "",                 # empty string — must be dropped
+                {"no_term_key": "x"},  # dict without "term" — must be dropped
+            ],
+            "built_at": time.time(),
+        })
+        builder = self._make_builder()
+        cached = builder.get_cached()
+        self.assertIn("Python", cached)
+        self.assertIn("Django", cached)
+        self.assertNotIn(42, cached)
+        self.assertNotIn(None, cached)
+        self.assertNotIn("", cached)
+        # All returned items must be non-empty strings
+        for item in cached:
+            self.assertIsInstance(item, str)
+            self.assertTrue(item)
+
+    def test_load_valid_string_list_passes(self):
+        """A well-formed list of strings must be loaded without modification."""
+        terms = ["Python", "TensorFlow", "Django"]
+        self._write_cache({"terms": terms, "built_at": time.time()})
+        builder = self._make_builder()
+        cached = builder.get_cached()
+        for t in terms:
+            self.assertIn(t, cached)
+
+    def test_load_valid_dict_format_passes(self):
+        """Entries as dicts with 'term' string key must be extracted correctly."""
+        self._write_cache({
+            "terms": [
+                {"term": "TensorFlow", "freq": 5},
+                {"term": "PyTorch", "freq": 3},
+            ],
+            "built_at": time.time(),
+        })
+        builder = self._make_builder()
+        cached = builder.get_cached()
+        self.assertIn("TensorFlow", cached)
+        self.assertIn("PyTorch", cached)
+
+    def test_load_dict_terms_build_does_not_raise(self):
+        """build() after loading a dict-terms cache must not raise KeyError."""
+        self._write_cache({"terms": {"a": 1, "b": 2}, "built_at": time.time()})
+        # Cache is empty (invalid type resets), so build() triggers rebuild
+        store = _FakeStore(items=[])
+        builder = AutoGlossaryBuilder(store=store, data_dir=self._data_dir)
+        # Must not raise — previously would crash with KeyError: slice(None, 30, None)
+        try:
+            result = builder.build()
+            self.assertIsInstance(result, list)
+        except KeyError as exc:
+            self.fail(f"build() raised KeyError after dict-terms cache: {exc}")
+
+
 if __name__ == "__main__":
     unittest.main()

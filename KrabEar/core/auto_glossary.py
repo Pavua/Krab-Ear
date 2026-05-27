@@ -402,13 +402,36 @@ class AutoGlossaryBuilder:
         return self._data_dir / AUTO_GLOSSARY_CACHE_FILE
 
     def _load_cache_from_disk(self) -> None:
-        """Загружает кэш с диска (при старте сервиса)."""
+        """Загружает кэш с диска (при старте сервиса).
+
+        W1450 F1 HIGH: strict validation of the ``terms`` field prevents
+        ``KeyError: slice(None, 30, None)`` when a corrupted or migrated cache
+        file stores ``terms`` as a dict instead of a list.
+        """
         path = self._cache_path()
         if not path or not path.exists():
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            self._cache = data.get("terms", [])
+            terms = data.get("terms", [])
+            if not isinstance(terms, list):
+                logger.warning(
+                    "auto_glossary: invalid terms type %s in cache, resetting",
+                    type(terms).__name__,
+                )
+                self._cache = []
+                self._cache_built_at = 0.0
+                return
+            # Accept plain strings and dicts with a "term" string key;
+            # silently drop anything else (garbage entries).
+            validated: List[str] = []
+            for entry in terms:
+                if isinstance(entry, str) and entry:
+                    validated.append(entry)
+                elif isinstance(entry, dict) and isinstance(entry.get("term"), str):
+                    validated.append(entry["term"])
+                # else: skip malformed entry silently
+            self._cache = validated
             self._cache_built_at = float(data.get("built_at", 0.0))
             logger.debug(
                 "auto_glossary: loaded %d terms from disk (age=%.1fh)",
