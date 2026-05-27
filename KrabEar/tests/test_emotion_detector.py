@@ -487,5 +487,37 @@ class TestEmotionDetectorConcurrent(unittest.TestCase):
             self.assertIn(emotion, valid_emotions)
 
 
+class TestEmotionDetectorTechLogPatterns(unittest.TestCase):
+    """W1383 F3 MED — технические лог-строки не должны давать negative."""
+
+    def setUp(self) -> None:
+        self.detector = EmotionDetector()
+
+    def test_tech_log_returns_neutral(self) -> None:
+        """«error 404 not found» — технический лог, результат нейтральный."""
+        result = self.detector.detect("error 404 not found")
+        self.assertEqual(result.primary_emotion, "neutral")
+        self.assertEqual(result.confidence, 0.5)
+        self.assertIn("tech_log_pattern", result.indicators)
+
+    def test_normal_negative_still_detected(self) -> None:
+        """Обычный эмоциональный текст продолжает определяться как negative."""
+        result = self.detector.detect("всё плохо")
+        self.assertEqual(result.primary_emotion, "negative")
+        self.assertNotIn("tech_log_pattern", result.indicators)
+
+    def test_traceback_skip(self) -> None:
+        """Python traceback возвращает neutral, не negative."""
+        traceback_text = (
+            "Traceback (most recent call last):\n"
+            "  File 'app.py', line 42, in main\n"
+            "    raise ValueError('fail')\n"
+            "ValueError: fail"
+        )
+        result = self.detector.detect(traceback_text)
+        self.assertEqual(result.primary_emotion, "neutral")
+        self.assertIn("tech_log_pattern", result.indicators)
+
+
 if __name__ == "__main__":
     unittest.main()
