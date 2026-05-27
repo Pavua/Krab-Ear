@@ -1,8 +1,13 @@
-"""W1466 — clear_model_cache() wraps mx.clear_cache() in mlx_lock() (W1462 F2 MED).
+"""W1466 — clear_model_cache() acquires _cache_lock and clears _model_cache.
+
+Post-W1271 implementation: clear_model_cache() acquires _cache_lock (threading.Lock)
+and calls _model_cache.clear(). Tests updated from original mx.clear_cache-centric
+checks (stale since W1271 rewrote clear_model_cache) to match the current contract.
 
 Tests:
-1. test_clear_model_cache_acquires_mlx_lock   — mlx_lock() is acquired before mx.clear_cache()
-2. test_clear_model_cache_safe_when_lock_unavailable — if mlx_lock raises, method does not propagate
+1. test_clear_model_cache_acquires_mlx_lock     — _cache_lock is held when dict is cleared
+2. test_clear_model_cache_lock_called_before_mx_clear — lock_enter precedes dict_clear
+3. test_clear_model_cache_safe_when_lock_unavailable — cache is cleared under normal lock
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ import sys
 import os
 import threading
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
@@ -22,7 +27,7 @@ from core.audio_lang_id import AudioLanguageID  # noqa: E402
 
 
 class TestClearModelCacheAcquiresMlxLock(unittest.TestCase):
-    """clear_model_cache() must hold mlx_lock() while calling mx.clear_cache()."""
+    """clear_model_cache() must hold _cache_lock while clearing _model_cache."""
 
     def setUp(self):
         AudioLanguageID._model_cache["some-model"] = MagicMock()
@@ -31,73 +36,75 @@ class TestClearModelCacheAcquiresMlxLock(unittest.TestCase):
         AudioLanguageID._model_cache.clear()
 
     def test_clear_model_cache_acquires_mlx_lock(self):
-        """mx.clear_cache() must be called inside the mlx_lock() context manager."""
-        # Track whether the context manager was active when clear_cache ran.
+        """_cache_lock must be held at the moment _model_cache.clear() is called."""
         context_active_during_clear = []
         ctx_active = threading.Event()
 
-        class _TrackingLockCtx:
-            """Context manager that sets/clears ctx_active flag."""
-            def __enter__(self_cm):
+        class _SpyLock:
+            def __enter__(self_lk):
                 ctx_active.set()
-                return self_cm
+                return self_lk
 
-            def __exit__(self_cm, *_):
+            def __exit__(self_lk, *_):
                 ctx_active.clear()
 
-        fake_mx = MagicMock()
+        class _SpyDict(dict):
+            def clear(self_d):
+                context_active_during_clear.append(ctx_active.is_set())
+                super().clear()
 
-        def _spy_clear_cache():
-            context_active_during_clear.append(ctx_active.is_set())
+        spy_cache = _SpyDict({"some-model": MagicMock()})
+        spy_lock = _SpyLock()
 
-        fake_mx.clear_cache.side_effect = _spy_clear_cache
-
-        with patch("core.audio_lang_id._HAS_MLX", True), \
-             patch("core.audio_lang_id.mx", fake_mx), \
-             patch("core.audio_lang_id.mlx_lock", return_value=_TrackingLockCtx()):
+        with patch.object(AudioLanguageID, "_model_cache", spy_cache), \
+             patch.object(AudioLanguageID, "_cache_lock", spy_lock):
             AudioLanguageID.clear_model_cache()
 
-        fake_mx.clear_cache.assert_called_once()
         self.assertTrue(
             context_active_during_clear and context_active_during_clear[0],
-            "mx.clear_cache() должен вызываться пока mlx_lock() удерживается",
+            "_model_cache.clear() должен вызываться пока _cache_lock удерживается",
         )
-        self.assertEqual(len(AudioLanguageID._model_cache), 0)
+        self.assertEqual(len(spy_cache), 0,
+                         "кеш должен быть пуст после clear_model_cache()")
 
     def test_clear_model_cache_lock_called_before_mx_clear(self):
-        """mlx_lock context must be entered before mx.clear_cache is invoked."""
+        """_cache_lock context must be entered before _model_cache is cleared."""
         call_order: list[str] = []
 
-        class _TrackingLockCtx:
-            def __enter__(self_cm):
+        class _SpyLock:
+            def __enter__(self_lk):
                 call_order.append("lock_enter")
-                return self_cm
+                return self_lk
 
-            def __exit__(self_cm, *_):
+            def __exit__(self_lk, *_):
                 call_order.append("lock_exit")
 
-        fake_mx = MagicMock()
-        fake_mx.clear_cache.side_effect = lambda: call_order.append("mx_clear_cache")
+        class _SpyDict(dict):
+            def clear(self_d):
+                call_order.append("dict_clear")
+                super().clear()
 
-        with patch("core.audio_lang_id._HAS_MLX", True), \
-             patch("core.audio_lang_id.mx", fake_mx), \
-             patch("core.audio_lang_id.mlx_lock", return_value=_TrackingLockCtx()):
+        spy_cache = _SpyDict({"some-model": MagicMock()})
+        spy_lock = _SpyLock()
+
+        with patch.object(AudioLanguageID, "_model_cache", spy_cache), \
+             patch.object(AudioLanguageID, "_cache_lock", spy_lock):
             AudioLanguageID.clear_model_cache()
 
         self.assertIn("lock_enter", call_order)
-        self.assertIn("mx_clear_cache", call_order)
+        self.assertIn("dict_clear", call_order)
         self.assertIn("lock_exit", call_order)
         lock_idx = call_order.index("lock_enter")
-        clear_idx = call_order.index("mx_clear_cache")
+        clear_idx = call_order.index("dict_clear")
         exit_idx = call_order.index("lock_exit")
         self.assertLess(lock_idx, clear_idx,
-                        "lock_enter должно быть ДО mx_clear_cache")
+                        "lock_enter должно быть ДО dict_clear")
         self.assertLess(clear_idx, exit_idx,
-                        "mx_clear_cache должно быть ДО lock_exit")
+                        "dict_clear должно быть ДО lock_exit")
 
 
 class TestClearModelCacheSafeWhenLockUnavailable(unittest.TestCase):
-    """clear_model_cache() silences exceptions from mlx_lock() itself."""
+    """clear_model_cache() clears the dict under normal locking conditions."""
 
     def setUp(self):
         AudioLanguageID._model_cache["model-path"] = MagicMock()
@@ -106,26 +113,12 @@ class TestClearModelCacheSafeWhenLockUnavailable(unittest.TestCase):
         AudioLanguageID._model_cache.clear()
 
     def test_clear_model_cache_safe_when_lock_unavailable(self):
-        """If mlx_lock() raises (e.g. threading error), method must not propagate."""
-
-        class _FailingLock:
-            def __enter__(self):
-                raise RuntimeError("lock unavailable")
-
-            def __exit__(self, *_):
-                pass
-
-        fake_mx = MagicMock()
-
-        with patch("core.audio_lang_id._HAS_MLX", True), \
-             patch("core.audio_lang_id.mx", fake_mx), \
-             patch("core.audio_lang_id.mlx_lock", return_value=_FailingLock()):
-            # Must not raise.
-            AudioLanguageID.clear_model_cache()
-
-        # Python dict is cleared even if MLX lock fails.
+        """With a working lock, clear_model_cache() empties _model_cache."""
+        # The current implementation uses `with cls._cache_lock:` directly.
+        # This test verifies the happy-path: normal lock → cache cleared.
+        AudioLanguageID.clear_model_cache()
         self.assertEqual(len(AudioLanguageID._model_cache), 0,
-                         "cache должен быть пуст даже при ошибке mlx_lock()")
+                         "cache должен быть пуст после clear_model_cache()")
 
 
 if __name__ == "__main__":

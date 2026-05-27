@@ -31,12 +31,25 @@ class TestAudioLanguageIDCacheLimit(unittest.TestCase):
 
     def setUp(self):
         _install_mlx_whisper_stub()
+        # Capture current module (may be None if not yet imported) so tearDown
+        # can restore it and prevent contamination of W1466 tests that import
+        # AudioLanguageID at module-level and patch the original object.
+        self._original_module = sys.modules.get("core.audio_lang_id")
         # Fresh import each test to avoid cross-test state
         if "core.audio_lang_id" in sys.modules:
             del sys.modules["core.audio_lang_id"]
         self.mod = importlib.import_module("core.audio_lang_id")
         self.AudioLanguageID = self.mod.AudioLanguageID
         self.AudioLanguageID._model_cache.clear()
+
+    def tearDown(self):
+        # Restore the original module so that other test files which imported
+        # AudioLanguageID at module-level (e.g. W1466 tests) continue to patch
+        # the correct object in sys.modules["core.audio_lang_id"].
+        if self._original_module is not None:
+            sys.modules["core.audio_lang_id"] = self._original_module
+        else:
+            sys.modules.pop("core.audio_lang_id", None)
 
     def _insert(self, path: str):
         """Simulate bounded cache insertion (mirrors audio_lang_id.py logic)."""
@@ -75,6 +88,35 @@ class TestAudioLanguageIDCacheLimit(unittest.TestCase):
         cache = self.AudioLanguageID._model_cache
         self.assertEqual(len(cache), 1)
         self.assertIn("model-a", cache)
+
+
+class TestSysModulesRestoredAfterTeardown(unittest.TestCase):
+    """Verify that TestAudioLanguageIDCacheLimit.tearDown restores sys.modules."""
+
+    def test_sys_modules_restored_after_teardown(self):
+        """After setUp+tearDown cycle, sys.modules['core.audio_lang_id'] is restored."""
+        _install_mlx_whisper_stub()
+        # Ensure module is loaded before we run the test class cycle
+        import importlib as _il
+        _il.import_module("core.audio_lang_id")
+        original = sys.modules.get("core.audio_lang_id")
+        self.assertIsNotNone(original, "core.audio_lang_id must be importable")
+
+        # Simulate a full setUp/tearDown cycle of TestAudioLanguageIDCacheLimit
+        instance = TestAudioLanguageIDCacheLimit("test_single_model_stored")
+        instance.setUp()
+        # After setUp, sys.modules has a NEW module object
+        mid_module = sys.modules.get("core.audio_lang_id")
+        # It might be a fresh module or same if originally None — that's fine
+        instance.tearDown()
+
+        # After tearDown, sys.modules must be restored to original
+        restored = sys.modules.get("core.audio_lang_id")
+        self.assertIs(
+            restored,
+            original,
+            "tearDown must restore the original module object in sys.modules",
+        )
 
 
 if __name__ == "__main__":
