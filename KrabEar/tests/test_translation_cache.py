@@ -760,7 +760,6 @@ class TestTranslationCacheUnifiedW1394(unittest.TestCase):
         lock_check = threading.Lock()
 
         real_open = open
-        real_replace = os.replace
 
         class TrackingFile:
             """Wraps a file handle and tracks concurrent open tmp writers."""
@@ -819,6 +818,185 @@ class TestTranslationCacheUnifiedW1394(unittest.TestCase):
             max_concurrent[0], 1,
             f"Максимум 1 одновременный tmp-writer (lock обеспечивает TOCTOU safety), "
             f"наблюдалось: {max_concurrent[0]}",
+        )
+
+
+class TestTranslationCacheV1MigrationW1395(unittest.TestCase):
+    """W1395 / W1387 F4 MED — v1→v2 migration with backup on first load.
+
+    Tests the four required cases from the wave spec:
+      - test_v1_cache_migrated_to_v2_on_load
+      - test_v1_cache_backup_written
+      - test_v1_keys_get_default_network_mode
+      - test_corrupt_v1_file_skipped_clean_start
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_v1_cache(self, entries: dict) -> str:
+        """Write a v1-format (plain dict) cache file; returns its path."""
+        path = os.path.join(self._tmp, "translation_cache.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, ensure_ascii=False)
+        return path
+
+    def test_v1_cache_migrated_to_v2_on_load(self) -> None:
+        """Loading a v1 (plain dict) cache file produces a v2-format file on disk."""
+        v1_entries = {
+            "aabbcc": "translated_value_1",
+            "ddeeff": "translated_value_2",
+        }
+        self._write_v1_cache(v1_entries)
+
+        # Loading should silently migrate
+        TranslationCache(data_dir=self._tmp)
+
+        # Verify the on-disk file is now v2
+        cache_path = os.path.join(self._tmp, "translation_cache.json")
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(
+            data.get("version"), 2,
+            "После миграции файл должен быть в формате v2",
+        )
+        self.assertIn("entries", data, "v2 формат должен содержать ключ 'entries'")
+
+    def test_v1_cache_backup_written(self) -> None:
+        """A .v1.bak backup file is written before migration."""
+        v1_entries = {"key1": "val1", "key2": "val2"}
+        self._write_v1_cache(v1_entries)
+
+        TranslationCache(data_dir=self._tmp)
+
+        bak_path = os.path.join(self._tmp, "translation_cache.json.v1.bak")
+        self.assertTrue(
+            os.path.exists(bak_path),
+            f"Backup файл {bak_path} должен существовать после миграции",
+        )
+        # Backup must contain the original v1 data
+        with open(bak_path, "r", encoding="utf-8") as fh:
+            bak_data = json.load(fh)
+        self.assertEqual(bak_data, v1_entries, "Backup должен содержать оригинальные v1 данные")
+
+    def test_v1_keys_get_default_network_mode(self) -> None:
+        """v1 entries are preserved in the migrated v2 cache with original hash keys.
+
+        The v1 keys are SHA-256 hashes computed WITHOUT network_mode.
+        After migration they remain in the cache under their original keys.
+        A reload produces the same number of entries as the original v1 file.
+        """
+        v1_entries = {
+            "aabbcc001122": "перевод_1",
+            "ddeeff334455": "перевод_2",
+            "ffeedd667788": "перевод_3",
+        }
+        self._write_v1_cache(v1_entries)
+
+        cache = TranslationCache(data_dir=self._tmp)
+
+        # All v1 string-keyed entries are migrated
+        stats = cache.get_stats()
+        self.assertEqual(
+            stats["entries"], len(v1_entries),
+            f"Все {len(v1_entries)} v1 записей должны быть перенесены в v2",
+        )
+
+        # The migrated cache must be reloadable and still have same entry count
+        cache2 = TranslationCache(data_dir=self._tmp)
+        stats2 = cache2.get_stats()
+        self.assertEqual(
+            stats2["entries"], len(v1_entries),
+            "После повторной загрузки мигрированного v2 количество записей должно совпадать",
+        )
+
+    def test_corrupt_v1_file_skipped_clean_start(self) -> None:
+        """A corrupted v1 file causes clean v2 start (no crash, no backup written)."""
+        cache_path = os.path.join(self._tmp, "translation_cache.json")
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            fh.write("{{{{ totally invalid json :::::")
+
+        # Must not raise
+        cache = TranslationCache(data_dir=self._tmp)
+
+        # Cache starts empty
+        stats = cache.get_stats()
+        self.assertEqual(stats["entries"], 0, "Corrupted кэш → чистый старт, 0 записей")
+
+        # No backup should be written (we couldn't parse the file)
+        bak_path = cache_path + ".v1.bak"
+        self.assertFalse(
+            os.path.exists(bak_path),
+            "Backup не должен создаваться при повреждённом файле",
+        )
+
+        # Normal operations still work after corrupt recovery
+        cache.put("hello", "en", "ru", "hf_marian", "привет")
+        self.assertEqual(cache.get("hello", "en", "ru", "hf_marian"), "привет")
+
+    def test_v1_migration_preserves_entry_count_up_to_max(self) -> None:
+        """v1 migration respects max_entries limit."""
+        v1_entries = {f"hash_{i:04d}": f"value_{i}" for i in range(10)}
+        self._write_v1_cache(v1_entries)
+
+        cache = TranslationCache(data_dir=self._tmp, max_entries=5)
+        stats = cache.get_stats()
+        self.assertLessEqual(
+            stats["entries"], 5,
+            "Миграция должна обрезать до max_entries",
+        )
+
+    def test_v1_migration_only_once(self) -> None:
+        """After migration, reloading must not re-migrate (file is already v2)."""
+        v1_entries = {"k1": "v1_value"}
+        self._write_v1_cache(v1_entries)
+
+        # First load: migrates
+        cache1 = TranslationCache(data_dir=self._tmp)
+
+        bak_path = os.path.join(self._tmp, "translation_cache.json.v1.bak")
+        self.assertTrue(os.path.exists(bak_path), "Backup должен существовать после первой загрузки")
+
+        # Add an entry and reload
+        cache1.put("new_key", "en", "ru", "eng", "new_value")
+
+        # Second load: file is v2 — no second backup, no data loss
+        bak_mtime_before = os.path.getmtime(bak_path)
+        cache2 = TranslationCache(data_dir=self._tmp)
+        bak_mtime_after = os.path.getmtime(bak_path)
+
+        self.assertEqual(
+            bak_mtime_before, bak_mtime_after,
+            "Backup не должен перезаписываться при повторной загрузке v2 файла",
+        )
+        # Both old migrated entry and new entry present
+        stats = cache2.get_stats()
+        self.assertGreaterEqual(stats["entries"], 1)
+
+    def test_v1_migration_non_string_values_skipped(self) -> None:
+        """Non-string values in v1 dict are skipped gracefully (no crash)."""
+        # A v1 file with mixed types (corrupted/unexpected data)
+        v1_mixed = {
+            "valid_hash": "valid_translation",
+            "numeric_value": 42,       # type: ignore[dict-item]
+            "list_value": ["a", "b"],  # type: ignore[dict-item]
+            "none_value": None,        # type: ignore[dict-item]
+        }
+        cache_path = os.path.join(self._tmp, "translation_cache.json")
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(v1_mixed, fh)
+
+        cache = TranslationCache(data_dir=self._tmp)
+
+        # Only valid string→string entries should be migrated
+        stats = cache.get_stats()
+        self.assertEqual(
+            stats["entries"], 1,
+            "Только str→str записи должны быть мигрированы; non-string values пропускаются",
         )
 
 

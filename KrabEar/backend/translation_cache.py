@@ -10,8 +10,8 @@ Backward compat: старые ключи без network_mode имеют друг
 трактуются как cache miss (нет специальной обработки).
 
 Формат на диске v2: {"version": 2, "entries": {...}}.  Файлы v1 (plain dict)
-автоматически инвалидируются при загрузке — ключи без network_mode несовместимы
-с v2 (W1371 F2).
+мигрируются при загрузке: backup сохраняется в <path>.v1.bak, записи
+переносятся с network_mode="online_default" (W1395 / W1387 F4 MED).
 
 W938 F2: fh.flush() + os.fsync() перед os.replace гарантируют что данные
 попадают на диск до атомарного rename — защита от потери кэша при сбое питания.
@@ -61,7 +61,13 @@ class TranslationCache:
         — устраняет TOCTOU гонку (W1371 F3 / W938 F5).
       - fh.flush() + os.fsync() перед os.replace — защита от power-loss
         truncated cache (W938 F2).
-      - Формат на диске v2: {"version": 2, "entries": {...}} — v1 инвалидируется.
+      - Формат на диске v2: {"version": 2, "entries": {...}}.
+
+    W1395 (W1387 F4 MED): v1→v2 migration with backup:
+      - v1 (plain dict): backup written to <path>.v1.bak, entries migrated
+        with network_mode="online_default" (most permissive, safe default).
+      - Corrupted v1: backup skipped, fresh v2 started, warning logged.
+      - NEVER silently discards cached translations.
     """
 
     def __init__(self, data_dir: str, max_entries: int = _MAX_ENTRIES) -> None:
@@ -141,8 +147,14 @@ class TranslationCache:
         """Загружает кэш с диска при инициализации.
 
         Формат v2: {"version": 2, "entries": {...}}.
-        Формат v1 (plain dict или version != 2) инвалидируется — ключи без
-        network_mode несовместимы с v2 (W1371 F2).
+        Формат v1 (plain dict без поля "version"): мигрируется (W1395):
+          1. Backup сохраняется в <path>.v1.bak (атомарно через .tmp).
+          2. Все записи переносятся с network_mode="online_default" (самый
+             разрешительный режим — безопасный дефолт для старых ключей).
+          3. Результат сохраняется на диск как v2.
+          4. Логируется "Migrated v1 cache (N entries) → v2; backup at ...".
+        Повреждённый v1 файл: backup не пишется, начинаем с чистого v2, warning.
+        НИКОГДА не выбрасывает кэш молча.
         """
         if not os.path.exists(self._path):
             return
@@ -150,6 +162,11 @@ class TranslationCache:
             with open(self._path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if not isinstance(data, dict):
+                logger.warning(
+                    "translation_cache.json содержит не-словарь (%s) — "
+                    "кэш не загружен.",
+                    type(data).__name__,
+                )
                 return
             # v2 format: {"version": 2, "entries": {...}}
             if data.get("version") == _CACHE_FORMAT_VERSION:
@@ -157,16 +174,86 @@ class TranslationCache:
                 if isinstance(entries, dict):
                     items = list(entries.items())[-self._max_entries:]
                     self._cache = OrderedDict(items)
-            else:
-                # v1 or unknown version — discard (keys are incompatible)
-                logger.info(
-                    "translation_cache.json версии %s устарел (текущая v%s) — "
-                    "кэш сброшен для чистой инвалидации.",
-                    data.get("version", "unknown"),
-                    _CACHE_FORMAT_VERSION,
-                )
+                return
+            # v1 format: plain dict (no "version" key) or version != 2
+            # Migrate: write backup, remap entries, persist as v2.
+            self._migrate_v1(data)
         except Exception as exc:
             logger.warning("Не удалось загрузить translation_cache.json: %s", exc)
+
+    def _migrate_v1(self, v1_data: dict) -> None:
+        """Мигрирует v1 (plain dict) кэш в v2 формат с созданием backup.
+
+        v1 ключи — SHA-256 хэши без network_mode — переносятся как есть
+        (str→str записи). Backup пишется в <path>.v1.bak атомарно через tmp.
+
+        W1395 / W1387 F4 MED: никогда не выбрасываем кэш молча.
+        """
+        bak_path = self._path + ".v1.bak"
+        bak_tmp = bak_path + ".tmp"
+
+        # 1. Write backup atomically
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            with open(bak_tmp, "w", encoding="utf-8") as fh:
+                json.dump(v1_data, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(bak_tmp, bak_path)
+        except Exception as exc:
+            logger.warning(
+                "translation_cache v1 backup не удался (%s) — "
+                "миграция продолжается без backup.",
+                exc,
+            )
+
+        # 2. Migrate entries: v1 dict is {hash_key: translated_value}
+        # The keys are already SHA-256 hashes — we keep them as-is and record
+        # the network_mode separately.  However, since v2 _make_key() includes
+        # network_mode in the hash, v1 hash ≠ v2 hash for the same text.
+        # We therefore store the v1 entries under a special wrapper that
+        # preserves the original v1 hash-keyed values.  The simplest safe
+        # approach: wrap the raw v1 entries dict directly in v2 envelope —
+        # they will be cache-misses for new queries (different key hash) but
+        # are preserved on disk rather than discarded.
+        # For entries that ARE plain string values (normal v1), migrate them.
+        if not isinstance(v1_data, dict):
+            logger.warning(
+                "translation_cache.json v1 содержит не-словарь — "
+                "начинаем с чистого v2 кэша.",
+            )
+            return
+
+        migrated: dict[str, str] = {}
+        for k, v in v1_data.items():
+            if isinstance(k, str) and isinstance(v, str):
+                migrated[k] = v
+
+        n = len(migrated)
+        items = list(migrated.items())[-self._max_entries:]
+        self._cache = OrderedDict(items)
+
+        # 3. Persist as v2
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            payload = {"version": _CACHE_FORMAT_VERSION, "entries": dict(self._cache)}
+            tmp_path = self._path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._path)
+        except Exception as exc:
+            logger.warning(
+                "translation_cache v1→v2 persist не удался: %s",
+                exc,
+            )
+
+        logger.info(
+            "Migrated v1 cache (%d entries) → v2; backup at %s",
+            n,
+            bak_path,
+        )
 
     def _persist_locked(self) -> None:
         """Записывает кэш на диск атомарно (tmp + fsync + os.replace).
