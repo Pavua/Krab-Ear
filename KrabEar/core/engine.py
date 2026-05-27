@@ -862,6 +862,28 @@ class AudioEngine:
                 except Exception:
                     logger.debug("GainNorm: ошибка нормализации, используем оригинальное аудио")
 
+            # 2.7 Удаление длинных внутренних пауз (SmartSilenceSkipper).
+            # Убирает долгие тихие участки внутри аудио до STT — уменьшает
+            # шанс галлюцинаций Whisper на длинных паузах и ускоряет транскрибацию.
+            # Default OFF: SMART_SILENCE_SKIP_ENABLED=False.
+            if (
+                settings.SMART_SILENCE_SKIP_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                try:
+                    from core.smart_silence_skipper import SmartSilenceSkipper
+                    _skip_result = SmartSilenceSkipper().process(audio_data, 16000)
+                    audio_data = _skip_result.processed_audio
+                    logger.debug(
+                        "SmartSilenceSkipper: %.2fs → %.2fs (удалено %.2fs тишины)",
+                        _skip_result.original_duration_sec,
+                        _skip_result.processed_duration_sec,
+                        _skip_result.original_duration_sec - _skip_result.processed_duration_sec,
+                    )
+                except Exception:
+                    logger.exception("smart_silence_skipper: failed, continuing with original audio")
+
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
 
