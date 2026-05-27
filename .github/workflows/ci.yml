@@ -162,3 +162,17 @@ jobs:
 
       - name: Verify CLAUDE.md file references
         run: python3 scripts/verify_claude_md.py
+
+  duplicate-defs-guard:
+    name: Duplicate definitions guard (W1441)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for duplicate function/method definitions
+        # Catches cases where a second def silently shadows the first in the same scope,
+        # masking shipped bug fixes (root cause: W1425 translator.py, W1438 audio_lang_id.py).
+        # @property getter/setter pairs are correctly excluded (valid Python pattern).
+        # No user-controlled input is used in this step — no injection risk.
+        run: python3 scripts/audit_duplicate_defs.py --fail-on-found
