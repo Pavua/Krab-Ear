@@ -58,6 +58,7 @@ class Transcriber:
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
         silence_ranges: list[tuple[float, float]] | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -72,6 +73,8 @@ class Transcriber:
                      diarization_enabled=True, но HF_TOKEN отсутствует — переопределяется в False.
             silence_ranges: Диапазоны тишины (start_sec, end_sec) от RealtimeSilenceFilter.
                      Семплы в этих диапазонах обнуляются перед STT (таймстемпы Whisper сохраняются).
+            progress_callback: Опциональный колбэк для отчёта о прогрессе (имя этапа).
+                     Пробрасывается в engine. Исключения внутри колбэка подавляются.
         """
         # Phase B.1 — guard: check HF_TOKEN before delegating to engine.
         # If diarization is requested (explicitly or via settings dict) but token
@@ -96,6 +99,7 @@ class Transcriber:
             diarize=diarize,
             skip_vad_prefilter=skip_vad_prefilter,
             silence_ranges=silence_ranges,
+            progress_callback=progress_callback,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
