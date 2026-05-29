@@ -748,5 +748,189 @@ class TestDiskFullPhaseE(unittest.TestCase):
                               "Must return a dict even when disk is full")
 
 
+class TestPersistLockAtomic(unittest.TestCase):
+    """W1588 / W1592 — _persist_lock must serialise dedup-check + add_history_item."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def _make_phase_d(self):
+        from backend.translator import TranslationResult
+        _tr = TranslationResult(
+            text="hello",
+            status="skipped",
+            source_lang="auto",
+            target_lang="ru",
+            mode="auto",
+            engine="fake",
+        )
+        return {
+            "text": "hello",
+            "display_text": "hello",
+            "translated_text": "",
+            "final_text": "hello",
+            "translation": _tr,
+            "translation_status": "skipped",
+            "confidence": 0.9,
+            "diarization_data": None,
+            "tp": {},
+        }
+
+    def _make_sr(self):
+        return {
+            "quality_profile": "balanced",
+            "cleanup_profile": "soft",
+            "translation_style": "neutral",
+            "translate_and_paste": False,
+        }
+
+    def _fake_item(self, item_id="fake-id"):
+        from backend.models import HistoryItem
+        return HistoryItem(
+            id=item_id,
+            text="hello",
+            ts="2026-01-01T00:00:00",
+            paste_status="failed",
+        )
+
+    def test_persist_lock_is_acquired_during_add_history_item(self):
+        """_persist_lock must be held while add_history_item is called."""
+        store_mock = MagicMock()
+        fake_item = self._fake_item()
+
+        acquired_during_call = []
+
+        def _spy_add(*args, **kwargs):
+            # Non-blocking acquire should fail because lock is already held
+            got_lock = store_mock._svc._persist_lock.acquire(blocking=False)
+            acquired_during_call.append(not got_lock)  # True = lock was already held
+            if got_lock:
+                store_mock._svc._persist_lock.release()
+            return fake_item
+
+        store_mock.add_history_item.side_effect = _spy_add
+
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store_mock})
+        store_mock._svc = svc  # back-ref for spy
+
+        svc._stop_recording_phase_e(
+            phase_d=self._make_phase_d(),
+            sr=self._make_sr(),
+            duration_sec=1.0,
+            stop_tail_trim_ms=0,
+            silence_detected=False,
+            silence_guard_enabled=False,
+            background_guard_rejected=False,
+            rt_session_id=None,
+            settings={},
+        )
+
+        self.assertTrue(
+            any(acquired_during_call),
+            "_persist_lock was not held during add_history_item — atomicity broken",
+        )
+
+    def test_concurrent_stop_recording_serialized_by_persist_lock(self):
+        """Two concurrent phase_e calls must execute serially under _persist_lock."""
+        import queue as _queue
+
+        add_call_order: list[int] = []
+        order_lock = threading.Lock()
+        call_seq = [0]
+
+        store_mock = MagicMock()
+        fake_item = self._fake_item("concurrent-id")
+
+        def _tracking_add(*args, **kwargs):
+            with order_lock:
+                call_seq[0] += 1
+                add_call_order.append(call_seq[0])
+            return fake_item
+
+        store_mock.add_history_item.side_effect = _tracking_add
+
+        recorder = _FakeRecorder()
+        svc = _make_service(self._tmp, recorder=recorder, extra_kwargs={"store": store_mock})
+
+        results_q: _queue.Queue = _queue.Queue()
+
+        def _call_phase_e():
+            try:
+                r = svc._stop_recording_phase_e(
+                    phase_d=self._make_phase_d(),
+                    sr=self._make_sr(),
+                    duration_sec=1.0,
+                    stop_tail_trim_ms=0,
+                    silence_detected=False,
+                    silence_guard_enabled=False,
+                    background_guard_rejected=False,
+                    rt_session_id=None,
+                    settings={},
+                )
+                results_q.put(r)
+            except Exception as exc:
+                results_q.put(exc)
+
+        t1 = threading.Thread(target=_call_phase_e)
+        t2 = threading.Thread(target=_call_phase_e)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        results = [results_q.get_nowait(), results_q.get_nowait()]
+        for r in results:
+            self.assertNotIsInstance(r, Exception, f"phase_e raised: {r}")
+
+        self.assertEqual(
+            len(add_call_order),
+            2,
+            "Expected exactly 2 add_history_item calls for 2 concurrent phase_e calls",
+        )
+
+    def test_dedup_check_and_add_history_item_atomic(self):
+        """Dedup guard + persist are atomic — duplicate detected inside the lock
+        must prevent add_history_item from being called."""
+        store_mock = MagicMock()
+        store_mock.add_history_item.return_value = self._fake_item("dup-test-id")
+
+        # AutoDeduplicator that always reports duplicate
+        fake_dedup = MagicMock()
+        dup_result = MagicMock()
+        dup_result.is_duplicate = True
+        dup_result.duplicate_of = "original-id"
+        dup_result.similarity = 0.99
+        fake_dedup.check_duplicate.return_value = dup_result
+
+        recorder = _FakeRecorder()
+        recorder.is_recording = True
+        svc = _make_service(
+            self._tmp,
+            recorder=recorder,
+            extra_kwargs={"store": store_mock, "auto_deduplicator": fake_dedup},
+        )
+
+        result = svc._stop_recording_phase_e(
+            phase_d=self._make_phase_d(),
+            sr=self._make_sr(),
+            duration_sec=1.0,
+            stop_tail_trim_ms=0,
+            silence_detected=False,
+            silence_guard_enabled=False,
+            background_guard_rejected=False,
+            rt_session_id=None,
+            settings={"auto_dedup_enabled": True},
+        )
+
+        self.assertEqual(
+            result.get("skipped"),
+            "duplicate",
+            "Dedup guard inside lock must return 'duplicate' skip",
+        )
+        store_mock.add_history_item.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

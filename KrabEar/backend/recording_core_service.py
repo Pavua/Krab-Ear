@@ -1139,68 +1139,74 @@ class RecordingCoreService:
         # privacy_mode is already delegated to AutoDeduplicator._privacy_mode_enabled(),
         # but we also honour the settings flag here to avoid calling check_duplicate at all
         # when the feature is disabled (cheaper + matches test expectations).
+        #
+        # W1588 / W1592: _persist_lock serialises the dedup-check + add_history_item pair
+        # so that two concurrent stop_recording IPC calls cannot both pass the dedup guard
+        # before either write lands.  Lock is held only for the check+add critical section;
+        # all heavy IO (STT, LLM, translation) runs outside.
         _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
-        if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
-            try:
-                import time as _time_mod
-                _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
-                _dedup_result = self._auto_deduplicator.check_duplicate(
-                    text=display_text or text,
-                    timestamp=_ts_now,
-                    store=self.store,
-                )
-                if _dedup_result.is_duplicate:
-                    logger.info(
-                        "AutoDedup: запись пропущена как дубликат original_id=%s similarity=%.3f",
-                        _dedup_result.duplicate_of,
-                        _dedup_result.similarity,
+        with self._persist_lock:
+            if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
+                try:
+                    import time as _time_mod
+                    _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
+                    _dedup_result = self._auto_deduplicator.check_duplicate(
+                        text=display_text or text,
+                        timestamp=_ts_now,
+                        store=self.store,
                     )
-                    return {
-                        "status": "ok",
-                        "skipped": "duplicate",
-                        "duplicate_of": _dedup_result.duplicate_of,
-                        "similarity": _dedup_result.similarity,
-                        "duration_sec": duration_sec,
-                        "quality_profile": sr["quality_profile"],
-                        "cleanup_profile": sr["cleanup_profile"],
-                        "translation_mode": translation.mode,
-                        "translation_style": sr.get("translation_style", "neutral"),
-                        "translate_and_paste": sr["translate_and_paste"],
-                        "translation_status": translation_status,
-                        "text": display_text,
-                        "original_text": text,
-                        "translated_text": translated_text,
-                        "history_id": None,
-                        "ts": None,
-                        "stop_tail_trim_ms": stop_tail_trim_ms,
-                        "silence_detected": silence_detected,
-                        "silence_guard_enabled": silence_guard_enabled,
-                        "background_guard_rejected": background_guard_rejected,
-                    }
-            except Exception:
-                logger.exception("AutoDedup: check_duplicate завершился с исключением, продолжаем запись")
+                    if _dedup_result.is_duplicate:
+                        logger.info(
+                            "AutoDedup: запись пропущена как дубликат original_id=%s similarity=%.3f",
+                            _dedup_result.duplicate_of,
+                            _dedup_result.similarity,
+                        )
+                        return {
+                            "status": "ok",
+                            "skipped": "duplicate",
+                            "duplicate_of": _dedup_result.duplicate_of,
+                            "similarity": _dedup_result.similarity,
+                            "duration_sec": duration_sec,
+                            "quality_profile": sr["quality_profile"],
+                            "cleanup_profile": sr["cleanup_profile"],
+                            "translation_mode": translation.mode,
+                            "translation_style": sr.get("translation_style", "neutral"),
+                            "translate_and_paste": sr["translate_and_paste"],
+                            "translation_status": translation_status,
+                            "text": display_text,
+                            "original_text": text,
+                            "translated_text": translated_text,
+                            "history_id": None,
+                            "ts": None,
+                            "stop_tail_trim_ms": stop_tail_trim_ms,
+                            "silence_detected": silence_detected,
+                            "silence_guard_enabled": silence_guard_enabled,
+                            "background_guard_rejected": background_guard_rejected,
+                        }
+                except Exception:
+                    logger.exception("AutoDedup: check_duplicate завершился с исключением, продолжаем запись")
 
-        item = self.store.add_history_item(
-            text=display_text,
-            paste_status="failed",
-            source_text=text,
-            translated_text=translated_text,
-            translation_mode=translation.mode,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            translation_status=translation_status,
-            translation_engine=translation.engine,
-            cleaned_text=tp.get("cleaned_text", ""),
-            llm_applied=bool(tp.get("llm_applied", False)),
-            llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-            diarization=diarization_data,
-            audio_duration_sec=duration_sec if duration_sec else None,
-            confidence=confidence if confidence else None,
-            emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-            word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-            speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-        )
+            item = self.store.add_history_item(
+                text=display_text,
+                paste_status="failed",
+                source_text=text,
+                translated_text=translated_text,
+                translation_mode=translation.mode,
+                source_lang=translation.source_lang,
+                target_lang=translation.target_lang,
+                translation_status=translation_status,
+                translation_engine=translation.engine,
+                cleaned_text=tp.get("cleaned_text", ""),
+                llm_applied=bool(tp.get("llm_applied", False)),
+                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+                diarization=diarization_data,
+                audio_duration_sec=duration_sec if duration_sec else None,
+                confidence=confidence if confidence else None,
+                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+            )
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
