@@ -12,19 +12,26 @@ from contracts.envelope import (
     parse_event,
 )
 from contracts.registry import EVENT_SCHEMA_MAP, EventType
+from contracts.history_events import AutoSummaryEvent, MarkdownExportEvent
+from contracts.hotword_events import HotwordDetected
+from contracts.live_subs_events import LiveSubsResult
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
 
 __all__ = [
-    "EventType",
+    "AutoSummaryEvent",
     "EVENT_SCHEMA_MAP",
+    "EventType",
+    "HotwordDetected",
     "KrabEventEnvelope",
-    "UnknownEventType",
-    "SttPartial",
-    "SttFinal",
+    "LiveSubsResult",
+    "MarkdownExportEvent",
     "SttFailed",
+    "SttFinal",
+    "SttPartial",
     "TranslationCompleted",
     "TranslationFailed",
-    "parse_event",
+    "UnknownEventType",
     "parse_and_validate",
+    "parse_event",
 ]
