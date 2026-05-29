@@ -185,6 +185,16 @@ class StateStore:
         emotion: str | None = None,
         word_timestamps: list | None = None,
         speaker_turns: list | None = None,
+        # W1643 F2 HIGH: fields previously silently dropped on the standard write path
+        tags: list | None = None,
+        favorite: bool = False,
+        audio_path: str = "",
+        is_protected: bool = False,
+        reasoning: str | None = None,
+        action_items: list | None = None,
+        decisions: list | None = None,
+        questions: list | None = None,
+        privacy_mode: bool = False,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
         item = HistoryItem.create(
@@ -208,6 +218,15 @@ class StateStore:
             emotion=emotion,
             word_timestamps=word_timestamps,
             speaker_turns=speaker_turns,
+            tags=tags,
+            favorite=favorite,
+            audio_path=audio_path,
+            is_protected=is_protected,
+            reasoning=reasoning,
+            action_items=action_items,
+            decisions=decisions,
+            questions=questions,
+            privacy_mode=privacy_mode,
         )
         try:
             with self._lock():
