@@ -332,12 +332,16 @@ class AutoGlossaryBuilder:
         return age_hours < self._refresh_hours
 
     def _is_privacy_mode_active(self) -> bool:
-        """Возвращает True если privacy_mode включён в текущих настройках."""
+        """Возвращает True если privacy_mode включён в текущих настройках.
+
+        Проверяет оба варианта ключа: "privacy_mode" и "privacy_mode_enabled"
+        (W1294: разные вызывающие используют разные ключи).
+        """
         if self._settings_provider is None:
             return False
         try:
-            settings = self._settings_provider()
-            return bool(settings.get("privacy_mode", False))
+            s = self._settings_provider()
+            return bool(s.get("privacy_mode", False) or s.get("privacy_mode_enabled", False))
         except Exception as exc:
             logger.warning(
                 "auto_glossary: не удалось получить настройки для privacy_mode: %s", exc
