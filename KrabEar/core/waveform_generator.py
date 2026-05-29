@@ -8,12 +8,29 @@ WaveformGenerator понижает дискретизацию аудио до nu
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 logger = logging.getLogger("KrabEar.Core.WaveformGenerator")
+
+
+# ---------------------------------------------------------------------------
+# Numeric safety guard (W1539 F4 / W1442 pattern)
+# ---------------------------------------------------------------------------
+# numpy can produce NaN/Inf from corrupt/all-zero audio (e.g. NaN input → NaN
+# RMS, Inf from log(0) in dB conversions). Both are NOT valid JSON (RFC 8259)
+# — Swift's JSONDecoder rejects them, silently blanking the waveform UI.
+
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Coerce NaN/Inf/non-numeric numpy result to a finite default value."""
+    if not isinstance(v, (int, float)):
+        return default
+    if math.isnan(v) or math.isinf(v):
+        return default
+    return float(v)
 
 
 @dataclass
@@ -73,8 +90,9 @@ class WaveformGenerator:
             )
 
         duration_sec = float(data.size) / float(sample_rate)
-        peak_amplitude = float(np.abs(data).max())
-        rms_amplitude = float(np.sqrt(np.mean(np.square(data, dtype=np.float64))))
+        peak_amplitude = _safe_float(float(np.abs(data).max()))
+        raw_rms = float(np.sqrt(np.mean(np.square(data, dtype=np.float64))))
+        rms_amplitude = _safe_float(raw_rms)
 
         points = self._downsample_to_bins(data, num_points, peak_amplitude)
 
