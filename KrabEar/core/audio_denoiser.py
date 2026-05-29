@@ -37,6 +37,14 @@ _STRENGTH_PARAMS: dict[str, dict] = {
     "strong":   {"prop_decrease": 0.95, "n_std_thresh_stationary": 2.0},
 }
 
+# W1322: параметры noisereduce бэкенда по уровням силы.
+# strong-mode включает min_attenuation_db=-12.0 — floor не даёт уничтожить тихую речь.
+_NOISEREDUCE_PARAMS: dict[str, dict] = {
+    "light":    {"prop_decrease": 0.5,  "stationary": True,  "freq_mask_smooth_hz": 500},
+    "moderate": {"prop_decrease": 0.75, "stationary": True,  "freq_mask_smooth_hz": 500},
+    "strong":   {"prop_decrease": 0.95, "stationary": False, "freq_mask_smooth_hz": 250, "min_attenuation_db": -12.0},  # W1322: floor at -12dB
+}
+
 # Количество семплов для оценки noise floor (первые ~200 мс @ 16 кГц)
 _NOISE_FLOOR_SAMPLES = 3200
 
@@ -156,9 +164,10 @@ class AudioDenoiser:
             return audio
 
         params = _STRENGTH_PARAMS.get(effective_strength, _STRENGTH_PARAMS["moderate"])
+        nr_params = _NOISEREDUCE_PARAMS.get(effective_strength)
 
         if self._has_noisereduce:
-            denoised = self._denoise_noisereduce(mono, sample_rate, params)
+            denoised = self._denoise_noisereduce(mono, sample_rate, params, nr_params=nr_params)
         else:
             denoised = self._denoise_spectral_gating(mono, sample_rate, params)
 
@@ -177,21 +186,46 @@ class AudioDenoiser:
         audio: np.ndarray,
         sample_rate: int,
         params: dict,
+        nr_params: dict | None = None,
     ) -> np.ndarray:
-        """Шумоподавление через пакет noisereduce (stationary mode)."""
+        """Шумоподавление через пакет noisereduce.
+
+        Args:
+            audio: 1-D float64 аудиомассив.
+            sample_rate: частота дискретизации в Гц.
+            params: параметры spectral gating (prop_decrease, n_std_thresh_stationary).
+            nr_params: параметры noisereduce бэкенда (_NOISEREDUCE_PARAMS[strength]).
+                       Если None — строится из params с дефолтами.
+        """
         import noisereduce as nr  # type: ignore
 
         # Оцениваем noise floor по первым ~200 мс
         noise_clip = audio[:_NOISE_FLOOR_SAMPLES] if len(audio) > _NOISE_FLOOR_SAMPLES else audio
 
-        result = nr.reduce_noise(
-            y=audio,
-            sr=sample_rate,
-            y_noise=noise_clip,
-            prop_decrease=params["prop_decrease"],
-            stationary=True,
-            n_std_thresh_stationary=params["n_std_thresh_stationary"],
-        )
+        if nr_params is not None:
+            # W1322: используем _NOISEREDUCE_PARAMS (включая min_attenuation_db для strong)
+            call_kwargs: dict = {
+                "y": audio,
+                "sr": sample_rate,
+                "y_noise": noise_clip,
+                "prop_decrease": nr_params["prop_decrease"],
+                "stationary": nr_params.get("stationary", True),
+            }
+            if "freq_mask_smooth_hz" in nr_params:
+                call_kwargs["freq_mask_smooth_hz"] = nr_params["freq_mask_smooth_hz"]
+            if "min_attenuation_db" in nr_params:
+                call_kwargs["min_attenuation_db"] = nr_params["min_attenuation_db"]
+        else:
+            call_kwargs = {
+                "y": audio,
+                "sr": sample_rate,
+                "y_noise": noise_clip,
+                "prop_decrease": params["prop_decrease"],
+                "stationary": True,
+                "n_std_thresh_stationary": params["n_std_thresh_stationary"],
+            }
+
+        result = nr.reduce_noise(**call_kwargs)
         return np.asarray(result, dtype=np.float64)
 
     # ------------------------------------------------------------------
