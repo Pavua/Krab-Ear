@@ -449,7 +449,7 @@ class BackendService:
         self._metadata_enricher = MetadataEnricher()
         self._timeline_exporter = TimelineExporter()
         self._timeline_view = TimelineViewGenerator()
-        self._auto_deduplicator = AutoDeduplicator()
+        self._auto_deduplicator = AutoDeduplicator(settings_provider=self._get_runtime_setting)
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
@@ -3837,6 +3837,7 @@ end tell'''
             dict: total_scanned, duplicate_groups, duplicates.
         """
         params["_store"] = self.store
+        params["_semantic_searcher"] = self._semantic_searcher
         return self._auto_deduplicator.handle_run_deduplication(params)
 
     def _handle_get_dedup_stats(self, params: dict[str, Any]) -> dict[str, Any]:
