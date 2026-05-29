@@ -209,6 +209,7 @@ class AudioRecorder:
                     if overflowed:
                         logger.warning("Переполнение аудиобуфера во время записи")
                         self._push_buffer_overflow_error()
+                    _max_duration_exceeded = False
                     with self._lock:
                         chunk_samples = data.reshape(-1).size
                         if self._chunks_total_samples + chunk_samples > MAX_RECORDING_SAMPLES:
@@ -218,10 +219,17 @@ class AudioRecorder:
                                 MAX_RECORDING_SAMPLES // self.sample_rate,
                                 extra={"max_samples": MAX_RECORDING_SAMPLES},
                             )
-                            self._push_max_duration_error()
-                            break
-                        self._chunks.append(data.copy())
-                        self._chunks_total_samples += chunk_samples
+                            _max_duration_exceeded = True
+                        else:
+                            self._chunks.append(data.copy())
+                            self._chunks_total_samples += chunk_samples
+                    # Push error OUTSIDE the lock to avoid lock-order deadlock:
+                    # error_bus._lock → event_bus.emit() → SSE callbacks that may
+                    # call recorder.is_recording / snapshot_rms (which re-acquire
+                    # self._lock). threading.Lock is not re-entrant.
+                    if _max_duration_exceeded:
+                        self._push_max_duration_error()
+                        break
                     if self._on_audio_level is not None:
                         now = time.monotonic()
                         if now - last_level_emit_at >= _AUDIO_LEVEL_EMIT_INTERVAL_SEC:
@@ -242,7 +250,8 @@ class AudioRecorder:
     def _push_max_duration_error(self) -> None:
         """Push audio.max_duration_reached to error bus. Never raises.
 
-        W1331: вызывается из _worker под self._lock когда достигнут MAX_RECORDING_SAMPLES.
+        W1652 (F3 fix): вызывается из _worker ПОСЛЕ освобождения self._lock во избежание
+        deadlock: error_bus._lock → event_bus.emit() → SSE callback → recorder.is_recording.
         """
         error_bus = getattr(self, "_error_bus", None)
         if error_bus is None:
