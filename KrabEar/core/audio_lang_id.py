@@ -28,6 +28,16 @@ from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
+# W1416 / W1465: module-level MLX availability flag + mlx.core alias.
+# Checked at clear_model_cache() time and inside _detect_with_mlx finally block.
+# Tests patch core.audio_lang_id._HAS_MLX and core.audio_lang_id.mx directly.
+try:
+    import mlx.core as mx  # type: ignore[import]
+    _HAS_MLX: bool = True
+except ImportError:
+    mx = None  # type: ignore[assignment]
+    _HAS_MLX = False
+
 # W1090 / W1525 guard — DO NOT DROP IN CHERRY-PICKS.
 # W1497 cherry-pick train reverted these constants via --theirs strategy.
 # Any future cherry-pick that touches this file must preserve both guards.
@@ -62,10 +72,14 @@ class AudioLanguageID:
 
     # Singleton-кеш модели (загружается лениво, расшаривается между вызовами)
     _model_cache: Dict[str, Any] = {}
-    # Lock guards _model_cache modifications from clear_model_cache() vs _detect_with_mlx().
-    # Note: _detect_with_mlx() already runs inside mlx_lock(), so this lock is only
-    # needed for clear_model_cache() calls from outside the mlx_lock() context.
-    _cache_lock: threading.Lock = threading.Lock()
+    # W1116: RLock (reentrant) guards _model_cache modifications from clear_model_cache()
+    # vs _detect_with_mlx(). RLock is required because _detect_with_mlx() runs inside
+    # mlx_lock() (an RLock itself) and may re-enter _model_cache_lock on the same thread.
+    # DO NOT downgrade to threading.Lock() — causes deadlock on re-entry.
+    _model_cache_lock: threading.RLock = threading.RLock()
+    # W1340 backward-compat alias — tests written before W1116 rename check _cache_lock.
+    # Both names point to the same RLock instance.
+    _cache_lock = _model_cache_lock
 
     # W1090 / W1525 guard constants exposed as class attributes for testability.
     # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
@@ -174,7 +188,11 @@ class AudioLanguageID:
         MODEL_BALANCED — предотвращает использование стale модели после переключения
         профиля STT, устраняя cold-load stall внутри mlx_lock() на следующей записи.
 
-        Потокобезопасно: захватывает _cache_lock перед очисткой dict.
+        W1416: также вызывает mx.clear_cache() когда MLX доступен, освобождая
+        Metal-буферы удалённой модели. Исключения из mx.clear_cache() подавляются
+        (деградация, а не падение).
+
+        Потокобезопасно: захватывает _model_cache_lock перед очисткой dict.
         """
         with cls._cache_lock:
             if cls._model_cache:
@@ -185,6 +203,18 @@ class AudioLanguageID:
                 cls._model_cache.clear()
             else:
                 logger.debug("AudioLanguageID.clear_model_cache: кеш уже пуст")
+
+        # W1405/W1416/W1582: освобождаем Metal GPU буферы после вытеснения модели.
+        # DO NOT REMOVE — W1497 cherry-pick train reverted this call.
+        # Runtime import (not module-level mx) to work correctly under sys.modules patching
+        # in tests (patch.dict("sys.modules", {"mlx.core": mock_mx}) is how W1416 tests spy).
+        if _HAS_MLX:
+            with mlx_lock():
+                try:
+                    import mlx.core as _mx_rt  # noqa: PLC0415
+                    _mx_rt.clear_cache()
+                except Exception:
+                    logger.debug("mx.clear_cache failed in clear_model_cache", exc_info=True)
 
     # ------------------------------------------------------------------
     # Внутренние методы
@@ -307,8 +337,9 @@ class AudioLanguageID:
         # H4: старые записи — чистый leak: объект модели удерживает MLX Metal
         # буферы, даже после mx.clear_cache() в engine.py.  Держим только
         # текущую модель; при смене профиля (balanced→max) старая вытесняется.
-        # _cache_lock защищает от гонки с clear_model_cache() из settings hook.
-        with AudioLanguageID._cache_lock:
+        # W1116: _model_cache_lock (RLock) защищает от гонки с clear_model_cache()
+        # из settings hook. RLock требуется т.к. этот метод уже под mlx_lock().
+        with AudioLanguageID._model_cache_lock:
             if model_path not in AudioLanguageID._model_cache:
                 logger.debug("AudioLanguageID: загружаем модель %s для LID", model_path)
                 if len(AudioLanguageID._model_cache) >= 1:
@@ -327,69 +358,83 @@ class AudioLanguageID:
 
             model = AudioLanguageID._model_cache[model_path]
 
-        # Строим log-mel spectrogram
+        # W1367 / W1416 / W1465: wrap inference in try/finally to call mx.clear_cache()
+        # INSIDE the mlx_lock() context (this method is always called under mlx_lock).
+        # DO NOT move clear_cache() outside this method — W1465 removes the outer call.
         try:
-            # mlx_whisper ожидает float32 numpy array нормализованный в [-1, 1]
-            audio_norm = audio_16k.astype(np.float32)
-            # Нормализуем пик если нужно
-            peak = float(np.max(np.abs(audio_norm)))
-            if peak > 1.0:
-                audio_norm = audio_norm / peak
+            # Строим log-mel spectrogram
+            try:
+                # mlx_whisper ожидает float32 numpy array нормализованный в [-1, 1]
+                audio_norm = audio_16k.astype(np.float32)
+                # Нормализуем пик если нужно
+                peak = float(np.max(np.abs(audio_norm)))
+                if peak > 1.0:
+                    audio_norm = audio_norm / peak
 
-            # Pad до минимальной длины (30 секунд = 480000 samples @ 16kHz)
-            n_samples = 16000 * 30
-            if len(audio_norm) < n_samples:
-                audio_norm = np.pad(audio_norm, (0, n_samples - len(audio_norm)))
+                # Pad до минимальной длины (30 секунд = 480000 samples @ 16kHz)
+                n_samples = 16000 * 30
+                if len(audio_norm) < n_samples:
+                    audio_norm = np.pad(audio_norm, (0, n_samples - len(audio_norm)))
 
-            mel = mlx_whisper.audio.log_mel_spectrogram(audio_norm)
+                mel = mlx_whisper.audio.log_mel_spectrogram(audio_norm)
 
-        except Exception as exc:
-            logger.warning("AudioLanguageID: log_mel_spectrogram failed: %s", exc)
-            return None
-
-        # detect_language
-        try:
-            # mlx_whisper.decoding.detect_language(model, mel) → dict[str, float]
-            # или может возвращать (str, dict) в разных версиях — обрабатываем оба
-            result = mlx_whisper.decoding.detect_language(model, mel)
-
-            probs: Optional[dict] = None
-            if isinstance(result, tuple):
-                # (language_str, probs_dict)
-                lang_code = result[0]
-                if len(result) >= 2 and isinstance(result[1], dict):
-                    probs = result[1]
-            elif isinstance(result, dict):
-                # {lang: prob, ...} — берём argmax
-                probs = result
-                lang_code = max(result, key=lambda k: result[k])
-            elif isinstance(result, str):
-                lang_code = result
-            else:
-                logger.warning(
-                    "AudioLanguageID: неожиданный тип результата detect_language: %s",
-                    type(result),
-                )
+            except Exception as exc:
+                logger.warning("AudioLanguageID: log_mel_spectrogram failed: %s", exc)
                 return None
 
-            lang_code = str(lang_code).strip().lower()
+            # detect_language
+            try:
+                # mlx_whisper.decoding.detect_language(model, mel) → dict[str, float]
+                # или может возвращать (str, dict) в разных версиях — обрабатываем оба
+                result = mlx_whisper.decoding.detect_language(model, mel)
 
-            # F2 guard (W1090 / W1525): drop low-confidence detections.
-            # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
-            if probs is not None and lang_code:
-                confidence = float(probs.get(lang_code, 0.0))
-                if confidence < _MIN_CONFIDENCE:
-                    logger.debug(
-                        "audio_lang_id: confidence %.3f for '%s' below threshold %.3f, dropping",
-                        confidence,
-                        lang_code,
-                        _MIN_CONFIDENCE,
+                probs: Optional[dict] = None
+                if isinstance(result, tuple):
+                    # (language_str, probs_dict)
+                    lang_code = result[0]
+                    if len(result) >= 2 and isinstance(result[1], dict):
+                        probs = result[1]
+                elif isinstance(result, dict):
+                    # {lang: prob, ...} — берём argmax
+                    probs = result
+                    lang_code = max(result, key=lambda k: result[k])
+                elif isinstance(result, str):
+                    lang_code = result
+                else:
+                    logger.warning(
+                        "AudioLanguageID: неожиданный тип результата detect_language: %s",
+                        type(result),
                     )
                     return None
 
-            logger.info("AudioLanguageID: detected language = %s", lang_code)
-            return lang_code if lang_code else None
+                lang_code = str(lang_code).strip().lower()
 
-        except Exception as exc:
-            logger.warning("AudioLanguageID: detect_language failed: %s", exc)
-            return None
+                # F2 guard (W1090 / W1525): drop low-confidence detections.
+                # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+                if probs is not None and lang_code:
+                    confidence = float(probs.get(lang_code, 0.0))
+                    if confidence < _MIN_CONFIDENCE:
+                        logger.debug(
+                            "audio_lang_id: confidence %.3f for '%s' below threshold %.3f, dropping",
+                            confidence,
+                            lang_code,
+                            _MIN_CONFIDENCE,
+                        )
+                        return None
+
+                logger.info("AudioLanguageID: detected language = %s", lang_code)
+                return lang_code if lang_code else None
+
+            except Exception as exc:
+                logger.warning("AudioLanguageID: detect_language failed: %s", exc)
+                return None
+
+        finally:
+            # W1367 / W1416: free MLX Metal buffers after inference, while still
+            # inside mlx_lock() context. Single call site — see W1465 for why the
+            # outer _run_detect.finally was removed (double-clear defect).
+            if _HAS_MLX and mx is not None:
+                try:
+                    mx.clear_cache()
+                except Exception:  # pragma: no cover
+                    pass
