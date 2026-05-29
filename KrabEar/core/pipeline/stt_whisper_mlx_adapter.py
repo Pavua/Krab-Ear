@@ -101,7 +101,10 @@ class WhisperMLXAdapter(STTAdapterBase):
         except ImportError:
             import contextlib
             mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
-            mlx_inter_process_lock = lambda **_kw: contextlib.nullcontext()  # type: ignore[assignment]
+
+            def mlx_inter_process_lock(**_kw):  # type: ignore[assignment]
+                return contextlib.nullcontext()
+
             class MLXInterLockTimeout(Exception):  # type: ignore[no-redef]
                 pass
 

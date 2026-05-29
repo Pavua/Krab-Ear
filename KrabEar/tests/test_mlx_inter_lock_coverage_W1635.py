@@ -34,6 +34,7 @@ if _PROJECT_ROOT not in sys.path:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _source(rel_path: str) -> str:
     path = os.path.join(_PROJECT_ROOT, rel_path)
     with open(path) as f:
