@@ -695,6 +695,22 @@ ERROR_REGISTRY: dict[str, _Entry] = {
         "dedupe_seconds": 180,
     },
 
+    # ── W1614 F1 HIGH: audio.max_duration_reached missing from registry ──────
+    # recorder.py:257 pushes this code when the max-duration limit is hit and
+    # the recording is auto-stopped. Previously the code was unknown to the
+    # registry, causing ErrorBus to emit a toast with an empty user_msg_ru and
+    # no dedupe window. Severity=warn (expected, user-triggered boundary),
+    # actionable=False (no UI action needed — recording is already stopped).
+    # Dedupe 60s: one toast per recording limit hit.
+    "audio.max_duration_reached": {
+        "user_msg_ru": "Запись остановлена: достигнут лимит длительности",
+        "actionable": False,
+        "action_id": None,
+        "action_label": "",
+        "severity": "warn",
+        "dedupe_seconds": 60,
+    },
+
     # ── W1231 F2 HIGH: two live callsites with unregistered codes ─────────────
 
     # rewriter.mlx_token_bug — mlx_lm 0.31.3 HTTP 500 UnboundLocalError on
