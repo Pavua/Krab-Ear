@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-all dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -96,6 +96,21 @@ dispatch-tests:
 		KrabEar/tests/test_dispatch_invariants_wave654.py \
 		KrabEar/tests/test_dispatch_invariants_wave693.py \
 		-v
+
+# Audit duplicate function/method defs (W1441 guard, wired in CI).
+# Exits non-zero if genuine shadowing bugs are found (@property pairs excluded).
+audit-duplicate-defs:
+	python3 scripts/audit_duplicate_defs.py $(ARGS)
+
+# Audit test imports against source modules (W1538 guard, wired in CI).
+# Detects symbols dropped by cherry-pick or rebase regressions.
+# Pass ARGS=--json for machine-readable output.
+audit-cherry-pick:
+	python3 scripts/audit_cherry_pick_regressions.py $(ARGS)
+
+# Run all static audit checks (CI parity — runs same checks as CI guard jobs).
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick
+	@echo "All audit checks passed."
 
 # Print current service.py line count (quick monolith size gauge).
 service-loc:

@@ -96,7 +96,7 @@ def _parse_from_imports(test_path: Path) -> list[tuple[str, str]]:
     return results
 
 
-def main(as_json: bool = False) -> None:
+def main(as_json: bool = False, fail_on_found: bool = False) -> list[dict]:
     missing: list[dict] = []
     checked = 0
     skipped_modules: set[str] = set()
@@ -124,7 +124,7 @@ def main(as_json: bool = False) -> None:
 
     if as_json:
         print(json.dumps({"missing": missing, "checked": checked}, indent=2))
-        return
+        return missing
 
     print(f"Checked {checked} from-imports across {len(test_files)} test files.")
     print(f"Skipped {len(skipped_modules)} unresolvable modules.")
@@ -136,9 +136,15 @@ def main(as_json: bool = False) -> None:
                 f"\n    from {m['module']} import {m['symbol']}"
                 f"\n    (source: {m['source_file']})\n"
             )
+        if fail_on_found:
+            sys.exit(1)
     else:
         print("\nNo missing symbols found — all imports resolve.")
 
+    return missing
+
 
 if __name__ == "__main__":
-    main(as_json="--json" in sys.argv)
+    fail_on_found = "--fail-on-found" in sys.argv
+    as_json = "--json" in sys.argv
+    missing = main(as_json=as_json, fail_on_found=fail_on_found)
