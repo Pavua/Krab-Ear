@@ -94,11 +94,16 @@ class WhisperMLXAdapter(STTAdapterBase):
         effective_language = self._language_override or language
 
         # Serialize MLX GPU access to prevent concurrent Metal hash table corruption.
+        # W1635: also acquire mlx_inter_process_lock (cross-process flock, env-var gated).
         try:
             from core.mlx_lock import mlx_lock
+            from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
         except ImportError:
             import contextlib
             mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
+            mlx_inter_process_lock = lambda **_kw: contextlib.nullcontext()  # type: ignore[assignment]
+            class MLXInterLockTimeout(Exception):  # type: ignore[no-redef]
+                pass
 
         params: dict[str, Any] = {
             "path_or_hf_repo": self._model_path,
@@ -117,7 +122,7 @@ class WhisperMLXAdapter(STTAdapterBase):
             params,
         ]
 
-        with mlx_lock():
+        with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
             for p in variants:
                 try:
                     result = mlx_whisper.transcribe(audio, **p)

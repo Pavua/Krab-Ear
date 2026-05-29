@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from core.mlx_lock import mlx_lock
+from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
@@ -286,8 +287,11 @@ class AudioLanguageID:
             return None
 
         try:
-            with mlx_lock():
+            with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
                 return self._detect_with_mlx(mlx_whisper, audio_16k)
+        except MLXInterLockTimeout as exc:
+            logger.error("AudioLanguageID: mlx_inter_lock timeout — %s", exc)
+            return None
         except Exception as exc:
             logger.warning("AudioLanguageID: inference failed: %s", exc)
             return None
