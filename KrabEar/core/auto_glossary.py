@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -233,6 +234,9 @@ class AutoGlossaryBuilder:
         # None means privacy_mode is assumed off (backward-compatible).
         self._settings_provider = settings_provider
 
+        # Lock protecting _cache + _cache_built_at across build/invalidate/get_cached.
+        self._cache_lock = threading.Lock()
+
         # In-memory cache
         self._cache: List[str] = []
         self._cache_built_at: float = 0.0  # Unix epoch
@@ -261,6 +265,19 @@ class AutoGlossaryBuilder:
         Returns:
             Список строк-терминов (не более top_n), отсортированных по частоте.
         """
+        if self._is_privacy_mode_active():
+            with self._cache_lock:
+                # W1570 N2: clear stale pre-privacy cache loaded from disk at __init__.
+                # Without this guard build() would return a valid _is_cache_valid()=True
+                # cache that was built before privacy_mode was toggled on.
+                if self._cache:
+                    self._cache = []
+                    self._cache_built_at = 0.0
+                    logger.debug(
+                        "auto_glossary: privacy_mode активен — сброс кэша из памяти"
+                    )
+            return []
+
         if not force and self._is_cache_valid():
             logger.debug("auto_glossary: cache hit (%d terms)", len(self._cache))
             return list(self._cache[:top_n])
@@ -289,11 +306,21 @@ class AutoGlossaryBuilder:
         return list(self._cache)
 
     def invalidate(self) -> None:
-        """Сбрасывает кэш — следующий вызов build() пересчитает глоссарий."""
-        self._cache = []
-        self._cache_built_at = 0.0
-        if self._data_dir:
-            self._save_cache_to_disk()
+        """Сбрасывает кэш — следующий вызов build() пересчитает глоссарий.
+
+        W1570 N1: skip disk write in privacy mode — _save_cache_to_disk()
+        is now guarded the same way as in build(), so no empty JSON file is
+        written when privacy_mode is active.
+        """
+        with self._cache_lock:
+            self._cache = []
+            self._cache_built_at = 0.0
+            if self._data_dir and not self._is_privacy_mode_active():
+                self._save_cache_to_disk()
+            elif self._is_privacy_mode_active():
+                logger.debug(
+                    "auto_glossary: privacy_mode активен — пропускаем сохранение при invalidate()"
+                )
 
     # ── Вспомогательные методы ────────────────────────────────────────────────
 
