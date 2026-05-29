@@ -87,6 +87,8 @@ class HistoryService:
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
+        # Late-injection: RecordingChainManager для каскадной очистки ghost item_ids (W1253 RC-3).
+        self._recording_chain_mgr = None
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -302,6 +304,9 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
+        if self._recording_chain_mgr is not None:
+            self._recording_chain_mgr.remove_item_from_all_chains(item_id)
         add_breadcrumb(
             category="history",
             message="delete_history_item",
