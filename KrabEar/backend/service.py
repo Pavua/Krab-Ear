@@ -222,6 +222,28 @@ class BackendService:
                     _rewriter_ref.set_api_key(new_key)
             self._settings_svc.register_after_save_hook(_on_settings_saved)
 
+        # W1603 / W1599 F2 MED: Re-initialize Sentry when privacy_mode toggles OFF.
+        # W1601 handled the ON path (clears _sentry_initialized).  This hook covers
+        # the inverse: when the user disables privacy_mode at runtime, Sentry must be
+        # re-initialized from the current sentry_dsn so crash reporting resumes.
+        def _on_privacy_mode_off(old: dict, new: dict) -> None:
+            old_privacy = bool(old.get("privacy_mode_enabled", False))
+            new_privacy = bool(new.get("privacy_mode_enabled", False))
+            if old_privacy and not new_privacy:
+                # Privacy mode just toggled OFF — re-init Sentry if DSN is configured.
+                from backend.observability import init_sentry, is_sentry_initialized  # noqa: PLC0415
+                if not is_sentry_initialized():
+                    dsn = str(new.get("sentry_dsn", "")).strip()
+                    if dsn:
+                        init_sentry(
+                            dsn=dsn,
+                            settings=new,
+                        )
+                        logger.info(
+                            "observability: Sentry re-initialized after privacy_mode disabled"
+                        )
+        self._settings_svc.register_after_save_hook(_on_privacy_mode_off)
+
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
