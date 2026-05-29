@@ -601,9 +601,11 @@ class AudioEngine:
         self.current_model = new_model
         # H2: при смене профиля balanced↔max старая модель выгружается из MLX.
         # Явный flush Metal cache освобождает GPU буферы немедленно, не дожидаясь GC.
+        # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
         try:
             import mlx.core as _mx
-            _mx.clear_cache()
+            with mlx_lock():
+                _mx.clear_cache()
         except (ImportError, AttributeError):
             pass  # MLX не установлен или старая версия без clear_cache
         return True
@@ -976,9 +978,11 @@ class AudioEngine:
             _gc.collect()
             # H2: явный flush MLX Metal cache — без этого GPU буферы остаются в
             # Metal heap и backend не возвращается к baseline RSS после каждого STT.
+            # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
             try:
                 import mlx.core as _mx
-                _mx.clear_cache()
+                with mlx_lock():
+                    _mx.clear_cache()
             except (ImportError, AttributeError):
                 pass  # MLX не установлен или старая версия без clear_cache
 
