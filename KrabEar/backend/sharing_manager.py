@@ -9,6 +9,7 @@ Wave 158: добавлены TTL (expires_at) и revoke API для устран�
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import math
@@ -208,11 +209,25 @@ class SharingManager:
             result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
             return result
 
+    def _find_share_by_token_constant_time(self, token: str) -> dict[str, Any] | None:
+        """Ищет запись в индексе по токену за константное время.
+
+        Итерирует ВСЕ записи без short-circuit, чтобы не давать timing-oracle
+        атакующему информацию о существовании токена.
+
+        Должна вызываться под self._lock.
+        """
+        found: dict[str, Any] | None = None
+        for known_token, entry in self._index.items():
+            if hmac.compare_digest(known_token, token):
+                found = entry
+        return found
+
     def get_shared(self, share_id: str) -> SharePackage | None:
         """Возвращает SharePackage по ID, или None если не найден / истёк / отозван."""
         now = time.time()
         with self._lock:
-            entry = self._index.get(share_id)
+            entry = self._find_share_by_token_constant_time(share_id)
             if entry is None:
                 return None
             # Проверяем отзыв
@@ -233,9 +248,10 @@ class SharingManager:
             True если пакет существовал и был отозван, False если не найден.
         """
         with self._lock:
-            if token not in self._index:
+            entry = self._find_share_by_token_constant_time(token)
+            if entry is None:
                 return False
-            self._index[token]["is_revoked"] = True
+            self._index[entry["share_id"]]["is_revoked"] = True
             self._save_index()
             return True
 
@@ -260,7 +276,11 @@ class SharingManager:
         fmt = str(params.get("format", "markdown")).strip()
         include_translation = bool(params.get("include_translation", True))
         ttl_hours_raw = params.get("ttl_hours")
-        ttl_hours: Optional[float] = float(ttl_hours_raw) if ttl_hours_raw is not None else None
+        # W1244: when ttl_hours absent from IPC params, apply 1h IPC default (not the 168h store default)
+        if ttl_hours_raw is None:
+            ttl_hours: Optional[float] = 1.0
+        else:
+            ttl_hours = float(ttl_hours_raw)
         # W1244: TTL validation at IPC boundary — raise RuntimeError (not ValueError) for IPC callers
         if ttl_hours is not None:
             if not math.isfinite(ttl_hours):
