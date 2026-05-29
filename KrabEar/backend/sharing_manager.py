@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
 import string
 import threading
@@ -29,6 +30,12 @@ _SHARES_INDEX_FILE = "shares_index.json"
 
 # Default TTL: 7 days in hours
 DEFAULT_SHARE_TTL_HOURS: int = 168
+
+# W1244: TTL upper bound (1 year) — prevents infinite/astronomically-large expiry timestamps
+_MAX_TTL_HOURS: int = 24 * 365  # 1 year
+
+# W1245: item_ids cap — prevents memory bomb from unbounded list
+_MAX_SHARE_ITEMS: int = 1000
 
 SUPPORTED_FORMATS = ("markdown", "text", "json")
 
@@ -133,11 +140,27 @@ class SharingManager:
         """
         if not item_ids:
             raise ValueError("item_ids не может быть пустым")
+        # W1245: cap item_ids to avoid memory bomb
+        if len(item_ids) > _MAX_SHARE_ITEMS:
+            raise ValueError(
+                f"too many item_ids: {len(item_ids)} > {_MAX_SHARE_ITEMS}"
+            )
         fmt = format.strip().lower()
         if fmt not in SUPPORTED_FORMATS:
             raise ValueError(
                 f"Неподдерживаемый формат: {format!r}. Допустимые: {SUPPORTED_FORMATS}"
             )
+
+        # W1244: validate and clamp ttl_hours before resolving
+        if ttl_hours is not None:
+            ttl_hours = float(ttl_hours)
+            if not math.isfinite(ttl_hours):
+                raise ValueError(
+                    "ttl_hours должен быть конечным числом (не inf/nan)"
+                )
+            if ttl_hours < 0:
+                ttl_hours = 0.0
+            ttl_hours = min(ttl_hours, float(_MAX_TTL_HOURS))
 
         # Вычисляем expires_at
         effective_ttl = self._resolve_ttl(ttl_hours)
@@ -229,17 +252,40 @@ class SharingManager:
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:
             raise RuntimeError("Параметр 'item_ids' должен быть непустым списком")
+        # W1245: item_ids cap — guard at IPC boundary before calling prepare_share
+        if len(item_ids) > _MAX_SHARE_ITEMS:
+            raise RuntimeError(
+                f"too many item_ids: {len(item_ids)} > {_MAX_SHARE_ITEMS}"
+            )
         fmt = str(params.get("format", "markdown")).strip()
         include_translation = bool(params.get("include_translation", True))
         ttl_hours_raw = params.get("ttl_hours")
         ttl_hours: Optional[float] = float(ttl_hours_raw) if ttl_hours_raw is not None else None
-        package = self.prepare_share(
-            item_ids,
-            format=fmt,
-            include_translation=include_translation,
-            ttl_hours=ttl_hours,
-        )
-        return package.to_dict()
+        # W1244: TTL validation at IPC boundary — raise RuntimeError (not ValueError) for IPC callers
+        if ttl_hours is not None:
+            if not math.isfinite(ttl_hours):
+                raise RuntimeError(
+                    "ttl_hours должен быть конечным числом (не inf/nan)"
+                )
+            if ttl_hours < 0:
+                ttl_hours = 0.0
+            ttl_hours = min(ttl_hours, float(_MAX_TTL_HOURS))
+        # W1244 F5: pre-check if any items resolve — used to set warning after
+        resolved_items = self._fetch_items(item_ids)
+        try:
+            package = self.prepare_share(
+                item_ids,
+                format=fmt,
+                include_translation=include_translation,
+                ttl_hours=ttl_hours,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        result = package.to_dict()
+        # Add warning when none of the item_ids resolved to actual history items
+        if not resolved_items:
+            result["warning"] = "no_items_found"
+        return result
 
     def handle_list_shared(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: список сохранённых пакетов."""
