@@ -176,3 +176,20 @@ jobs:
         # @property getter/setter pairs are correctly excluded (valid Python pattern).
         # No user-controlled input is used in this step — no injection risk.
         run: python3 scripts/audit_duplicate_defs.py --fail-on-found
+
+  cherry-pick-regression-guard:
+    name: Cherry-pick regression guard (W1538)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check test imports resolve against source modules
+        # Detects symbols imported in tests that no longer exist in the source module,
+        # which indicates a cherry-pick or rebase silently dropped a fix wave.
+        # Root cause of W1525 regression train: 4-of-5 fix waves clobbered by W1497.
+        # continue-on-error: pre-existing 18 regressions on this branch must be fixed
+        # before this gate can be made strict. Remove continue-on-error once clean.
+        # No user-controlled input is used in this step — no injection risk.
+        continue-on-error: true
+        run: python3 scripts/audit_cherry_pick_regressions.py --fail-on-found
