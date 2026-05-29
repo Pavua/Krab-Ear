@@ -41,7 +41,7 @@ def _build_engine() -> "AudioEngine":  # noqa: F821
     engine._confidence_calibrator = MagicMock()
     engine._llm_rewriter = MagicMock()
     engine.current_model = "balanced"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._metrics_collector = MagicMock()
     engine._error_bus = MagicMock()
     return engine

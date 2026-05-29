@@ -2504,6 +2504,47 @@ class BackendService:
 
         return adapters
 
+    def _handle_clear_unavailable_models(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: clear_unavailable_models — сбрасывает TTL blacklist недоступных STT-моделей.
+
+        Позволяет оператору/тесту вручную снять блокировку с адаптеров, занесённых
+        в _unavailable_models, не перезапуская backend.  Полезно после:
+          - смены профиля STT
+          - установки нового адаптера (Parakeet, SenseVoice, WhisperX)
+          - временного сбоя MLX GPU, который уже устранён
+
+        Возвращает:
+            count   — число удалённых записей.
+            cleared — список {model_id, age_sec} для каждой удалённой записи.
+
+        W1304/W1475: handler reverted by W1497 cherry-pick train, restored in W1534.
+        """
+        import time as _time
+
+        transcriber = getattr(self, "transcriber", None)
+        if transcriber is None:
+            logger.warning("[service] clear_unavailable_models: transcriber is None")
+            return {"count": 0, "cleared": [], "error": "transcriber not available"}
+
+        engine = getattr(transcriber, "engine", None)
+        if engine is None:
+            logger.warning("[service] clear_unavailable_models: transcriber.engine is None")
+            return {"count": 0, "cleared": [], "error": "engine not available"}
+
+        unavail: dict[str, float] = getattr(engine, "_unavailable_models", {})
+        now = _time.monotonic()
+        cleared = [
+            {"model_id": mid, "age_sec": round(now - ts, 2)}
+            for mid, ts in list(unavail.items())
+        ]
+        unavail.clear()
+        logger.info(
+            "[service] clear_unavailable_models: сброшено %d записей",
+            len(cleared),
+            extra={"cleared": [c["model_id"] for c in cleared]},
+        )
+        return {"count": len(cleared), "cleared": cleared}
+
     def _handle_summarize_item(self, params: dict[str, Any]) -> dict[str, Any]:
         """Генерирует LLM-summary для элемента истории по ID."""
         item_id = str(params.get("id", "")).strip()

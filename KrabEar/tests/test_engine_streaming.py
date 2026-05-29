@@ -45,7 +45,7 @@ class TestTranscribeChunkedBasic(unittest.TestCase):
             self.engine = AudioEngine.__new__(AudioEngine)
             self.engine.current_model = "test-model"
             self.engine.quality_profile = "balanced"
-            self.engine._unavailable_models = set()
+            self.engine._unavailable_models = {}
             self.engine._last_llm_diff = None
             self.engine._llm_rewriter = None
             self.engine._confidence_calibrator = MagicMock()

@@ -46,12 +46,12 @@ def _make_engine(
     engine = AudioEngine.__new__(AudioEngine)
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._router = None
     if whisperx_marker_unavailable:
-        engine._unavailable_models.add(engine._WHISPERX_MARKER)
+        engine._unavailable_models[engine._WHISPERX_MARKER] = __import__("time").monotonic()
     if sensevoice_marker_unavailable:
-        engine._unavailable_models.add(engine._SENSEVOICE_MARKER)
+        engine._unavailable_models[engine._SENSEVOICE_MARKER] = __import__("time").monotonic()
     engine._sensevoice_model = None
     engine._sensevoice_load_error = None
     engine._whisperx_model = None
@@ -125,7 +125,7 @@ class TestWhisperXAdapterEnabled(unittest.TestCase):
 
         engine = _make_engine()
         # Помечаем balanced whisper как недоступный — WhisperX должен сработать
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         engine._transcribe_whisperx = lambda *a, **kw: {  # type: ignore[method-assign]
             "text": "привет мир",
@@ -319,7 +319,7 @@ class TestWhisperXOnlyNoSenseVoice(unittest.TestCase):
 
         engine = _make_engine()
         # Balanced недоступен чтобы дойти до WhisperX
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         wx_called = []
         engine._transcribe_whisperx = lambda *a, **kw: wx_called.append(True) or {  # type: ignore[method-assign]

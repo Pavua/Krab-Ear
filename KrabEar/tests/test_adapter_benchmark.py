@@ -83,7 +83,7 @@ def _make_engine(
     engine = AudioEngine.__new__(AudioEngine)
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._parakeet_model = None
     engine._parakeet_load_error = None
     engine._sensevoice_model = None

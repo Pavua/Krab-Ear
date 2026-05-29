@@ -174,7 +174,7 @@ class TestVADPrefilterIntegrationWithTranscribe(unittest.TestCase):
         # Нужные атрибуты для set_quality_profile / _maybe_run_diarization
         engine._diarization_pipeline = None
         engine._model_loaded = False
-        engine._unavailable_models = set()
+        engine._unavailable_models = {}
 
         from core import config as cfg_module
         cfg_module.settings.STT_VAD_PREFILTER_ENABLED = True

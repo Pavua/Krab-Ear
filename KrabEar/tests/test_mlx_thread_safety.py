@@ -120,7 +120,7 @@ class TestEngineTranscribeUsesLock(unittest.TestCase):
         with patch.dict("sys.modules", {"mlx_whisper": MagicMock()}):
             from core import engine as engine_mod
             eng = engine_mod.AudioEngine.__new__(engine_mod.AudioEngine)
-            eng._unavailable_models = set()
+            eng._unavailable_models = {}
         return eng
 
     def test_transcribe_model_acquires_mlx_lock(self):
@@ -156,7 +156,7 @@ class TestEngineTranscribeUsesLock(unittest.TestCase):
         with patch("core.engine.mlx_whisper", fake_mlx):
             from core import engine as engine_mod
             eng = engine_mod.AudioEngine.__new__(engine_mod.AudioEngine)
-            eng._unavailable_models = set()
+            eng._unavailable_models = {}
 
             import numpy as np
             audio = np.zeros(16000, dtype=np.float32)
@@ -195,7 +195,7 @@ class TestEngineTranscribeUsesLock(unittest.TestCase):
 
             def run_transcribe():
                 eng = engine_mod.AudioEngine.__new__(engine_mod.AudioEngine)
-                eng._unavailable_models = set()
+                eng._unavailable_models = {}
                 audio = np.zeros(16000, dtype=np.float32)
                 eng._transcribe_model(audio, "mlx-community/whisper-tiny", "")
 

@@ -181,7 +181,7 @@ def _make_engine_stub() -> AudioEngine:
     engine = AudioEngine.__new__(AudioEngine)
     engine.current_model = "mlx-community/whisper-base-mlx"
     engine.quality_profile = "balanced"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._error_bus = MagicMock()
     engine._llm_rewriter = None
     engine._settings_get = lambda k, d: d
