@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Any
 from backend.models import DEFAULT_SETTINGS
 from backend.observability import add_breadcrumb
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS_BACKUP, SettingsBackup
-from backend.settings_validator import SettingsValidator
+from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
 
 _log = logging.getLogger(__name__)
 
@@ -73,6 +74,8 @@ class SettingsService:
         self._cache_ttl: float = 5.0
         self._validator = SettingsValidator()
         self._backup = backup if backup is not None else SettingsBackup()
+        # W1437: RLock serialises all 5 save paths to prevent concurrent race conditions.
+        self._save_lock = threading.RLock()
         # Hooks called with (old_settings, new_settings) after a successful save.
         # BackendService registers a hook to propagate hot-reloaded values to
         # live collaborators (e.g. LLMRewriter.set_api_key).
@@ -107,6 +110,79 @@ class SettingsService:
         self._cache_ts = 0.0
 
     # ------------------------------------------------------------------
+    # W1308: after-save hooks helper
+    # ------------------------------------------------------------------
+
+    def _fire_after_save_hooks(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> None:
+        """Call all registered after-save hooks with (old, new). Exceptions are swallowed."""
+        for hook in self._after_save_hooks:
+            try:
+                hook(old_settings, new_settings)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("after_save_hook failed: %s", exc)
+
+    def _reload_and_fire_hooks(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> None:
+        """W1341/W1436: Hot-reload pydantic settings, then fire hooks.
+
+        Single point of truth called on ALL 5 save paths so pydantic Settings
+        never stays stale and hooks always fire after reload.
+        """
+        try:
+            from core.config import reload_settings_from_json  # noqa: PLC0415
+            updated = reload_settings_from_json()
+            if updated:
+                _log.info("settings: hot-reloaded %d pydantic fields", updated)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("settings: hot-reload failed: %s", exc)
+        self._fire_after_save_hooks(old_settings, new_settings)
+
+    # ------------------------------------------------------------------
+    # W1457: migration helper
+    # ------------------------------------------------------------------
+
+    def _maybe_migrate(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Migrate settings to current schema version if needed.
+
+        W1457: After write-back to store, invalidates cache so subsequent
+        cached_settings() calls always return the latest schema version.
+
+        This method does NOT call store.save_settings itself — callers are
+        responsible for the final save after validation. The write-back (and
+        invalidate_cache) only happens when settings were loaded from store
+        (i.e. when this is called from the regular load path, not restore).
+        For restore path: migrate only, caller validates+saves.
+        """
+        schema_ver = settings.get("schema_version", "1.0")
+        if schema_ver == CURRENT_SCHEMA_VERSION:
+            return settings
+        try:
+            migrated = self._validator.migrate(settings, from_version=schema_ver, to_version=CURRENT_SCHEMA_VERSION)
+            _log.info("_maybe_migrate: migrated settings %s→%s", schema_ver, CURRENT_SCHEMA_VERSION)
+            return migrated
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("_maybe_migrate: migration %s→%s failed: %s", schema_ver, CURRENT_SCHEMA_VERSION, exc)
+            return settings
+
+    def _maybe_migrate_and_save(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Migrate settings to current schema and write-back to store if needed.
+
+        W1457: Calls store.save_settings(migrated) then invalidate_cache() after
+        schema write-back so cached_settings() always returns the migrated version.
+        Used when loading live settings from store (not from backup restore path).
+        """
+        schema_ver = settings.get("schema_version", "1.0")
+        if schema_ver == CURRENT_SCHEMA_VERSION:
+            return settings
+        migrated = self._maybe_migrate(settings)
+        if migrated is not settings:
+            try:
+                self.store.save_settings(migrated)
+                self.invalidate_cache()  # W1457: invalidate after schema write-back
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("_maybe_migrate_and_save: write-back failed: %s", exc)
+        return migrated
+
+    # ------------------------------------------------------------------
     # IPC handlers
     # ------------------------------------------------------------------
 
@@ -114,6 +190,10 @@ class SettingsService:
         return self.cached_settings()
 
     def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._save_lock:  # W1437
+            return self._handle_set_settings_locked(params)
+
+    def _handle_set_settings_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         old_settings = self.cached_settings()
         try:
             self._backup.create_backup(old_settings, reason="before_set")
@@ -282,7 +362,6 @@ class SettingsService:
 
         result = self.store.save_settings(settings)
         self.invalidate_cache()
-        _t1 = time.monotonic()
         add_breadcrumb(
             category="settings",
             message="set_settings",
@@ -291,22 +370,8 @@ class SettingsService:
                 "key_count": len(params),
             },
         )
-        # Hot-reload pydantic Settings из обновлённого settings.json — без
-        # restart engine.py видит новые feature flags (STT_GIGAAM_ENABLED,
-        # STT_LANGUAGE_ROUTING_ENABLED, etc).
-        try:
-            from core.config import reload_settings_from_json
-            updated = reload_settings_from_json()
-            if updated:
-                _log.info("set_settings: hot-reloaded %d pydantic fields", updated)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("set_settings: hot-reload failed: %s", exc)
-        # Notify registered hooks (e.g. propagate api_key to live LLMRewriter).
-        for hook in self._after_save_hooks:
-            try:
-                hook(old_settings, settings)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("set_settings: after_save_hook failed: %s", exc)
+        # W1341/W1436: hot-reload pydantic settings then fire hooks (single point of truth).
+        self._reload_and_fire_hooks(old_settings, settings)
         return result
 
     def handle_apply_profile_preset(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -320,28 +385,32 @@ class SettingsService:
             available = ", ".join(self._PROFILE_PRESETS.keys())
             raise ValueError(f"Неизвестный пресет профиля: '{profile}'. Доступные: {available}")
 
-        settings = self.cached_settings()
-        settings.update(preset)
-        settings["active_preset"] = profile
-        result = self.store.save_settings(settings)
-        self.invalidate_cache()
-        add_breadcrumb(
-            category="settings",
-            message="apply_profile_preset",
-            data={
-                "profile": profile,
-                "keys_changed": sorted(preset.keys()),
-            },
-        )
-        try:
-            import backend.event_bus as _ebus  # noqa: PLC0415
-            _ebus.bus.emit("preset.changed", {
-                "profile": profile,
-                "description": self._PROFILE_PRESET_DESCRIPTIONS.get(profile, ""),
-            })
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
-        return result
+        with self._save_lock:  # W1437
+            old_settings = self.cached_settings()
+            settings = dict(old_settings)
+            settings.update(preset)
+            settings["active_preset"] = profile
+            result = self.store.save_settings(settings)
+            self.invalidate_cache()
+            add_breadcrumb(
+                category="settings",
+                message="apply_profile_preset",
+                data={
+                    "profile": profile,
+                    "keys_changed": sorted(preset.keys()),
+                },
+            )
+            try:
+                import backend.event_bus as _ebus  # noqa: PLC0415
+                _ebus.bus.emit("preset.changed", {
+                    "profile": profile,
+                    "description": self._PROFILE_PRESET_DESCRIPTIONS.get(profile, ""),
+                })
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("handle_apply_profile_preset: emit preset.changed failed: %s", exc)
+            # W1308/W1341/W1436: reload pydantic settings and fire hooks
+            self._reload_and_fire_hooks(old_settings, settings)
+            return result
 
     def handle_get_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущие настройки уведомлений из хранилища настроек."""
@@ -357,30 +426,34 @@ class SettingsService:
 
     def handle_set_notification_preferences(self, params: dict[str, Any]) -> dict[str, Any]:
         """Обновляет настройки уведомлений. Принимает любое подмножество полей."""
-        settings = self.cached_settings()
+        with self._save_lock:  # W1437
+            old_settings = self.cached_settings()
+            settings = dict(old_settings)
 
-        _BOOL_FIELDS = (
-            "notifications_enabled",
-            "notify_on_low_confidence",
-            "notify_on_llm_failure",
-            "notify_on_import_complete",
-            "notify_sound_enabled",
-        )
-        for field in _BOOL_FIELDS:
-            if field in params:
-                settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
-
-        if "notify_confidence_threshold" in params:
-            settings["notify_confidence_threshold"] = self._coerce_bounded(
-                value=params["notify_confidence_threshold"],
-                default=0.5,
-                min_value=0.0,
-                max_value=1.0,
+            _BOOL_FIELDS = (
+                "notifications_enabled",
+                "notify_on_low_confidence",
+                "notify_on_llm_failure",
+                "notify_on_import_complete",
+                "notify_sound_enabled",
             )
+            for field in _BOOL_FIELDS:
+                if field in params:
+                    settings[field] = self._coerce_bool(params[field], default=bool(settings.get(field, True)))
 
-        result = self.store.save_settings(settings)
-        self.invalidate_cache()
-        return result
+            if "notify_confidence_threshold" in params:
+                settings["notify_confidence_threshold"] = self._coerce_bounded(
+                    value=params["notify_confidence_threshold"],
+                    default=0.5,
+                    min_value=0.0,
+                    max_value=1.0,
+                )
+
+            result = self.store.save_settings(settings)
+            self.invalidate_cache()
+            # W1308/W1341/W1436: reload pydantic settings and fire hooks
+            self._reload_and_fire_hooks(old_settings, settings)
+            return result
 
     # W929 F4: single source of truth — imported from settings_backup.
     # Covers all 9 secret fields; local 4-field set was a subset causing leaks.
@@ -438,44 +511,51 @@ class SettingsService:
         if not isinstance(incoming, dict):
             raise ValueError("Файл настроек должен содержать JSON-объект")
 
-        errors: list[str] = []
-        skipped = 0
-        merged = self.cached_settings()
+        with self._save_lock:  # W1437
+            errors: list[str] = []
+            skipped = 0
+            old_settings = self.cached_settings()
+            merged = dict(old_settings)
 
-        for key, value in incoming.items():
-            if key in self._SENSITIVE_FIELDS:
-                skipped += 1
-                _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
-                continue
-            merged[key] = value
+            for key, value in incoming.items():
+                if key in self._SENSITIVE_FIELDS:
+                    skipped += 1
+                    _log.debug("import_settings: пропуск чувствительного поля '%s'", key)
+                    continue
+                merged[key] = value
 
-        # Validate the merged result
-        vr = self._validator.validate(merged)
-        if not vr.valid:
-            errors.extend(vr.errors)
-        if vr.warnings:
-            for w in vr.warnings:
-                _log.warning("import_settings: %s", w)
-            errors.extend(vr.warnings)
-        merged = vr.fixed
+            # Validate the merged result
+            vr = self._validator.validate(merged)
+            if not vr.valid:
+                # W1434: raise ValueError on hard validation failure
+                raise ValueError(
+                    f"Настройки содержат ошибки: {'; '.join(vr.errors)}"
+                )
+            if vr.warnings:
+                for w in vr.warnings:
+                    _log.warning("import_settings: %s", w)
+                errors.extend(vr.warnings)
+            merged = vr.fixed
 
-        imported = len(incoming) - skipped
-        self.store.save_settings(merged)
-        self.invalidate_cache()
-        add_breadcrumb(
-            category="settings",
-            message="import_settings",
-            level="info" if not errors else "warning",
-            data={
-                "imported": imported,
-                "skipped": skipped,
-                "error_count": len(errors),
-            },
-        )
+            imported = len(incoming) - skipped
+            self.store.save_settings(merged)
+            self.invalidate_cache()
+            add_breadcrumb(
+                category="settings",
+                message="import_settings",
+                level="info" if not errors else "warning",
+                data={
+                    "imported": imported,
+                    "skipped": skipped,
+                    "error_count": len(errors),
+                },
+            )
 
-        _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
-                  imported, skipped, len(errors), src)
-        return {"imported": imported, "skipped": skipped, "errors": errors}
+            _log.info("import_settings: imported=%d skipped=%d errors=%d from %s",
+                      imported, skipped, len(errors), src)
+            # W1308/W1341/W1436: reload pydantic settings and fire hooks
+            self._reload_and_fire_hooks(old_settings, merged)
+            return {"imported": imported, "skipped": skipped, "errors": errors}
 
     def handle_list_profile_presets(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных пресетов профилей с описаниями и значениями."""
@@ -513,6 +593,10 @@ class SettingsService:
     def handle_restore_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает настройки из указанного бэкапа и сохраняет их.
 
+        W1435: migrate old-schema backups, validate before save.
+        Returns {"ok": False, "error": "Backup validation failed", "details": [...]}
+        on hard validation errors without calling store.save_settings.
+
         Params:
             backup_id (str): идентификатор бэкапа.
 
@@ -523,12 +607,33 @@ class SettingsService:
         if not backup_id:
             raise ValueError("Параметр 'backup_id' обязателен для restore_settings_backup")
 
-        restored = self._backup.restore_backup(backup_id)
-        self.store.save_settings(restored)
-        self.invalidate_cache()
+        with self._save_lock:  # W1437
+            old_settings = self.cached_settings()
+            restored = self._backup.restore_backup(backup_id)
 
-        _log.info("handle_restore_settings_backup: restored from %s", backup_id)
-        return {"restored_settings": restored, "backup_id": backup_id}
+            # W1435: migrate old schema before validate
+            restored = self._maybe_migrate(restored)
+
+            # W1435: validate restored settings — reject corrupt backups without saving
+            vr = self._validator.validate(restored)
+            if not vr.valid:
+                _log.warning("handle_restore_settings_backup: corrupt backup %s rejected: %s",
+                             backup_id, vr.errors)
+                return {
+                    "ok": False,
+                    "error": "Backup validation failed",
+                    "details": vr.errors,
+                    "backup_id": backup_id,
+                }
+            restored = vr.fixed
+
+            self.store.save_settings(restored)
+            self.invalidate_cache()
+
+            _log.info("handle_restore_settings_backup: restored from %s", backup_id)
+            # W1308/W1341/W1436: reload pydantic settings and fire hooks
+            self._reload_and_fire_hooks(old_settings, restored)
+            return {"restored_settings": restored, "backup_id": backup_id}
 
     def handle_create_manual_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Создаёт ручной бэкап текущих настроек с произвольной причиной.
