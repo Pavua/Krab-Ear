@@ -1,16 +1,17 @@
-"""W1306 — Parakeet language gate: вставляется только для "en" / "auto".
+"""W1306 — Parakeet language gate: вставляется только для "en".
 
 W1303 F3 MED: до фикса Parakeet вставлялся в chain безусловно, независимо
 от языка. Для RU/ES это возвращает мусорный текст и молча останавливает chain
 (нет исключения → "успешно"). Фикс добавляет гейт аналогичный GigaAM:
-  _effective_lang in {"en", "auto"}
+  _effective_lang == "en"  (строгий gate, W1644 F4 уточнил: "auto" тоже исключается)
 
-Тесты проверяют четыре сценария по ТЗ:
+Тесты проверяют четыре сценария:
   1. test_parakeet_inserted_for_en_audio        — вставляется для "en"
-  2. test_parakeet_inserted_for_auto_lang        — вставляется для "auto"
-  3. test_parakeet_skipped_for_ru_audio          — пропускается для "ru"
-  4. test_parakeet_skipped_for_es_audio          — пропускается для "es"
+  2. test_parakeet_skipped_for_auto_lang        — НЕ вставляется для "auto" (W1644 F4)
+  3. test_parakeet_skipped_for_ru_audio         — пропускается для "ru"
+  4. test_parakeet_skipped_for_es_audio         — пропускается для "es"
 
+W1647: исправлен баг test harness (engine._unavailable_models был set, должен быть dict).
 Паттерн: AudioEngine.__new__() без __init__, прямой вызов
 _transcribe_with_fallback_impl — воспроизводит существующий
 test_parakeet_adapter.py / test_sensevoice_adapter.py.
@@ -19,6 +20,7 @@ test_parakeet_adapter.py / test_sensevoice_adapter.py.
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -83,8 +85,9 @@ def _candidates_for_lang(engine: AudioEngine, mock_settings: Any, language: str)
         return {"text": "hello", "engine": "parakeet", "language": "en", "segments": []}
 
     engine._transcribe_parakeet = fake_parakeet  # type: ignore[method-assign]
-    # Помечаем balanced whisper недоступным — chain вынужден пробовать адаптеры
-    engine._unavailable_models = {"mlx-community/whisper-large-v3-turbo"}
+    # Помечаем balanced whisper недоступным — chain вынужден пробовать адаптеры.
+    # W1647: исправлен баг — должен быть dict[str, float] (TTL timestamp), а не set.
+    engine._unavailable_models = {"mlx-community/whisper-large-v3-turbo": time.monotonic()}
 
     with patch("core.engine.settings", mock_settings):
         with patch("core.engine._profiler") as mock_profiler:
@@ -115,21 +118,27 @@ class TestParakeetInsertedForEnAudio(unittest.TestCase):
         )
 
 
-class TestParakeetInsertedForAutoLang(unittest.TestCase):
-    """test_parakeet_inserted_for_auto_lang — Parakeet должен войти в chain для "auto"."""
+class TestParakeetSkippedForAutoLang(unittest.TestCase):
+    """test_parakeet_skipped_for_auto_lang — Parakeet НЕ должен входить в chain для "auto".
+
+    W1644 F4 уточнение: gate строгий только на "en" (зеркалит GigaAM == "ru").
+    При неизвестном языке ("auto") Parakeet исключается — безопаснее использовать
+    Whisper (который умеет язык определять сам), чем рисковать мусорным текстом.
+    """
 
     @patch("core.engine.settings")
-    def test_parakeet_inserted_for_auto_lang(self, mock_settings_global: Any) -> None:
+    def test_parakeet_skipped_for_auto_lang(self, mock_settings_global: Any) -> None:
         mock_settings = _make_settings(parakeet_enabled=True)
         mock_settings.TRANSCRIBE_LANGUAGE = "auto"
         engine = _make_engine()
 
         visited = _candidates_for_lang(engine, mock_settings, language="auto")
 
-        self.assertIn(
+        self.assertNotIn(
             "parakeet",
             visited,
-            "PARAKEET_MARKER должен вставляться в chain когда язык='auto'",
+            "PARAKEET_MARKER НЕ должен вставляться в chain когда язык='auto' — "
+            "gate строгий только на 'en' (W1644 F4, W1647)",
         )
 
 

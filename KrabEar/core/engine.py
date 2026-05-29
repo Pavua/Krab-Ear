@@ -1732,8 +1732,16 @@ class AudioEngine:
         # --- Parakeet adapter: позиция 2 (после balanced, до SenseVoice) ---
         # Вставляем маркер ПОСЛЕ первого кандидата (balanced/turbo). Parakeet
         # EN-оптимизирован и пробуется перед SenseVoice (которая RU+эмоция).
-        # Гейт по settings.PARAKEET_ENABLED. При сбое маркер помечается недоступным.
-        if settings.PARAKEET_ENABLED and not self._is_model_unavailable(self._PARAKEET_MARKER):
+        # Гейт по settings.PARAKEET_ENABLED И языку "en".
+        # W1644 F4: Parakeet — EN-only модель (NVIDIA NeMo OpenASR leaderboard EN).
+        # На RU/ES аудио возвращает мусор, который может прервать chain ложным успехом.
+        # Зеркалит паттерн GigaAM (_effective_lang == "ru"): строгий gate только на "en".
+        # При сбое маркер помечается недоступным, chain продолжается без него.
+        if (
+            settings.PARAKEET_ENABLED
+            and _effective_lang == "en"
+            and not self._is_model_unavailable(self._PARAKEET_MARKER)
+        ):
             if len(candidates) >= 1:
                 candidates = [candidates[0], self._PARAKEET_MARKER] + candidates[1:]
             else:
