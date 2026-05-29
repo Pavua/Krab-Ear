@@ -39,6 +39,11 @@ _MIN_PEAK_AMPLITUDE: float = 1e-4
 #     unreliable below ~0.35 — language code may flip randomly on short clips).
 _MIN_CONFIDENCE: float = 0.35
 
+# W1121 / W1561: hard allowlist of language codes returned by detect()
+# Anything outside this set is silently downgraded to None to avoid Whisper
+# picking obscure low-resource models that crash on Russian/Spanish input.
+SUPPORTED_LANGUAGES = frozenset({"ru", "es", "en", "de", "fr", "it", "pt"})
+
 
 class AudioLanguageID:
     """Определяет язык аудио через mlx-whisper encoder (без decoder).
@@ -349,6 +354,16 @@ class AudioLanguageID:
                         _MIN_CONFIDENCE,
                     )
                     return None
+
+            # W1121 / W1561: gate against unsupported language codes.
+            # DO NOT REMOVE — prevents Whisper from routing to obscure low-resource
+            # models that crash on Russian/Spanish input.
+            if lang_code and lang_code not in SUPPORTED_LANGUAGES:
+                logger.debug(
+                    "audio_lang_id: %r not in SUPPORTED_LANGUAGES, returning None",
+                    lang_code,
+                )
+                return None
 
             logger.info("AudioLanguageID: detected language = %s", lang_code)
             return lang_code if lang_code else None

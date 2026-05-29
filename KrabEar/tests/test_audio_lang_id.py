@@ -33,7 +33,7 @@ _PROJECT_ROOT = os.path.dirname(_HERE)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from core.audio_lang_id import AudioLanguageID  # noqa: E402
+from core.audio_lang_id import AudioLanguageID, SUPPORTED_LANGUAGES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +715,45 @@ class TestAudioLangIDHighConfidencePreserved(unittest.TestCase):
     def test_zero_peak_threshold_constant_value(self):
         """_ZERO_PEAK_THRESHOLD class constant equals 1e-4."""
         self.assertAlmostEqual(AudioLanguageID._ZERO_PEAK_THRESHOLD, 1e-4)
+
+
+# ---------------------------------------------------------------------------
+# W1121 / W1561 — SUPPORTED_LANGUAGES frozenset tests
+# ---------------------------------------------------------------------------
+
+class TestSupportedLanguagesFrozenset(unittest.TestCase):
+    """test_supported_languages_frozenset_present — SUPPORTED_LANGUAGES exists (W1561)."""
+
+    def test_supported_languages_frozenset_present(self):
+        """SUPPORTED_LANGUAGES is a module-level frozenset (W1121 allowlist)."""
+        self.assertIsInstance(SUPPORTED_LANGUAGES, frozenset,
+                              "SUPPORTED_LANGUAGES must be a frozenset")
+
+    def test_supported_languages_includes_ru_es_en(self):
+        """SUPPORTED_LANGUAGES contains at minimum ru, es, en."""
+        for code in ("ru", "es", "en"):
+            self.assertIn(code, SUPPORTED_LANGUAGES,
+                          f"{code!r} must be in SUPPORTED_LANGUAGES")
+
+    def test_unsupported_language_returned_as_none(self):
+        """detect() returns None when mlx_whisper reports an unsupported language (W1561)."""
+        AudioLanguageID._model_cache.clear()
+        lid = AudioLanguageID()
+
+        # Pick a code definitely not in SUPPORTED_LANGUAGES
+        unsupported = "xx"
+        assert unsupported not in SUPPORTED_LANGUAGES, "Test invariant: xx must not be supported"
+
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = (unsupported, {unsupported: 0.9})
+
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+
+        self.assertIsNone(result,
+                          f"Unsupported language {unsupported!r} must be downgraded to None")
 
 
 if __name__ == "__main__":
