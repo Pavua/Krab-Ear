@@ -227,6 +227,8 @@ _HEAVY_MODEL_MIN_FREE_GB = 4.0
 # for this duration; after expiry the adapter gets one retry automatically.
 # Uses time.monotonic() — immune to wall-clock skew / NTP jumps.
 _UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
+# W1562: backward-compat alias for _UNAVAILABLE_MODEL_TTL_SEC
+_UNAVAILABLE_TTL_SEC = _UNAVAILABLE_MODEL_TTL_SEC
 
 
 def _get_available_memory_gb() -> float:
