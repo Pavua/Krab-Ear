@@ -28,6 +28,28 @@ AUTO_GLOSSARY_CACHE_FILE = "auto_glossary.json"
 
 # ── Вспомогательные функции ───────────────────────────────────────────────────
 
+# W1294: known filler words that often start sentence-initial bigrams.
+# Bigrams whose first token matches any of these are noise in the auto-glossary
+# because they carry no lexical signal for STT prompt injection.
+_FILLER_STARTERS = frozenset({
+    # Russian fillers that often start sentences
+    "ну", "вот", "так", "хорошо", "ладно", "слушай", "знаешь",
+    "понимаешь", "значит", "короче", "типа", "давайте", "итак",
+    "затем", "потом", "просто", "вообще", "кстати",
+    # English fillers
+    "well", "okay", "ok", "like", "you", "i", "so", "right",
+    # Spanish fillers
+    "bueno", "pues", "vale", "oye", "entonces",
+})
+
+
+def _starts_with_filler(text: str) -> bool:
+    """W1294: True if the first word of text is a known filler starter."""
+    if not text:
+        return False
+    first = text.split(maxsplit=1)[0].lower().strip(".,!?;:")
+    return first in _FILLER_STARTERS
+
 
 def _is_capitalized_or_multiword(term: str) -> bool:
     """Возвращает True если термин — заглавное слово или многословная фраза.
@@ -342,6 +364,10 @@ class AutoGlossaryBuilder:
                 if _looks_like_hallucination(et.term):
                     # Защита от self-poisoning loop: не подбираем Whisper
                     # hallucinations и instruction-style фрагменты.
+                    continue
+                # W1294: skip bigrams/phrases that start with a filler word
+                # (e.g. "хорошо давайте", "знаешь что") — they pollute STT prompt.
+                if " " in et.term and _starts_with_filler(et.term):
                     continue
                 key = et.term  # сохраняем оригинальный регистр
                 freq[key] += et.frequency
