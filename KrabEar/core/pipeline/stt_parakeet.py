@@ -153,17 +153,32 @@ class ParakeetSTTAdapter(STTAdapterBase):
         # which run on PyTorch+MPS and therefore don't need either lock.
         # Same dual-lock pattern as mlx_whisper in AudioEngine._transcribe_mlx()
         # — see core/mlx_inter_lock.py usage note and PR #71 for rationale.
+        #
+        # W1636 (W1630 F2 HIGH): mlx_inter_process_lock raises MLXInterLockTimeout
+        # on flock timeout (safe default). We catch it here, log loudly, and re-raise
+        # so the STT router can mark this adapter temporarily unavailable instead of
+        # silently running unguarded MLX and risking GPU-corruption SIGSEGV.
         try:
-            from core.mlx_inter_lock import mlx_inter_process_lock
+            from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock
             from core.mlx_lock import mlx_lock
         except ImportError:
             import contextlib
+            MLXInterLockTimeout = Exception  # type: ignore[assignment,misc]
             mlx_inter_process_lock = contextlib.nullcontext  # type: ignore[assignment]
             mlx_lock = contextlib.nullcontext  # type: ignore[assignment]
 
-        with mlx_inter_process_lock():
-            with mlx_lock():
-                raw_result = self._model.transcribe(audio)
+        try:
+            with mlx_inter_process_lock():
+                with mlx_lock():
+                    raw_result = self._model.transcribe(audio)
+        except MLXInterLockTimeout:
+            logger.error(
+                "ParakeetSTTAdapter: MLX inter-process lock timeout — "
+                "cannot safely run inference without cross-process serialization. "
+                "Aborting transcription to prevent GPU-corruption SIGSEGV.",
+                exc_info=True,
+            )
+            raise
 
         # Build unified STTResult from AlignedResult.
         text: str = (raw_result.text or "").strip()
