@@ -4330,6 +4330,13 @@ def main() -> None:
 
     configure_logging(data_dir)
 
+    # W1634 / W1631 F2 HIGH: load persisted settings BEFORE init_sentry so that
+    # privacy_mode_enabled from settings.json is respected at startup.
+    # StateStore.load_settings() is a lightweight read-only JSON parse — safe to
+    # call here before build_service() (which will reload and normalise later).
+    _early_store = StateStore(data_dir=data_dir)
+    _startup_settings: dict = _early_store.load_settings() or {}
+
     # Sentry / GlitchTip crash telemetry (no-op если DSN не задан).
     # W704: release string читается из Info.plist через get_release_string()
     # (priority: env KRAB_EAR_RELEASE → Info.plist → __version__.py).
@@ -4337,6 +4344,7 @@ def main() -> None:
         dsn=settings.SENTRY_DSN or None,
         environment=settings.SENTRY_ENVIRONMENT,
         release=get_release_string(),
+        settings=_startup_settings,
     )
     if sentry_ok:
         logger.info("Sentry telemetry активна (env=%s)", settings.SENTRY_ENVIRONMENT)
