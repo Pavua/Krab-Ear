@@ -73,6 +73,8 @@ class HistoryService:
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
         cached_settings: "Callable[[], dict[str, Any]] | None" = None,
+        semantic_searcher: Any | None = None,
+        auto_glossary_builder: Any | None = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -84,6 +86,11 @@ class HistoryService:
         self._speaker_manager = None
         # Callable для получения текущих настроек (для privacy mode guard и др.).
         self._cached_settings = cached_settings
+        # SemanticSearcher для синхронизации удаления эмбеддингов (W1426 F2).
+        self._semantic_searcher = semantic_searcher
+        # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
+        # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
+        self._auto_glossary = auto_glossary_builder
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)

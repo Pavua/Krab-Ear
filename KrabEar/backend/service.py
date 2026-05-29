@@ -552,6 +552,11 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
+        # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
+        self._history._semantic_searcher = self._semantic_searcher
+        # Late-inject AutoGlossaryBuilder into HistoryService so that
+        # add_history_item immediately invalidates the glossary cache (W1288 F1).
+        self._history._auto_glossary = self._auto_glossary
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -1367,6 +1372,9 @@ class BackendService:
             "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
             "export_timeline_ical": self._handle_export_timeline_ical,  # экспорт таймлайна в iCalendar (.ics) файл
             # --- Default STT hotwords seed ---
+            # --- Auto-Glossary IPC (W1104) ---
+            "get_auto_glossary": self._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
+            "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
         }
 
         handler = handlers.get(method)
@@ -1810,6 +1818,48 @@ class BackendService:
         # Также сбрасываем in-memory LRU-кэш транслятора
         self.translator.clear_cache()
         return {"ok": True, "entries_cleared": entries_before}
+
+    def _handle_get_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий auto-glossary из кэша (без пересчёта).
+
+        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список
+        (история недоступна для извлечения терминов).
+
+        Returns:
+            {"ok": True, "terms": [...], "count": N, "from_cache": True}
+        """
+        settings_dict = self._settings_svc.cached_settings()
+        if settings_dict.get("privacy_mode_enabled"):
+            return {"ok": True, "terms": [], "count": 0, "from_cache": False}
+
+        terms = self._auto_glossary.get_cached()
+        return {"ok": True, "terms": terms, "count": len(terms), "from_cache": True}
+
+    def _handle_refresh_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Принудительно пересчитывает auto-glossary из истории транскрибаций.
+
+        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список.
+
+        params (optional):
+            window_days: int — горизонт истории в днях (default 7).
+            top_n: int — максимальное число терминов (default 30).
+
+        Returns:
+            {"ok": True, "terms": [...], "count": N, "refreshed": True}
+        """
+        settings_dict = self._settings_svc.cached_settings()
+        if settings_dict.get("privacy_mode_enabled"):
+            return {"ok": True, "terms": [], "count": 0, "refreshed": False}
+
+        window_days = int(params.get("window_days", 7))
+        top_n = int(params.get("top_n", 30))
+
+        terms = self._auto_glossary.build(
+            window_days=window_days,
+            top_n=top_n,
+            force=True,
+        )
+        return {"ok": True, "terms": terms, "count": len(terms), "refreshed": True}
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""

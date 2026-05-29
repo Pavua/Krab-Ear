@@ -359,4 +359,7 @@ def build_dispatch_table(
         # --- D.2.3: Scored STT routing decision ---
         "get_stt_routing_decision": svc._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
         # --- Default STT hotwords seed ---
+        # --- Auto-Glossary IPC (W1104) ---
+        "get_auto_glossary": svc._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
+        "refresh_auto_glossary": svc._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
     }
