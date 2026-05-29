@@ -65,6 +65,7 @@ from core.config import settings
 from core.audio_converter import AudioConverter
 from core.auto_glossary import AutoGlossaryBuilder
 from backend.translator import Translator
+from backend.translation_cache import TranslationCache
 from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
@@ -207,6 +208,11 @@ class BackendService:
                     transcriber.engine._settings_get = self._get_runtime_setting
 
         self.translator = translator or Translator()
+        # W1429 — wire persistent translation cache (late-injection pattern)
+        self._translation_cache = TranslationCache(data_dir=str(store.data_dir))
+        self.translator._translation_cache = self._translation_cache
+        # W1500 — wire runtime settings getter for privacy-mode detection
+        self.translator._settings_getter = self._get_runtime_setting
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
         # Hot-propagate api_key changes to the running LLMRewriter without restart.
@@ -1723,6 +1729,21 @@ class BackendService:
             "conflicts": conflicts,
             "total": len(new_entries),
         }
+
+    def _handle_clear_translation_cache(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Очищает персистентный LRU-кэш переводов (W1429).
+
+        Сбрасывает оба слоя: in-memory translator._cache и disk-файл translation_cache.json.
+        Возвращает количество записей до очистки для диагностики.
+        """
+        entries_before = 0
+        if self._translation_cache is not None:
+            stats = self._translation_cache.get_stats()
+            entries_before = stats.get("entries", 0)
+            self._translation_cache.clear()
+        # Также сбрасываем in-memory LRU-кэш транслятора
+        self.translator.clear_cache()
+        return {"ok": True, "entries_cleared": entries_before}
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
