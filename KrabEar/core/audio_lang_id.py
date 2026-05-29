@@ -25,6 +25,16 @@ import numpy as np
 
 from core.mlx_lock import mlx_lock
 
+# W1367/W1416/W1465/W1466/W1582 guard — DO NOT DROP IN CHERRY-PICKS.
+# W1497 cherry-pick train reverted _HAS_MLX + mx.clear_cache calls via --theirs.
+# Restored in W1582. Any future cherry-pick touching this file MUST preserve this block.
+try:
+    import mlx.core as mx  # type: ignore[import]
+    _HAS_MLX = True
+except ImportError:
+    mx = None  # type: ignore[assignment]
+    _HAS_MLX = False
+
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
 # W1090 / W1525 guard — DO NOT DROP IN CHERRY-PICKS.
@@ -155,11 +165,15 @@ class AudioLanguageID:
 
     @classmethod
     def clear_model_cache(cls) -> None:
-        """Вытесняет загруженную LID-модель из кеша класса.
+        """Вытесняет загруженную LID-модель из кеша класса и освобождает Metal буферы.
 
         Вызывается из _on_settings_saved hook в BackendService при изменении
         MODEL_BALANCED — предотвращает использование стale модели после переключения
         профиля STT, устраняя cold-load stall внутри mlx_lock() на следующей записи.
+
+        W1405/W1416/W1582: также вызывает mx.clear_cache() чтобы освободить Metal GPU
+        буферы удалённой модели. Runtime import используется (не module-level mx) чтобы
+        корректно работать под patch.dict("sys.modules", ...) в тестах.
 
         Потокобезопасно: захватывает _cache_lock перед очисткой dict.
         """
@@ -172,6 +186,17 @@ class AudioLanguageID:
                 cls._model_cache.clear()
             else:
                 logger.debug("AudioLanguageID.clear_model_cache: кеш уже пуст")
+
+        # W1405/W1416/W1582: освобождаем Metal GPU буферы после вытеснения модели.
+        # DO NOT REMOVE — W1497 cherry-pick train reverted this call.
+        # Runtime import (not module-level mx) to work correctly under sys.modules patching.
+        if _HAS_MLX:
+            with mlx_lock():
+                try:
+                    import mlx.core as _mx_rt
+                    _mx_rt.clear_cache()
+                except Exception:
+                    logger.debug("mx.clear_cache failed in clear_model_cache", exc_info=True)
 
     # ------------------------------------------------------------------
     # Внутренние методы
@@ -295,79 +320,93 @@ class AudioLanguageID:
 
             model = AudioLanguageID._model_cache[model_path]
 
-        # Строим log-mel spectrogram
+        # Строим log-mel spectrogram + detect_language, гарантируем mx.clear_cache()
+        # W1367/W1416/W1465/W1582: try/finally ВНУТРИ mlx_lock() — правильное место.
+        # DO NOT MOVE TO _run_detect (outside mlx_lock) — это регрессия W1462.
         try:
-            # mlx_whisper ожидает float32 numpy array нормализованный в [-1, 1]
-            audio_norm = audio_16k.astype(np.float32)
-            # Нормализуем пик если нужно
-            peak = float(np.max(np.abs(audio_norm)))
-            if peak > 1.0:
-                audio_norm = audio_norm / peak
+            try:
+                # mlx_whisper ожидает float32 numpy array нормализованный в [-1, 1]
+                audio_norm = audio_16k.astype(np.float32)
+                # Нормализуем пик если нужно
+                peak = float(np.max(np.abs(audio_norm)))
+                if peak > 1.0:
+                    audio_norm = audio_norm / peak
 
-            # Pad до минимальной длины (30 секунд = 480000 samples @ 16kHz)
-            n_samples = 16000 * 30
-            if len(audio_norm) < n_samples:
-                audio_norm = np.pad(audio_norm, (0, n_samples - len(audio_norm)))
+                # Pad до минимальной длины (30 секунд = 480000 samples @ 16kHz)
+                n_samples = 16000 * 30
+                if len(audio_norm) < n_samples:
+                    audio_norm = np.pad(audio_norm, (0, n_samples - len(audio_norm)))
 
-            mel = mlx_whisper.audio.log_mel_spectrogram(audio_norm)
+                mel = mlx_whisper.audio.log_mel_spectrogram(audio_norm)
 
-        except Exception as exc:
-            logger.warning("AudioLanguageID: log_mel_spectrogram failed: %s", exc)
-            return None
-
-        # detect_language
-        try:
-            # mlx_whisper.decoding.detect_language(model, mel) → dict[str, float]
-            # или может возвращать (str, dict) в разных версиях — обрабатываем оба
-            result = mlx_whisper.decoding.detect_language(model, mel)
-
-            probs: Optional[dict] = None
-            if isinstance(result, tuple):
-                # (language_str, probs_dict)
-                lang_code = result[0]
-                if len(result) >= 2 and isinstance(result[1], dict):
-                    probs = result[1]
-            elif isinstance(result, dict):
-                # {lang: prob, ...} — берём argmax
-                probs = result
-                lang_code = max(result, key=lambda k: result[k])
-            elif isinstance(result, str):
-                lang_code = result
-            else:
-                logger.warning(
-                    "AudioLanguageID: неожиданный тип результата detect_language: %s",
-                    type(result),
-                )
+            except Exception as exc:
+                logger.warning("AudioLanguageID: log_mel_spectrogram failed: %s", exc)
                 return None
 
-            lang_code = str(lang_code).strip().lower()
+            # detect_language
+            try:
+                # mlx_whisper.decoding.detect_language(model, mel) → dict[str, float]
+                # или может возвращать (str, dict) в разных версиях — обрабатываем оба
+                result = mlx_whisper.decoding.detect_language(model, mel)
 
-            # F2 guard (W1090 / W1525): drop low-confidence detections.
-            # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
-            if probs is not None and lang_code:
-                confidence = float(probs.get(lang_code, 0.0))
-                if confidence < _MIN_CONFIDENCE:
-                    logger.debug(
-                        "audio_lang_id: confidence %.3f for '%s' below threshold %.3f, dropping",
-                        confidence,
-                        lang_code,
-                        _MIN_CONFIDENCE,
+                probs: Optional[dict] = None
+                if isinstance(result, tuple):
+                    # (language_str, probs_dict)
+                    lang_code = result[0]
+                    if len(result) >= 2 and isinstance(result[1], dict):
+                        probs = result[1]
+                elif isinstance(result, dict):
+                    # {lang: prob, ...} — берём argmax
+                    probs = result
+                    lang_code = max(result, key=lambda k: result[k])
+                elif isinstance(result, str):
+                    lang_code = result
+                else:
+                    logger.warning(
+                        "AudioLanguageID: неожиданный тип результата detect_language: %s",
+                        type(result),
                     )
                     return None
 
-            # W1121 / W1561: gate against unsupported language codes.
-            # DO NOT REMOVE — prevents Whisper from routing to obscure low-resource
-            # models that crash on Russian/Spanish input.
-            if lang_code and lang_code not in SUPPORTED_LANGUAGES:
-                logger.debug(
-                    "audio_lang_id: %r not in SUPPORTED_LANGUAGES, returning None",
-                    lang_code,
-                )
+                lang_code = str(lang_code).strip().lower()
+
+                # F2 guard (W1090 / W1525): drop low-confidence detections.
+                # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+                if probs is not None and lang_code:
+                    confidence = float(probs.get(lang_code, 0.0))
+                    if confidence < _MIN_CONFIDENCE:
+                        logger.debug(
+                            "audio_lang_id: confidence %.3f for '%s' below threshold %.3f, dropping",
+                            confidence,
+                            lang_code,
+                            _MIN_CONFIDENCE,
+                        )
+                        return None
+
+                # W1121 / W1561: gate against unsupported language codes.
+                # DO NOT REMOVE — prevents Whisper from routing to obscure low-resource
+                # models that crash on Russian/Spanish input.
+                if lang_code and lang_code not in SUPPORTED_LANGUAGES:
+                    logger.debug(
+                        "audio_lang_id: %r not in SUPPORTED_LANGUAGES, returning None",
+                        lang_code,
+                    )
+                    return None
+
+                logger.info("AudioLanguageID: detected language = %s", lang_code)
+                return lang_code if lang_code else None
+
+            except Exception as exc:
+                logger.warning("AudioLanguageID: detect_language failed: %s", exc)
                 return None
 
-            logger.info("AudioLanguageID: detected language = %s", lang_code)
-            return lang_code if lang_code else None
-
-        except Exception as exc:
-            logger.warning("AudioLanguageID: detect_language failed: %s", exc)
-            return None
+        finally:
+            # W1367/W1416/W1465/W1582: освобождаем Metal GPU буферы после каждого LID
+            # inference. Вызов ВНУТРИ mlx_lock() (этот метод вызывается из _run_detect
+            # через `with mlx_lock(): self._detect_with_mlx(...)`).
+            # DO NOT REMOVE OR MOVE — W1497 cherry-pick train reverted this.
+            if _HAS_MLX:
+                try:
+                    mx.clear_cache()
+                except Exception:
+                    logger.debug("mx.clear_cache failed in _detect_with_mlx", exc_info=True)
