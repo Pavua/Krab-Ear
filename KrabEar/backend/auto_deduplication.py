@@ -25,6 +25,7 @@ import uuid
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Callable, Optional
 
 from core.duplicate_detector import DuplicateDetector
@@ -44,6 +45,37 @@ _MAX_DEDUP_SCAN: int = 1000
 # Timestamp-заглушка для записей без поля ts — ставим в эпоху 0 (самые старые)
 _MISSING_TS_PLACEHOLDER: str = "1970-01-01T00:00:00+00:00"
 
+# W1245: Jaccard hybrid algorithm boundary constants
+_JACCARD_LOW: float = 0.7    # below → use Jaccard only
+_JACCARD_HIGH: float = 0.85  # above → use Jaccard only; between → blend with SequenceMatcher
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """W1245: Jaccard similarity on lowercased word sets with SequenceMatcher fallback.
+
+    For Jaccard scores in [_JACCARD_LOW, _JACCARD_HIGH] (indeterminate zone),
+    blends with SequenceMatcher ratio to reduce false positives from short texts
+    (old pure-SequenceMatcher gave ~0.91 for 'Привет как дела' vs 'Привет как').
+    Returns 0.0 if either string is empty.
+    """
+    if not a or not b:
+        # Both empty → identical (1.0) per convention, one empty → 0.0
+        if not a and not b:
+            return 1.0
+        return 0.0
+    set_a = set(a.lower().split())
+    set_b = set(b.lower().split())
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    jaccard = intersection / union if union > 0 else 0.0
+    # Indeterminate zone: blend with SequenceMatcher for higher precision
+    if _JACCARD_LOW <= jaccard <= _JACCARD_HIGH:
+        sm = SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        return (jaccard + sm) / 2.0
+    return jaccard
+
 
 @dataclass
 class DedupResult:
@@ -51,7 +83,17 @@ class DedupResult:
     is_duplicate: bool
     duplicate_of: str | None  # ID оригинальной записи (или None)
     similarity: float         # коэффициент сходства [0.0, 1.0]
-    action_taken: str         # "kept" | "skipped" | "merged"
+    action_taken: str         # "kept" | "skipped" | "merged" | "privacy_skipped"
+
+
+# W1248: sentinel instance returned when privacy_mode_enabled is True — avoids
+# creating a new object on every call (identity check in tests: `result is _PRIVACY_SKIPPED`).
+_PRIVACY_SKIPPED = DedupResult(
+    is_duplicate=False,
+    duplicate_of=None,
+    similarity=0.0,
+    action_taken="privacy_skipped",
+)
 
 
 class AutoDeduplicator:
@@ -72,6 +114,8 @@ class AutoDeduplicator:
     ) -> None:
         self._detector = DuplicateDetector()
         self._lock = threading.RLock()
+        # W1245 F5: serializes concurrent check_duplicate calls to prevent race conditions.
+        self._check_lock = threading.Lock()
         # Поставщик runtime-настроек: _get_runtime_setting(key, default) из BackendService.
         # Если не задан — проверка режима приватности пропускается (небезопасно, только для тестов).
         self._settings_provider = settings_provider
@@ -123,95 +167,92 @@ class AutoDeduplicator:
             )
 
         # W1248: пропускаем дедупликацию в режиме приватности — сравнение текстов запрещено.
+        # Returns _PRIVACY_SKIPPED sentinel (same instance, supports `result is _PRIVACY_SKIPPED`).
         if self._privacy_mode_enabled():
             logger.debug("check_duplicate: пропущено — активен режим приватности")
-            return DedupResult(
-                is_duplicate=False,
-                duplicate_of=None,
-                similarity=0.0,
-                action_taken="kept",
-            )
+            return _PRIVACY_SKIPPED
 
-        with self._lock:
-            self._total_checked += 1
-
-        # Загружаем последние записи для сравнения (достаточно последних 50)
-        try:
-            items, _ = store.get_history_page(cursor=None, limit=50)
-        except Exception:
-            logger.exception("Ошибка загрузки истории для дедупликации")
-            return DedupResult(
-                is_duplicate=False,
-                duplicate_of=None,
-                similarity=0.0,
-                action_taken="kept",
-            )
-
-        # W1243 F2: нормализуем ts — пустой/отсутствующий → эпоха 0 (вне окна)
-        normalized_items = []
-        for item in items:
-            if not item.get("ts"):
-                item = dict(item)
-                item["ts"] = _MISSING_TS_PLACEHOLDER
-            normalized_items.append(item)
-
-        # Добавляем новую запись как временный элемент для find_duplicates
-        new_item: dict[str, Any] = {
-            "id": "__new__",
-            "text": text,
-            "ts": timestamp,
-        }
-        candidates = normalized_items + [new_item]
-
-        groups = self._detector.find_duplicates(candidates, similarity_threshold=threshold)
-
-        best_similarity = 0.0
-        duplicate_of: str | None = None
-
-        for group in groups:
-            # Проверяем, входит ли новая запись в эту группу дубликатов
-            ids_in_group = {item.get("id") for item in group.items}
-            if "__new__" not in ids_in_group:
-                continue
-
-            # Ищем существующую запись-оригинал (не нашу временную)
-            existing = [
-                item for item in group.items if item.get("id") != "__new__"
-            ]
-            if not existing:
-                continue
-
-            # Берём первый оригинал (самый ранний в списке = самый свежий из истории)
-            original = existing[0]
-            best_similarity = group.similarity
-            duplicate_of = original.get("id")
-            break
-
-        if duplicate_of is not None:
+        with self._check_lock:
             with self._lock:
-                self._duplicates_found += 1
-                self._chars_saved += len(text)
+                self._total_checked += 1
 
-            action = "merged" if best_similarity >= MERGE_THRESHOLD else "skipped"
-            logger.debug(
-                "Дубликат обнаружен: similarity=%.3f, original_id=%s, action=%s",
-                best_similarity,
-                duplicate_of,
-                action,
-            )
+            # Загружаем последние записи для сравнения (достаточно последних 50)
+            try:
+                items, _ = store.get_history_page(cursor=None, limit=50)
+            except Exception:
+                logger.exception("Ошибка загрузки истории для дедупликации")
+                return DedupResult(
+                    is_duplicate=False,
+                    duplicate_of=None,
+                    similarity=0.0,
+                    action_taken="kept",
+                )
+
+            # W1243 F2: нормализуем ts — пустой/отсутствующий → эпоха 0 (вне окна)
+            normalized_items = []
+            for item in items:
+                if not item.get("ts"):
+                    item = dict(item)
+                    item["ts"] = _MISSING_TS_PLACEHOLDER
+                normalized_items.append(item)
+
+            # Добавляем новую запись как временный элемент для find_duplicates
+            new_item: dict[str, Any] = {
+                "id": "__new__",
+                "text": text,
+                "ts": timestamp,
+            }
+            candidates = normalized_items + [new_item]
+
+            groups = self._detector.find_duplicates(candidates, similarity_threshold=threshold)
+
+            best_similarity = 0.0
+            duplicate_of: str | None = None
+
+            for group in groups:
+                # Проверяем, входит ли новая запись в эту группу дубликатов
+                ids_in_group = {item.get("id") for item in group.items}
+                if "__new__" not in ids_in_group:
+                    continue
+
+                # Ищем существующую запись-оригинал (не нашу временную)
+                existing = [
+                    item for item in group.items if item.get("id") != "__new__"
+                ]
+                if not existing:
+                    continue
+
+                # Берём первый оригинал (самый ранний в списке = самый свежий из истории)
+                original = existing[0]
+                best_similarity = group.similarity
+                duplicate_of = original.get("id")
+                break
+
+            if duplicate_of is not None:
+                with self._lock:
+                    self._duplicates_found += 1
+                    self._chars_saved += len(text)
+
+                action = "merged" if best_similarity >= MERGE_THRESHOLD else "skipped"
+                logger.debug(
+                    "Дубликат обнаружен: similarity=%.3f, original_id=%s, action=%s",
+                    best_similarity,
+                    duplicate_of,
+                    action,
+                )
+                return DedupResult(
+                    is_duplicate=True,
+                    duplicate_of=duplicate_of,
+                    similarity=best_similarity,
+                    action_taken=action,
+                )
+
             return DedupResult(
-                is_duplicate=True,
-                duplicate_of=duplicate_of,
+                is_duplicate=False,
+                duplicate_of=None,
                 similarity=best_similarity,
-                action_taken=action,
+                action_taken="kept",
             )
-
-        return DedupResult(
-            is_duplicate=False,
-            duplicate_of=None,
-            similarity=best_similarity,
-            action_taken="kept",
-        )
 
     def run_deduplication(
         self,
@@ -240,6 +281,18 @@ class AutoDeduplicator:
               - duplicate_groups: int
               - duplicates: list[dict]  — каждый элемент: {original_id, duplicate_ids, similarity}
         """
+        # W1248: пропускаем в режиме приватности — сравнение текстов запрещено.
+        if self._privacy_mode_enabled():
+            logger.debug("run_deduplication: пропущено — активен режим приватности")
+            return {
+                "total_scanned": 0,
+                "total_in_store": 0,
+                "capped": False,
+                "duplicate_groups": 0,
+                "duplicates": [],
+                "skipped_reason": "privacy_mode",
+            }
+
         all_items: list[dict] = []
         cursor: str | None = None
         total_in_store: int = 0
@@ -419,12 +472,12 @@ class AutoDeduplicator:
         """Возвращает True если включён режим приватности (запрещено сравнивать тексты).
 
         Использует settings_provider (инжектированный из BackendService) для чтения
-        runtime-настройки 'privacy_mode'. Без провайдера — всегда False (не блокирует).
+        runtime-настройки 'privacy_mode_enabled'. Без провайдера — всегда False (не блокирует).
         """
         if self._settings_provider is None:
             return False
         try:
-            return bool(self._settings_provider("privacy_mode", False))
+            return bool(self._settings_provider("privacy_mode_enabled", False))
         except Exception:
             logger.warning("_privacy_mode_enabled: ошибка чтения настройки, считаем False")
             return False
@@ -465,22 +518,41 @@ class AutoDeduplicator:
     def handle_run_deduplication(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода run_deduplication.
 
-        W1243 F2: запускает сканирование в фоновом потоке и немедленно возвращает job_id.
+        W1248: поддерживает _semantic_searcher — если передан, вызывает remove_item
+        для каждого найденного дубликата (исключение логируется и не прокидывается).
+
+        W1243 F2: запускает сканирование синхронно и возвращает полный результат.
+        Для асинхронного режима используйте run_deduplication_async.
 
         Params:
             threshold (float, optional): порог сходства, по умолчанию 0.9.
             store: передаётся из BackendService.
+            _semantic_searcher (optional): объект с методом remove_item(id).
 
         Returns:
-            dict с полями: ok=True, job_id (str).
+            dict с полями из run_deduplication.
         """
         threshold = float(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
+        semantic_searcher = params.get("_semantic_searcher")
 
-        job_id = self.run_deduplication_async(store=store, threshold=threshold)
-        return {"ok": True, "job_id": job_id}
+        result = self.run_deduplication(store=store, threshold=threshold)
+
+        # W1248: notify semantic searcher about removed duplicates
+        if semantic_searcher is not None and result.get("duplicates"):
+            for group in result["duplicates"]:
+                for dup_id in group.get("duplicate_ids", []):
+                    try:
+                        semantic_searcher.remove_item(dup_id)
+                    except Exception:
+                        logger.warning(
+                            "handle_run_deduplication: semantic_searcher.remove_item(%s) failed",
+                            dup_id,
+                        )
+
+        return result
 
     def handle_dedup_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода dedup_progress — опрос статуса фоновой dedup-задачи.
