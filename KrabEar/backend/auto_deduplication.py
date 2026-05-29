@@ -106,7 +106,23 @@ class AutoDeduplicator:
       - Записи с отсутствующим ts получают заглушку 1970-01-01 (эпоха 0).
       - Фоновое выполнение: handle_run_deduplication возвращает job_id немедленно.
       - handle_dedup_progress — опрос статуса задачи.
+
+    W1567 F1 HIGH fix (wire _text_similarity):
+      - check_duplicate now uses _text_similarity (Jaccard hybrid, W1245) as the
+        primary tier before delegating to DuplicateDetector.
+      - Tier 1: similarity >= _SIMILARITY_THRESHOLD (0.85) → definite duplicate,
+        DuplicateDetector bypassed.
+      - Tier 2: _JACCARD_LOW (0.7) <= similarity < _SIMILARITY_THRESHOLD → ambiguous,
+        fall through to DuplicateDetector for SequenceMatcher confirmation.
+      - Below _JACCARD_LOW (0.7) → not a duplicate, DuplicateDetector skipped.
+      - 60-second time window enforced in tier-1 scan (mirrors DuplicateDetector behaviour).
     """
+
+    # W1567: primary similarity threshold — above this, record is a definite duplicate.
+    _SIMILARITY_THRESHOLD: float = 0.85
+
+    # 60-second window for tier-1 scan (same as DuplicateDetector.DEFAULT_TIME_WINDOW_SECONDS).
+    _TIME_WINDOW_SECONDS: int = 60
 
     def __init__(
         self,
@@ -196,37 +212,108 @@ class AutoDeduplicator:
                     item["ts"] = _MISSING_TS_PLACEHOLDER
                 normalized_items.append(item)
 
-            # Добавляем новую запись как временный элемент для find_duplicates
-            new_item: dict[str, Any] = {
-                "id": "__new__",
-                "text": text,
-                "ts": timestamp,
-            }
-            candidates = normalized_items + [new_item]
+            # ------------------------------------------------------------------
+            # W1567 F1 HIGH: Tier-1 scan using _text_similarity (Jaccard hybrid).
+            # Filter candidates to the 60-second time window first, then score.
+            # ------------------------------------------------------------------
+            try:
+                new_ts = datetime.fromisoformat(
+                    timestamp.replace("Z", "+00:00")
+                ).timestamp()
+            except (ValueError, AttributeError):
+                new_ts = None
 
-            groups = self._detector.find_duplicates(candidates, similarity_threshold=threshold)
+            tier1_match_id: str | None = None
+            tier1_similarity: float = 0.0
+            ambiguous_candidates: list[dict] = []  # 0.7 <= sim < 0.85 → tier-2
+
+            for candidate in normalized_items:
+                cand_text = str(candidate.get("text") or "").strip()
+                if not cand_text:
+                    continue
+
+                # 60-second time window filter
+                if new_ts is not None:
+                    cand_ts_raw = candidate.get("ts") or ""
+                    try:
+                        cand_ts = datetime.fromisoformat(
+                            str(cand_ts_raw).replace("Z", "+00:00")
+                        ).timestamp()
+                        if abs(new_ts - cand_ts) > self._TIME_WINDOW_SECONDS:
+                            continue
+                    except (ValueError, AttributeError):
+                        # Unparseable ts → treated as outside window (safe)
+                        continue
+
+                sim = _text_similarity(text, cand_text)
+
+                if sim >= self._SIMILARITY_THRESHOLD:
+                    # Definite duplicate — take the first (most recent) hit
+                    if tier1_match_id is None or sim > tier1_similarity:
+                        tier1_match_id = candidate.get("id")
+                        tier1_similarity = sim
+                elif sim >= _JACCARD_LOW:
+                    # Ambiguous zone — collect for tier-2 DuplicateDetector confirmation
+                    ambiguous_candidates.append(candidate)
+
+            if tier1_match_id is not None:
+                # Tier-1 confirmed: report without involving DuplicateDetector
+                with self._lock:
+                    self._duplicates_found += 1
+                    self._chars_saved += len(text)
+
+                action = "merged" if tier1_similarity >= MERGE_THRESHOLD else "skipped"
+                logger.debug(
+                    "Дубликат (tier-1 Jaccard): similarity=%.3f, original_id=%s, action=%s",
+                    tier1_similarity,
+                    tier1_match_id,
+                    action,
+                )
+                return DedupResult(
+                    is_duplicate=True,
+                    duplicate_of=tier1_match_id,
+                    similarity=tier1_similarity,
+                    action_taken=action,
+                )
+
+            # ------------------------------------------------------------------
+            # Tier-2: run DuplicateDetector (SequenceMatcher) on ambiguous
+            # candidates (0.7 <= Jaccard < 0.85) only, or on ALL normalized items
+            # when no new_ts was available (legacy behaviour preserved).
+            # ------------------------------------------------------------------
+            tier2_candidates = ambiguous_candidates if new_ts is not None else normalized_items
 
             best_similarity = 0.0
             duplicate_of: str | None = None
 
-            for group in groups:
-                # Проверяем, входит ли новая запись в эту группу дубликатов
-                ids_in_group = {item.get("id") for item in group.items}
-                if "__new__" not in ids_in_group:
-                    continue
+            if tier2_candidates:
+                # Добавляем новую запись как временный элемент для find_duplicates
+                new_item: dict[str, Any] = {
+                    "id": "__new__",
+                    "text": text,
+                    "ts": timestamp,
+                }
+                candidates_for_detector = tier2_candidates + [new_item]
 
-                # Ищем существующую запись-оригинал (не нашу временную)
-                existing = [
-                    item for item in group.items if item.get("id") != "__new__"
-                ]
-                if not existing:
-                    continue
+                groups = self._detector.find_duplicates(
+                    candidates_for_detector, similarity_threshold=threshold
+                )
 
-                # Берём первый оригинал (самый ранний в списке = самый свежий из истории)
-                original = existing[0]
-                best_similarity = group.similarity
-                duplicate_of = original.get("id")
-                break
+                for group in groups:
+                    ids_in_group = {item.get("id") for item in group.items}
+                    if "__new__" not in ids_in_group:
+                        continue
+
+                    existing = [
+                        item for item in group.items if item.get("id") != "__new__"
+                    ]
+                    if not existing:
+                        continue
+
+                    original = existing[0]
+                    best_similarity = group.similarity
+                    duplicate_of = original.get("id")
+                    break
 
             if duplicate_of is not None:
                 with self._lock:
@@ -235,7 +322,7 @@ class AutoDeduplicator:
 
                 action = "merged" if best_similarity >= MERGE_THRESHOLD else "skipped"
                 logger.debug(
-                    "Дубликат обнаружен: similarity=%.3f, original_id=%s, action=%s",
+                    "Дубликат (tier-2 SequenceMatcher): similarity=%.3f, original_id=%s, action=%s",
                     best_similarity,
                     duplicate_of,
                     action,
