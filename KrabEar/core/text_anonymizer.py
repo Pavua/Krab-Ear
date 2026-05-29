@@ -71,6 +71,86 @@ def _passes_luhn(digits: str) -> bool:
     return checksum % 10 == 0
 
 
+# ── СНИЛС checksum helper (W1022 F1) ────────────────────────────────────────
+
+def _snils_valid(num: str, expected_check: Optional[int] = None) -> bool:
+    """Проверяет контрольное число СНИЛС (mod-101).
+
+    Два режима:
+    1. _snils_valid(digits9, expected_check) — принимает 9 первых цифр и
+       ожидаемое контрольное число; возвращает True если совпадает.
+    2. _snils_valid(full_snils) — принимает полный СНИЛС (11 цифр, разделители
+       игнорируются); проверяет контрольное число из последних 2 цифр.
+
+    Алгоритм (по ПФРФ):
+      sum9 = sum(d[i] * (9 - i) for i in range(9))
+      if sum9 < 100:    check2 = sum9
+      elif sum9 in (100, 101): check2 = 0
+      else:
+          r = sum9 % 101
+          check2 = 0 if r in (100, 101) else r
+    """
+    try:
+        if expected_check is not None:
+            # Режим 1: num — 9 цифр, expected_check — ожидаемый check2
+            digits9 = num
+            if len(digits9) != 9:
+                return False
+            digits = [int(c) for c in digits9]
+            s = sum(digits[i] * (9 - i) for i in range(9))
+            if s < 100:
+                check2 = s
+            elif s in (100, 101):
+                check2 = 0
+            else:
+                r = s % 101
+                check2 = 0 if r in (100, 101) else r
+            return check2 == expected_check
+        else:
+            # Режим 2: num — полный СНИЛС (11 значащих цифр)
+            stripped = re.sub(r"[^\d]", "", num)
+            if len(stripped) != 11:
+                return False
+            digits = [int(c) for c in stripped]
+            s = sum(digits[i] * (9 - i) for i in range(9))
+            if s < 100:
+                check2 = s
+            elif s in (100, 101):
+                check2 = 0
+            else:
+                r = s % 101
+                check2 = 0 if r in (100, 101) else r
+            stored = digits[9] * 10 + digits[10]
+            return check2 == stored
+    except (ValueError, IndexError):
+        return False
+
+
+# ── IBAN mod-97 checksum helper (W1022 F4) ───────────────────────────────────
+
+def _iban_valid(s: str) -> bool:
+    """Проверяет контрольную сумму IBAN по ISO 13616 (mod-97).
+
+    Алгоритм:
+    1. Убрать пробелы, перевести в верхний регистр.
+    2. Переместить первые 4 символа в конец.
+    3. Заменить буквы: A=10, B=11, …, Z=35.
+    4. Вычислить int(строка) % 97 — должно быть равно 1.
+    """
+    try:
+        cleaned = s.replace(" ", "").upper()
+        if len(cleaned) < 5:
+            return False
+        rearranged = cleaned[4:] + cleaned[:4]
+        numeric = "".join(
+            str(ord(c) - ord("A") + 10) if c.isalpha() else c
+            for c in rearranged
+        )
+        return int(numeric) % 97 == 1
+    except (ValueError, AttributeError):
+        return False
+
+
 # ── Датаклассы результата ────────────────────────────────────────────────────
 
 @dataclass
@@ -153,10 +233,26 @@ _BUILTIN_RULES_RAW: list[tuple[str, str, str]] = [
         "[ИНН]",
     ),
     # СНИЛС: XXX-XXX-XXX XX  /  XXXXXXXXXXX (11 цифр)
+    # Контрольное число проверяется алгоритмом mod-101 в anonymize() (W1022 F1)
     (
         "snils",
-        r"\b\d{3}[\s\-]\d{3}[\s\-]\d{3}[\s\-]?\d{2}\b",
+        r"\b\d{3}[- ]?\d{3}[- ]?\d{3}[- ]?\d{2}\b",
         "[СНИЛС]",
+    ),
+    # US SSN: XXX-XX-XXXX (с явными ограничениями на невалидные блоки)
+    # Checksum не определён стандартом; фильтруем структурно-невалидные диапазоны
+    # (area 000, 666, 900-999; group 00; serial 0000)
+    (
+        "us_ssn",
+        r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+        "[SSN]",
+    ),
+    # IBAN: 2 буквы кода страны + 2 контрольных цифры + до 30 символов BBAN
+    # Контрольная сумма mod-97 проверяется в anonymize() (W1022 F4)
+    (
+        "iban",
+        r"\b[A-Z]{2}\d{2}[A-Z0-9]{1,30}\b",
+        "[IBAN]",
     ),
 ]
 
@@ -225,6 +321,14 @@ class TextAnonymizer:
                 elif name == "inn":
                     # Validate ИНН ФЛ checksum — skip random 12-digit numbers
                     if not _passes_inn_fl_checksum(m.group(0)):
+                        continue
+                elif name == "snils":
+                    # Validate СНИЛС mod-101 checksum (W1022 F1) — skip bad checksums
+                    if not _snils_valid(m.group(0)):
+                        continue
+                elif name == "iban":
+                    # Validate IBAN mod-97 checksum (W1022 F4) — skip bad checksums
+                    if not _iban_valid(m.group(0)):
                         continue
                 matches.append((m.start(), m.end(), m.group(0), replacement, name))
 

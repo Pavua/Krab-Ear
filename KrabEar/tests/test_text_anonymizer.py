@@ -429,17 +429,18 @@ class TestTextAnonymizerCreditCardLuhn(unittest.TestCase):
         self.assertIn("[КАРТА]", result.anonymized_text)
         self.assertEqual(result.redaction_count, 1)
 
-    def test_redact_credit_card_invalid_luhn_kept(self) -> None:
-        """Luhn-invalid 16-digit number — TextAnonymizer НЕ выполняет Luhn-проверку.
+    def test_redact_credit_card_invalid_luhn_not_redacted(self) -> None:
+        """Luhn-invalid 16-digit number — Luhn-валидация предотвращает false positive.
 
-        Фактическое поведение: число редактируется (паттерн-матчинг без Luhn).
-        Тест документирует это поведение явно, чтобы будущие изменения были заметны.
+        Фактическое поведение (post-W1022/W1536): число НЕ редактируется, т.к. не
+        проходит Luhn-проверку. Это корректное поведение, предотвращающее ложные срабатывания.
         """
         # 1234567890123456 — Luhn-invalid (контрольная сумма не совпадает)
         result = self.a.anonymize("Число: 1234567890123456")
-        # Anonymizer редактирует без Luhn-валидации — это задокументированное поведение
-        self.assertIn("[КАРТА]", result.anonymized_text)
-        self.assertEqual(result.redactions[0].category, "credit_card")
+        # Anonymizer с Luhn-валидацией корректно НЕ редактирует это число
+        self.assertNotIn("[КАРТА]", result.anonymized_text)
+        self.assertIn("1234567890123456", result.anonymized_text)
+        self.assertEqual(result.redaction_count, 0)
 
     def test_redact_credit_card_mastercard_luhn_valid(self) -> None:
         """MasterCard 5425233430109903 — Luhn-valid."""
