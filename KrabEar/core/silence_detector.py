@@ -154,7 +154,6 @@ class SilenceDetector:
         Returns:
             Аудио с обрезанной ведущей/завершающей тишиной.
         """
-        audio.shape
         mono = self._to_mono(audio)
 
         if len(mono) == 0 or sample_rate <= 0:
@@ -194,8 +193,6 @@ class SilenceDetector:
         start_sample = start_frame * _FRAME_SIZE
         end_sample = min(end_frame * _FRAME_SIZE, n_samples)
 
-        if audio.ndim > 1:
-            return audio[start_sample:end_sample]
         return audio[start_sample:end_sample]
 
     def get_speech_ratio(

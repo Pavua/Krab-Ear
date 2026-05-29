@@ -29,8 +29,9 @@ SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
 # Backward-compatible alias
 SILENCE_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_STRICT
 
-# Эквивалентная амплитуда для STRICT: 10 ** (-40 / 20) = 0.01
-SILENCE_THRESHOLD_AMP: float = 0.01  # 10 ** (SILENCE_THRESHOLD_DB / 20)
+# Эквивалентная амплитуда для STRICT: 10 ** (SILENCE_THRESHOLD_DB / 20) = 0.01.
+# Вычисляется из SILENCE_THRESHOLD_DB_STRICT чтобы значение не расходилось при смене порога.
+SILENCE_THRESHOLD_AMP: float = 10.0 ** (SILENCE_THRESHOLD_DB_STRICT / 20.0)
 
 __all__ = [
     "SILENCE_THRESHOLD_DB",
