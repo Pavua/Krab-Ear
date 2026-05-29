@@ -419,4 +419,14 @@ class VoiceCommandProcessor:
                 output.append(char)
                 pos += 1
 
+        # W1257 F5: capitalize_next survived to end-of-text without finding a word to
+        # capitalize — this usually means the user said «большая буква» / «capitalize next»
+        # at the very end of an utterance with nothing following.  Log a diagnostic warning
+        # so callers can detect the condition, and preserve accumulated output as-is.
+        if capitalize_next:
+            logger.info(
+                "capitalize_next at end-of-text: no following word found; "
+                "accumulated text preserved as-is"
+            )
+
         return "".join(output)
