@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # Защита от квадратичного роста сложности TF-IDF при очень больших входных данных.
 _MAX_ITEMS: int = 500
 
+# W1281 / W1538: публичный псевдоним для тестов и внешних проверок.
+# _HARD_MAX_ITEMS используется в тестах напрямую через import.
+_HARD_MAX_ITEMS: int = _MAX_ITEMS
+
 # ── Стоп-слова (объединённые для всех поддерживаемых языков) ────────────────
 
 _STOP_WORDS: frozenset = frozenset({
@@ -133,8 +137,8 @@ def _compute_tfidf(
     scores: Dict[str, float] = {}
     for word, count in tf.items():
         tf_val = count / total_tf
-        # Количество окон, содержащих это слово
-        doc_freq = sum(1 for w_tokens in all_windows_tokens if word in w_tokens)
+        # Количество окон, содержащих это слово (W1277 F4: set() для O(1) lookup)
+        doc_freq = sum(1 for w_tokens in all_windows_tokens if word in set(w_tokens))
         idf_val = math.log((total_windows + 1) / (doc_freq + 1)) + 1.0
         scores[word] = tf_val * idf_val
 
