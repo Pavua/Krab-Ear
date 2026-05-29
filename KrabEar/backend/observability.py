@@ -307,6 +307,25 @@ def is_sentry_initialized() -> bool:
     return _sentry_initialized
 
 
+def flush_sentry(timeout: float = 2.0) -> None:
+    """Flush pending Sentry events to the server.
+
+    No-op if Sentry SDK is not initialized or not installed.
+    Safe to call from signal handlers — never raises.
+
+    Args:
+        timeout: максимальное время ожидания отправки (секунд).
+    """
+    if not _sentry_initialized:
+        return
+    try:
+        import sentry_sdk  # noqa: PLC0415
+
+        sentry_sdk.flush(timeout=timeout)
+    except Exception:  # noqa: BLE001
+        pass  # телеметрия не должна мешать штатному завершению
+
+
 def capture_exception(exc: Exception, component: str | None = None) -> None:
     """Отправляет исключение в Sentry если SDK инициализирован.
 
@@ -361,7 +380,12 @@ def mask_phone(phone: str) -> str:
 
 
 def install_signal_handlers() -> None:
-    """Install Sentry-aware handlers for SIGABRT/SIGSEGV/SIGTERM.
+    """Install Sentry-aware handlers for SIGABRT/SIGSEGV.
+
+    SIGTERM is intentionally excluded — ``main()`` in ``service.py`` owns the
+    SIGTERM handler and calls both ``shutdown_handler.shutdown()`` **and**
+    ``flush_sentry()`` in the correct order (shutdown first, so final events are
+    captured before the flush).
 
     Sends a Sentry event with the signal name before propagating the signal
     to the default handler so the process terminates normally.
@@ -390,7 +414,8 @@ def install_signal_handlers() -> None:
         signal.signal(signum, signal.SIG_DFL)
         signal.raise_signal(signum)
 
-    for sig in (signal.SIGTERM, signal.SIGABRT, signal.SIGSEGV):
+    # SIGTERM is NOT in this list — main()'s _signal_handler handles it.
+    for sig in (signal.SIGABRT, signal.SIGSEGV):
         try:
             signal.signal(sig, _handler)
         except (ValueError, OSError):

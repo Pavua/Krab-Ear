@@ -405,30 +405,48 @@ class TestInstallSignalHandlers(unittest.TestCase):
         self.assertTrue(getattr(mod.install_signal_handlers, "_installed", False))
 
     def test_idempotent_second_call_does_not_reinstall(self):
-        """Second call does not change signal handlers that were set by first call."""
+        """Second call does not change signal handlers that were set by first call.
+
+        W1640: SIGTERM is no longer managed here; we use SIGABRT instead.
+        """
         import signal as _signal
         from backend.observability import install_signal_handlers
 
         install_signal_handlers()
-        handler_after_first = _signal.getsignal(_signal.SIGTERM)
+        handler_after_first = _signal.getsignal(_signal.SIGABRT)
 
         install_signal_handlers()
-        handler_after_second = _signal.getsignal(_signal.SIGTERM)
+        handler_after_second = _signal.getsignal(_signal.SIGABRT)
 
         self.assertEqual(handler_after_first, handler_after_second)
 
     def test_no_op_when_sentry_not_initialized(self):
-        """Handler can be invoked without crashing even if Sentry is absent."""
+        """install_signal_handlers() does not crash when Sentry is absent.
+
+        W1640: SIGTERM is no longer registered by install_signal_handlers()
+        (main()._signal_handler owns SIGTERM).  This test now verifies that
+        install_signal_handlers() completes without raising, and that SIGTERM
+        is NOT overridden (main() must remain the authoritative SIGTERM owner).
+        """
         import signal as _signal
         import backend.observability as mod
 
         # Ensure Sentry is NOT initialized.
         mod._sentry_initialized = False
-        mod.install_signal_handlers()
 
-        # The SIGTERM handler should be a callable (our wrapper).
-        handler = _signal.getsignal(_signal.SIGTERM)
-        self.assertTrue(callable(handler))
+        original_sigterm = _signal.getsignal(_signal.SIGTERM)
+        try:
+            mod.install_signal_handlers()  # must not raise
+        except Exception as exc:
+            self.fail(f"install_signal_handlers() raised {exc!r}")
+
+        # SIGTERM must NOT be overridden by install_signal_handlers (W1640).
+        handler_after = _signal.getsignal(_signal.SIGTERM)
+        self.assertEqual(
+            handler_after,
+            original_sigterm,
+            "install_signal_handlers() must not touch SIGTERM — main() owns it (W1640)",
+        )
 
 
 if __name__ == "__main__":
