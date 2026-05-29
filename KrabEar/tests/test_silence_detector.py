@@ -185,6 +185,27 @@ class TestTrimSilence(unittest.TestCase):
         trimmed = self.detector.trim_silence(stereo, SAMPLE_RATE, min_silence_sec=0.3)
         self.assertLess(len(trimmed), len(stereo))
 
+    def test_trim_silence_2d_preserves_ndim_and_channels(self):
+        """W1566 F5: trim_silence на 2D-массиве сохраняет ndim=2 и число каналов.
+
+        Ранее одинаковые ветки (audio.ndim > 1 / else) обе возвращали audio[s:e],
+        что корректно, но избыточно. После коллапса (F2) — один return. Тест
+        проверяет, что поведение не изменилось: 2D-вход → 2D-выход с тем же
+        количеством каналов.
+        """
+        n_channels = 3
+        speech_mono = _make_speech(1.0)
+        silence_mono = _make_silence(0.6)
+        mono = _concat(silence_mono, speech_mono)
+        multichannel = np.stack([mono] * n_channels, axis=1)  # shape (N, 3)
+        self.assertEqual(multichannel.ndim, 2)
+
+        trimmed = self.detector.trim_silence(multichannel, SAMPLE_RATE, min_silence_sec=0.3)
+
+        self.assertEqual(trimmed.ndim, 2, "trim_silence должен сохранять ndim=2 для многоканального входа")
+        self.assertEqual(trimmed.shape[1], n_channels, "число каналов должно оставаться неизменным")
+        self.assertLess(len(trimmed), len(multichannel), "ведущая тишина должна быть обрезана")
+
 
 class TestGetSpeechRatio(unittest.TestCase):
     """Тесты метода get_speech_ratio."""
