@@ -27,6 +27,18 @@ from core.mlx_lock import mlx_lock
 
 logger = logging.getLogger("KrabEar.AudioLanguageID")
 
+# W1090 / W1525 guard — DO NOT DROP IN CHERRY-PICKS.
+# W1497 cherry-pick train reverted these constants via --theirs strategy.
+# Any future cherry-pick that touches this file must preserve both guards.
+#
+# F1: skip encoder on silent/near-silent audio (avoids spurious detections
+#     and wastes GPU time on pure silence).
+_MIN_PEAK_AMPLITUDE: float = 1e-4
+
+# F2: discard low-confidence detect_language results (Whisper LID head is
+#     unreliable below ~0.35 — language code may flip randomly on short clips).
+_MIN_CONFIDENCE: float = 0.35
+
 
 class AudioLanguageID:
     """Определяет язык аудио через mlx-whisper encoder (без decoder).
@@ -46,6 +58,11 @@ class AudioLanguageID:
     # Note: _detect_with_mlx() already runs inside mlx_lock(), so this lock is only
     # needed for clear_model_cache() calls from outside the mlx_lock() context.
     _cache_lock: threading.Lock = threading.Lock()
+
+    # W1090 / W1525 guard constants exposed as class attributes for testability.
+    # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+    _ZERO_PEAK_THRESHOLD: float = _MIN_PEAK_AMPLITUDE  # 1e-4
+    MIN_CONFIDENCE: float = _MIN_CONFIDENCE  # 0.35
 
     def __init__(
         self,
@@ -105,6 +122,17 @@ class AudioLanguageID:
         # 4. Обрезаем до preview_sec
         preview_frames = int(sample_rate * preview_sec)
         audio_preview = audio_mono[:preview_frames]
+
+        # 4a. F1 guard (W1090 / W1525): skip encoder on silent/near-silent audio.
+        # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+        peak = float(np.max(np.abs(audio_preview)))
+        if peak < _MIN_PEAK_AMPLITUDE:
+            logger.debug(
+                "audio_lang_id: peak %.4f below threshold %.4f, skipping encoder",
+                peak,
+                _MIN_PEAK_AMPLITUDE,
+            )
+            return None
 
         # 5. Ресемплируем до 16000 Hz если нужно (mlx-whisper требует 16kHz)
         if sample_rate != 16000:
@@ -288,11 +316,15 @@ class AudioLanguageID:
             # или может возвращать (str, dict) в разных версиях — обрабатываем оба
             result = mlx_whisper.decoding.detect_language(model, mel)
 
+            probs: Optional[dict] = None
             if isinstance(result, tuple):
                 # (language_str, probs_dict)
                 lang_code = result[0]
+                if len(result) >= 2 and isinstance(result[1], dict):
+                    probs = result[1]
             elif isinstance(result, dict):
                 # {lang: prob, ...} — берём argmax
+                probs = result
                 lang_code = max(result, key=lambda k: result[k])
             elif isinstance(result, str):
                 lang_code = result
@@ -304,6 +336,20 @@ class AudioLanguageID:
                 return None
 
             lang_code = str(lang_code).strip().lower()
+
+            # F2 guard (W1090 / W1525): drop low-confidence detections.
+            # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+            if probs is not None and lang_code:
+                confidence = float(probs.get(lang_code, 0.0))
+                if confidence < _MIN_CONFIDENCE:
+                    logger.debug(
+                        "audio_lang_id: confidence %.3f for '%s' below threshold %.3f, dropping",
+                        confidence,
+                        lang_code,
+                        _MIN_CONFIDENCE,
+                    )
+                    return None
+
             logger.info("AudioLanguageID: detected language = %s", lang_code)
             return lang_code if lang_code else None
 
