@@ -175,5 +175,24 @@ class TestAudioLangIDAllowlist(unittest.TestCase):
         self.assertEqual(getattr(rec, "fallback", None), "other")
 
 
+    def test_uk_included_in_supported_languages(self):
+        """Ukrainian (uk) is in SUPPORTED_LANGUAGES — W1581 canonical check.
+
+        W1561 PR #1425 used {ru,es,en,de,fr,it,pt} which omitted Ukrainian.
+        W1581 restores the W1121 contract: {ru,uk,en,es} — uk is critical.
+        """
+        from core.audio_lang_id import SUPPORTED_LANGUAGES
+        self.assertIn(
+            "uk", SUPPORTED_LANGUAGES,
+            "Ukrainian 'uk' must be in SUPPORTED_LANGUAGES (W1121 contract, W1581 regression fix)",
+        )
+        # Also verify de/fr/it/pt are absent (they were the W1561 regression set)
+        for code in ("de", "fr", "it", "pt"):
+            self.assertNotIn(
+                code, SUPPORTED_LANGUAGES,
+                f"{code!r} must NOT be in SUPPORTED_LANGUAGES (W1561 regression codes)",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

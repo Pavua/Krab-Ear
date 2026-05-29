@@ -735,8 +735,13 @@ class TestSupportedLanguagesFrozenset(unittest.TestCase):
             self.assertIn(code, SUPPORTED_LANGUAGES,
                           f"{code!r} must be in SUPPORTED_LANGUAGES")
 
-    def test_unsupported_language_returned_as_none(self):
-        """detect() returns None when mlx_whisper reports an unsupported language (W1561)."""
+    def test_unsupported_language_returned_with_warning(self):
+        """detect() returns the code AND emits WARNING for unsupported languages (W1121 contract).
+
+        W1561 was wrong — it silently returned None. W1581 corrects to W1121 design:
+        unsupported lang codes are returned so STTRouter can decide; a WARNING is emitted.
+        restrict_to_supported=True is the opt-in filter mode (tested in test_audio_lang_id_allowlist_W1121.py).
+        """
         AudioLanguageID._model_cache.clear()
         lid = AudioLanguageID()
 
@@ -750,10 +755,16 @@ class TestSupportedLanguagesFrozenset(unittest.TestCase):
         mock_mlx.decoding.detect_language.return_value = (unsupported, {unsupported: 0.9})
 
         with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-            result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
+            with self.assertLogs("KrabEar.AudioLanguageID", level="WARNING") as cm:
+                result = lid.detect(_speech(seconds=3.0), sample_rate=16000)
 
-        self.assertIsNone(result,
-                          f"Unsupported language {unsupported!r} must be downgraded to None")
+        # W1121 contract: code is returned (STTRouter decides); warning is emitted
+        self.assertEqual(result, unsupported,
+                         f"Unsupported language {unsupported!r} must be returned (W1121 contract); "
+                         f"use restrict_to_supported=True to filter")
+        warning_msgs = [m for m in cm.output if "WARNING" in m and "unsupported" in m]
+        self.assertTrue(len(warning_msgs) >= 1,
+                        f"Expected >=1 WARNING for unsupported lang={unsupported!r}, got: {cm.output}")
 
 
 if __name__ == "__main__":

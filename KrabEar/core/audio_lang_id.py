@@ -39,10 +39,12 @@ _MIN_PEAK_AMPLITUDE: float = 1e-4
 #     unreliable below ~0.35 — language code may flip randomly on short clips).
 _MIN_CONFIDENCE: float = 0.35
 
-# W1121 / W1561: hard allowlist of language codes returned by detect()
-# Anything outside this set is silently downgraded to None to avoid Whisper
-# picking obscure low-resource models that crash on Russian/Spanish input.
-SUPPORTED_LANGUAGES = frozenset({"ru", "es", "en", "de", "fr", "it", "pt"})
+# W1121 / W1581: canonical allowlist of language codes returned by detect().
+# Exact four codes: ru (Russian), uk (Ukrainian), en (English), es (Spanish).
+# Ukrainian is critical — do NOT replace with de/fr/it/pt (W1575 F1 HIGH regression).
+# Codes outside this set emit a WARNING and are returned as-is (STTRouter decides),
+# unless restrict_to_supported=True is set on the instance (returns None instead).
+SUPPORTED_LANGUAGES = frozenset({"ru", "uk", "en", "es"})
 
 
 class AudioLanguageID:
@@ -73,9 +75,14 @@ class AudioLanguageID:
         self,
         model_path: Optional[str] = None,
         preview_sec: Optional[float] = None,
+        restrict_to_supported: bool = False,
     ) -> None:
         self._model_path = model_path
         self._preview_sec = preview_sec
+        # W1581: when True, codes not in SUPPORTED_LANGUAGES → None (hard filter).
+        # Default False: unsupported codes are returned with a WARNING so STTRouter
+        # can decide what to do (soft-warn mode is the production default).
+        self._restrict_to_supported = restrict_to_supported
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -128,25 +135,30 @@ class AudioLanguageID:
         preview_frames = int(sample_rate * preview_sec)
         audio_preview = audio_mono[:preview_frames]
 
-        # 4a. F1 guard (W1090 / W1525): skip encoder on silent/near-silent audio.
-        # DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
-        peak = float(np.max(np.abs(audio_preview)))
-        if peak < _MIN_PEAK_AMPLITUDE:
-            logger.debug(
-                "audio_lang_id: peak %.4f below threshold %.4f, skipping encoder",
-                peak,
-                _MIN_PEAK_AMPLITUDE,
-            )
-            return None
-
         # 5. Ресемплируем до 16000 Hz если нужно (mlx-whisper требует 16kHz)
         if sample_rate != 16000:
             audio_preview = self._resample(audio_preview, sample_rate, 16000)
 
-        # 6. Запускаем inference под mlx_lock
+        # 6. Запускаем inference под mlx_lock (F1 silent-audio guard lives inside _run_detect)
         result = self._run_detect(audio_preview)
 
-        # 7. Сохраняем в кеш
+        # 7. W1121 / W1581: allowlist gate after _run_detect.
+        # Unsupported lang codes emit a WARNING so STTRouter can decide what to do.
+        # Hard-filter mode (restrict_to_supported=True) returns None instead.
+        # DO NOT REMOVE — W1561 used wrong set {ru,es,en,de,fr,it,pt}; canonical is {ru,uk,en,es}.
+        if result is not None and result not in SUPPORTED_LANGUAGES:
+            logger.warning(
+                "AudioLanguageID: detected unsupported language, STTRouter will use fallback",
+                extra={"detected_lang": result, "fallback": "other"},
+            )
+            if self._restrict_to_supported:
+                logger.debug(
+                    "AudioLanguageID: restrict_to_supported=True → suppressing lang=%s",
+                    result,
+                )
+                return None
+
+        # 8. Сохраняем в кеш
         if result is not None and cache is not None:
             cache["audio_lang"] = result
             logger.debug("AudioLanguageID: cached result → %s", result)
@@ -250,7 +262,23 @@ class AudioLanguageID:
 
         Использует mlx_whisper.audio.log_mel_spectrogram + detect_language.
         При любой ошибке возвращает None.
+
+        F1 guard (W1090 / W1525) lives here — skips MLX encoder on silent/near-silent
+        audio to avoid spurious detections and wasted GPU time.
+        DO NOT REMOVE — reverted by W1497 cherry-pick train, restored W1530.
+        Keeping it here (not in detect()) lets unit tests monkey-patch _run_detect
+        while still exercising allowlist logic in detect().
         """
+        # F1 guard (W1090 / W1525): skip encoder on silent/near-silent audio.
+        peak = float(np.max(np.abs(audio_16k))) if len(audio_16k) > 0 else 0.0
+        if peak < _MIN_PEAK_AMPLITUDE:
+            logger.debug(
+                "audio_lang_id: peak %.4f below threshold %.4f, skipping encoder",
+                peak,
+                _MIN_PEAK_AMPLITUDE,
+            )
+            return None
+
         try:
             import mlx_whisper  # type: ignore[import]
         except ImportError:
@@ -354,16 +382,6 @@ class AudioLanguageID:
                         _MIN_CONFIDENCE,
                     )
                     return None
-
-            # W1121 / W1561: gate against unsupported language codes.
-            # DO NOT REMOVE — prevents Whisper from routing to obscure low-resource
-            # models that crash on Russian/Spanish input.
-            if lang_code and lang_code not in SUPPORTED_LANGUAGES:
-                logger.debug(
-                    "audio_lang_id: %r not in SUPPORTED_LANGUAGES, returning None",
-                    lang_code,
-                )
-                return None
 
             logger.info("AudioLanguageID: detected language = %s", lang_code)
             return lang_code if lang_code else None
