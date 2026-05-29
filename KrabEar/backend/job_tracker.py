@@ -20,10 +20,15 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
 from typing import Any
+
+logger = logging.getLogger("backend.job_tracker")
+
+_PRUNE_CANCEL_EVENT_TTL = 3600.0  # 1 hour — cancel events stuck longer than this get evicted
 
 
 class JobTracker:
@@ -32,6 +37,7 @@ class JobTracker:
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events_ts: dict[str, float] = {}  # monotonic timestamp when cancel was set
         self._lock = threading.Lock()
 
     def create_job(self, total_files: int) -> str:
@@ -140,6 +146,7 @@ class JobTracker:
             if job.get("status") in ("done", "failed", "cancelled"):
                 return False
             job["cancel_requested"] = True
+            self._cancel_events_ts[job_id] = time.monotonic()
             event = self._cancel_events.get(job_id)
         # Устанавливаем event вне блокировки — Event.set() потокобезопасен.
         if event is not None:
@@ -157,21 +164,56 @@ class JobTracker:
         with self._lock:
             return self._cancel_events.get(job_id)
 
-    def prune(self, max_age_sec: int = 3600) -> None:
+    def prune(
+        self,
+        max_age_sec: float = 3600,
+        max_running_age_sec: float | None = None,
+    ) -> int:
         """Удаляет давно завершённые задачи (done/failed/cancelled старше max_age_sec).
 
+        Также удаляет задачи в статусе 'running', у которых started_at старше
+        max_running_age_sec (по умолчанию None = не удалять). Это защищает от
+        зависших воркеров, которые никогда не перейдут в терминальный статус.
+
+        Возвращает количество удалённых задач.
+
         Вызывается автоматически из create_job(). Не требует фонового GC-потока.
-        Также очищает соответствующие cancel_events.
+        Также очищает соответствующие cancel_events и просроченные cancel event записи.
         """
-        threshold = time.monotonic() - max_age_sec
+        now = time.monotonic()
+        threshold = now - max_age_sec
         terminal = {"done", "failed", "cancelled"}
+        stale: list[str] = []
+
         with self._lock:
-            stale = [
-                jid
-                for jid, job in self._jobs.items()
-                if job.get("status") in terminal
-                and (job.get("finished_at") or 0.0) < threshold
-            ]
+            for jid, job in self._jobs.items():
+                status = job.get("status")
+                if status in terminal and (job.get("finished_at") or 0.0) < threshold:
+                    stale.append(jid)
+                elif (
+                    status == "running"
+                    and max_running_age_sec is not None
+                    and (job.get("started_at") or now) < now - max_running_age_sec
+                ):
+                    logger.warning(
+                        "prune: evicting stale running job job_id=%s started_at=%.1f age_sec=%.0f",
+                        jid,
+                        job.get("started_at", 0.0),
+                        now - (job.get("started_at") or now),
+                    )
+                    stale.append(jid)
+
             for jid in stale:
                 self._jobs.pop(jid, None)
                 self._cancel_events.pop(jid, None)
+                self._cancel_events_ts.pop(jid, None)
+
+            # Evict cancel events older than _PRUNE_CANCEL_EVENT_TTL
+            # (covers orphaned events whose job was already removed)
+            cancel_ttl_threshold = now - _PRUNE_CANCEL_EVENT_TTL
+            for jid, evt_ts in list(self._cancel_events_ts.items()):
+                if evt_ts < cancel_ttl_threshold:
+                    self._cancel_events.pop(jid, None)
+                    self._cancel_events_ts.pop(jid, None)
+
+        return len(stale)
