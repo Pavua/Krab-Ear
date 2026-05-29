@@ -23,6 +23,7 @@ for p in (PROJECT_ROOT, KRAB_EAR_ROOT):
 # Stub heavy optional dependencies so engine.py imports cleanly in test env
 # ---------------------------------------------------------------------------
 
+
 def _install_stub(name: str, attrs: dict | None = None) -> types.ModuleType:
     """Install a stub module if not already present."""
     if name not in sys.modules:

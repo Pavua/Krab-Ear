@@ -125,7 +125,8 @@ class TranscriberForwardsProgressCallbackTest(unittest.TestCase):
     def test_transcriber_both_new_params_forwarded(self):
         """silence_ranges and progress_callback can be passed simultaneously."""
         ranges = [(1.0, 2.0)]
-        cb = lambda stage: None
+        def cb(stage):  # noqa: E731
+            return None
 
         self.transcriber.transcribe("audio.wav", silence_ranges=ranges, progress_callback=cb)
 

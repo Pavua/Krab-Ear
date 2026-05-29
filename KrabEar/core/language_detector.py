@@ -37,7 +37,7 @@ _ES_MARKERS = frozenset("ñáéíóúüÑÁÉÍÓÚÜ¿¡")
 _FR_MARKERS = frozenset("çœÇŒ«»")
 # Слова-маркеры французского (нижний регистр)
 _FR_WORD_MARKERS = frozenset({"c'est", "très", "être", "mais", "avec", "dans",
-                               "pour", "sur", "les", "des", "une", "est"})
+                              "pour", "sur", "les", "des", "une", "est"})
 
 # Символы-маркеры турецкого — ş, ğ, İ, ı уникальны для TR
 _TR_MARKERS = frozenset("şŞğĞıİ")
@@ -46,7 +46,7 @@ _TR_MARKERS = frozenset("şŞğĞıİ")
 _PT_MARKERS = frozenset("ãõÃÕ")
 # Слова-маркеры португальского (нижний регистр)
 _PT_WORD_MARKERS = frozenset({"não", "você", "então", "também", "isso",
-                               "para", "com", "uma", "que", "são"})
+                              "para", "com", "uma", "que", "são"})
 
 # Минимальная доля маркерных букв от общего числа букв для классификации «es»
 _ES_DENSITY_THRESHOLD = 0.02  # 2 %

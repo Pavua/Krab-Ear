@@ -474,7 +474,7 @@ class TestAbbreviationHandlers(unittest.TestCase):
         )
         self.assertTrue(result["added"])
 
-    def test_add_abbreviation_default_language(self) -> None:
+    def test_add_abbreviation_default_language_abbr_key(self) -> None:
         svc, mocks = _make_service()
         svc.handle_add_abbreviation({"abbr": "т.д.", "expansion": "так далее"})
         mocks["abbreviation_expander"].add_abbreviation.assert_called_once_with(

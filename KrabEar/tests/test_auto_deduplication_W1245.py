@@ -72,8 +72,8 @@ class TestJaccardHybrid(unittest.TestCase):
         # "Привет как дела" (3 tokens) vs "Привет как" (2 tokens)
         # intersection = 2, union = 3 → Jaccard = 2/3 ≈ 0.667 < 0.9
         score = _text_similarity("Привет как дела", "Привет как")
-        self.assertLess(score, 0.9,
-            msg=f"Short prefix pair should score < 0.9 but got {score:.4f}")
+        self.assertLess(score, 0.9,  # noqa: E128
+                        msg=f"Short prefix pair should score < 0.9 but got {score:.4f}")
 
     def test_jaccard_true_duplicate_above_threshold(self):
         """Identical texts must score 1.0 (true duplicate detection preserved)."""
@@ -170,16 +170,16 @@ class TestConcurrentCheckDuplicateSerialized(unittest.TestCase):
         # We allow true_count >= 1 to account for different scheduling, but at most
         # one thread should have gotten is_duplicate=False.
         false_count = sum(1 for r in results if not r)
-        self.assertLessEqual(false_count, 1,
-            f"At most 1 thread should get is_duplicate=False, got false_count={false_count}")
+        self.assertLessEqual(false_count, 1,  # noqa: E128
+                             f"At most 1 thread should get is_duplicate=False, got false_count={false_count}")
 
     def test_check_lock_exists_on_instance(self):
         """AutoDeduplicator must expose _check_lock as a threading.Lock."""
         dedup = AutoDeduplicator()
         self.assertTrue(hasattr(dedup, "_check_lock"),
-            "_check_lock attribute must exist")
+                        "_check_lock attribute must exist")
         self.assertIsInstance(dedup._check_lock, type(threading.Lock()),
-            "_check_lock must be a threading.Lock instance")
+                              "_check_lock must be a threading.Lock instance")
 
 
 # ---------------------------------------------------------------------------

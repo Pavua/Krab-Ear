@@ -566,7 +566,7 @@ class TestTranscriptVersioningW1410(unittest.TestCase):
 
         # NDJSON файл должен содержать reverted_from в последней строке
         versions_file = Path(self.temp_dir.name) / "transcript_versions.ndjson"
-        lines = [l.strip() for l in versions_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+        lines = [ln.strip() for ln in versions_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
         last_record = _json.loads(lines[-1])
         self.assertIn("reverted_from", last_record)
         self.assertEqual(last_record["reverted_from"], 1)

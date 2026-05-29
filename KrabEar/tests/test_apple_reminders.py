@@ -155,10 +155,7 @@ class TestCreateAppleReminder(unittest.TestCase):
         self.assertEqual(result.get("error"), "osascript timeout")
 
 
-    # ------------------------------------------------------------------
-    # test_apple_reminder_backslash_in_title_safe  (W1052 regression)
-    # ------------------------------------------------------------------
-    def test_apple_reminder_backslash_in_title_safe(self):
+    def test_apple_reminder_backslash_in_title_safe(self):  # W1052 regression
         """Backslash in title must be doubled; naïve replace misses this.
 
         Without _escape_as_str(), a title like 'C:\\path' stays as 'C:\\path' in

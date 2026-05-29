@@ -152,10 +152,7 @@ class TestSendImessage(unittest.TestCase):
         self.assertEqual(result.get("error"), "Messages not running")
 
 
-    # ------------------------------------------------------------------
-    # test_imessage_backslash_in_body_safe  (W1052 regression)
-    # ------------------------------------------------------------------
-    def test_imessage_backslash_in_body_safe(self):
+    def test_imessage_backslash_in_body_safe(self):  # W1052 regression
         """Backslash in body must be doubled; naïve replace misses this.
 
         Without _escape_as_str(), sending 'path\\file' keeps a lone backslash in
