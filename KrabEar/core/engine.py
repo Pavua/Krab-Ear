@@ -180,6 +180,41 @@ _BYTES_PER_MB = 1024 * 1024
 _VOXTRAL_MAX_TOKENS = 2048
 
 # ---------------------------------------------------------------------------
+# W1223 / W1535 security: разрешённые HuggingFace repo для Voxtral loader.
+# snapshot_download с произвольным repo_id открывает supply-chain вектор
+# (вредоносный вес), DoS через гигантский репозиторий и resource-exhaustion
+# через repo с тысячами файлов. Только явно одобренные repo допустимы.
+# ---------------------------------------------------------------------------
+_VOXTRAL_REPO_ALLOWLIST: frozenset[str] = frozenset({
+    "mistralai/Voxtral-Mini-3B-2507",
+    "mistralai/Voxtral-Small-24B-2507",
+    "mlx-community/Voxtral-Mini-3B-2507-mlx-bf16",
+    "mlx-community/Voxtral-Mini-3B-2507-mlx-4bit",
+    # Legacy / original Phase 4.4 model retained for backwards compatibility.
+    "mistralai/Voxtral-Mini-4B-Realtime-2602",
+    "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit",
+    "mlx-community/Voxtral-Mini-4B-Realtime-2602-bf16",
+})
+
+
+def _validate_voxtral_repo(repo_id: str) -> str:
+    """Проверяет repo_id против _VOXTRAL_REPO_ALLOWLIST.
+
+    Returns:
+        repo_id — если он в allowlist.
+
+    Raises:
+        ValueError — если repo_id не в allowlist (supply-chain защита).
+    """
+    if repo_id in _VOXTRAL_REPO_ALLOWLIST:
+        return repo_id
+    allowed = ", ".join(sorted(_VOXTRAL_REPO_ALLOWLIST))
+    raise ValueError(
+        f"Voxtral repo не в allowlist: '{repo_id}'. "
+        f"Допустимы только: {allowed}"
+    )
+
+# ---------------------------------------------------------------------------
 # Утилита: проверка доступной памяти macOS через vm_stat
 # ---------------------------------------------------------------------------
 
@@ -2397,6 +2432,15 @@ class AudioEngine:
             self._voxtral_load_error = (
                 "mistral-inference не установлен — Voxtral adapter недоступен "
                 "(установите: pip install mistral-inference)"
+            )
+            raise RuntimeError(self._voxtral_load_error)
+
+        # W1223/W1535 security: validate repo against allowlist before download.
+        try:
+            _validate_voxtral_repo(settings.VOXTRAL_MODEL)
+        except ValueError as exc:
+            self._voxtral_load_error = (
+                f"Voxtral repo не разрешён (допустимы только allowlist repos): {exc}"
             )
             raise RuntimeError(self._voxtral_load_error)
 
