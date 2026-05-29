@@ -180,20 +180,32 @@ class ArchiveManager:
                 item_id = item.get("id", "")
                 if item_id in ids_set:
                     found_ids.add(item_id)
-                    # Восстанавливаем без поля archived_at
+                    # W1047/W1542b: восстанавливаем полный словарь без поля archived_at,
+                    # сохраняя ВСЕ оригинальные поля (id, ts, chat_id, message_id, llm_applied,
+                    # diarization, tags, favorite и т.д.). Без этого ветка add_history_item
+                    # роняла 10+ полей метаданных и генерировала новый UUID.
                     restore_dict = {k: v for k, v in item.items() if k != "archived_at"}
                     try:
-                        _store.add_history_item(
-                            text=restore_dict.get("text", ""),
-                            paste_status=restore_dict.get("paste_status", "failed"),
-                            source_text=restore_dict.get("source_text", ""),
-                            translated_text=restore_dict.get("translated_text", ""),
-                            translation_mode=restore_dict.get("translation_mode", "off"),
-                            source_lang=restore_dict.get("source_lang", ""),
-                            target_lang=restore_dict.get("target_lang", ""),
-                            translation_status=restore_dict.get("translation_status", "not_requested"),
-                            translation_engine=restore_dict.get("translation_engine", ""),
-                        )
+                        if hasattr(_store, "restore_history_item_raw"):
+                            # Предпочтительный путь: сохранить все поля + оригинальный id.
+                            # При коллизии id со существующей активной записью store
+                            # добавляет суффикс '-restored' (новый UUID не генерируется).
+                            _store.restore_history_item_raw(restore_dict)
+                        else:
+                            # Фоллбэк для FakeStore-стабов в тестах без restore_history_item_raw.
+                            # ВНИМАНИЕ: эта ветка теряет 10+ полей метаданных — используется
+                            # только для обратной совместимости с устаревшими тестовыми двойниками.
+                            _store.add_history_item(
+                                text=restore_dict.get("text", ""),
+                                paste_status=restore_dict.get("paste_status", "failed"),
+                                source_text=restore_dict.get("source_text", ""),
+                                translated_text=restore_dict.get("translated_text", ""),
+                                translation_mode=restore_dict.get("translation_mode", "off"),
+                                source_lang=restore_dict.get("source_lang", ""),
+                                target_lang=restore_dict.get("target_lang", ""),
+                                translation_status=restore_dict.get("translation_status", "not_requested"),
+                                translation_engine=restore_dict.get("translation_engine", ""),
+                            )
                         unarchived_count += 1
                         if self._semantic_searcher is not None:
                             restore_text = restore_dict.get("text", "")
