@@ -244,8 +244,10 @@ class BulkReprocessor:
                 audio_data = self._load_audio(audio_path)
                 # Defense-in-depth: serialise MLX GPU access even if the caller
                 # didn't inject is_recording_fn.  Per project rule (PR #71).
+                # W1635: also acquire mlx_inter_process_lock for cross-process safety.
                 from core.mlx_lock import mlx_lock
-                with mlx_lock():
+                from core.mlx_inter_lock import mlx_inter_process_lock
+                with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
                     result = self.transcriber.transcribe(
                         audio_data,
                         quality_profile="balanced",

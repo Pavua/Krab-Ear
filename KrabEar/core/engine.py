@@ -36,6 +36,7 @@ except Exception:
     mlx_whisper = None  # type: ignore[assignment]
 
 from core.mlx_lock import mlx_lock  # noqa: E402 — после try/except блока MLX импорта
+from core.mlx_inter_lock import MLXInterLockTimeout, mlx_inter_process_lock  # noqa: E402
 from core.mlx_subprocess import MLXTimeoutError, get_watchdog  # noqa: E402
 from core.transcript_context import build_initial_prompt
 
@@ -470,7 +471,7 @@ class AudioEngine:
         import time as _time
         t0 = _time.monotonic()
         try:
-            with mlx_lock():
+            with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock + intra-process RLock
                 mlx_whisper.transcribe(
                     silent_audio,
                     path_or_hf_repo=model_name,
@@ -481,6 +482,9 @@ class AudioEngine:
             latency_ms = int((_time.monotonic() - t0) * 1000)
             logger.info("STT warmup завершён: модель=%s, latency=%dms", model_name, latency_ms)
             return {"loaded": True, "latency_ms": latency_ms, "model_name": model_name, "error": None}
+        except MLXInterLockTimeout as exc:
+            logger.error("STT warmup: mlx_inter_lock timeout — %s", exc)
+            return {"loaded": False, "latency_ms": 0, "model_name": model_name, "error": str(exc)}
         except Exception as exc:
             latency_ms = int((_time.monotonic() - t0) * 1000)
             logger.warning("STT warmup не удался (модель=%s): %s", model_name, exc)
@@ -602,9 +606,10 @@ class AudioEngine:
         # H2: при смене профиля balanced↔max старая модель выгружается из MLX.
         # Явный flush Metal cache освобождает GPU буферы немедленно, не дожидаясь GC.
         # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
+        # W1635: degrade_on_timeout=True — non-critical cache flush, not inference.
         try:
             import mlx.core as _mx
-            with mlx_lock():
+            with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
                 _mx.clear_cache()
         except (ImportError, AttributeError):
             pass  # MLX не установлен или старая версия без clear_cache
@@ -979,9 +984,10 @@ class AudioEngine:
             # H2: явный flush MLX Metal cache — без этого GPU буферы остаются в
             # Metal heap и backend не возвращается к baseline RSS после каждого STT.
             # W1618/W63: clear_cache — MLX op, must hold mlx_lock to prevent concurrent SIGSEGV.
+            # W1635: degrade_on_timeout=True — non-critical cache flush, not inference.
             try:
                 import mlx.core as _mx
-                with mlx_lock():
+                with mlx_inter_process_lock(degrade_on_timeout=True), mlx_lock():  # W1635
                     _mx.clear_cache()
             except (ImportError, AttributeError):
                 pass  # MLX не установлен или старая версия без clear_cache
@@ -1952,8 +1958,10 @@ class AudioEngine:
 
         last_err: Exception | None = None
         # Сериализуем доступ к GPU через глобальный MLX lock.
+        # W1635: also wrap with mlx_inter_process_lock for cross-process GPU safety.
+        # Raises MLXInterLockTimeout — let it propagate to transcribe() callers.
         # Минимальный critical section: только сам mlx_whisper.transcribe вызов.
-        with mlx_lock():
+        with mlx_inter_process_lock(), mlx_lock():  # W1635: cross-process flock (outer) + intra-process RLock (inner)
             for params in variants:
                 try:
                     if recovery_enabled:
