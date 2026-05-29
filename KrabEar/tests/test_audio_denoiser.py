@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.audio_denoiser import AudioDenoiser, _has_whispered_segments
+from core.audio_denoiser import AudioDenoiser, _has_whispered_segments, _NOISEREDUCE_PARAMS
 from core.noise_profiler import NoiseProfiler
 
 _SR = 16000  # стандартная частота дискретизации Whisper
@@ -400,6 +400,67 @@ class TestMultichannelWarning(unittest.TestCase):
         result = self.denoiser.denoise(stereo, _SR, strength="light")
         self.assertEqual(result.ndim, 1)
         self.assertEqual(result.shape[0], stereo.shape[0])
+
+
+# ---------------------------------------------------------------------------
+# W1550 — _NOISEREDUCE_PARAMS regression tests (W1322 floor restored)
+# ---------------------------------------------------------------------------
+
+class TestNoiseReduceParamsW1550(unittest.TestCase):
+    """W1550: _NOISEREDUCE_PARAMS dict restored (W1322 regression guard)."""
+
+    def test_noisereduce_params_constant_exists(self) -> None:
+        """_NOISEREDUCE_PARAMS должен быть определён в модуле."""
+        import core.audio_denoiser as mod
+        self.assertTrue(hasattr(mod, "_NOISEREDUCE_PARAMS"),
+                        "_NOISEREDUCE_PARAMS отсутствует — W1322 регрессия")
+
+    def test_noisereduce_params_has_all_levels(self) -> None:
+        """_NOISEREDUCE_PARAMS содержит light/moderate/strong."""
+        for level in ("light", "moderate", "strong"):
+            self.assertIn(level, _NOISEREDUCE_PARAMS,
+                          f"_NOISEREDUCE_PARAMS отсутствует ключ '{level}'")
+
+    def test_noisereduce_params_strong_has_min_attenuation_db(self) -> None:
+        """strong-mode должен содержать min_attenuation_db=-12.0 (W1322 floor)."""
+        strong = _NOISEREDUCE_PARAMS["strong"]
+        self.assertIn("min_attenuation_db", strong,
+                      "strong-mode без min_attenuation_db — W1322 floor потерян")
+        self.assertAlmostEqual(strong["min_attenuation_db"], -12.0,
+                               msg="min_attenuation_db должен быть -12.0 dB")
+
+    def test_noisereduce_params_strong_stationary_false(self) -> None:
+        """strong-mode должен использовать stationary=False для нестационарного шума."""
+        self.assertFalse(_NOISEREDUCE_PARAMS["strong"].get("stationary", True),
+                         "strong-mode должен иметь stationary=False")
+
+    def test_noisereduce_params_light_moderate_stationary_true(self) -> None:
+        """light/moderate используют stationary=True."""
+        for level in ("light", "moderate"):
+            self.assertTrue(
+                _NOISEREDUCE_PARAMS[level].get("stationary", False),
+                f"_NOISEREDUCE_PARAMS['{level}'] должен иметь stationary=True",
+            )
+
+    def test_noisereduce_params_prop_decrease_ordering(self) -> None:
+        """prop_decrease: light < moderate < strong."""
+        self.assertLess(
+            _NOISEREDUCE_PARAMS["light"]["prop_decrease"],
+            _NOISEREDUCE_PARAMS["moderate"]["prop_decrease"],
+        )
+        self.assertLess(
+            _NOISEREDUCE_PARAMS["moderate"]["prop_decrease"],
+            _NOISEREDUCE_PARAMS["strong"]["prop_decrease"],
+        )
+
+    def test_noisereduce_params_used_in_denoise_strong(self) -> None:
+        """denoise(..., strength='strong') проходит без исключений при noisereduce=absent."""
+        # noisereduce чаще всего не установлен в CI → fallback path тоже покрываем
+        denoiser = AudioDenoiser()
+        audio = _make_noisy_audio(duration_sec=1.0, snr_target_db=5.0)
+        # Не должно бросать исключение (W1322 параметры корректны)
+        result = denoiser.denoise(audio, _SR, strength="strong")
+        self.assertEqual(result.shape, audio.shape)
 
 
 if __name__ == "__main__":

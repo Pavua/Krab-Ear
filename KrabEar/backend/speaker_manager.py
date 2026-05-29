@@ -32,6 +32,9 @@ _SPEAKER_TAG_RE = re.compile(r"\[(SPEAKER_\d+)\]")
 
 _EMBEDDING_DIM = 512
 
+# W1236: жёсткий лимит размера embedding (~16 KB при float32) для защиты от DoS.
+_MAX_EMBEDDING_FLOATS = 4096  # ~16 KB per embedding, hard cap to prevent DoS via huge list
+
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Возвращает косинусное сходство двух 1-D векторов в диапазоне [-1, 1]."""
@@ -313,6 +316,12 @@ class SpeakerManager:
         """Регистрирует нового спикера. Returns новый speaker_id."""
         if embedding is None:
             raise ValueError("embedding не может быть None")
+        # W1236: проверяем длину embedding до сохранения (DoS guard)
+        flat = embedding.flatten()
+        if len(flat) > _MAX_EMBEDDING_FLOATS:
+            raise ValueError(
+                f"embedding length {len(flat)} exceeds _MAX_EMBEDDING_FLOATS={_MAX_EMBEDDING_FLOATS}"
+            )
         with self._lock:
             speaker_id = f"Speaker_{self._auto_speaker_counter}"
             self._auto_speaker_counter += 1
@@ -395,6 +404,11 @@ class SpeakerManager:
         emb_raw = params.get("embedding")
         if not isinstance(emb_raw, list) or len(emb_raw) == 0:
             raise ValueError("Параметр embedding обязателен (list[float])")
+        # W1236: DoS guard — проверяем до создания np.array
+        if len(emb_raw) > _MAX_EMBEDDING_FLOATS:
+            raise ValueError(
+                f"embedding length {len(emb_raw)} exceeds _MAX_EMBEDDING_FLOATS={_MAX_EMBEDDING_FLOATS}"
+            )
         sid = self.register_speaker(name, np.array(emb_raw, dtype=np.float32))
         return {"speaker_id": sid, "name": name}
 

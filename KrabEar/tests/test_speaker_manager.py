@@ -1,7 +1,7 @@
 """Тесты SpeakerManager — псевдонимы спикеров диаризации."""
 
 from __future__ import annotations
-from backend.speaker_manager import SpeakerManager
+from backend.speaker_manager import SpeakerManager, _MAX_EMBEDDING_FLOATS
 
 import json
 import sys
@@ -787,6 +787,65 @@ class TestSpeakerManagerW962(unittest.TestCase):
         """IPC handle_merge_speakers без dst_id → ValueError."""
         with self.assertRaises(ValueError):
             self.mgr.handle_merge_speakers({"src_id": "SPEAKER_01"})
+
+
+# ---------------------------------------------------------------------------
+# W1550 — _MAX_EMBEDDING_FLOATS regression tests (W1236 DoS guard restored)
+# ---------------------------------------------------------------------------
+
+class TestMaxEmbeddingFloatsW1550(unittest.TestCase):
+    """W1550: _MAX_EMBEDDING_FLOATS constant restored (W1236 regression guard)."""
+
+    def setUp(self):
+        self.mgr = SpeakerManager()
+
+    def test_max_embedding_floats_constant_exists(self):
+        """_MAX_EMBEDDING_FLOATS должен быть определён в модуле."""
+        import backend.speaker_manager as mod
+        self.assertTrue(hasattr(mod, "_MAX_EMBEDDING_FLOATS"),
+                        "_MAX_EMBEDDING_FLOATS отсутствует — W1236 регрессия")
+
+    def test_max_embedding_floats_value(self):
+        """_MAX_EMBEDDING_FLOATS должен быть равен 4096."""
+        self.assertEqual(_MAX_EMBEDDING_FLOATS, 4096)
+
+    def test_register_speaker_rejects_oversized_embedding(self):
+        """register_speaker с embedding > _MAX_EMBEDDING_FLOATS должен бросать ValueError."""
+        import numpy as np
+        oversized = np.ones(_MAX_EMBEDDING_FLOATS + 1, dtype=np.float32)
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.register_speaker("DoS", oversized)
+        self.assertIn("_MAX_EMBEDDING_FLOATS", str(ctx.exception))
+
+    def test_register_speaker_accepts_valid_embedding(self):
+        """register_speaker с embedding <= _MAX_EMBEDDING_FLOATS проходит без ошибок."""
+        import numpy as np
+        valid = np.ones(512, dtype=np.float32)
+        sid = self.mgr.register_speaker("ValidSpeaker", valid)
+        self.assertIsNotNone(sid)
+        self.assertIn(sid, self.mgr.get_all_fingerprints())
+
+    def test_register_speaker_accepts_max_size_embedding(self):
+        """register_speaker с embedding ровно _MAX_EMBEDDING_FLOATS не бросает ошибку."""
+        import numpy as np
+        boundary = np.ones(_MAX_EMBEDDING_FLOATS, dtype=np.float32)
+        sid = self.mgr.register_speaker("BoundarySpeaker", boundary)
+        fps = self.mgr.get_all_fingerprints()
+        self.assertIn(sid, fps)
+        self.assertEqual(len(fps[sid]), _MAX_EMBEDDING_FLOATS)
+
+    def test_handle_register_speaker_ipc_rejects_oversized(self):
+        """IPC handle_register_speaker с embedding > _MAX_EMBEDDING_FLOATS → ValueError."""
+        oversized_list = [1.0] * (_MAX_EMBEDDING_FLOATS + 1)
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.handle_register_speaker({"name": "DoS", "embedding": oversized_list})
+        self.assertIn("_MAX_EMBEDDING_FLOATS", str(ctx.exception))
+
+    def test_handle_register_speaker_ipc_accepts_valid(self):
+        """IPC handle_register_speaker с допустимым embedding проходит без ошибок."""
+        valid_list = [0.5] * 512
+        result = self.mgr.handle_register_speaker({"name": "ValidIPC", "embedding": valid_list})
+        self.assertIn("speaker_id", result)
 
 
 if __name__ == "__main__":
