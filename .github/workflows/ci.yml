@@ -188,8 +188,6 @@ jobs:
         # Detects symbols imported in tests that no longer exist in the source module,
         # which indicates a cherry-pick or rebase silently dropped a fix wave.
         # Root cause of W1525 regression train: 4-of-5 fix waves clobbered by W1497.
-        # continue-on-error: pre-existing 18 regressions on this branch must be fixed
-        # before this gate can be made strict. Remove continue-on-error once clean.
+        # W1595 (2026-05-29): all 26 regressions fixed — gate is now strict (hard-fail).
         # No user-controlled input is used in this step — no injection risk.
-        continue-on-error: true
         run: python3 scripts/audit_cherry_pick_regressions.py --fail-on-found
