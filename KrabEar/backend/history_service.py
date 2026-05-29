@@ -73,6 +73,8 @@ class HistoryService:
         clipboard_history: list[dict] | None = None,
         llm_rewriter: "LLMRewriter | None" = None,
         cached_settings: "Callable[[], dict[str, Any]] | None" = None,
+        semantic_searcher: Any | None = None,
+        auto_glossary_builder: Any | None = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -84,6 +86,11 @@ class HistoryService:
         self._speaker_manager = None
         # Callable для получения текущих настроек (для privacy mode guard и др.).
         self._cached_settings = cached_settings
+        # SemanticSearcher для синхронизации удаления эмбеддингов (W1426 F2).
+        self._semantic_searcher = semantic_searcher
+        # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
+        # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
+        self._auto_glossary = auto_glossary_builder
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
@@ -122,6 +129,13 @@ class HistoryService:
             translation_status=str(params.get("translation_status", "not_requested")).strip() or "not_requested",
             translation_engine=str(params.get("translation_engine", "")).strip(),
         )
+        # Инвалидируем кэш автоглоссария после добавления новой записи.
+        # Новые имена собственные сразу попадут в STT-промпт при следующем вызове.
+        if self._auto_glossary is not None:
+            try:
+                self._auto_glossary.invalidate()
+            except Exception as _ag_exc:
+                logger.warning("auto_glossary invalidate error after add_history_item: %s", _ag_exc)
         return item.to_dict()
 
     def handle_get_history_page(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -302,6 +316,15 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
+        # Use the canonical .remove_item() name; .remove is an alias (W1172).
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(item_id)
+            except Exception:
+                logger.warning(
+                    "semantic_search remove failed for %s", item_id, exc_info=True
+                )
         add_breadcrumb(
             category="history",
             message="delete_history_item",

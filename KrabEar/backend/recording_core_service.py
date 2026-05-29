@@ -1207,6 +1207,13 @@ class RecordingCoreService:
                 word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
                 speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
             )
+            # W1288 F1: Invalidate AutoGlossary cache so new proper-noun terms from this
+            # recording are available in the next STT initial-prompt (instead of waiting TTL).
+            if self._auto_glossary is not None:
+                try:
+                    self._auto_glossary.invalidate()
+                except Exception as _ag_exc:
+                    logger.warning("auto_glossary invalidate error after recording persist: %s", _ag_exc)
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),

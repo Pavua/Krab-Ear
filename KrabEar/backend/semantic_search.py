@@ -256,6 +256,9 @@ class SemanticSearcher:
             self._save_locked()
         return True
 
+    # Alias so callers can use either .remove() or .remove_item() (W1172).
+    remove = remove_item
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

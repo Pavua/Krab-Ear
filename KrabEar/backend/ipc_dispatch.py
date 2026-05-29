@@ -79,6 +79,8 @@ def build_dispatch_table(
         "apply_glossary_suggestions": svc._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
         "export_glossary_csv": svc._glossary_svc.handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
         "import_glossary_csv": svc._glossary_svc.handle_import_glossary_csv,  # импорт CSV в translation_glossary (merge|replace)
+        "get_auto_glossary": svc._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
+        "refresh_auto_glossary": svc._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
         "import_history_ndjson": svc._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
         "get_history_stats": svc._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
         "get_history_overview": svc._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)

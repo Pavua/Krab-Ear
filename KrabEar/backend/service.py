@@ -245,6 +245,20 @@ class BackendService:
                         )
         self._settings_svc.register_after_save_hook(_on_privacy_mode_off)
 
+        # W1265 F1 MED: evict AudioLanguageID model cache when model_balanced changes.
+        # The cache holds a loaded mlx-whisper encoder for the current model path;
+        # after a model switch the cached encoder is stale and must be dropped.
+        def _on_settings_saved_lang_id(old: dict, new: dict) -> None:
+            old_model = str(old.get("model_balanced", ""))
+            new_model = str(new.get("model_balanced", ""))
+            if new_model != old_model:
+                try:
+                    from core.audio_lang_id import AudioLanguageID  # noqa: PLC0415
+                    AudioLanguageID.clear_model_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._settings_svc.register_after_save_hook(_on_settings_saved_lang_id)
+
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".
@@ -517,6 +531,11 @@ class BackendService:
             model_name=settings.SEMANTIC_SEARCH_MODEL,
             enabled=settings.SEMANTIC_SEARCH_ENABLED,
         )
+        # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
+        self._history._semantic_searcher = self._semantic_searcher
+        # Late-inject AutoGlossaryBuilder into HistoryService so that
+        # add_history_item immediately invalidates the glossary cache (W1288 F1).
+        self._history._auto_glossary = self._auto_glossary
         # Telegram Bridge — мост Krab Ear → main Krab userbot.
         self._telegram_bridge = TelegramBridge(
             base_url=settings.TELEGRAM_BRIDGE_URL,
@@ -1026,6 +1045,8 @@ class BackendService:
             "apply_glossary_suggestions": self._glossary_auto_learn.handle_apply_glossary_suggestions,  # применяет выбранные мед. термины в translation_glossary
             "export_glossary_csv": self._handle_export_glossary_csv,  # экспорт глоссария в CSV-строку
             "import_glossary_csv": self._handle_import_glossary_csv,  # импорт CSV в translation_glossary (merge|replace)
+            "get_auto_glossary": self._handle_get_auto_glossary,  # W1104: возвращает текущий auto-glossary из кэша
+            "refresh_auto_glossary": self._handle_refresh_auto_glossary,  # W1104: принудительно пересчитывает auto-glossary
             "import_history_ndjson": self._history.handle_import_history_ndjson,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_stats": self._history.handle_get_history_stats,  # VERIFIED: called from Swift (HistoryPanel)
             "get_history_overview": self._history.handle_get_history_overview,  # VERIFIED: called from Swift (HistoryPanel)
@@ -1775,6 +1796,50 @@ class BackendService:
         # Также сбрасываем in-memory LRU-кэш транслятора
         self.translator.clear_cache()
         return {"ok": True, "entries_cleared": entries_before}
+
+    # ── AutoGlossary IPC handlers (W1104) ─────────────────────────────────────
+
+    def _handle_get_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает текущий auto-glossary из кэша (без пересчёта).
+
+        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список
+        (история недоступна для извлечения терминов).
+
+        Returns:
+            {"ok": True, "terms": [...], "count": N, "from_cache": True}
+        """
+        settings_dict = self._settings_svc.cached_settings()
+        if settings_dict.get("privacy_mode_enabled"):
+            return {"ok": True, "terms": [], "count": 0, "from_cache": False}
+
+        terms = self._auto_glossary.get_cached()
+        return {"ok": True, "terms": terms, "count": len(terms), "from_cache": True}
+
+    def _handle_refresh_auto_glossary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Принудительно пересчитывает auto-glossary из истории транскрибаций.
+
+        Privacy guard: в режиме privacy_mode_enabled возвращает пустой список.
+
+        params (optional):
+            window_days: int — горизонт истории в днях (default 7).
+            top_n: int — максимальное число терминов (default 30).
+
+        Returns:
+            {"ok": True, "terms": [...], "count": N, "refreshed": True}
+        """
+        settings_dict = self._settings_svc.cached_settings()
+        if settings_dict.get("privacy_mode_enabled"):
+            return {"ok": True, "terms": [], "count": 0, "refreshed": False}
+
+        window_days = int(params.get("window_days", 7))
+        top_n = int(params.get("top_n", 30))
+
+        terms = self._auto_glossary.build(
+            window_days=window_days,
+            top_n=top_n,
+            force=True,
+        )
+        return {"ok": True, "terms": terms, "count": len(terms), "refreshed": True}
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
