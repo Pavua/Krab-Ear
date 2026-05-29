@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, fields as dc_fields, field
 from datetime import datetime
 from typing import Any
 import uuid
@@ -75,6 +75,9 @@ class HistoryItem:
     # Privacy mode flag: True when the recording was made while privacy_mode_enabled=True.
     # Allows audit/filtering of privacy-mode sessions; user can purge these separately.
     privacy_mode: bool = False
+    # W1238 forward-compat sidecar: unknown fields from newer binaries are collected here
+    # on from_dict and spread back into to_dict output so round-trips are lossless.
+    _extra: dict = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -145,12 +148,33 @@ class HistoryItem:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Преобразует dataclass в сериализуемый словарь."""
-        return asdict(self)
+        """Преобразует dataclass в сериализуемый словарь.
+
+        Unknown fields captured in _extra are spread at the top level so that
+        round-trips through from_dict → to_dict are lossless (W1238 sidecar).
+        Known fields always win over any collision in _extra.
+        The _extra key itself is never emitted in the output.
+        """
+        # Start with unknown fields from newer binaries (lower priority).
+        result: dict[str, Any] = dict(self._extra) if self._extra else {}
+        # Overlay every known dataclass field (higher priority).
+        for f in dc_fields(self):
+            if f.name == "_extra":
+                continue
+            result[f.name] = getattr(self, f.name)
+        return result
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "HistoryItem":
-        """Восстанавливает запись из JSON-словаря с мягкой валидацией."""
+        """Восстанавливает запись из JSON-словаря с мягкой валидацией.
+
+        Unknown keys (fields written by a newer binary) are collected into
+        _extra so that to_dict round-trips are lossless (W1238 sidecar).
+        """
+        # Determine which keys are known dataclass fields (excluding _extra itself).
+        _known = {f.name for f in dc_fields(cls) if f.name != "_extra"}
+        extra = {k: v for k, v in payload.items() if k not in _known}
+
         return cls(
             id=str(payload.get("id", "")).strip(),
             ts=str(payload.get("ts", "")).strip(),
@@ -183,6 +207,7 @@ class HistoryItem:
             decisions=payload.get("decisions") if isinstance(payload.get("decisions"), list) else None,
             questions=payload.get("questions") if isinstance(payload.get("questions"), list) else None,
             privacy_mode=bool(payload.get("privacy_mode", False)),
+            _extra=extra,
         )
 
 
