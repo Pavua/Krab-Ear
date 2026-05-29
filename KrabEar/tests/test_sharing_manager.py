@@ -911,5 +911,72 @@ class Wave98RequiredTestCase(unittest.TestCase):
         self.assertIn(text, disk_content)
 
 
+# ---------------------------------------------------------------------------
+# W1546 — regression guard for _MAX_TTL_HOURS + _MAX_SHARE_ITEMS caps
+# (W1244 + W1245 reverted by W1497 cherry-pick train)
+# ---------------------------------------------------------------------------
+
+class CapsW1546TestCase(unittest.TestCase):
+    """W1546 regression guard: _MAX_TTL_HOURS and _MAX_SHARE_ITEMS constants +
+    ttl_hours validation + item_ids cap must be present in sharing_manager.
+
+    These tests were lost when the W1497 cherry-pick train reverted W1244+W1245.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._store = FakeStore(data_dir=self._tmpdir)
+        self._store.add_fake_item("c1", "cap test item")
+        self._mgr = SharingManager(store=self._store)
+
+    def test_max_ttl_hours_constant_present(self) -> None:
+        """_MAX_TTL_HOURS must be importable and be a positive integer (W1244)."""
+        from backend.sharing_manager import _MAX_TTL_HOURS
+        self.assertIsInstance(_MAX_TTL_HOURS, int)
+        self.assertGreater(_MAX_TTL_HOURS, 0)
+
+    def test_max_share_items_constant_present(self) -> None:
+        """_MAX_SHARE_ITEMS must be importable and be a positive integer (W1245)."""
+        from backend.sharing_manager import _MAX_SHARE_ITEMS
+        self.assertIsInstance(_MAX_SHARE_ITEMS, int)
+        self.assertGreater(_MAX_SHARE_ITEMS, 0)
+
+    def test_negative_ttl_raises(self) -> None:
+        """Negative ttl_hours passed via IPC results in an instantly-expired share
+        (clamped to 0 = immediate expiry).  get_shared must return None for it."""
+        pkg = self._mgr.prepare_share(["c1"], ttl_hours=-10.0)
+        # Negative is clamped to 0 → expires_at is set to approximately now
+        # so get_shared should return None immediately
+        found = self._mgr.get_shared(pkg.share_id)
+        self.assertIsNone(found, "Negative ttl_hours should produce an expired share")
+
+    def test_inf_ttl_raises(self) -> None:
+        """float('inf') as ttl_hours must raise (ValueError from prepare_share,
+        RuntimeError from handle_prepare_share)."""
+        import math
+        with self.assertRaises((ValueError, RuntimeError)):
+            self._mgr.prepare_share(["c1"], ttl_hours=float("inf"))
+
+    def test_too_many_items_raises(self) -> None:
+        """Passing more than _MAX_SHARE_ITEMS item_ids must raise (W1245)."""
+        from backend.sharing_manager import _MAX_SHARE_ITEMS
+        oversized_ids = [f"ghost_{i}" for i in range(_MAX_SHARE_ITEMS + 1)]
+        with self.assertRaises((ValueError, RuntimeError)):
+            self._mgr.prepare_share(oversized_ids)
+
+    def test_ttl_clamped_to_max(self) -> None:
+        """ttl_hours larger than _MAX_TTL_HOURS must be clamped to _MAX_TTL_HOURS (W1244)."""
+        import time
+        from backend.sharing_manager import _MAX_TTL_HOURS
+        huge = float(_MAX_TTL_HOURS) * 10
+        pkg = self._mgr.prepare_share(["c1"], ttl_hours=huge)
+        self.assertIsNotNone(pkg.expires_at, "expires_at must be set")
+        expected_max = time.time() + _MAX_TTL_HOURS * 3600.0
+        self.assertLessEqual(
+            pkg.expires_at, expected_max + 5.0,
+            "expires_at must not exceed now + _MAX_TTL_HOURS * 3600",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
