@@ -27,6 +27,42 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
+# ---------------------------------------------------------------------------
+# Export path allowlist (W1432 / W1532 security guard)
+# ---------------------------------------------------------------------------
+# Directories where export handlers are permitted to write files.
+# All paths are expanded and resolved at check time to defeat symlink tricks.
+_EXPORT_ALLOWED_ROOTS: tuple[str, ...] = (
+    "~/Library/Application Support/KrabEar",
+    "~/.krab_ear_data",
+    "~/Documents",
+    "~/Desktop",
+    "~/Downloads",
+)
+
+
+def _is_safe_export_dir(output_dir: str) -> bool:
+    """Return True only if *output_dir* is inside one of the allowed roots.
+
+    Defends against:
+    - Absolute paths outside allowed roots (e.g. /etc, /tmp, /)
+    - Parent traversal (../../sensitive)
+    - Symlinks that escape allowed roots (resolved via Path.resolve())
+    """
+    try:
+        target = Path(output_dir).expanduser().resolve()
+    except (ValueError, OSError):
+        return False
+
+    for root_str in _EXPORT_ALLOWED_ROOTS:
+        allowed = Path(root_str).expanduser().resolve()
+        try:
+            target.relative_to(allowed)
+            return True
+        except ValueError:
+            continue
+    return False
+
 
 class HistoryService:
     """Обработчики IPC-команд для истории транскрипций."""
@@ -2121,6 +2157,10 @@ class HistoryService:
 
         # --- Сохраняем ---
         if output_dir_param:
+            if not _is_safe_export_dir(output_dir_param):
+                raise ValueError(
+                    f"output_dir outside allowed roots: {output_dir_param!r}"
+                )
             out_dir = Path(output_dir_param).expanduser().resolve()
         else:
             out_dir = Path(self.store.data_dir) / "transcripts"
@@ -2631,6 +2671,10 @@ class HistoryService:
         # Создаём директорию бандла
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         if output_dir_param:
+            if not _is_safe_export_dir(output_dir_param):
+                raise ValueError(
+                    f"output_dir outside allowed roots: {output_dir_param!r}"
+                )
             base_dir = Path(output_dir_param).expanduser().resolve()
         else:
             base_dir = Path(self.store.data_dir) / "exports"
