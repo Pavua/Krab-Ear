@@ -119,6 +119,7 @@ from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
     _BREADCRUMB_EXCLUDED_METHODS,
     add_breadcrumb,
+    flush_sentry,
     get_release_string,
     init_sentry,
     install_signal_handlers,
@@ -4370,9 +4371,14 @@ def main() -> None:
 
     def _signal_handler(signum: int, frame: Any) -> None:
         logger.info("Получен сигнал %s, завершаем backend", signum)
+        # W1633: run graceful shutdown first so final events are captured.
         service._shutdown_handler.shutdown()
         server.stop()
         service.close()
+        # W1640: flush Sentry AFTER shutdown so any errors raised during
+        # shutdown are captured before the buffer is flushed.
+        # No-op when Sentry is not initialized (DSN absent).
+        flush_sentry()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
