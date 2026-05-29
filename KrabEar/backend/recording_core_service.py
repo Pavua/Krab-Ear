@@ -20,7 +20,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from backend.auto_deduplication import AutoDeduplicator
 
 import numpy as np
 
@@ -66,6 +69,7 @@ class RecordingCoreService:
         action_items_extractor: Any,
         transcription_counter_ref: list,  # [int] mutable box so BackendService sees updates
         last_stt_engine_ref: list,        # [str|None] mutable box
+        auto_deduplicator: "AutoDeduplicator | None" = None,
     ) -> None:
         self.recorder = recorder
         self.transcriber = transcriber
@@ -83,6 +87,10 @@ class RecordingCoreService:
         self._action_items_extractor = action_items_extractor
         self._transcription_counter_ref = transcription_counter_ref
         self._last_stt_engine_ref = last_stt_engine_ref
+        self._auto_deduplicator = auto_deduplicator
+
+        # Serializes history persistence in phase_e to prevent double-write races
+        self._persist_lock = threading.Lock()
 
         # Preview worker state (owned by this service)
         self._preview_lock = threading.Lock()
@@ -1125,6 +1133,53 @@ class RecordingCoreService:
         confidence = phase_d["confidence"]
         diarization_data = phase_d["diarization_data"]
         tp = phase_d["tp"]
+
+        # W1247 / W1572: AutoDeduplicator guard — check BEFORE persisting to history.
+        # Respects auto_dedup_enabled and privacy_mode_enabled settings.
+        # privacy_mode is already delegated to AutoDeduplicator._privacy_mode_enabled(),
+        # but we also honour the settings flag here to avoid calling check_duplicate at all
+        # when the feature is disabled (cheaper + matches test expectations).
+        _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
+        _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
+            try:
+                import time as _time_mod
+                _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
+                _dedup_result = self._auto_deduplicator.check_duplicate(
+                    text=display_text or text,
+                    timestamp=_ts_now,
+                    store=self.store,
+                )
+                if _dedup_result.is_duplicate:
+                    logger.info(
+                        "AutoDedup: запись пропущена как дубликат original_id=%s similarity=%.3f",
+                        _dedup_result.duplicate_of,
+                        _dedup_result.similarity,
+                    )
+                    return {
+                        "status": "ok",
+                        "skipped": "duplicate",
+                        "duplicate_of": _dedup_result.duplicate_of,
+                        "similarity": _dedup_result.similarity,
+                        "duration_sec": duration_sec,
+                        "quality_profile": sr["quality_profile"],
+                        "cleanup_profile": sr["cleanup_profile"],
+                        "translation_mode": translation.mode,
+                        "translation_style": sr.get("translation_style", "neutral"),
+                        "translate_and_paste": sr["translate_and_paste"],
+                        "translation_status": translation_status,
+                        "text": display_text,
+                        "original_text": text,
+                        "translated_text": translated_text,
+                        "history_id": None,
+                        "ts": None,
+                        "stop_tail_trim_ms": stop_tail_trim_ms,
+                        "silence_detected": silence_detected,
+                        "silence_guard_enabled": silence_guard_enabled,
+                        "background_guard_rejected": background_guard_rejected,
+                    }
+            except Exception:
+                logger.exception("AutoDedup: check_duplicate завершился с исключением, продолжаем запись")
 
         item = self.store.add_history_item(
             text=display_text,
