@@ -245,6 +245,40 @@ class BackendService:
                         )
         self._settings_svc.register_after_save_hook(_on_privacy_mode_off)
 
+        # W1265 F1 MED / W1340: Evict AudioLanguageID._model_cache when MODEL_BALANCED
+        # changes so the first recording after an STT profile switch does NOT block the
+        # STT pipeline thread with a cold-load stall inside mlx_lock().
+        #
+        # W1334 F2 HIGH (case-mismatch fix): settings.json uses pydantic field names
+        # (uppercase "MODEL_BALANCED") while DEFAULT_SETTINGS uses lowercase
+        # "model_balanced"; both keys must be checked so the comparison never silently
+        # short-circuits to "" == "" and skips eviction.
+        def _get_model_balanced(d: dict) -> str:
+            """Case-tolerant helper: checks MODEL_BALANCED, model_balanced, stt_model_balanced."""
+            for k in ("MODEL_BALANCED", "model_balanced", "stt_model_balanced"):
+                v = d.get(k)
+                if v is not None:
+                    return str(v)
+            return ""
+
+        def _on_settings_saved_lang_id(old: dict, new: dict) -> None:
+            old_model = _get_model_balanced(old)
+            new_model = _get_model_balanced(new)
+            if new_model != old_model:
+                try:
+                    from core.audio_lang_id import AudioLanguageID
+                    AudioLanguageID.clear_model_cache()
+                    logger.info(
+                        "AudioLanguageID cache evicted: model_balanced changed %s → %s",
+                        old_model or "(empty)",
+                        new_model or "(empty)",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "AudioLanguageID cache evict failed: %s", exc
+                    )
+        self._settings_svc.register_after_save_hook(_on_settings_saved_lang_id)
+
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
         # as "первая диктовка медленнее остальных".

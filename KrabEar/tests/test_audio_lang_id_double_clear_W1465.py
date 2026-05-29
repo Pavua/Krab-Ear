@@ -78,8 +78,11 @@ class TestMxClearCacheCalledOncePerInference(unittest.TestCase):
         audio = np.zeros(48000, dtype=np.float32)
 
         mod_name = mod.__name__  # "core.audio_lang_id"
+        # Patch _MIN_PEAK_AMPLITUDE to 0.0 so silent test audio bypasses the F1 guard
+        # (W1090/W1525 restored F1 guard; test intent is clear_cache count, not F1 logic)
         with patch(f"{mod_name}._HAS_MLX", True), \
              patch(f"{mod_name}.mx", mock_mx), \
+             patch(f"{mod_name}._MIN_PEAK_AMPLITUDE", 0.0), \
              patch.dict("sys.modules", {"mlx_whisper": mock_mlx_whisper}):
             lid = mod.AudioLanguageID(model_path="fake-model", preview_sec=3.0)
             result = lid.detect(audio, sample_rate=16000)
@@ -129,8 +132,11 @@ class TestMxClearCacheUnderMlxLock(unittest.TestCase):
         audio = np.zeros(32000, dtype=np.float32)
 
         mod_name = mod.__name__
+        # Patch _MIN_PEAK_AMPLITUDE to 0.0 so silent test audio bypasses the F1 guard
+        # (W1090/W1525 restored F1 guard; test intent is lock-held-during-clear, not F1)
         with patch(f"{mod_name}._HAS_MLX", True), \
              patch(f"{mod_name}.mx", mock_mx), \
+             patch(f"{mod_name}._MIN_PEAK_AMPLITUDE", 0.0), \
              patch.dict("sys.modules", {"mlx_whisper": mock_mlx_whisper}):
             lid = mod.AudioLanguageID(model_path="test-model", preview_sec=2.0)
             lid.detect(audio, sample_rate=16000)
