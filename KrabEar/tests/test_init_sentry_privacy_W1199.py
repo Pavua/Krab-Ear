@@ -323,5 +323,117 @@ class TestRuntimeEnablePrivacyDisablesSentry(unittest.TestCase):
         self.assertTrue(_obs._sentry_initialized)
 
 
+# ---------------------------------------------------------------------------
+# W1601 tests: _sentry_initialized cleared when privacy_mode toggled ON after init
+# ---------------------------------------------------------------------------
+
+class TestPrivacyModeToggleAfterInitClearsSentryFlag(unittest.TestCase):
+    """W1601 / W1599 F1 HIGH: init_sentry must clear _sentry_initialized when
+    privacy_mode_enabled=True is passed AFTER Sentry was previously initialised."""
+
+    def setUp(self):
+        _reset_observability()
+
+    def test_privacy_mode_toggle_after_init_clears_sentry_initialized(self):
+        """init_sentry clears _sentry_initialized when privacy mode is toggled ON
+        while _sentry_initialized is already True (W1599 F1 HIGH scenario)."""
+        import backend.observability as mod
+
+        # Simulate Sentry having been initialised in a prior call.
+        mod._sentry_initialized = True
+
+        fake_sdk = _make_fake_sentry_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            result = mod.init_sentry(
+                dsn="https://fake@sentry.io/999",
+                settings={"privacy_mode_enabled": True},
+            )
+
+        self.assertFalse(result, "init_sentry must return False when privacy_mode_enabled=True")
+        self.assertFalse(
+            mod._sentry_initialized,
+            "_sentry_initialized MUST be False after privacy_mode toggle ON (W1601 fix)",
+        )
+        # The SDK init must NOT have been called.
+        fake_sdk.init.assert_not_called()
+
+    def test_capture_exception_no_op_after_privacy_toggle_on(self):
+        """capture_exception becomes a no-op once privacy_mode clears the flag.
+
+        Scenario:
+          1. Sentry initialised → _sentry_initialized = True.
+          2. init_sentry called with privacy_mode_enabled=True → clears flag.
+          3. capture_exception() → must NOT call sentry_sdk.capture_exception.
+        """
+        import backend.observability as mod
+
+        # Step 1: simulate prior init.
+        mod._sentry_initialized = True
+
+        fake_sdk = _make_fake_sentry_sdk()
+        fake_sdk.push_scope = MagicMock()
+        # Make push_scope a context manager that returns a mock scope.
+        mock_scope = MagicMock()
+        fake_sdk.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        fake_sdk.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        fake_sdk.capture_exception = MagicMock()
+
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            # Step 2: toggle privacy ON — must clear the flag.
+            result = mod.init_sentry(
+                dsn="https://fake@sentry.io/999",
+                settings={"privacy_mode_enabled": True},
+            )
+            self.assertFalse(result)
+            self.assertFalse(mod._sentry_initialized)
+
+            # Step 3: capture_exception must be a no-op.
+            mod.capture_exception(RuntimeError("should not be sent"))
+
+        fake_sdk.capture_exception.assert_not_called()
+
+    def test_add_breadcrumb_no_op_after_privacy_toggle_on(self):
+        """add_breadcrumb becomes a no-op once privacy_mode clears the flag."""
+        import backend.observability as mod
+
+        mod._sentry_initialized = True
+
+        fake_sdk = _make_fake_sentry_sdk()
+        fake_sdk.add_breadcrumb = MagicMock()
+
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            mod.init_sentry(
+                dsn="https://fake@sentry.io/999",
+                settings={"privacy_mode_enabled": True},
+            )
+            self.assertFalse(mod._sentry_initialized)
+
+            mod.add_breadcrumb(
+                category="ipc",
+                message="should_not_be_recorded",
+            )
+
+        fake_sdk.add_breadcrumb.assert_not_called()
+
+    def test_privacy_mode_on_when_already_false_stays_false(self):
+        """If _sentry_initialized was already False, privacy_mode=True is still a no-op
+        (no double-clear side effects)."""
+        import backend.observability as mod
+
+        # Flag is already False — this is the normal "never initialised" path.
+        self.assertFalse(mod._sentry_initialized)
+
+        fake_sdk = _make_fake_sentry_sdk()
+        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+            result = mod.init_sentry(
+                dsn="https://fake@sentry.io/999",
+                settings={"privacy_mode_enabled": True},
+            )
+
+        self.assertFalse(result)
+        self.assertFalse(mod._sentry_initialized)
+        fake_sdk.init.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

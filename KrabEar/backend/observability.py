@@ -246,6 +246,15 @@ def init_sentry(
 
     if settings and settings.get("privacy_mode_enabled"):
         logger.info("Sentry init skipped — privacy_mode_enabled=True")
+        # W1601 / W1599 F1 HIGH: if Sentry was already initialised in a previous
+        # call, clear the flag now so that capture_exception() and add_breadcrumb()
+        # become no-ops immediately.  The Sentry SDK keeps its own internal state
+        # but our guard flag is what prevents new data from being forwarded.
+        if _sentry_initialized:
+            logger.info(
+                "init_sentry: privacy_mode now ON — clearing _sentry_initialized"
+            )
+            _sentry_initialized = False
         if dsn:
             # Записываем в privacy audit log что Sentry был заблокирован
             try:
