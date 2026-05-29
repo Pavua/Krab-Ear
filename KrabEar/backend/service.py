@@ -3127,19 +3127,8 @@ class BackendService:
 
         return result
 
-    # ── AppleScript injection helper ────────────────────────────────────────
-
-    @staticmethod
-    def _escape_as_str(value: str) -> str:
-        """Escape a string for safe embedding inside AppleScript double-quoted literals.
-
-        Handles double-quotes and backslashes so that arbitrary user text cannot
-        break out of an AppleScript string literal or inject extra commands.
-        Backslashes must be escaped first to avoid double-escaping the quotes.
-        """
-        return value.replace("\\", "\\\\").replace('"', '\\"')
-
     # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
+    # (W1442) `_escape_as_str` def kept at single location below near W944 fix block
 
     def _handle_create_apple_note(self, params: dict) -> dict:
         """Create Apple Note from text via osascript.

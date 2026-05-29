@@ -7,6 +7,7 @@ RMS/peak уровни, SNR, клиппинг, тишина — и возвращ
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,27 @@ import numpy as np
 from core.silence_detector import SILENCE_THRESHOLD_AMP
 
 logger = logging.getLogger("KrabEar.AudioQuality")
+
+
+# ---------------------------------------------------------------------------
+# Numeric safety guard (W1017/W1103/W1442 restoration)
+# ---------------------------------------------------------------------------
+# numpy can produce NaN on all-zero / all-NaN audio input and Inf on degenerate
+# divisions. Both literal values are NOT valid JSON (RFC 8259) — Swift's
+# JSONDecoder rejects them and the entire IPC response is dropped, silently
+# blanking the analytics UI. This helper sits at the boundary between numpy
+# results and the report dict. Always wrap rms_level/peak_level/snr_estimate_db
+# before they enter the dataclass. Single 2-arg form `_safe_float(v, 1.0)`
+# allows a custom fallback for ratios where 0.0 is wrong (e.g. silence_ratio).
+
+
+def _safe_float(v: float, default: float = 0.0) -> float:
+    """Coerce NaN/Inf/non-numeric input to a finite default value."""
+    if not isinstance(v, (int, float)):
+        return default
+    if math.isnan(v) or math.isinf(v):
+        return default
+    return float(v)
 
 # ---------------------------------------------------------------------------
 # Пороговые значения для оценки качества
@@ -111,18 +133,24 @@ class AudioQualityAnalyzer:
         duration_sec = n_samples / max(sample_rate, 1)
 
         # --- RMS и пик ---
-        rms_level = float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0
-        peak_level = float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0
+        # W1442: wrap in _safe_float so NaN/Inf from all-zero/all-NaN audio
+        # don't propagate into the IPC response (RFC 8259 — invalid JSON).
+        rms_level = _safe_float(
+            float(np.sqrt(np.mean(audio_data ** 2))) if n_samples > 0 else 0.0
+        )
+        peak_level = _safe_float(
+            float(np.max(np.abs(audio_data))) if n_samples > 0 else 0.0
+        )
 
         # --- Клиппинг ---
         clipping_samples = int(np.sum(np.abs(audio_data) >= _CLIPPING_THRESHOLD))
-        clipping_ratio = clipping_samples / max(n_samples, 1)
+        clipping_ratio = _safe_float(clipping_samples / max(n_samples, 1))
 
         # --- Тишина (по фреймам) ---
-        silence_ratio = self._compute_silence_ratio(audio_data)
+        silence_ratio = _safe_float(self._compute_silence_ratio(audio_data))
 
         # --- SNR (оценка) ---
-        snr_estimate_db = self._estimate_snr(audio_data, sample_rate)
+        snr_estimate_db = _safe_float(self._estimate_snr(audio_data, sample_rate))
 
         # --- Предупреждения ---
         warnings: list[str] = []
