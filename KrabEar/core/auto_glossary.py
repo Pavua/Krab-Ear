@@ -26,6 +26,10 @@ logger = logging.getLogger("KrabEar.Core.AutoGlossary")
 # Имя файла кэша на диске (в data_dir).
 AUTO_GLOSSARY_CACHE_FILE = "auto_glossary.json"
 
+# W1538 / W1497-regression: максимальный размер объединённого текста одного history-элемента
+# перед передачей в TermExtractor. Защита от OOM при очень длинных транскрибациях.
+_MAX_TEXT_BYTES: int = 1024 * 1024  # 1 МБ
+
 # ── Вспомогательные функции ───────────────────────────────────────────────────
 
 # W1294: known filler words that often start sentence-initial bigrams.
@@ -352,6 +356,15 @@ class AutoGlossaryBuilder:
             ).strip()
             if not raw_text:
                 continue
+
+            # W1538: обрезаем слишком длинные тексты во избежание OOM
+            raw_bytes = raw_text.encode("utf-8")
+            if len(raw_bytes) > _MAX_TEXT_BYTES:
+                raw_text = raw_bytes[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore")
+                logger.warning(
+                    "auto_glossary: text truncated to _MAX_TEXT_BYTES (%d bytes)",
+                    _MAX_TEXT_BYTES,
+                )
 
             extracted = self._extractor.extract_terms(raw_text)
             for et in extracted:

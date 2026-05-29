@@ -18,6 +18,32 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("KrabEar.VoiceCommands")
 
+# ---------------------------------------------------------------------------
+# W1256: strict mode flag
+# When True (default), ambiguous single-word triggers (вопрос, точка, period,
+# colon, tab, coma, punto, etc.) are NOT treated as commands — only exact
+# multi-word phrases like «вопросительный знак» trigger commands.
+# When False (legacy), all single-word triggers fire as before.
+# ---------------------------------------------------------------------------
+_VOICE_COMMANDS_STRICT_MODE: bool = True
+
+# Set of ambiguous command patterns (raw pattern strings) that are gated by strict mode.
+# These words/phrases have common non-command meanings and caused production damage
+# (W1251 F1+F2 HIGH). In strict mode these patterns are silently skipped; only
+# unambiguous forms (e.g. «вопросительный знак», «full stop») are recognised.
+_AMBIGUOUS_SINGLE_WORD_PATTERNS: frozenset = frozenset({
+    # RU — однословные
+    "вопрос",    # question (→ не «?» в строгом режиме)
+    "точка",     # point/dot (→ не «.» в строгом режиме)
+    # ES — однословные / двухсловные омонимы
+    "coma",      # медицинская кома (→ не «,»)
+    "punto",     # точка/пойнт (→ не «.»)
+    "dos puntos",  # «два пункта» / «двоеточие» (амбигуено)
+    # EN — однословные
+    "period",    # медицинский/финансовый период (→ не «.»)
+    "colon",     # анатомический термин (→ не «:»)
+    "tab",       # UI-термин (browser tab, keyboard tab) (→ не «\t»)
+})
 
 # ---------------------------------------------------------------------------
 # Таблицы команд: (паттерн, тип, значение)
@@ -112,8 +138,9 @@ _LANG_COMMANDS: dict[str, list[tuple[str, str, str]]] = {
     "en": _EN_COMMANDS,
 }
 
-# Компилированные паттерны: {lang: [(compiled_re, action, arg), ...]}
-_COMPILED: dict[str, list[tuple[re.Pattern[str], str, str]]] = {}
+# Компилированные паттерны: {lang: [(compiled_re, raw_pattern, action, arg), ...]}
+# raw_pattern хранится для strict-mode фильтрации (_AMBIGUOUS_SINGLE_WORD_PATTERNS).
+_COMPILED: dict[str, list[tuple[re.Pattern[str], str, str, str]]] = {}
 
 
 def _build_pattern(raw_pattern: str) -> re.Pattern[str]:
@@ -133,11 +160,16 @@ def _build_pattern(raw_pattern: str) -> re.Pattern[str]:
     return re.compile(r"(?<!\w)" + escaped + r"(?!\w)", re.IGNORECASE)
 
 
-def _get_compiled(lang: str) -> list[tuple[re.Pattern[str], str, str]]:
-    """Возвращает компилированные паттерны для языка (с кэшированием)."""
+def _get_compiled(lang: str) -> list[tuple[re.Pattern[str], str, str, str]]:
+    """Возвращает компилированные паттерны для языка (с кэшированием).
+
+    Returns:
+        List of (compiled_re, raw_pattern, action, arg) tuples.
+        raw_pattern хранится для W1256 strict-mode фильтрации.
+    """
     if lang not in _COMPILED:
         raw = _LANG_COMMANDS.get(lang, [])
-        _COMPILED[lang] = [(_build_pattern(p), action, arg) for p, action, arg in raw]
+        _COMPILED[lang] = [(_build_pattern(p), p, action, arg) for p, action, arg in raw]
     return _COMPILED[lang]
 
 
@@ -220,6 +252,29 @@ class VoiceCommandProcessor:
     def _enabled(self) -> bool:
         return bool(self._settings_get("voice_commands_enabled", True))
 
+    def _is_strict_mode(self) -> bool:
+        """Returns True if strict mode is active (default: _VOICE_COMMANDS_STRICT_MODE).
+
+        Strict mode gates ambiguous single-word triggers so common words like
+        «вопрос», «период», «colon», «tab» are not treated as commands (W1256).
+        """
+        return bool(self._settings_get("voice_commands_strict_mode", _VOICE_COMMANDS_STRICT_MODE))
+
+    def set_voice_commands_strict_mode(self, strict: bool) -> None:
+        """Runtime toggle for strict mode (W1256 IPC hook).
+
+        Overrides the settings_get callback by injecting a runtime value.
+        After calling this, _is_strict_mode() returns the new value immediately.
+        """
+        _original = self._settings_get
+
+        def _patched(key: str, default: Any) -> Any:
+            if key == "voice_commands_strict_mode":
+                return strict
+            return _original(key, default)
+
+        self._settings_get = _patched
+
     def _allowed_languages(self) -> list[str]:
         val = self._settings_get("voice_commands_languages", ["ru", "es", "en"])
         if isinstance(val, str):
@@ -254,7 +309,7 @@ class VoiceCommandProcessor:
         if not patterns:
             return text
 
-        result = self._apply_commands(text, patterns)
+        result = self._apply_commands(text, patterns, strict=self._is_strict_mode())
         if result != text:
             logger.debug(
                 "VoiceCommands: %d chars → %d chars (lang=%s)",
@@ -267,7 +322,8 @@ class VoiceCommandProcessor:
     def _apply_commands(
         self,
         text: str,
-        patterns: list[tuple[re.Pattern[str], str, str]],
+        patterns: list[tuple[re.Pattern[str], str, str, str]],
+        strict: bool = True,
     ) -> str:
         """Жадный однопроходный парсер команд.
 
@@ -275,6 +331,11 @@ class VoiceCommandProcessor:
         - Перед вставкой: убираем trailing пробел из output (пробел перед командой).
         - После вставки: если в тексте есть продолжение — добавляем один пробел.
           (не добавляем для \n, \n\n, \t — они сами являются разделителями).
+
+        Args:
+            patterns: list of (compiled_re, raw_pattern, action, arg).
+            strict: если True — пропускаем паттерны, чьё raw_pattern входит в
+                    _AMBIGUOUS_SINGLE_WORD_PATTERNS (W1256 strict mode).
         """
         output: list[str] = []
         pos = 0
@@ -287,7 +348,11 @@ class VoiceCommandProcessor:
         while pos < length:
             matched = False
 
-            for pattern, action, arg in patterns:
+            for pattern, raw_pat, action, arg in patterns:
+                # W1256: в строгом режиме пропускаем ambiguous однословные паттерны
+                if strict and raw_pat.lower() in _AMBIGUOUS_SINGLE_WORD_PATTERNS:
+                    continue
+
                 m = pattern.match(text, pos)
                 if m is None:
                     continue
