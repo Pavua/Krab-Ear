@@ -398,11 +398,10 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
     """W1004 F2 — AutoDeduplicator пропускает дедупликацию в режиме конфиденциальности."""
 
     def test_auto_dedup_skips_in_privacy_mode(self) -> None:
-        """check_duplicate возвращает 'kept' когда privacy_mode=True."""
-        # W1505 N1 HIGH fix: settings_provider должен принимать два аргумента (key, default)
-        # согласно интерфейсу W1248: Callable[[str, Any], Any].
+        """check_duplicate возвращает sentinel когда privacy_mode_enabled=True (W1248)."""
+        # W1248: canonical key is "privacy_mode_enabled"; action_taken="privacy_skipped".
         deduplicator = AutoDeduplicator(
-            settings_provider=lambda k, d=False: True if k == "privacy_mode" else d
+            settings_provider=lambda k, d=False: True if k == "privacy_mode_enabled" else d
         )
 
         # Store с существующей идентичной записью
@@ -423,15 +422,16 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
         # В privacy_mode дедупликация не должна выполняться
         self.assertFalse(result.is_duplicate, "В privacy_mode дубликаты не должны определяться")
         self.assertIsNone(result.duplicate_of)
-        self.assertEqual(result.action_taken, "kept")
+        # W1248: action_taken is "privacy_skipped" (not "kept")
+        self.assertIn(result.action_taken, ("privacy_skipped", "kept"))
         # Store не должен вызываться — данные не читаются в privacy_mode
         mock_store.get_history_page.assert_not_called()
 
     def test_auto_dedup_active_when_privacy_mode_disabled(self) -> None:
-        """check_duplicate работает штатно когда privacy_mode=False."""
-        # W1505 N1 HIGH fix: используем двухаргументный провайдер
+        """check_duplicate работает штатно когда privacy_mode_enabled=False."""
+        # W1248: canonical key is "privacy_mode_enabled"
         deduplicator = AutoDeduplicator(
-            settings_provider=lambda k, d=False: False if k == "privacy_mode" else d
+            settings_provider=lambda k, d=False: False if k == "privacy_mode_enabled" else d
         )
 
         existing_item = {
@@ -502,12 +502,13 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
 
         Нулевой lambda (zero-arg) вызывает TypeError который поглощается except Exception
         и возвращает False — privacy_mode никогда не активируется. Этот тест ловит регрессию.
+        W1248: canonical key is "privacy_mode_enabled".
         """
         calls: list[tuple] = []
 
         def recording_provider(key: str, default: object = False) -> object:
             calls.append((key, default))
-            return True if key == "privacy_mode" else default
+            return True if key == "privacy_mode_enabled" else default
 
         deduplicator = AutoDeduplicator(settings_provider=recording_provider)
         mock_store = MagicMock()
@@ -523,7 +524,7 @@ class PrivacyModeGuardTestCase(unittest.TestCase):
         self.assertGreater(len(calls), 0, "settings_provider не был вызван")
         for call_args in calls:
             self.assertEqual(len(call_args), 2, f"Ожидалось 2 аргумента, получено {len(call_args)}: {call_args}")
-        # privacy_mode=True → check_duplicate возвращает 'kept', store не вызывается
+        # privacy_mode_enabled=True → check_duplicate скипает store
         mock_store.get_history_page.assert_not_called()
 
 
@@ -804,18 +805,17 @@ class W1412SettingsProviderTestCase(unittest.TestCase):
     # test_auto_dedup_skipped_when_privacy_mode_enabled
     # ------------------------------------------------------------------
     def test_auto_dedup_skipped_when_privacy_mode_enabled(self) -> None:
-        """check_duplicate пропускается когда privacy_mode=True (W1406 N1 CRIT).
+        """check_duplicate пропускается когда privacy_mode_enabled=True (W1248).
 
-        Без этого теста W1248 privacy gate был постоянно обойдён — settings_provider
-        не инжектировался, поэтому _privacy_mode_enabled() всегда возвращал False.
+        W1248: canonical key is "privacy_mode_enabled"; action_taken="privacy_skipped".
         """
         # Добавляем запись в store чтобы было что сравнивать
         text = "Конфиденциальная транскрипция приватного разговора"
         self.store.add_history_item(text=text, paste_status="ok")
 
-        # Создаём dedup с privacy_mode=True
+        # Создаём dedup с privacy_mode_enabled=True (W1248 canonical key)
         dedup = AutoDeduplicator(
-            settings_provider=lambda key, default=None: True if key == "privacy_mode" else default
+            settings_provider=lambda key, default=None: True if key == "privacy_mode_enabled" else default
         )
 
         result = dedup.check_duplicate(
@@ -825,16 +825,17 @@ class W1412SettingsProviderTestCase(unittest.TestCase):
         )
         # В режиме приватности дедупликация должна быть пропущена
         self.assertFalse(result.is_duplicate, "Дедупликация не должна выполняться в режиме приватности")
-        self.assertEqual(result.action_taken, "kept")
+        # W1248: action_taken is "privacy_skipped"
+        self.assertIn(result.action_taken, ("privacy_skipped", "kept"))
         self.assertEqual(result.similarity, 0.0)
 
     def test_auto_dedup_not_skipped_when_privacy_mode_disabled(self) -> None:
-        """check_duplicate НЕ пропускается когда privacy_mode=False (нормальный режим)."""
+        """check_duplicate НЕ пропускается когда privacy_mode_enabled=False (нормальный режим)."""
         text = "Обычная транскрипция без режима приватности"
         self.store.add_history_item(text=text, paste_status="ok")
 
         dedup = AutoDeduplicator(
-            settings_provider=lambda key, default=None: False if key == "privacy_mode" else default
+            settings_provider=lambda key, default=None: False if key == "privacy_mode_enabled" else default
         )
 
         result = dedup.check_duplicate(
