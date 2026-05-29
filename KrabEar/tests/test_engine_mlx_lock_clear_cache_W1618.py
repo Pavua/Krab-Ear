@@ -213,7 +213,7 @@ class TestPostDiarizationClearCacheHeldUnderMlxLock(unittest.TestCase):
         eng._build_dynamic_prompt = MagicMock(return_value="")
         eng._apply_vad_prefilter = MagicMock(return_value=None)
         eng._maybe_denoise = MagicMock(side_effect=lambda x: x)
-        eng._maybe_multipass_retry = MagicMock(side_effect=lambda a, p, l, r: r)
+        eng._maybe_multipass_retry = MagicMock(side_effect=lambda a, p, lang, r: r)
 
         audio = np.zeros(16000, dtype=np.float32)
 
