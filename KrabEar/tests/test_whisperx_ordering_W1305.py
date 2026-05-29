@@ -36,7 +36,7 @@ def _make_engine(
     engine = AudioEngine.__new__(AudioEngine)
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
-    engine._unavailable_models: set = set()
+    engine._unavailable_models: dict = {}
     engine._router = None
     engine._sensevoice_model = None
     engine._sensevoice_load_error = None
@@ -45,11 +45,11 @@ def _make_engine(
     engine._parakeet_model = None
     engine._parakeet_load_error = None
     if parakeet_marker_unavailable:
-        engine._unavailable_models.add(engine._PARAKEET_MARKER)
+        engine._unavailable_models[engine._PARAKEET_MARKER] = __import__("time").monotonic()
     if sensevoice_marker_unavailable:
-        engine._unavailable_models.add(engine._SENSEVOICE_MARKER)
+        engine._unavailable_models[engine._SENSEVOICE_MARKER] = __import__("time").monotonic()
     if whisperx_marker_unavailable:
-        engine._unavailable_models.add(engine._WHISPERX_MARKER)
+        engine._unavailable_models[engine._WHISPERX_MARKER] = __import__("time").monotonic()
     return engine
 
 
@@ -305,7 +305,7 @@ class TestWhisperXDefaultPositionWhenNeither(unittest.TestCase):
 
         engine = _make_engine()
         # Помечаем balanced недоступным — тогда первым должен попасть WhisperX
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         call_order: list[str] = []
         engine._transcribe_whisperx = MagicMock(  # type: ignore[method-assign]

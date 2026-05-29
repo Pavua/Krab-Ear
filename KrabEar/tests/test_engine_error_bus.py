@@ -28,7 +28,7 @@ def _make_engine_stub() -> object:
     engine = AudioEngine.__new__(AudioEngine)
     engine.current_model = "mlx-community/whisper-base-mlx"
     engine.quality_profile = "balanced"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._error_bus = MagicMock()
     engine._llm_rewriter = None
     engine._settings_get = lambda k, d: d
@@ -95,7 +95,7 @@ class SttLoadFailCallSiteTests(unittest.TestCase):
         try:
             raise MemoryError("OOM loading model")
         except MemoryError:
-            engine._unavailable_models.add(model_name)
+            engine._unavailable_models[model_name] = __import__("time").monotonic()
             engine._push_error(
                 "stt.load_fail",
                 f"MemoryError loading {model_name} — switching to balanced",
@@ -122,7 +122,7 @@ class SttLoadFailCallSiteTests(unittest.TestCase):
             raise oom_err
         except OSError as e:
             if e.errno == 12 or "Cannot allocate memory" in str(e):
-                engine._unavailable_models.add(model_name)
+                engine._unavailable_models[model_name] = __import__("time").monotonic()
                 engine._push_error(
                     "stt.load_fail",
                     f"OOM (OSError errno={e.errno}) loading {model_name}",

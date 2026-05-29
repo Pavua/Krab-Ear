@@ -36,10 +36,10 @@ def _make_engine(
     engine = AudioEngine.__new__(AudioEngine)
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._router = None
     if voxtral_marker_unavailable:
-        engine._unavailable_models.add(engine._VOXTRAL_MARKER)
+        engine._unavailable_models[engine._VOXTRAL_MARKER] = __import__("time").monotonic()
     engine._voxtral_model = None
     engine._voxtral_load_error = None
     engine._sensevoice_model = None
@@ -125,7 +125,7 @@ class TestVoxtralAdapterEnabled(unittest.TestCase):
 
         engine = _make_engine()
         # Помечаем balanced whisper как недоступный — Voxtral должен сработать
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         engine._transcribe_voxtral = lambda *a, **kw: {  # type: ignore[method-assign]
             "text": "привет мир",
@@ -301,7 +301,7 @@ class TestVoxtralWithReasoningEnabled(unittest.TestCase):
         _mock_settings(mock_settings, voxtral_enabled=True, voxtral_reasoning_enabled=True)
 
         engine = _make_engine()
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         engine._transcribe_voxtral = lambda *a, **kw: {  # type: ignore[method-assign]
             "text": "Добрый день, как дела?",
@@ -340,7 +340,7 @@ class TestVoxtralChainPosition(unittest.TestCase):
         )
 
         engine = _make_engine()
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         vt_called = []
         engine._transcribe_voxtral = lambda *a, **kw: vt_called.append(True) or {  # type: ignore[method-assign]

@@ -35,7 +35,7 @@ def _bare_engine() -> AudioEngine:
     engine = AudioEngine.__new__(AudioEngine)
     engine.quality_profile = "balanced"
     engine.current_model = "mlx-community/whisper-large-v3-turbo"
-    engine._unavailable_models = set()
+    engine._unavailable_models = {}
     engine._router = None
     engine._voxtral_model = None
     engine._voxtral_load_error = None
@@ -166,7 +166,7 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
         """Fallback chain adapter branch uses ThreadPoolExecutor.result(timeout=...) for Voxtral."""
         _mock_settings(mock_settings)
         engine = _bare_engine()
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         calls_with_timeout: list[float] = []
 
@@ -228,7 +228,7 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
         """When adapter times out, model is added to _unavailable_models and chain continues."""
         _mock_settings(mock_settings)
         engine = _bare_engine()
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-turbo")
+        engine._unavailable_models["mlx-community/whisper-large-v3-turbo"] = __import__("time").monotonic()
 
         timeout_exc = concurrent.futures.TimeoutError()
 

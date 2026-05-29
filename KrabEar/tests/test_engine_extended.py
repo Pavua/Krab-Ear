@@ -140,7 +140,7 @@ class UnavailableModelsTrackingTests(unittest.TestCase):
         from core.config import settings
 
         # Pre-populate the unavailable set with balanced model
-        self.engine._unavailable_models.add(settings.MODEL_BALANCED)
+        self.engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
         with patch("core.engine.AudioEngine._transcribe_model") as mock_tm:
             mock_tm.return_value = _whisper_ok()
@@ -281,7 +281,7 @@ class FallbackChainTests(unittest.TestCase):
         from core.config import settings
 
         # Mark balanced model as unavailable
-        self.engine._unavailable_models.add(settings.MODEL_BALANCED)
+        self.engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
         with patch("core.engine.settings") as mock_settings:
             mock_settings.MODEL_BALANCED = settings.MODEL_BALANCED
@@ -303,7 +303,7 @@ class FallbackChainTests(unittest.TestCase):
         """При online и все локальные модели недоступны → вызывает _transcribe_remote."""
         from core.config import settings
 
-        self.engine._unavailable_models.add(settings.MODEL_BALANCED)
+        self.engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
         with patch("core.engine.AudioEngine._transcribe_remote") as mock_remote:
             mock_remote.return_value = _whisper_ok("remote text")

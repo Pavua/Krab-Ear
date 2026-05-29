@@ -125,7 +125,7 @@ class UnavailableModelTests(unittest.TestCase):
 
     def test_mark_model_unavailable(self):
         engine = _make_engine()
-        engine._unavailable_models.add("mlx-community/whisper-large-v3-mlx")
+        engine._unavailable_models["mlx-community/whisper-large-v3-mlx"] = __import__("time").monotonic()
         self.assertIn("mlx-community/whisper-large-v3-mlx", engine._unavailable_models)
 
     def test_fallback_chain_skips_unavailable_model(self):
@@ -135,7 +135,7 @@ class UnavailableModelTests(unittest.TestCase):
         from core.config import settings
 
         # Помечаем balanced модель как недоступную
-        engine._unavailable_models.add(settings.MODEL_BALANCED)
+        engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
         # В offline_strict режиме после исчерпания всех кандидатов должен быть RuntimeError
         with patch("core.engine.settings") as mock_settings:
@@ -148,7 +148,7 @@ class UnavailableModelTests(unittest.TestCase):
             mock_settings.WHISPERX_ENABLED = False
             mock_settings.VOXTRAL_ENABLED = False
 
-            engine._unavailable_models.add(settings.MODEL_BALANCED)
+            engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
             with self.assertRaises(RuntimeError):
                 engine._transcribe_with_fallback_impl("fake.wav", "", None)
@@ -503,7 +503,7 @@ class RemoteFallbackTests(unittest.TestCase):
             mock_settings.VOXTRAL_ENABLED = False
 
             # Помечаем единственный кандидат недоступным
-            engine._unavailable_models.add(settings.MODEL_BALANCED)
+            engine._unavailable_models[settings.MODEL_BALANCED] = __import__("time").monotonic()
 
             with patch.object(engine, "_transcribe_remote", side_effect=fake_remote):
                 result = engine._transcribe_with_fallback_impl("fake.wav", "", None)
