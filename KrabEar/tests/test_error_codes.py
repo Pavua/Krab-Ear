@@ -116,6 +116,13 @@ class ErrorRegistryShapeTests(unittest.TestCase):
             # metadata + stale user message.
             "rewriter.mlx_token_bug",
             "rewriter.gpu_stream_error",
+            # Added W1614 F1 HIGH — stt.transcribe_failed was in the registry
+            # (added in W78) but was missing from this expected set (test drift).
+            "stt.transcribe_failed",
+            # Added W1614 F1 HIGH — audio.max_duration_reached pushed by
+            # recorder.py:257 but was absent from ERROR_REGISTRY causing silent
+            # empty-user_msg_ru toast.
+            "audio.max_duration_reached",
         }
         self.assertEqual(set(ERROR_REGISTRY.keys()), expected)
 
@@ -128,7 +135,7 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         self.assertEqual(entry["severity"], "critical")
         self.assertTrue(entry["actionable"])
         self.assertIsNotNone(entry["action_id"])
-        self.assertEqual(entry["dedupe_seconds"], 300)
+        self.assertEqual(entry["dedupe_seconds"], 600)
         self.assertTrue(entry["user_msg_ru"])
 
     def test_proc_cmdline_permission_in_registry(self):
@@ -183,7 +190,9 @@ class ErrorRegistryShapeTests(unittest.TestCase):
         stt.padding_mismatch / diarization.vad_gated / agent.binary_drift = 54,
         W1231 F2 (W1233) added rewriter.mlx_token_bug + rewriter.gpu_stream_error = 56,
         W1231 F1 (W1232) system.proc_cmdline_permission was missing = 57 (prev PR
-        already had disk.critical + startup.stt_model_cache_miss); test_expected_codes_present
+        already had disk.critical + startup.stt_model_cache_miss),
+        W1614 F1 added stt.transcribe_failed (was in registry but test set drifted)
+        + audio.max_duration_reached (new) = 58; test_expected_codes_present
         guards the exact set so this count test is a redundant but cheap invariant.
         """
-        self.assertEqual(len(ERROR_REGISTRY), 56)
+        self.assertEqual(len(ERROR_REGISTRY), 58)
