@@ -134,11 +134,15 @@ def _compute_tfidf(
     tf: Counter = Counter(window_tokens)
     total_tf = len(window_tokens)
 
+    # W1281/W1286: pre-convert each window's token list to a set for O(1) membership checks.
+    # Avoids repeated O(n) list scans inside the inner loop — reduces O(V·W·n) → O(V·W).
+    window_token_sets = [set(toks) for toks in all_windows_tokens]
+
     scores: Dict[str, float] = {}
     for word, count in tf.items():
         tf_val = count / total_tf
-        # Количество окон, содержащих это слово (W1277 F4: set() для O(1) lookup)
-        doc_freq = sum(1 for w_tokens in all_windows_tokens if word in set(w_tokens))
+        # Количество окон, содержащих это слово (W1286: set-based O(1) lookup per window)
+        doc_freq = sum(1 for tok_set in window_token_sets if word in tok_set)
         idf_val = math.log((total_windows + 1) / (doc_freq + 1)) + 1.0
         scores[word] = tf_val * idf_val
 
