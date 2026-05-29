@@ -1,28 +1,40 @@
-"""Общие константы порога тишины для всех модулей Krab Ear.
+"""Общие константы порога тишины для всех модулей Krab Ear (W1018).
 
-Единственный источник истины (SSOT) для порога тишины -40 dBFS.
+Двухуровневая система порогов:
 
-Обоснование выбора -40 dB:
-  -40 dBFS соответствует амплитуде ~0.01 (1% от полной шкалы).
-  Этот порог:
-  - достаточно высокий, чтобы фоновый шум помещения (~-60..−50 dBFS)
-    был надёжно классифицирован как тишина;
-  - достаточно низкий, чтобы тихий шёпот (~−35..−30 dBFS) всё ещё
-    распознавался как речь;
-  - проверен эмпирически на записях RU/ES разговорной речи
-    в офисе и дома (см. docs/measurements/).
+  SILENCE_THRESHOLD_DB_STRICT (-40 дБ)
+      Агрессивный порог для аналитики (AudioQualityAnalyzer, get_speech_ratio).
+      Офисный фоновый шум обычно ниже -40 дБ → надёжно детектируется как тишина.
 
-Все модули, работающие с тишиной, ДОЛЖНЫ импортировать константы
-отсюда, а не задавать -40.0 вручную, чтобы избежать расхождений
-при тюнинге порога.
+  SILENCE_THRESHOLD_DB_PRESERVE_WHISPER (-55 дБ)
+      Мягкий порог для STT-путей (SmartSilenceSkipper, RealtimeSilenceFilter).
+      Сохраняет шёпот и тихую речь (~-45…-55 дБ) — не допускает их отсечения
+      перед Whisper, что устраняет пустые транскрипты для тихой речи.
+
+Backward-compatible aliases:
+  SILENCE_THRESHOLD_DB  → SILENCE_THRESHOLD_DB_STRICT  (-40 dB)
+  SILENCE_THRESHOLD_AMP → амплитудный эквивалент -40 dB (0.01)
+
+Все модули ДОЛЖНЫ импортировать константы отсюда.
 """
 
 from __future__ import annotations
 
-# -40 dBFS — стандартный порог тишины для всех детекторов Krab Ear
-SILENCE_THRESHOLD_DB: float = -40.0
+# Строгий порог: -40 dBFS (аналитика, метрики)
+SILENCE_THRESHOLD_DB_STRICT: float = -40.0
 
-# Эквивалентная амплитуда: 10 ** (-40 / 20) = 0.01
+# Мягкий порог для STT: -55 dBFS — сохраняет шёпот
+SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
+
+# Backward-compatible alias
+SILENCE_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_STRICT
+
+# Эквивалентная амплитуда для STRICT: 10 ** (-40 / 20) = 0.01
 SILENCE_THRESHOLD_AMP: float = 0.01  # 10 ** (SILENCE_THRESHOLD_DB / 20)
 
-__all__ = ["SILENCE_THRESHOLD_DB", "SILENCE_THRESHOLD_AMP"]
+__all__ = [
+    "SILENCE_THRESHOLD_DB",
+    "SILENCE_THRESHOLD_AMP",
+    "SILENCE_THRESHOLD_DB_STRICT",
+    "SILENCE_THRESHOLD_DB_PRESERVE_WHISPER",
+]
