@@ -557,6 +557,10 @@ class BackendService:
         self._startup_diagnostics = StartupDiagnostics(
             data_dir=self.store.data_dir,
         )
+        # W1622 (W1615 F1 HIGH): wire error_bus so _push_stt_cache_miss_error
+        # actually fires instead of silently returning.  _error_bus is guaranteed
+        # to exist here — it was initialised ~280 lines above.
+        self._startup_diagnostics._error_bus = self._error_bus
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
         try:
             _startup_report = self._startup_diagnostics.run_all_checks()
