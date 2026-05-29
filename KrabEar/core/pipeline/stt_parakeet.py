@@ -229,3 +229,7 @@ class ParakeetSTTAdapter(STTAdapterBase):
         """Release model from memory."""
         self._model = None
         self._load_failed = False
+
+
+# W1591 / W1538: backward-compat alias for tests that use the shorter name
+ParakeetAdapter = ParakeetSTTAdapter
