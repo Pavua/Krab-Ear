@@ -3771,16 +3771,20 @@ end tell'''
             total_shifts (int)  — количество смен темы.
             current_topic (dict) — текущая тема (last_n=window_size).
         """
+        # W996: privacy guard — не раскрываем темы в режиме приватности
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"timeline": [], "reason": "privacy_mode_active"}
+
         window_size = max(1, int(params.get("window_size", 5) or 5))
-        limit = int(params.get("limit", 100) or 100)
+        _raw_limit = int(params.get("limit", 100) or 100)
+        limit = _raw_limit if _raw_limit > 0 else 100
         try:
             with self.store._lock():
                 items = self.store._load_active_items_unlocked()
         except Exception:
             items = []
 
-        if limit > 0:
-            items = items[-limit:]
+        items = items[-limit:]
 
         timeline = self._topic_tracker.get_topic_timeline(items, window_size=window_size)
         current_topic = self._topic_tracker.get_current_topic(items, last_n=window_size)
