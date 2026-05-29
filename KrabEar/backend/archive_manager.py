@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import threading
@@ -18,6 +19,7 @@ logger = logging.getLogger("KrabEar.Backend.ArchiveManager")
 
 _ARCHIVE_SUBDIR = "archive"
 _ARCHIVE_FILE = "archive.ndjson"
+_ARCHIVE_LOCK_FILE = "archive.ndjson.lock"  # sibling lock file for cross-process flock
 
 
 @dataclass
@@ -42,9 +44,11 @@ class ArchiveManager:
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
+        self._lock_path = self._archive_dir / _ARCHIVE_LOCK_FILE
         self._lock = threading.Lock()
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._archive_path.touch(exist_ok=True)
+        self._lock_path.touch(exist_ok=True)
 
     # ------------------------------------------------------------------
     # Внутренние хелперы
@@ -68,23 +72,32 @@ class ArchiveManager:
             logger.warning("Не удалось прочитать архив: %s", exc)
         return items
 
-    @staticmethod
-    def _append_ndjson(path: Path, payload: dict[str, Any]) -> None:
-        """Атомарный append JSON-строки."""
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    def _append_ndjson(self, path: Path, payload: dict[str, Any]) -> None:
+        """Атомарный append JSON-строки с cross-process flock на sibling lock file."""
+        with self._lock_path.open("a", encoding="utf-8") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
     def _rewrite_archive(self, items: list[dict[str, Any]]) -> None:
-        """Перезаписывает файл архива атомарно через tmp-файл."""
+        """Перезаписывает файл архива атомарно через tmp-файл с cross-process flock."""
         tmp = self._archive_path.with_suffix(".ndjson.tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as fh:
-                for item in items:
-                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
-            tmp.replace(self._archive_path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        with self._lock_path.open("a", encoding="utf-8") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                try:
+                    with tmp.open("w", encoding="utf-8") as fh:
+                        for item in items:
+                            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    tmp.replace(self._archive_path)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
     # ------------------------------------------------------------------
     # Публичный API
