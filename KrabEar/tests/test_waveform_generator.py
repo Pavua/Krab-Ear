@@ -10,6 +10,7 @@
 from __future__ import annotations
 from core.waveform_generator import WaveformData, WaveformGenerator
 
+import math
 import sys
 import tempfile
 import unittest
@@ -397,6 +398,49 @@ class TestGetWaveformIPC(unittest.TestCase):
             "params": {"file_path": "/no/such/file.wav"},
         })
         self.assertFalse(response.get("ok", True))
+
+
+# ── Тест 8: NaN/Inf guard (W1539 F4) ─────────────────────────────────────
+
+
+class TestNaNInfGuard(unittest.TestCase):
+    """W1549: corrupt audio (NaN/Inf samples) must not propagate to WaveformData.
+
+    RFC 8259 disallows NaN/Inf literals in JSON — Swift JSONDecoder rejects them
+    and drops the entire IPC response, blanking the waveform UI.
+    """
+
+    def setUp(self):
+        self.gen = WaveformGenerator()
+
+    def test_waveform_nan_audio_input_returns_zero_rms(self):
+        """All-NaN input: rms_amplitude must be 0.0, not NaN."""
+        nan_audio = np.full(1600, float("nan"), dtype=np.float32)
+        result = self.gen.generate_waveform(nan_audio, 16000, num_points=10)
+        self.assertEqual(result.rms_amplitude, 0.0,
+                         "rms_amplitude must be 0.0 for NaN audio")
+        self.assertFalse(math.isnan(result.rms_amplitude),
+                         "rms_amplitude must not be NaN")
+
+    def test_waveform_inf_audio_input_returns_zero_peak(self):
+        """All-Inf input: peak_amplitude must be 0.0, not Inf."""
+        inf_audio = np.full(1600, float("inf"), dtype=np.float32)
+        result = self.gen.generate_waveform(inf_audio, 16000, num_points=10)
+        self.assertEqual(result.peak_amplitude, 0.0,
+                         "peak_amplitude must be 0.0 for Inf audio")
+        self.assertFalse(math.isinf(result.peak_amplitude),
+                         "peak_amplitude must not be Inf")
+
+    def test_waveform_normal_audio_unchanged(self):
+        """Normal audio: rms and peak must be finite and positive."""
+        audio = _make_sine(16000, duration_sec=1.0)
+        result = self.gen.generate_waveform(audio, 16000, num_points=100)
+        self.assertTrue(math.isfinite(result.rms_amplitude),
+                        "rms_amplitude must be finite for normal audio")
+        self.assertTrue(math.isfinite(result.peak_amplitude),
+                        "peak_amplitude must be finite for normal audio")
+        self.assertGreater(result.rms_amplitude, 0.0)
+        self.assertGreater(result.peak_amplitude, 0.0)
 
 
 if __name__ == "__main__":
