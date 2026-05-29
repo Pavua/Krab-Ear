@@ -158,10 +158,7 @@ class TestCreateAppleNote(unittest.TestCase):
         self.assertEqual(result.get("error"), "Notes не открылись")
 
 
-    # ------------------------------------------------------------------
-    # test_apple_note_backslash_in_title_safe  (W1052 regression)
-    # ------------------------------------------------------------------
-    def test_apple_note_backslash_in_title_safe(self):
+    def test_apple_note_backslash_in_title_safe(self):  # W1052 regression
         """Backslash in title must be doubled before quote-escaping.
 
         Naïve .replace('"', '\\"') skips backslash escaping, so a title like

@@ -27,6 +27,7 @@ if PROJECT_ROOT not in sys.path:
 # Stub out heavy dependencies so we can import vg_ws_client cleanly
 # ---------------------------------------------------------------------------
 
+
 def _install_stubs() -> None:
     for mod_name in (
         "backend.event_bus",

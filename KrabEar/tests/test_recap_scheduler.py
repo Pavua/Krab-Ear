@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 # Путь для импорта

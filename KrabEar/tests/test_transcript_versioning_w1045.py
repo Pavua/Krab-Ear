@@ -193,8 +193,10 @@ class TestDeleteHistoryItemCascadesVersions(unittest.TestCase):
 
 class FakeLock:
     """Контекстный менеджер — stub для store._lock()."""
+
     def __enter__(self):
         return self
+
     def __exit__(self, *_):
         pass
 

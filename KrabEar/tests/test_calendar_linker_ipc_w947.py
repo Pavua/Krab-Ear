@@ -250,7 +250,7 @@ class TestLinkToCalendarEvent(unittest.TestCase):
             "privacy_mode_enabled": False,
             "calendar_link_enabled": True,
         }.get(k, d)), \
-             patch.object(self.svc._calendar_linker, "find_active_event", return_value=fake_event):
+                patch.object(self.svc._calendar_linker, "find_active_event", return_value=fake_event):  # noqa: E127
             result = self._call({"history_item_id": item.id})
 
         self.assertTrue(result["ok"])
@@ -269,8 +269,8 @@ class TestLinkToCalendarEvent(unittest.TestCase):
             "privacy_mode_enabled": False,
             "calendar_link_enabled": True,
         }.get(k, d)), \
-             patch.object(self.svc._calendar_linker, "find_active_event",
-                          side_effect=RuntimeError("osascript gone")):
+                patch.object(self.svc._calendar_linker, "find_active_event",  # noqa: E127
+                             side_effect=RuntimeError("osascript gone")):
             result = self._call({"history_item_id": "abc123"})
         self.assertTrue(result["ok"])
         self.assertIsNone(result["calendar_event"])
@@ -288,7 +288,7 @@ class TestLinkToCalendarEvent(unittest.TestCase):
             "privacy_mode_enabled": False,
             "calendar_link_enabled": True,
         }.get(k, d)), \
-             patch.object(self.svc._calendar_linker, "find_active_event", side_effect=mock_find):
+                patch.object(self.svc._calendar_linker, "find_active_event", side_effect=mock_find):  # noqa: E127
             self._call({"history_item_id": "x", "at_time": "2026-05-26T14:30:00"})
 
         self.assertIsNotNone(captured.get("at_time"))
@@ -308,7 +308,7 @@ class TestLinkToCalendarEvent(unittest.TestCase):
             "privacy_mode_enabled": False,
             "calendar_link_enabled": True,
         }.get(k, d)), \
-             patch.object(self.svc._calendar_linker, "find_active_event", side_effect=mock_find):
+                patch.object(self.svc._calendar_linker, "find_active_event", side_effect=mock_find):  # noqa: E127
             result = self._call({"history_item_id": "x", "at_time": "not-a-date"})
 
         self.assertTrue(result["ok"])

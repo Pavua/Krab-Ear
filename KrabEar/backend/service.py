@@ -114,7 +114,6 @@ from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
 from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
-from backend.text_processing_service import TextProcessingService
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
 from backend.observability import (
@@ -126,7 +125,6 @@ from backend.observability import (
 )
 from backend.calendar_link import CalendarLinker
 from backend.privacy_audit import get_privacy_audit_logger
-from backend.text_processing_service import TextProcessingService
 
 import argparse
 from datetime import datetime, timedelta

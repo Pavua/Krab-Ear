@@ -84,7 +84,7 @@ def _make_settings_svc(privacy: bool = False) -> MagicMock:
     return svc
 
 
-def _make_recording_core_service(privacy: bool = False) -> "RecordingCoreService":
+def _make_recording_core_service(privacy: bool = False):  # noqa: F821
     """Import and wire a RecordingCoreService with minimal fakes."""
     from backend.recording_core_service import RecordingCoreService
 

@@ -58,6 +58,7 @@ from backend.twilio_adapter import (
 # Helpers to build a minimal mock Response
 # ---------------------------------------------------------------------------
 
+
 def _mock_response(status: int, json_data=None, text: str = "", headers=None):
     resp = MagicMock()
     resp.status_code = status
@@ -94,7 +95,7 @@ class TestRetryAfterCapped(unittest.TestCase):
         """A huge Retry-After (e.g. 9999s) must be clamped to 60s."""
         adapter = self._make_adapter()
         resp = _mock_response(429, json_data=None, text="rate limit",
-                               headers={"Retry-After": "9999"})
+                              headers={"Retry-After": "9999"})
         with patch("backend.twilio_adapter.time.sleep") as mock_sleep:
             result = adapter._handle_response(resp)
         mock_sleep.assert_called_once()

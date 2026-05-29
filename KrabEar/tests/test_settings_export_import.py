@@ -73,8 +73,8 @@ class TestExportSettings(unittest.TestCase):
             with open(out) as f:
                 data = json.load(f)
 
-        for field in ("voice_gateway_api_key", "hf_token", "rest_api_key", "lm_studio_api_key"):
-            self.assertNotIn(field, data, f"Sensitive field '{field}' should not be exported")
+        for sensitive_field in ("voice_gateway_api_key", "hf_token", "rest_api_key", "lm_studio_api_key"):
+            self.assertNotIn(sensitive_field, data, f"Sensitive field '{sensitive_field}' should not be exported")
 
     def test_export_creates_valid_json(self):
         svc = self._svc()

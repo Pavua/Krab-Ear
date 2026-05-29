@@ -534,7 +534,7 @@ class TestNumberNormalizerConcurrent(unittest.TestCase):
 class TestNumberNormalizerCompoundWordBoundary(unittest.TestCase):
     """W991 F1 HIGH — right-boundary guard prevents compound word corruption.
 
-    Without (?!\w) at the tail of num_seq_pat, a decade prefix such as
+    Without (?!\\w) at the tail of num_seq_pat, a decade prefix such as
     «двадцать» matches inside «двадцатилетний» and corrupts it to
     «2дцатилетний».  This suite verifies the fix across RU / ES / EN.
     """

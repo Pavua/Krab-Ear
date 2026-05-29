@@ -427,7 +427,7 @@ class TestConcurrentProcess(unittest.TestCase):
 
 
 class TestLookaroundBoundary(unittest.TestCase):
-    """W989 F1: lookaround (?<!\w)/(?!\w) vs \b boundary regression tests.
+    r"""W989 F1: lookaround (?<!\w)/(?!\w) vs \b boundary regression tests.
 
     \b fails when a word-char command is immediately preceded/followed by a
     non-word char that is itself non-word (e.g. «(точка)» — ')' is non-word,
