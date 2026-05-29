@@ -1,33 +1,32 @@
 """Нормализация дат и времени в транскрибированном тексте.
 
 DateTimeNormalizer конвертирует словесные даты и время в цифровую форму:
-    «третье ноября» → «2026-11-03» (ISO-8601, default) или «03.11» (european)
+    «третье ноября» → «03.11» (european, default)
     «девять часов утра» → «09:00»
-    «пятнадцатого января две тысячи двадцать шестого года» → «2026-01-15»
+    «пятнадцатого января две тысячи двадцать шестого года» → «15.01.2026»
 
 Поддерживаемые языки: ru, es, en.
 Принцип: эвристический lookup-table + regex без тяжёлых NLP библиотек.
-Идемпотентность: уже нормализованные строки «2026-01-15», «09:00» не трогаются.
+Идемпотентность: уже нормализованные строки «03.11», «09:00» не трогаются.
 
 Формат вывода дат управляется модульной константой ``DATETIME_OUTPUT_FORMAT``:
 
-    * ``"iso8601"`` (default) — ``YYYY-MM-DD`` для полных дат, ``MM-DD`` для
-      дат без года. Подходит для лексикографической сортировки и RFC-3339
-      парсинга.
-    * ``"european"`` — ``DD.MM.YYYY`` / ``DD.MM`` — легаси формат для обратной
-      совместимости с ранними версиями.
+    * ``"european"`` (default) — ``DD.MM.YYYY`` / ``DD.MM`` — формат,
+      соответствующий тест-спеке и ожиданиям UI.
+    * ``"iso8601"`` — ``YYYY-MM-DD`` для полных дат, ``MM-DD`` для дат без
+      года. Подходит для лексикографической сортировки и RFC-3339 парсинга.
 
 Переопределить глобально::
 
     import core.datetime_normalizer as dn
-    dn.DATETIME_OUTPUT_FORMAT = "european"
+    dn.DATETIME_OUTPUT_FORMAT = "iso8601"
 
 Переопределить на уровне экземпляра::
 
-    normalizer = DateTimeNormalizer(output_format="european")
+    normalizer = DateTimeNormalizer(output_format="iso8601")
 
 Запуск тестов:
-    PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_datetime_iso_W1094.py -v
+    PYTHONPATH=$(pwd)/KrabEar python -m unittest KrabEar/tests/test_datetime_normalizer -v
 """
 
 from __future__ import annotations
@@ -37,10 +36,10 @@ import re
 from typing import Dict, Literal, Optional
 
 # ---------------------------------------------------------------------------
-# Формат вывода дат.  Значение по умолчанию — ISO-8601 (YYYY-MM-DD).
-# Установите "european" для легаси DD.MM.YYYY поведения.
+# Формат вывода дат.  Значение по умолчанию — European (DD.MM.YYYY).
+# Установите "iso8601" для YYYY-MM-DD поведения.
 # ---------------------------------------------------------------------------
-DATETIME_OUTPUT_FORMAT: Literal["iso8601", "european"] = "iso8601"
+DATETIME_OUTPUT_FORMAT: Literal["iso8601", "european"] = "european"
 
 logger = logging.getLogger("KrabEar.DateTimeNormalizer")
 
