@@ -290,6 +290,11 @@ class BackendService:
         if self.transcriber is not None:
             self.transcriber._error_bus = self._error_bus
 
+        # Wire error_bus into recorder so audio.max_duration_reached /
+        # audio.buffer_overflow errors are forwarded to the error bus (W1652 F1 fix).
+        if self.recorder is not None:
+            self.recorder._error_bus = self._error_bus
+
         # Wire error_bus into mlx_subprocess module for stt.mlx_watchdog_hang push
         try:
             import core.mlx_subprocess as _mlx_sub  # noqa: PLC0415
