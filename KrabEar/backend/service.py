@@ -4354,8 +4354,15 @@ def main() -> None:
     service = build_service(data_dir)
     server = IPCServer(socket_path=socket_path, service=service)
 
+    # Даём shutdown_handler ссылку на IPC-сервер (шаг 6 graceful shutdown).
+    service._ipc_server = server
+
+    # Регистрируем graceful shutdown handler (SIGTERM + SIGINT).
+    service._shutdown_handler.register(service)
+
     def _signal_handler(signum: int, frame: Any) -> None:
         logger.info("Получен сигнал %s, завершаем backend", signum)
+        service._shutdown_handler.shutdown()
         server.stop()
         service.close()
 
@@ -4365,6 +4372,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        service._shutdown_handler.shutdown()
         service.close()
 
 
