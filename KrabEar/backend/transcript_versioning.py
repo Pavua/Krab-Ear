@@ -24,6 +24,10 @@ _VERSIONS_FILE = "transcript_versions.ndjson"
 # При превышении — oldest versions (с наименьшим version_num) удаляются.
 MAX_VERSIONS_PER_ITEM = 50
 
+# W1423/W1563: максимальный размер текста одной версии.
+# Предотвращает неограниченный рост NDJSON-файла при сохранении очень длинных текстов.
+_MAX_TEXT_BYTES = 256 * 1024  # 256 KB per version — prevents unbounded version blob growth
+
 
 class TranscriptVersionManager:
     """Версионирование текста транскрипций.
@@ -128,6 +132,11 @@ class TranscriptVersionManager:
         source = str(source).strip()
         if source not in VALID_SOURCES:
             raise ValueError(f"Недопустимый source {source!r}. Допустимые: {sorted(VALID_SOURCES)}")
+        text_bytes = len(text.encode("utf-8"))
+        if text_bytes > _MAX_TEXT_BYTES:
+            raise ValueError(
+                f"version text {text_bytes} bytes exceeds _MAX_TEXT_BYTES={_MAX_TEXT_BYTES}"
+            )
 
         with self._lock:
             all_records = self._read_all()
