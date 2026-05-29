@@ -16,8 +16,10 @@ logger = logging.getLogger("KrabEar.PunctuationFixer")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
 
 # Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
-_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
-_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
+# W1376: включаем двоеточие (:), исключая протокол URL (://)
+_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»]|:(?!/))([^\s\d»\"')\]])")
+# W1377: паттерн для нахождения точки перед заглавной буквой (обработка через callback)
+_NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(?<=[^\s])(\.)([А-ЯA-ZЁ])")
 
 # STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
 # common Whisper output like "dime.como".  Only applied in ES mode.
@@ -55,6 +57,49 @@ _EN_DOUBLE_QUOTE_OPEN_RE = re.compile(r'(?<!\w)"(?=\S)')
 _EN_DOUBLE_QUOTE_CLOSE_RE = re.compile(r'(?<=\S)"(?!\w)')
 
 
+def _insert_period_space(match: "re.Match[str]") -> str:
+    """W1377: context-aware period+capital boundary insertion.
+
+    Inserts a space between a period and a following capital letter ONLY when
+    it is a real sentence boundary.  Skips:
+      - Single letter before dot (abbreviation): т.е.П → т.е.П  (no space)
+      - Digit before dot (version/decimal):      v1.0.Beta → v1.0.Beta (no space)
+
+    A "single letter before dot" means the character immediately before the dot
+    is a letter AND the character before THAT is NOT also a plain letter
+    (i.e. it is a dot, non-word char, or start of string) — this identifies
+    abbreviation-style sequences like т.е., e.g., etc.
+
+    Full words ending in a letter (Текст, США, Конец) have at least two
+    consecutive letters before the dot, so they are treated as sentence boundaries
+    and a space is inserted.
+    """
+    full = match.string
+    dot_pos = match.start(1)   # position of '.'
+    capital = match.group(2)
+
+    # Check char immediately before the dot
+    if dot_pos > 0:
+        pre_dot = full[dot_pos - 1]
+
+        # Digit before dot → version / decimal (v1.0.Beta, 2.3.5)
+        if pre_dot.isdigit():
+            return match.group(0)  # no space inserted
+
+        # Single letter before dot: only an abbreviation if the char before THAT
+        # is not also a plain letter (i.e. it's a dot, space, non-word char, or
+        # start of string).  Example: т.е.П → dot_pos-2 is '.', so skip.
+        # Counter-example: Текст.С → dot_pos-2 is 'с' (letter), so insert.
+        if pre_dot.isalpha() and dot_pos >= 2:
+            pre_pre_dot = full[dot_pos - 2]
+            if not pre_pre_dot.isalpha():
+                # Abbreviation pattern: X.Capital where X is single letter
+                return match.group(0)  # no space inserted
+
+    # Real sentence boundary — insert space
+    return match.group(1) + " " + capital
+
+
 class PunctuationFixer:
     """Детерминированная коррекция пунктуации для вывода STT.
 
@@ -81,9 +126,11 @@ class PunctuationFixer:
 
         # Общие правила (применяются для всех языков)
         result = _MULTI_SPACE_RE.sub(" ", result)
-        result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
-        result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)
-        result = _NO_SPACE_AFTER_PERIOD_RE.sub(r"\1 \2", result)
+        # W1348: add-space-after FIRST, then remove-space-before — so newly
+        # inserted spaces before punct (e.g. «стоп».) get cleaned up correctly.
+        result = _NO_SPACE_AFTER_PUNCT_RU_RE.sub(r"\1 \2", result)   # add space after ,;!?»:
+        result = _NO_SPACE_AFTER_PERIOD_RE.sub(_insert_period_space, result)  # W1377 callback
+        result = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)            # remove space before punct
         result = _CAPITALIZE_AFTER_SENT_RE.sub(lambda m: m.group(1) + m.group(2).upper(), result)
 
         if language == "ru":
