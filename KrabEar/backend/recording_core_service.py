@@ -1385,6 +1385,7 @@ class RecordingCoreService:
 
         items: list[dict[str, Any]] = []
         errors: list[str] = []
+        skipped_duplicates: int = 0
         for file_index, audio_path in enumerate(audio_paths):
             if cancel_check is not None and cancel_check():
                 break
@@ -1441,37 +1442,71 @@ class RecordingCoreService:
                 final_text = translated_text if (translate_and_paste and translated_text) else text
                 display_text = self._format_text_with_speakers(final_text, diarization_data)
 
-                history_item = self.store.add_history_item(
-                    text=display_text,
-                    paste_status="failed",
-                    source_text=text,
-                    translated_text=translated_text,
-                    translation_mode=translation.mode,
-                    source_lang=translation.source_lang,
-                    target_lang=translation.target_lang,
-                    translation_status=translation.status,
-                    translation_engine=translation.engine,
-                    diarization=diarization_data,
-                    audio_duration_sec=audio_duration_sec,
-                    emotion=(
-                        transcribe_payload.get("emotion")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("emotion"), str)
-                        else None
-                    ),
-                    word_timestamps=(
-                        transcribe_payload.get("word_timestamps")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("word_timestamps"), list)
-                        else None
-                    ),
-                    speaker_turns=(
-                        transcribe_payload.get("speaker_turns")
-                        if isinstance(transcribe_payload, dict)
-                        and isinstance(transcribe_payload.get("speaker_turns"), list)
-                        else None
-                    ),
-                )
+                # W1602 / W1588 F2: mirror the W1572 dedup guard for the batch-import path.
+                # Previously add_history_item was called unconditionally here, silently creating
+                # duplicates when users re-imported the same file with auto_dedup_enabled=True.
+                # _persist_lock serialises the check + add pair (atomicity, same as W1592).
+                _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
+                _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+                with self._persist_lock:
+                    if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
+                        try:
+                            import time as _time_mod
+                            _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
+                            _dedup_result = self._auto_deduplicator.check_duplicate(
+                                text=display_text or text,
+                                timestamp=_ts_now,
+                                store=self.store,
+                            )
+                            if _dedup_result.is_duplicate:
+                                logger.info(
+                                    "transcribe_paths: запись пропущена как дубликат"
+                                    " original_id=%s similarity=%.3f path=%s",
+                                    _dedup_result.duplicate_of,
+                                    _dedup_result.similarity,
+                                    audio_path,
+                                )
+                                self._safe_callback(on_file_done, file_index, None, "duplicate")
+                                skipped_duplicates += 1
+                                continue
+                        except Exception:
+                            logger.exception(
+                                "transcribe_paths: dedup check завершился с исключением,"
+                                " продолжаем запись path=%s",
+                                audio_path,
+                            )
+
+                    history_item = self.store.add_history_item(
+                        text=display_text,
+                        paste_status="failed",
+                        source_text=text,
+                        translated_text=translated_text,
+                        translation_mode=translation.mode,
+                        source_lang=translation.source_lang,
+                        target_lang=translation.target_lang,
+                        translation_status=translation.status,
+                        translation_engine=translation.engine,
+                        diarization=diarization_data,
+                        audio_duration_sec=audio_duration_sec,
+                        emotion=(
+                            transcribe_payload.get("emotion")
+                            if isinstance(transcribe_payload, dict)
+                            and isinstance(transcribe_payload.get("emotion"), str)
+                            else None
+                        ),
+                        word_timestamps=(
+                            transcribe_payload.get("word_timestamps")
+                            if isinstance(transcribe_payload, dict)
+                            and isinstance(transcribe_payload.get("word_timestamps"), list)
+                            else None
+                        ),
+                        speaker_turns=(
+                            transcribe_payload.get("speaker_turns")
+                            if isinstance(transcribe_payload, dict)
+                            and isinstance(transcribe_payload.get("speaker_turns"), list)
+                            else None
+                        ),
+                    )
 
                 summary: str | None = None
                 if len(final_text) > 500:
@@ -1557,6 +1592,7 @@ class RecordingCoreService:
             "items": items,
             "processed": len(items),
             "errors": errors,
+            "skipped_duplicates": skipped_duplicates,
         }
 
     # ------------------------------------------------------------------ #
