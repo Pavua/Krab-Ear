@@ -1958,7 +1958,8 @@ class AudioEngine:
                 try:
                     if recovery_enabled:
                         # Watchdog: запускает в daemon-thread, бросает MLXTimeoutError при зависании.
-                        # MLXTimeoutError — не TypeError, не перехватывается ниже → всплывает выше.
+                        # W1604 F1 fix: MLXTimeoutError перехватывается ЗДЕСЬ (внутри loop),
+                        # чтобы variants fallthrough работал так же, как при recovery_enabled=False.
                         captured_params = params  # closure capture
                         return get_watchdog().run_with_timeout(
                             fn=lambda: mlx_whisper.transcribe(audio_data, **captured_params),
@@ -1967,6 +1968,20 @@ class AudioEngine:
                         )
                     else:
                         return mlx_whisper.transcribe(audio_data, **params)
+                except MLXTimeoutError as e:
+                    # W1604 F1 HIGH: watchdog timeout при одном variant — логируем + пробуем
+                    # следующий вариант параметров (fp32, меньший beam_size и т.д.).
+                    # После exhaustion всех вариантов last_err всплывёт наружу.
+                    logger.warning(
+                        "MLX watchdog timeout %.1fs (variant %d/%d, model=%s) — пробую следующий вариант",
+                        e.timeout_sec, variants.index(params) + 1, len(variants), model_name,
+                    )
+                    self._push_error(
+                        "stt.mlx_timeout",
+                        f"MLXTimeoutError {e.timeout_sec}s (variant {variants.index(params) + 1}/{len(variants)}, model={model_name})",
+                        severity="error",
+                    )
+                    last_err = e
                 except TypeError as e:
                     last_err = e
                 except (MemoryError, RuntimeError) as e:
