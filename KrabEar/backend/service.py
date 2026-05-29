@@ -544,6 +544,7 @@ class BackendService:
                     "auto_glossary_refresh_hours", settings.AUTO_GLOSSARY_REFRESH_HOURS
                 )
             ),
+            settings_provider=self._settings_svc.cached_settings,
         )
         # Семантический поиск (opt-in, lazy model load)
         self._semantic_searcher = SemanticSearcher(
