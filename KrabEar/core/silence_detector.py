@@ -18,16 +18,34 @@ logger = logging.getLogger("KrabEar.SilenceDetector")
 # Размер фрейма для анализа тишины (в семплах)
 _FRAME_SIZE = 512
 
-# Единый порог тишины для всех аудио-анализаторов проекта.
-# -40 дБ = амплитуда 0.01 — соответствует реальному фоновому шуму в офисе/дома.
-# Использовать через _db_to_amplitude() или импортировать SILENCE_THRESHOLD_DB напрямую.
-SILENCE_THRESHOLD_DB: float = -40.0
+# Двухуровневая система порогов тишины (W1018):
+#
+#   SILENCE_THRESHOLD_DB_STRICT          = -40 дБ  — агрессивное определение тишины
+#       Используется для аналитики, обнаружения тишины в записях, AudioQualityAnalyzer.
+#       Офисный/домашний фоновый шум обычно ниже -40 дБ.
+#
+#   SILENCE_THRESHOLD_DB_PRESERVE_WHISPER = -55 дБ  — мягкий порог для STT-путей
+#       Сохраняет шёпот и тихую речь (-45…-55 дБ) при подаче аудио на Whisper.
+#       Используется в SmartSilenceSkipper, RealtimeSilenceFilter и всех STT-путях.
+#
+# Backward-compatible aliases:
+#   SILENCE_THRESHOLD_DB  → SILENCE_THRESHOLD_DB_STRICT   (используется в аналитике)
+#   SILENCE_THRESHOLD_AMP → амплитудный эквивалент STRICT (-40 dB → 0.01)
+
+# Строгий порог: -40 дБ = амплитуда 0.01
+SILENCE_THRESHOLD_DB_STRICT: float = -40.0
+
+# Мягкий порог для STT: -55 дБ = амплитуда ≈ 0.00178 — сохраняет шёпот
+SILENCE_THRESHOLD_DB_PRESERVE_WHISPER: float = -55.0
 
 
 def _db_to_amplitude(db: float) -> float:
     """Конвертирует порог в дБ в амплитуду (RMS)."""
     return 10.0 ** (db / 20.0)
 
+
+# Backward-compatible alias: SILENCE_THRESHOLD_DB == SILENCE_THRESHOLD_DB_STRICT
+SILENCE_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_STRICT
 
 # Амплитудный эквивалент SILENCE_THRESHOLD_DB (0.01 при -40 дБ).
 # Экспортируется для прямого использования в AudioQualityAnalyzer и других модулях,

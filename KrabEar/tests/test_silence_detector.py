@@ -571,5 +571,39 @@ class TestRealtimeSilenceFilterUsesPreserveWhisperThreshold(unittest.TestCase):
         self.assertEqual(_DEFAULT_THRESHOLD_DB, SILENCE_THRESHOLD_DB_PRESERVE_WHISPER)
 
 
+class TestTwoTierThresholdExports(unittest.TestCase):
+    """W1531 — проверяет наличие двухуровневых констант порогов тишины (регрессия W1018)."""
+
+    def test_two_tier_thresholds_exported(self):
+        """SILENCE_THRESHOLD_DB_STRICT и SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
+        должны быть экспортированы из core.silence_detector.
+
+        W1525 мета-аудит выявил, что W1497 cherry-pick train откатил W1018 —
+        оба имени отсутствовали в модуле, что приводило к ImportError и пустым
+        транскриптам для тихой речи.
+        """
+        import core.silence_detector as sd
+        self.assertTrue(
+            hasattr(sd, "SILENCE_THRESHOLD_DB_STRICT"),
+            "SILENCE_THRESHOLD_DB_STRICT должен быть экспортирован из core.silence_detector",
+        )
+        self.assertTrue(
+            hasattr(sd, "SILENCE_THRESHOLD_DB_PRESERVE_WHISPER"),
+            "SILENCE_THRESHOLD_DB_PRESERVE_WHISPER должен быть экспортирован из core.silence_detector",
+        )
+
+    def test_preserve_whisper_threshold_is_lower(self):
+        """SILENCE_THRESHOLD_DB_PRESERVE_WHISPER должен быть ниже SILENCE_THRESHOLD_DB_STRICT.
+
+        Более низкий порог (дальше от нуля в отрицательную сторону) означает,
+        что тихая речь/шёпот не будет классифицирована как тишина.
+        """
+        self.assertLess(
+            SILENCE_THRESHOLD_DB_PRESERVE_WHISPER,
+            SILENCE_THRESHOLD_DB_STRICT,
+            "PRESERVE_WHISPER (-55 дБ) должен быть меньше STRICT (-40 дБ)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

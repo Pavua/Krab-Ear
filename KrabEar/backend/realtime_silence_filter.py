@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from core.silence_constants import SILENCE_THRESHOLD_DB
+from core.silence_constants import SILENCE_THRESHOLD_DB_PRESERVE_WHISPER
 from core.silence_detector import SilenceDetector
 
 if TYPE_CHECKING:
@@ -28,7 +28,8 @@ logger = logging.getLogger("KrabEar.Backend.RealtimeSilenceFilter")
 _DEFAULT_CHECK_SEC: float = 5.0
 _DEFAULT_WINDOW_SEC: float = 10.0
 _DEFAULT_MAX_SILENCE_SEC: float = 8.0
-_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB  # -40 dBFS
+# W1018: STT-пути используют PRESERVE_WHISPER (-55 дБ) — сохраняет тихую речь и шёпот.
+_DEFAULT_THRESHOLD_DB: float = SILENCE_THRESHOLD_DB_PRESERVE_WHISPER  # -55 dBFS
 
 
 class RealtimeSilenceFilter:
