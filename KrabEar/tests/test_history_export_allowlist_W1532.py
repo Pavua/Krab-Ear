@@ -88,14 +88,7 @@ class TestHandleExportObsidianAllowlist(unittest.TestCase):
 
         store = StateStore(tmp_dir)
         # Seed one history item so the handler doesn't error on empty store
-        from backend.models import HistoryItem
-        import uuid, datetime as dt
-        item = HistoryItem(
-            id=str(uuid.uuid4()),
-            ts=dt.datetime.now(dt.timezone.utc).isoformat(),
-            text="Test transcript",
-        )
-        store.add_history_item(item)
+        store.add_history_item(text="Test transcript", paste_status="ok")
         return HistoryService(store=store)
 
     def test_export_obsidian_outside_allowed_root_raises(self) -> None:
@@ -134,14 +127,7 @@ class TestHandleBatchExportAllowlist(unittest.TestCase):
         from backend.state_store import StateStore
 
         store = StateStore(tmp_dir)
-        from backend.models import HistoryItem
-        import uuid, datetime as dt
-        item = HistoryItem(
-            id=str(uuid.uuid4()),
-            ts=dt.datetime.now(dt.timezone.utc).isoformat(),
-            text="Batch export test",
-        )
-        store.add_history_item(item)
+        store.add_history_item(text="Batch export test", paste_status="ok")
         return HistoryService(store=store)
 
     def test_batch_export_outside_allowed_root_raises(self) -> None:

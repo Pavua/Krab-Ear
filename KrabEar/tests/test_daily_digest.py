@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, Mock
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -116,12 +115,7 @@ class DailyDigestTestCase(unittest.TestCase):
         item2.source_lang = "en"
         item2.confidence = 0.90
 
-        @contextmanager
-        def mock_lock():
-            yield
-
-        mock_store._lock = mock_lock
-        mock_store._load_active_items_unlocked.return_value = [item1, item2]
+        mock_store._load_active_items_with_lock.return_value = [item1, item2]
 
         digest = self.gen.generate_digest(date_str=target_date, store=mock_store)
         self.assertEqual(digest.total_recordings, 1)
@@ -155,12 +149,7 @@ class DailyDigestTestCase(unittest.TestCase):
         item3.source_lang = "ru"
         item3.confidence = 0.92
 
-        @contextmanager
-        def mock_lock():
-            yield
-
-        mock_store._lock = mock_lock
-        mock_store._load_active_items_unlocked.return_value = [item1, item2, item3]
+        mock_store._load_active_items_with_lock.return_value = [item1, item2, item3]
 
         digest = self.gen.generate_digest(date_str=today, store=mock_store)
         self.assertEqual(digest.languages_used.get("ru"), 2)
@@ -193,12 +182,7 @@ class DailyDigestTestCase(unittest.TestCase):
         item3.source_lang = "ru"
         item3.confidence = 0.85
 
-        @contextmanager
-        def mock_lock():
-            yield
-
-        mock_store._lock = mock_lock
-        mock_store._load_active_items_unlocked.return_value = [item1, item2, item3]
+        mock_store._load_active_items_with_lock.return_value = [item1, item2, item3]
 
         digest = self.gen.generate_digest(date_str=today, store=mock_store)
         self.assertGreater(len(digest.highlights), 0)
@@ -220,12 +204,7 @@ class DailyDigestTestCase(unittest.TestCase):
         item.source_lang = "ru"
         item.confidence = 0.95
 
-        @contextmanager
-        def mock_lock():
-            yield
-
-        mock_store._lock = mock_lock
-        mock_store._load_active_items_unlocked.return_value = [item]
+        mock_store._load_active_items_with_lock.return_value = [item]
 
         digest = self.gen.generate_digest(date_str=today, store=mock_store)
         self.assertEqual(len(digest.highlights), 1)
@@ -245,12 +224,7 @@ class DailyDigestTestCase(unittest.TestCase):
         item.source_lang = "ru"
         item.confidence = 0.95
 
-        @contextmanager
-        def mock_lock():
-            yield
-
-        mock_store._lock = mock_lock
-        mock_store._load_active_items_unlocked.return_value = [item]
+        mock_store._load_active_items_with_lock.return_value = [item]
 
         digest = self.gen.generate_digest(date_str=today, store=mock_store)
         md = digest.formatted_markdown
@@ -320,13 +294,8 @@ def _make_mock_store(items, today=None):
         if not hasattr(item, 'source_lang'):
             item.source_lang = "ru"
 
-    @contextmanager
-    def mock_lock():
-        yield
-
     store = Mock()
-    store._lock = mock_lock
-    store._load_active_items_unlocked.return_value = items
+    store._load_active_items_with_lock.return_value = items
     return store
 
 
@@ -469,13 +438,8 @@ class DailyDigestDirectItemsTestCase(unittest.TestCase):
         item.confidence = 0.9
         item.audio_duration_sec = None
 
-        @contextmanager
-        def mock_lock():
-            yield
-
         store = Mock()
-        store._lock = mock_lock
-        store._load_active_items_unlocked.return_value = [item]
+        store._load_active_items_with_lock.return_value = [item]
 
         digest = self.gen.generate_digest(date_str=self.today, store=store)
         self.assertEqual(digest.total_duration_min, 0.0)

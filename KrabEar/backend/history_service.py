@@ -38,8 +38,6 @@ _EXPORT_ALLOWED_ROOTS: tuple[str, ...] = (
     "~/Documents",
     "~/Desktop",
     "~/Downloads",
-    "/tmp",
-    "/var/folders",  # macOS-style tmp (used by tempfile.mkdtemp())
 )
 
 
@@ -105,13 +103,62 @@ class HistoryService:
 
     def _is_privacy_mode(self) -> bool:
         """Возвращает True если privacy_mode_enabled активен в текущих настройках."""
-        if self._cached_settings is None:
-            return False
         try:
-            settings = self._cached_settings()
+            if self._cached_settings is not None:
+                settings = self._cached_settings()
+            else:
+                settings = self.store.load_settings()
             return bool(settings.get("privacy_mode_enabled", False))
         except Exception:  # noqa: BLE001
             return False
+
+    # ------------------------------------------------------------------
+    # Export path allowlist helper
+    # ------------------------------------------------------------------
+
+    def _resolve_export_dir(self, output_dir: str | None) -> Path | None:
+        """Validates *output_dir* against the export allowlist.
+
+        Returns the resolved absolute Path when *output_dir* is provided and
+        allowed, or ``None`` when *output_dir* is ``None`` / empty (callers
+        should fall back to their default directory).
+
+        Raises ``ValueError`` if the resolved path is not permitted.
+        Additionally allows self.store.data_dir (instance-level root).
+        """
+        import tempfile as _tempfile
+
+        if not output_dir:
+            return None
+
+        resolved = Path(output_dir).expanduser().resolve()
+
+        data_dir_root = Path(self.store.data_dir).resolve()
+        home = Path.home()
+        allowed_roots: list[Path] = [
+            data_dir_root,
+            (home / "Documents").resolve(),
+            (home / "Downloads").resolve(),
+            (home / "Desktop").resolve(),
+            Path("/tmp").resolve(),
+            Path(_tempfile.gettempdir()).resolve(),
+        ]
+
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root)
+                return resolved
+            except ValueError:
+                continue
+
+        # Also try module-level allowed roots for cross-user paths.
+        if _is_safe_export_dir(str(resolved)):
+            return resolved
+
+        raise ValueError(
+            f"export output_dir is outside allowed directories: {resolved!s}. "
+            f"Allowed roots: {[str(r) for r in allowed_roots]}"
+        )
 
     # ------------------------------------------------------------------
     # История
@@ -198,6 +245,10 @@ class HistoryService:
         Returns:
             {"matches": [{"id": ..., "text": ..., "score": ...}, ...]}
         """
+        # Privacy mode guard (W1007): не раскрывать текст в режиме приватности.
+        if self._is_privacy_mode():
+            return {"ok": True, "results": [], "reason": "privacy_mode_active"}
+
         query = str(params.get("query", "")).strip()
         threshold = float(params.get("threshold", 0.6))
         limit = int(params.get("limit", 50))
@@ -313,6 +364,14 @@ class HistoryService:
         ok = self.store.delete_history_item(item_id)
         if not ok:
             raise ValueError(f"Запись не найдена: {item_id}")
+        # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.remove_item(item_id)
+            except Exception:
+                logger.warning(
+                    "semantic_search remove failed for %s", item_id, exc_info=True
+                )
         # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(item_id)
@@ -824,11 +883,13 @@ class HistoryService:
 
         speakers = {t.get("speaker") for t in turns if t.get("speaker")}
         srt_lines: list[str] = []
-        for seq, turn in enumerate(turns, start=1):
+        seq = 0
+        for turn in turns:
             speaker = turn.get("speaker", "SPEAKER_00")
             turn_text = str(turn.get("text", "")).strip()
             if not turn_text:
                 continue
+            seq += 1
             start_sec = float(turn.get("start", 0.0) or 0.0)
             end_sec = float(turn.get("end", start_sec + 1.0) or start_sec + 1.0)
             srt_lines.append(str(seq))

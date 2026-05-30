@@ -52,13 +52,9 @@ def _make_cached_settings(privacy: bool = False):
 
 
 def _make_store_with_items(items: list) -> MagicMock:
-    """Возвращает mock StateStore, отдающий items из _load_active_items_unlocked."""
+    """Возвращает mock StateStore, отдающий items из _load_active_items_with_lock."""
     store = MagicMock()
-    lock_ctx = MagicMock()
-    lock_ctx.__enter__ = MagicMock(return_value=None)
-    lock_ctx.__exit__ = MagicMock(return_value=False)
-    store._lock.return_value = lock_ctx
-    store._load_active_items_unlocked.return_value = list(items)
+    store._load_active_items_with_lock.return_value = list(items)
     return store
 
 
@@ -85,8 +81,7 @@ class _MinimalService:
         if self._cached_settings().get("privacy_mode_enabled"):
             return {"insight": None, "privacy_mode": True}
         try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
+            items = self.store._load_active_items_with_lock()
         except Exception:
             items = []
         insight = self._recording_insights.get_daily_insight(items)
@@ -135,10 +130,10 @@ class GetDailyInsightIPCReturnsResultTestCase(unittest.TestCase):
         svc._recording_insights.get_daily_insight.assert_called_once_with(items)
 
     def test_get_daily_insight_ipc_store_exception_passes_empty_list(self) -> None:
-        """Если store._lock() бросает исключение, хэндлер передаёт [] в генератор."""
+        """Если store._load_active_items_with_lock() бросает исключение, хэндлер передаёт [] в генератор."""
         insight = _make_insight()
         svc = _MinimalService(privacy=False, insight=insight)
-        svc.store._lock.side_effect = RuntimeError("store error")
+        svc.store._load_active_items_with_lock.side_effect = RuntimeError("store error")
 
         result = svc._handle_get_daily_insight({})
 
@@ -164,7 +159,7 @@ class GetDailyInsightPrivacyModeTestCase(unittest.TestCase):
         self.assertIsNone(result["insight"])
         # Генератор и store не должны были быть вызваны
         svc._recording_insights.get_daily_insight.assert_not_called()
-        svc.store._lock.assert_not_called()
+        svc.store._load_active_items_with_lock.assert_not_called()
 
     def test_get_daily_insight_not_gated_when_privacy_false(self) -> None:
         """privacy_mode_enabled=False → генератор вызывается нормально."""

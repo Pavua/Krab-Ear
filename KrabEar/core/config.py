@@ -197,6 +197,10 @@ class Settings(BaseSettings):
     STT_DENOISE_SNR_THRESHOLD_DB: float = 15.0
     STT_DENOISE_STRENGTH: str = "moderate"
 
+    # При STT_GAIN_NORMALIZE_ENABLED=True: после шумоподавления выравниваем
+    # уровень громкости через GainNormalizer.auto_gain (target -20 dBFS RMS).
+    STT_GAIN_NORMALIZE_ENABLED: bool = True
+
     # Умный пропуск тишины: удалять длинные паузы (>1 с) перед STT.
     SMART_SILENCE_SKIP_ENABLED: bool = False
 

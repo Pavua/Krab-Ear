@@ -883,11 +883,20 @@ class AudioEngine:
                 pass  # Fall through to configured profile
 
         try:
-            # 2.4 Обнуление диапазонов тишины от RealtimeSilenceFilter.
+            # 2.4 Адаптивное шумоподавление (применяется только к numpy-массивам,
+            # т.е. к живым записям; файловые импорты пропускаются для скорости).
+            # ВАЖНО: Denoiser должен видеть исходный audio ДО обнуления RSF-диапазонов,
+            # чтобы шумовой профиль строился по реальному ambient-шуму, а не по нулям.
+            if (
+                settings.STT_DENOISE_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                audio_data = self._maybe_denoise(audio_data)
+
+            # 2.5 Обнуление диапазонов тишины от RealtimeSilenceFilter.
             # Семплы обнуляются (не удаляются) — таймстемпы Whisper сохраняются.
-            # 2.4 Silence ranges pre-processing (от RealtimeSilenceFilter).
-            # Обнуляем семплы в помеченных диапазонах тишины — Whisper обрабатывает
-            # нулевые блоки быстрее, с меньшим количеством галлюцинаций.
+            # RSF-маска применяется к очищенному сигналу (после деноизера).
             if silence_ranges and isinstance(audio_data, np.ndarray) and not is_preview:
                 try:
                     from backend.realtime_silence_filter import zero_silence_ranges as _zero_sr
@@ -899,14 +908,43 @@ class AudioEngine:
                 except Exception:
                     logger.debug("transcribe: ошибка применения silence_ranges, пропускаем")
 
-            # 2.5 Адаптивное шумоподавление (применяется только к numpy-массивам,
-            #     т.е. к живым записям; файловые импорты пропускаются для скорости).
+            # 2.6 Нормализация усиления (GainNormalizer.auto_gain).
+            # Выравнивает тихие записи до -20 дБFS RMS, ограничивает громкие
+            # через soft-knee limiter. При ошибке — продолжаем с оригинальным аудио.
             if (
-                settings.STT_DENOISE_ENABLED
+                settings.STT_GAIN_NORMALIZE_ENABLED
                 and not is_preview
                 and isinstance(audio_data, np.ndarray)
             ):
-                audio_data = self._maybe_denoise(audio_data)
+                try:
+                    from core.gain_normalizer import GainNormalizer
+                    _gain_result = GainNormalizer().auto_gain(audio_data)
+                    if isinstance(_gain_result, np.ndarray):
+                        audio_data = _gain_result
+                except Exception:
+                    logger.debug("GainNormalizer.auto_gain failed — продолжаем без нормализации")
+
+            # 2.7 Удаление длинных внутренних пауз (SmartSilenceSkipper).
+            # Убирает долгие тихие участки внутри аудио до STT — уменьшает
+            # шанс галлюцинаций Whisper на длинных паузах и ускоряет транскрибацию.
+            # Default OFF: SMART_SILENCE_SKIP_ENABLED=False.
+            if (
+                settings.SMART_SILENCE_SKIP_ENABLED
+                and not is_preview
+                and isinstance(audio_data, np.ndarray)
+            ):
+                try:
+                    from core.smart_silence_skipper import SmartSilenceSkipper
+                    _skip_result = SmartSilenceSkipper().process(audio_data, 16000)
+                    audio_data = _skip_result.processed_audio
+                    logger.debug(
+                        "SmartSilenceSkipper: %.2fs → %.2fs (удалено %.2fs тишины)",
+                        _skip_result.original_duration_sec,
+                        _skip_result.processed_duration_sec,
+                        _skip_result.original_duration_sec - _skip_result.processed_duration_sec,
+                    )
+                except Exception:
+                    logger.exception("smart_silence_skipper: failed, continuing with original audio")
 
             # 3. Вызов распознавания с механизмом деградации (fallback)
             _report("stt")
@@ -1336,11 +1374,20 @@ class AudioEngine:
             attempt_start = time.time()
             try:
                 if candidate["kind"] == "model":
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(
+                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = _executor.submit(
                             self._transcribe_model, audio_data, model_label, prompt, language,
                         )
                         attempt_result = future.result(timeout=settings.TRANSCRIBE_TIMEOUT_SEC)
+                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception:
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        _executor.shutdown(wait=False)
                     attempt_result["model_used"] = model_label
                 else:
                     attempt_result = self._transcribe_remote(audio_data, prompt)
@@ -1844,8 +1891,22 @@ class AudioEngine:
                 span_pfx, adapter_model, adapter_fn = _adapter_map[model_name]
                 try:
                     span_name = f"{span_pfx}_{_short_model_name(adapter_model)}"
+                    # W1219 F2: guard adapter calls with same timeout used for Whisper
+                    # branches — prevents GPU stall from blocking IPC indefinitely.
+                    _adapter_timeout = getattr(settings, "TRANSCRIBE_TIMEOUT_SEC", 120)
                     with _profiler.start_span(span_name):
-                        adapter_result = adapter_fn()
+                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        try:
+                            _fut = _pool.submit(adapter_fn)
+                            try:
+                                adapter_result = _fut.result(timeout=_adapter_timeout)
+                            except concurrent.futures.TimeoutError:
+                                _fut.cancel()
+                                raise TimeoutError(
+                                    f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
+                                )
+                        finally:
+                            _pool.shutdown(wait=False)
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
@@ -1870,9 +1931,18 @@ class AudioEngine:
                 timeout = settings.TRANSCRIBE_TIMEOUT_SEC
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(self._transcribe_model, audio_data, model_name, prompt, language)
+                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = _executor.submit(self._transcribe_model, audio_data, model_name, prompt, language)
                         result = future.result(timeout=timeout)
+                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception:
+                        _executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
             except concurrent.futures.TimeoutError:
@@ -3179,7 +3249,7 @@ class AudioEngine:
                     headers={"Authorization": "Bearer token_here"},  # Placeholder: local gateway не требует auth
                     files={"file": (os.path.basename(audio_path), f, "audio/wav")},
                     data={"model": settings.STT_MODEL, "prompt": prompt},
-                    timeout=60,
+                    timeout=settings.STT_GATEWAY_TIMEOUT_SEC,
                 )
                 resp.raise_for_status()
                 data = resp.json()
