@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import ANY, MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -30,7 +30,8 @@ class TestEventBusEmitCallsEventReplayRecord(unittest.TestCase):
 
         bus.emit("stt.final", {"text": "hello"})
 
-        mock_replay.record_event.assert_called_once_with("stt.final", {"text": "hello"})
+        # W1677 F4 LOW: emit() now passes ts= kwarg carrying the delivery timestamp.
+        mock_replay.record_event.assert_called_once_with("stt.final", {"text": "hello"}, ts=ANY)
 
     def test_emit_forwards_payload_exactly(self) -> None:
         """Payload передаётся в record_event без изменений."""
@@ -41,7 +42,8 @@ class TestEventBusEmitCallsEventReplayRecord(unittest.TestCase):
         payload = {"confidence": 0.95, "duration_sec": 3.1, "lang": "ru"}
         bus.emit("stt.complete", payload)
 
-        mock_replay.record_event.assert_called_once_with("stt.complete", payload)
+        # W1677 F4 LOW: emit() now passes ts= kwarg carrying the delivery timestamp.
+        mock_replay.record_event.assert_called_once_with("stt.complete", payload, ts=ANY)
 
     def test_emit_multiple_events_each_recorded(self) -> None:
         """Каждый emit вызывает record_event ровно по одному разу."""
@@ -53,10 +55,11 @@ class TestEventBusEmitCallsEventReplayRecord(unittest.TestCase):
         bus.emit("evt.b", {"x": 2})
         bus.emit("evt.c", {"x": 3})
 
+        # W1677 F4 LOW: emit() now passes ts= kwarg carrying the delivery timestamp.
         self.assertEqual(mock_replay.record_event.call_count, 3)
-        mock_replay.record_event.assert_any_call("evt.a", {"x": 1})
-        mock_replay.record_event.assert_any_call("evt.b", {"x": 2})
-        mock_replay.record_event.assert_any_call("evt.c", {"x": 3})
+        mock_replay.record_event.assert_any_call("evt.a", {"x": 1}, ts=ANY)
+        mock_replay.record_event.assert_any_call("evt.b", {"x": 2}, ts=ANY)
+        mock_replay.record_event.assert_any_call("evt.c", {"x": 3}, ts=ANY)
 
 
 class TestEventBusEmitWhenEventReplayNoneNoOp(unittest.TestCase):
@@ -138,7 +141,8 @@ class TestRecordFailureDoesNotBreakEmit(unittest.TestCase):
 
         bus.emit("post.inject", {"k": "v"})
 
-        mock_replay.record_event.assert_called_once_with("post.inject", {"k": "v"})
+        # W1677 F4 LOW: emit() now passes ts= kwarg carrying the delivery timestamp.
+        mock_replay.record_event.assert_called_once_with("post.inject", {"k": "v"}, ts=ANY)
 
 
 if __name__ == "__main__":
