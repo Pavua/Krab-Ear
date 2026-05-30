@@ -158,7 +158,26 @@ class HealthCheckService:
                 "cached": self._settings_svc._cache is not None if self._settings_svc else False,
             },
             "profiler": profiler_report,
+            # W1685 F5: use injected MetricsCollector (was dead injection — never read).
+            # Returns a brief summary for diagnostics panels; safe when collector is None.
+            "metrics_summary": self._get_metrics_summary(),
         }
+
+    def _get_metrics_summary(self) -> dict[str, Any]:
+        """Возвращает краткий снимок MetricsCollector для диагностического вывода.
+
+        Возвращает ``{"available": False}`` если collector не был передан при
+        инициализации (необязательный параметр). Обёрнуто в try/except — никогда
+        не роняет get_diagnostics.
+        """
+        if self._metrics_collector is None:
+            return {"available": False}
+        try:
+            summary = self._metrics_collector.get_summary()
+            return {"available": True, **summary}
+        except Exception as exc:
+            logger.warning("Не удалось получить снимок MetricsCollector: %s", exc)
+            return {"available": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # handle_probe_llm_http
