@@ -66,6 +66,7 @@ The project is bilingual (RU/ES primary, EN secondary). Code comments, UI labels
 Note: `TTSService` (`backend/tts_service.py`) is standalone — not extracted from `service.py`.
 
 Orphan-import regression guard: `scripts/audit_orphan_imports.py` runs in CI on every push.
+Decorative-architecture guard: `scripts/audit_decorative_wiring.py --strict` runs in CI (strict, enforced since W1692) — detects service/collaborator instances wired into `self._field` in `__init__` but never called anywhere else (collaborator exists but is a silent no-op). Companion to `audit_orphan_imports` (dangling symbols) + `audit_duplicate_defs` (shadowing) + `audit_cherry_pick_regressions` (body-reverts). All 9 original findings (W1686) fixed in W1687/W1688/W1690.
 
 ### Key layers inside `KrabEar/`:
 - **`core/config.py`** — Pydantic-Settings singleton (`settings`), all params overridable via `KRAB_EAR_*` env vars. Also contains `DEFAULT_SETTINGS` dict used by UI/IPC.
