@@ -3366,7 +3366,13 @@ end tell
         Backslashes MUST be doubled before quotes so that a trailing backslash
         cannot cancel the closing-quote escape (W1028-F5 / W944 fix).
         Also strips control characters (CR, LF, NUL) that would break the script.
+
+        Defensive: non-str input is coerced via ``str()`` so a numeric/None param
+        (e.g. a JSON number in ``title``) cannot raise inside this security helper
+        and leak an unsanitised value downstream (W1442 restored the W942 coercion).
         """
+        if not isinstance(s, str):
+            s = str(s)
         s = re.sub(r'[\r\n\x00]', ' ', s)
         s = s.replace('\\', '\\\\')  # backslash FIRST — prevents Stand\" → Stand\\"
         s = s.replace('"', '\\"')
