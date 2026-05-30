@@ -35,6 +35,10 @@ _engine_mod = types.ModuleType("core.engine")
 class _FakeEngine:
     quality_profile = "balanced"
 
+    def __init__(self, *args, **kwargs):
+        # rest_server constructs AudioEngine(skip_gigaam_warmup=True); accept any args
+        pass
+
     def normalize_audio(self, *a, **kw):
         pass
 

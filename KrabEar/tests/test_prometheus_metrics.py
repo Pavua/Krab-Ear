@@ -19,6 +19,9 @@ _engine_mod = types.ModuleType("core.engine")
 class _FakeEngine:
     quality_profile = "balanced"
 
+    def __init__(self, *args, **kwargs):
+        pass
+
     def normalize_audio(self, *a, **kw):
         pass
 
