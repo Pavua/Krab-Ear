@@ -183,6 +183,8 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
             def submit(self, fn: Any, *a: Any, **kw: Any) -> "FakeFuture":
                 return FakeFuture(fn)
 
+            def shutdown(self, wait: bool = True, **kw: Any) -> None: pass
+
         class FakeFuture:
             def __init__(self, fn: Any) -> None:
                 self._fn = fn
@@ -251,6 +253,8 @@ class TestVoxtralAdapterBranchUsesTranscribeTimeout(unittest.TestCase):
 
             def submit(self, fn: Any, *a: Any, **kw: Any) -> TimingOutFuture:
                 return TimingOutFuture()
+
+            def shutdown(self, wait: bool = True, **kw: Any) -> None: pass
 
         with patch("core.engine._profiler") as mock_profiler, \
              patch("concurrent.futures.ThreadPoolExecutor", TimingOutExecutor):

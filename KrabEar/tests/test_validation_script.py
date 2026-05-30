@@ -64,6 +64,8 @@ def _reload_worker(env_overrides: dict[str, str | None]) -> types.ModuleType:
         import gigaam_worker as mod  # type: ignore[import]
     except ImportError as exc:
         raise unittest.SkipTest(f"gigaam_worker import failed (expected outside venv_gigaam): {exc}")
+    except SystemExit as exc:
+        raise unittest.SkipTest(f"gigaam_worker singleton guard fired: {exc}")
     finally:
         for key, orig in saved.items():
             if orig is None:

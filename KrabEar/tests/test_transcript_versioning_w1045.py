@@ -223,7 +223,7 @@ class TestCleanupOldHistoryCascadesVersions(unittest.TestCase):
 
         store = MagicMock()
         store.data_dir = Path(self.temp_dir.name)
-        store._lock.return_value = FakeLock()
+        store._lock = MagicMock(return_value=FakeLock())
         store._load_active_items_unlocked.return_value = all_items
         store._append_ndjson = MagicMock()
         store.tombstones_path = Path(self.temp_dir.name) / "tombstones.ndjson"

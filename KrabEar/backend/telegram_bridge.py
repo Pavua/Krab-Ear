@@ -60,26 +60,19 @@ class TelegramBridge:
         circuit_fail_threshold: int = 3,
         circuit_reset_sec: float = 60.0,
     ) -> None:
-        parsed = urlparse(base_url)
-        if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        # Hostname allowlist guard — reject non-localhost targets at construction
+        # time so that a bad KRAB_EAR_TELEGRAM_BRIDGE_URL cannot be used for SSRF
+        # (e.g. 0.0.0.0, 169.254.x.x link-local, private LAN IPs).
+        _parsed = urlparse(base_url)
+        if _parsed.hostname not in self._ALLOWED_HOSTS:
             raise ValueError(
-                f"TelegramBridge base_url must point to localhost; "
-                f"got hostname={parsed.hostname!r}"
+                f"telegram_bridge: refusing non-localhost base_url {base_url!r}; "
+                f"hostname {_parsed.hostname!r} not in {set(self._ALLOWED_HOSTS)}"
             )
         self._base_url = base_url.rstrip("/")
         self._timeout_sec = timeout_sec
         self._circuit_fail_threshold = circuit_fail_threshold
         self._circuit_reset_sec = circuit_reset_sec
-
-        # Hostname allowlist guard — reject non-localhost targets at construction
-        # time so that a bad KRAB_EAR_TELEGRAM_BRIDGE_URL cannot be used for SSRF
-        # (e.g. 0.0.0.0, 169.254.x.x link-local, private LAN IPs).
-        _parsed = urlparse(self._base_url)
-        if _parsed.hostname not in self._ALLOWED_HOSTS:
-            raise ValueError(
-                f"telegram_bridge: refusing non-localhost base_url {self._base_url!r}; "
-                f"hostname {_parsed.hostname!r} not in {set(self._ALLOWED_HOSTS)}"
-            )
 
         self._lock = threading.Lock()
         self._fail_count: int = 0

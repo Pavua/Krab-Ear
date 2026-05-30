@@ -357,7 +357,7 @@ class TestTranslateSelectionGlossaryApplied(unittest.TestCase):
         self.assertEqual(kwargs["glossary"], {})
 
     def test_translate_selection_privacy_mode_forces_offline(self) -> None:
-        """privacy_mode_enabled=True → network_mode=offline_only передаётся транслятору."""
+        """privacy_mode_enabled=True → network_mode=offline_strict передаётся транслятору."""
         svc, translator = _make_service(
             settings={
                 "privacy_mode_enabled": True,

@@ -117,6 +117,10 @@ class AppleIntegrationService:
           - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
           - "circuit_open" — если circuit breaker разомкнут.
         """
+        # W1211 F2: privacy_mode_enabled guard
+        if self._settings_get("privacy_mode_enabled", False):
+            return {"ok": True, "chats": [], "skipped": "privacy_mode"}
+
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 

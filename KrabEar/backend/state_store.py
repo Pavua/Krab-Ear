@@ -990,6 +990,23 @@ class StateStore:
         orphaned-данные для tombstone-записей.
         """
         active = self._load_active_items_unlocked()
+        _active_ids = {item.id for item in active}
+        _all_ids: set[str] = set()
+        try:
+            for line in self.tombstones_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    import json as _jj
+                    try:
+                        obj = _jj.loads(line)
+                        if isinstance(obj, dict) and obj.get("id"):
+                            _all_ids.add(obj["id"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        _tombstoned_ids = _all_ids - _active_ids
+
         tmp_history = self.history_path.with_suffix(".ndjson.tmp")
 
         with tmp_history.open("w", encoding="utf-8") as fh:
@@ -1013,6 +1030,14 @@ class StateStore:
                 on_compact(active_ids)
             except Exception:
                 logger.exception("_compact_unlocked: ошибка в _on_compact_hook")
+
+        _versioner = getattr(self, "_transcript_versioner", None)
+        if _versioner is not None and _tombstoned_ids:
+            for _item_id in _tombstoned_ids:
+                try:
+                    _versioner.purge_versions_for_item(_item_id)
+                except Exception:
+                    logger.exception("_compact_unlocked: версии id=%s", _item_id)
 
     def _history_stats_unlocked(self) -> dict[str, int]:
         """Собирает метрики журналов истории без повторного захвата lock."""

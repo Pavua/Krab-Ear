@@ -204,6 +204,7 @@ class PhaseCPassesSettingsToTranscriberTest(unittest.TestCase):
             "quality_profile": "balanced",
             "cleanup_profile": "soft",
             "lang_hint": None,
+            "privacy_mode_enabled": False,
         }
 
         captured_kwargs: list[dict] = []
@@ -230,6 +231,7 @@ class PhaseCPassesSettingsToTranscriberTest(unittest.TestCase):
             "quality_profile": "balanced",
             "cleanup_profile": "soft",
             "lang_hint": None,
+            "privacy_mode_enabled": False,
         }
         svc._stop_recording_phase_c(audio, 1.0, sr)
 
@@ -252,6 +254,7 @@ class PhaseCPassesSettingsToTranscriberTest(unittest.TestCase):
             "quality_profile": "balanced",
             "cleanup_profile": "soft",
             "lang_hint": None,
+            "privacy_mode_enabled": False,
         }
         svc._stop_recording_phase_c(audio, 1.0, sr)
 

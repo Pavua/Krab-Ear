@@ -44,6 +44,8 @@ with patch.dict("sys.modules", {
             patch("backend.state_store.StateStore", return_value=_fake_store):
         _mock_settings.DATA_DIR = Path("/tmp/krab_ear_test_ws")
         _mock_settings.REST_API_KEY = ""
+        _mock_settings.RATE_LIMIT_ENABLED = False
+        _mock_settings.RATE_LIMIT_STORAGE_URI = "memory://"
         import backend.rest_server as _rest_server_mod
 
 # The internal logic function — testable without Flask request context
