@@ -151,6 +151,32 @@ limiter = Limiter(
 
 app.register_error_handler(429, _rate_limit_exceeded_handler)
 
+
+def _request_entity_too_large_handler(e):
+    """Return 413 JSON instead of Flask's default HTML page (W1674 F2 MED fix — W1684).
+
+    Flask returns an HTML error page when MAX_CONTENT_LENGTH is exceeded.
+    JSON-only clients (e.g. Swift's JSONSerialization) cannot parse that
+    response and crash silently.  This handler ensures all 413 responses
+    carry Content-Type: application/json with a machine-readable body.
+    """
+    max_mb = _rest_mod_max_content_mb()
+    response = jsonify({"error": "Файл слишком большой", "max_mb": max_mb})
+    response.status_code = 413
+    return response
+
+
+def _rest_mod_max_content_mb() -> int:
+    """Return MAX_CONTENT_LENGTH as MB for the 413 error body."""
+    try:
+        limit = app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024)
+        return int(limit) // (1024 * 1024)
+    except Exception:
+        return 500
+
+
+app.register_error_handler(413, _request_entity_too_large_handler)
+
 # WebSocket heartbeat interval (seconds)
 _WS_HEARTBEAT_SEC = 30
 # How long to block waiting for next event before looping (keep < heartbeat)
@@ -1216,8 +1242,15 @@ api.register_blueprint(v1_blp)
 
 @app.route("/v2/", defaults={"p": ""}, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 @app.route("/v2/<path:p>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+@require_api_key
+@limiter.limit("60 per minute")
 def v2_not_implemented(p):
-    """Catch-all for /v2/* — returns 501 until v2 is implemented."""
+    """Catch-all for /v2/* — returns 501 until v2 is implemented.
+
+    Auth + rate-limit enforced (W1674 F1 MED fix — W1684): the /v2 stub
+    carries the same auth and rate-limit posture as production v1 routes.
+    Unauthenticated callers receive 401; excessive callers receive 429.
+    """
     response = jsonify({
         "error": "API v2 not yet implemented",
         "supported_versions": ["v1"],
@@ -1377,6 +1410,9 @@ if __name__ == "__main__":
     # Defense in depth: emit a warning at startup so operator knows the
     # security posture. Full fix (require auth by default) would break
     # existing localhost clients — defer to opt-in migration wave.
+    import errno as _errno
+    import sys as _sys
+
     _auth_mode = (
         "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
         else "legacy-key" if settings.REST_API_KEY
@@ -1392,4 +1428,31 @@ if __name__ == "__main__":
         )
     else:
         logger.info("REST server starting on 127.0.0.1:5005 with auth=%s", _auth_mode)
-    app.run(host="127.0.0.1", port=5005)
+
+    # F3 MED fix (W1674 / W1684): guard against EADDRINUSE.
+    #
+    # Without this guard, Flask's app.run() raises OSError([Errno 48] Address
+    # already in use) when port 5005 is occupied, and the process exits with a
+    # raw traceback — nothing is logged, the operator sees no structured error,
+    # and launchd silently respawns in a tight crash-loop.
+    #
+    # With this guard: a structured logger.error fires (visible in
+    # krab-ear-rest.err.log), Sentry captures the event if a DSN is wired,
+    # and sys.exit(1) terminates cleanly so launchd does NOT tight-loop.
+    try:
+        app.run(host="127.0.0.1", port=5005)
+    except OSError as _e:
+        if _e.errno == _errno.EADDRINUSE:
+            logger.error(
+                "REST server failed to start: port 5005 is already in use "
+                "(EADDRINUSE). Another instance may be running. "
+                "Stop it first: lsof -ti :5005 | xargs kill -9",
+                extra={"errno": _e.errno, "port": 5005},
+            )
+            try:
+                from backend.observability import capture_exception
+                capture_exception(_e)
+            except Exception:
+                pass
+            _sys.exit(1)
+        raise
