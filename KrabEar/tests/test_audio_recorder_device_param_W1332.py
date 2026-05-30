@@ -241,6 +241,7 @@ class TestRecordingCoreServiceDeviceInjection(unittest.TestCase):
         svc._preview_worker_thread = None
         svc._rt_partial = None
         svc._rt_session_id = None
+        svc._session_tracker = MagicMock()
         return svc, fake_recorder
 
     def test_set_device_called_with_setting(self):

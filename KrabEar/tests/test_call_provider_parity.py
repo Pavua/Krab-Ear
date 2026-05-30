@@ -39,7 +39,7 @@ def _telnyx(key: str = "tk_test_fake_do_not_use_00000000") -> TelnyxAdapter:
     )
 
 
-def _twilio(sid: str = "AC00000000000000000000000000ffff", token: str = "test-fake-authtoken-do-not-use") -> TwilioAdapter:
+def _twilio(sid: str = "ACDEADBEEF1234567890ABCDEF0000FFFF", token: str = "test-fake-authtoken-do-not-use") -> TwilioAdapter:
     return TwilioAdapter(
         account_sid=sid,
         auth_token=token,
@@ -268,7 +268,7 @@ class SuccessShapeParityTestCase(unittest.TestCase):
         self.twilio = _twilio()
         _inject_post(
             self.twilio,
-            _mock_resp(201, {"sid": "CA001", "status": "queued", "to": "+15550009999"}),
+            _mock_resp(201, {"sid": "CA00000000000000000000000000000FF0", "status": "queued", "to": "+15550009999"}),
         )
         r_twi = self.twilio.dial("+15550009999")
         self.assertTrue(r_twi["ok"])
@@ -282,8 +282,8 @@ class SuccessShapeParityTestCase(unittest.TestCase):
         self.assertTrue(r_tel["ok"])
 
         self.twilio = _twilio()
-        _inject_post(self.twilio, _mock_resp(200, {"sid": "CA1", "status": "completed"}))
-        r_twi = self.twilio.hangup("CA1")
+        _inject_post(self.twilio, _mock_resp(200, {"sid": "CA00000000000000000000000000000FF0", "status": "completed"}))
+        r_twi = self.twilio.hangup("CA00000000000000000000000000000FF0")
         self.assertTrue(r_twi["ok"])
 
     def test_get_call_status_keys_parity(self) -> None:
@@ -295,8 +295,8 @@ class SuccessShapeParityTestCase(unittest.TestCase):
             self.assertIn(key, r_tel)
 
         self.twilio = _twilio()
-        _inject_get(self.twilio, _mock_resp(200, {"status": "in-progress", "sid": "CA1"}))
-        r_twi = self.twilio.get_call_status("CA1")
+        _inject_get(self.twilio, _mock_resp(200, {"status": "in-progress", "sid": "CA00000000000000000000000000000FF0"}))
+        r_twi = self.twilio.get_call_status("CA00000000000000000000000000000FF0")
         self.assertTrue(r_twi["ok"])
         for key in self._GET_STATUS_OK_KEYS:
             self.assertIn(key, r_twi)
@@ -371,10 +371,10 @@ class TwilioBasicAuthTestCase(unittest.TestCase):
     def test_basic_auth_credentials(self) -> None:
         """_auth() возвращает HTTPBasicAuth с правильными credentials."""
         from requests.auth import HTTPBasicAuth
-        adapter = _twilio(sid="AC00000000000000000000000000aaaa", token="test-fake-tok-do-not-use-bbbbbb")
+        adapter = _twilio(sid="ACDEADBEEF1234567890ABCDEF0000AABB", token="test-fake-tok-do-not-use-bbbbbb")
         auth = adapter._auth()
         self.assertIsInstance(auth, HTTPBasicAuth)
-        self.assertEqual(auth.username, "AC00000000000000000000000000aaaa")
+        self.assertEqual(auth.username, "ACDEADBEEF1234567890ABCDEF0000AABB")
         self.assertEqual(auth.password, "test-fake-tok-do-not-use-bbbbbb")
 
     def test_basic_auth_content_type_form_encoded(self) -> None:
@@ -389,7 +389,7 @@ class TwilioBasicAuthTestCase(unittest.TestCase):
     def test_basic_auth_dial_sends_form_payload(self) -> None:
         """POST при dial Twilio передаёт data= (не json=)."""
         adapter = _twilio()
-        mock_resp = _mock_resp(201, {"sid": "CA001", "status": "queued"})
+        mock_resp = _mock_resp(201, {"sid": "CA00000000000000000000000000000FF0", "status": "queued"})
         sess = MagicMock()
         sess.post.return_value = mock_resp
         sess.headers = {}
@@ -421,10 +421,10 @@ class HangupIdempotentTestCase(unittest.TestCase):
 
     def test_twilio_hangup_twice_no_exception(self) -> None:
         adapter = _twilio()
-        _inject_post(adapter, _mock_resp(200, {"sid": "CA1", "status": "completed"}))
-        r1 = adapter.hangup("CA1")
-        _inject_post(adapter, _mock_resp(200, {"sid": "CA1", "status": "completed"}))
-        r2 = adapter.hangup("CA1")
+        _inject_post(adapter, _mock_resp(200, {"sid": "CA00000000000000000000000000000FF0", "status": "completed"}))
+        r1 = adapter.hangup("CA00000000000000000000000000000FF0")
+        _inject_post(adapter, _mock_resp(200, {"sid": "CA00000000000000000000000000000FF0", "status": "completed"}))
+        r2 = adapter.hangup("CA00000000000000000000000000000FF0")
         self.assertTrue(r1["ok"])
         self.assertTrue(r2["ok"])
 
@@ -620,7 +620,7 @@ class UnicodePhoneNumberTestCase(unittest.TestCase):
                  lambda n: _mock_resp(201, {"data": {"call_leg_id": "l", "call_control_id": "c"}}),
                  _inject_post),
                 ("Twilio", _twilio(),
-                 lambda n: _mock_resp(201, {"sid": "CA1", "status": "queued"}),
+                 lambda n: _mock_resp(201, {"sid": "CA00000000000000000000000000000FF0", "status": "queued"}),
                  _inject_post),
             ]:
                 inject_fn(adapter, make_resp_fn(number))
@@ -748,7 +748,7 @@ class BehavioralGapTestCase(unittest.TestCase):
     def test_gap7_twilio_404_returns_not_found(self) -> None:
         adapter = _twilio()
         _inject_get(adapter, _mock_resp(404, {"message": "Not found"}))
-        result = adapter.get_call_status("CA_missing")
+        result = adapter.get_call_status("CADEADBEEFDEADBEEFDEADBEEF12345600")
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "not_found")
 
@@ -760,7 +760,7 @@ class BehavioralGapTestCase(unittest.TestCase):
 
     def test_gap8_twilio_requires_both_sid_and_token(self) -> None:
         """Twilio НЕ сконфигурирован если задан только один из двух параметров."""
-        only_sid = TwilioAdapter(account_sid="AC00000000000000000000000000ffff", auth_token="", from_number="")
+        only_sid = TwilioAdapter(account_sid="ACDEADBEEF1234567890ABCDEF0000FFFF", auth_token="", from_number="")
         only_token = TwilioAdapter(account_sid="", auth_token="test-fake-tok-do-not-use", from_number="")
         self.assertFalse(only_sid.is_configured())
         self.assertFalse(only_token.is_configured())

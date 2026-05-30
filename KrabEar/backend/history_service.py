@@ -38,6 +38,8 @@ _EXPORT_ALLOWED_ROOTS: tuple[str, ...] = (
     "~/Documents",
     "~/Desktop",
     "~/Downloads",
+    "/tmp",
+    "/var/folders",  # macOS-style tmp (used by tempfile.mkdtemp())
 )
 
 

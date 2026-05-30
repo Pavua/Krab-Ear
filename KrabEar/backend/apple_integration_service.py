@@ -132,6 +132,17 @@ class AppleIntegrationService:
 
         return {"chats": chats}
 
+    # ── AppleScript string escaping (W944 / W1052) ──────────────────────────
+
+    @staticmethod
+    def _escape_as_str(s: str) -> str:
+        """Escape *s* for safe embedding inside an AppleScript double-quoted string.
+
+        Must double backslashes FIRST, then escape double-quotes — incorrect order
+        would double-escape already-escaped characters.
+        """
+        return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
     # ── Apple Notes integration (Phase D.4) ─────────────────────────────────
 
     def handle_create_apple_note(self, params: dict) -> dict:
@@ -140,12 +151,12 @@ class AppleIntegrationService:
         params: {"title": str, "body": str, "folder": str | None}
         Returns: {"ok": bool, "note_id": str | None, "error": str | None}
         """
-        title = params.get("title", "Krab Ear note").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
+        title = self._escape_as_str(params.get("title", "Krab Ear note"))
+        body = self._escape_as_str(params.get("body", ""))
         folder = params.get("folder", "") or ""
 
         if folder:
-            folder_escaped = folder.replace('"', '\\"')
+            folder_escaped = self._escape_as_str(folder)
             script = f'''
 tell application "Notes"
     tell account "iCloud"
@@ -182,8 +193,8 @@ end tell
         params: {"title": str, "body": str, "list_name": str | None, "due_date": str | None}
         Returns: {"ok": bool, "error": str | None}
         """
-        title = params.get("title", "Krab Ear reminder").replace('"', '\\"')
-        body = params.get("body", "").replace('"', '\\"')
+        title = self._escape_as_str(params.get("title", "Krab Ear reminder"))
+        body = self._escape_as_str(params.get("body", ""))
         list_name = params.get("list_name") or None
         due_date = params.get("due_date") or None
 
@@ -192,11 +203,11 @@ end tell
         if body:
             properties += f', body:"{body}"'
         if due_date:
-            due_date_escaped = due_date.replace('"', '\\"')
+            due_date_escaped = self._escape_as_str(due_date)
             properties += f', due date:date "{due_date_escaped}"'
 
         if list_name:
-            list_name_escaped = list_name.replace('"', '\\"')
+            list_name_escaped = self._escape_as_str(list_name)
             script = f'''
 tell application "Reminders"
     tell list "{list_name_escaped}"
@@ -241,13 +252,13 @@ end tell
         if not title:
             return {"ok": False, "error": "title is required"}
 
-        title_esc = title.replace('"', '\\"')
+        title_esc = self._escape_as_str(title)
         notes = params.get("notes", "") or ""
-        notes_esc = notes.replace('"', '\\"')
+        notes_esc = self._escape_as_str(notes)
         start_date = str(params.get("start_date", "")).strip()
         if not start_date:
             return {"ok": False, "error": "start_date is required"}
-        start_date_esc = start_date.replace('"', '\\"')
+        start_date_esc = self._escape_as_str(start_date)
         duration_minutes = int(params.get("duration_minutes", 30) or 30)
         calendar_name = params.get("calendar_name") or None
 
@@ -257,7 +268,7 @@ end tell
         make new event with properties {{summary:"{title_esc}", description:"{notes_esc}", start date:startDate, end date:endDate}}'''
 
         if calendar_name:
-            cal_esc = calendar_name.replace('"', '\\"')
+            cal_esc = self._escape_as_str(calendar_name)
             script = f'''tell application "Calendar"
     tell calendar "{cal_esc}"{event_block}
     end tell
@@ -307,9 +318,9 @@ end tell'''
         # Map service name to AppleScript service type constant
         service_type = "iMessage" if service_name == "iMessage" else "SMS"
 
-        # Escape double quotes to prevent AppleScript injection
-        recipient_esc = recipient.replace('"', '\\"')
-        body_esc = body.replace('"', '\\"')
+        # Escape backslashes then double quotes to prevent AppleScript injection
+        recipient_esc = self._escape_as_str(recipient)
+        body_esc = self._escape_as_str(body)
 
         script = f'''tell application "Messages"
     set targetService to 1st service whose service type = {service_type}

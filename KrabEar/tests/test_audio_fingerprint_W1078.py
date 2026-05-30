@@ -151,11 +151,15 @@ class TestAudioFingerprinterW1078(unittest.TestCase):
             self.fp.is_duplicate_audio(audio, other, sample_rate=self.sr, threshold=0.5)
         )
 
-    def test_is_duplicate_threshold_zero_always_true(self) -> None:
-        """threshold=0.0 makes is_duplicate_audio() always return True."""
+    def test_is_duplicate_threshold_zero_ignored(self) -> None:
+        """W1063: threshold parameter is ignored by is_duplicate_audio(); exact-match only.
+
+        Different audio is never a duplicate regardless of threshold value.
+        """
         a1 = _sine(440.0)
         a2 = _sine(880.0)
-        self.assertTrue(
+        # threshold=0.0 is a no-op — exact SHA-256 match required
+        self.assertFalse(
             self.fp.is_duplicate_audio(a1, a2, sample_rate=self.sr, threshold=0.0)
         )
 

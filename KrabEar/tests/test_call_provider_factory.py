@@ -74,7 +74,7 @@ class TwilioProviderTestCase(unittest.TestCase):
         provider = get_provider(
             _settings(
                 CALL_PROVIDER="twilio",
-                TWILIO_ACCOUNT_SID="ACtest123",
+                TWILIO_ACCOUNT_SID="ACDEADBEEF1234567890ABCDEF0000FFFF",
                 TWILIO_AUTH_TOKEN="authtest456",
                 TWILIO_FROM_NUMBER="+15550009999",
             )
@@ -183,13 +183,13 @@ class ProviderCredentialsTestCase(unittest.TestCase):
         provider = get_provider(
             _settings(
                 CALL_PROVIDER="twilio",
-                TWILIO_ACCOUNT_SID="ACtest123",
+                TWILIO_ACCOUNT_SID="ACDEADBEEF1234567890ABCDEF0000FFFF",
                 TWILIO_AUTH_TOKEN="authtest456",
                 TWILIO_FROM_NUMBER="+15550009999",
             )
         )
         self.assertIsInstance(provider, TwilioAdapter)
-        self.assertEqual(provider._account_sid, "ACtest123")
+        self.assertEqual(provider._account_sid, "ACDEADBEEF1234567890ABCDEF0000FFFF")
         self.assertEqual(provider._auth_token, "authtest456")
         self.assertEqual(provider._from_number, "+15550009999")
 

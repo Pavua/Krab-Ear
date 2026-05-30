@@ -130,6 +130,8 @@ from backend.observability import (
     install_signal_handlers,
 )
 from backend.calendar_link import CalendarLinker
+from backend.audit_logger import AuditLogger
+from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
 
 import argparse
@@ -501,6 +503,13 @@ class BackendService:
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()
         self._transcript_versioning = TranscriptVersionManager(data_dir=self.store.data_dir)
+        # BulkReprocessor — массовое перетранскрибирование истории (W1037 F4 / W1044 re-wire)
+        self._bulk_reprocessor = BulkReprocessor(
+            store=self.store,
+            transcriber=self.transcriber,
+            version_manager=self._transcript_versioning,
+            event_bus=event_bus,
+        )
         self._language_learning = LanguageLearningManager()
         self._config_presets = ConfigPresetsLibrary(data_dir=self.store.data_dir)
         # IPC throttle — защита от злоупотребления тяжёлыми методами.
@@ -564,6 +573,10 @@ class BackendService:
         )
         self._template_manager = TemplateManager(data_dir=self.store.data_dir)
         self._feature_flags = FeatureFlags(data_dir=self.store.data_dir)
+        # W979 F4: late-inject feature_flags into LLMRewriter so set_feature_flag IPC
+        # changes are reflected immediately during rewrite() without a restart.
+        if self._llm_rewriter is not None:
+            self._llm_rewriter._feature_flags = self._feature_flags
         self._plugin_manager = PluginManager(data_dir=self.store.data_dir)
         self._hotword_detector = HotwordDetector(data_dir=self.store.data_dir)
         self._model_cache_manager = ModelCacheManager()
@@ -736,6 +749,10 @@ class BackendService:
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
+
+        # Audit logger — structured NDJSON log of all IPC requests (W1351 F1 fix).
+        # Always enabled (core observability). Flushed at shutdown via GracefulShutdownHandler.
+        self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
         if settings.STT_AUTO_SEED_HOTWORDS:
@@ -1310,7 +1327,10 @@ class BackendService:
             "get_analytics_dashboard": self._analytics_svc.handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
             "get_topic_timeline": self._search_and_analysis_svc.handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
-            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
+            "apply_config_preset": self._config_presets.handle_apply_config_preset,  # атомарно применить пресет: merge + save + after_save_hooks
+            "delete_config_preset": self._config_presets.handle_delete_config_preset,  # удалить кастомный конфигурационный пресет по имени
+            "export_config_preset": self._config_presets.handle_export_config_preset,  # экспортировать пресет в JSON-строку для передачи/сохранения
+            "import_config_preset": self._config_presets.handle_import_config_preset,  # импортировать пресет из JSON-строки (envelope или прямой объект)
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
             "enqueue_transcription": self._transcription_queue.handle_enqueue,  # добавить аудиофайл в очередь транскрипции с приоритетом
             "cancel_transcription": self._transcription_queue.handle_cancel,  # отменить задание транскрипции по job_id
@@ -1464,6 +1484,12 @@ class BackendService:
             # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
             # --- D.2.3: Scored STT routing decision ---
             "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
+            # --- Speech pace analysis (W1048 F2) ---
+            "analyze_speech_pace": self._handle_analyze_speech_pace,  # анализ темпа речи: wpm, cpm, категория, расчётное время чтения
+            # --- Bulk reprocess (Wave 1044 — re-wired after Wave 65 removal) ---
+            "bulk_reprocess_start": self._handle_bulk_reprocess_start,  # массовое перетранскрибирование с текущими настройками STT
+            "bulk_reprocess_cancel": self._handle_bulk_reprocess_cancel,  # отменить текущий запуск bulk reprocess
+            "bulk_reprocess_status": self._handle_bulk_reprocess_status,  # статус: активен ли cancel_event
             # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
             "export_timeline_svg": self._handle_export_timeline_svg,  # экспорт таймлайна в SVG-файл
             "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
@@ -1535,12 +1561,28 @@ class BackendService:
                 level="info",
             )
 
+        _t0 = time.monotonic()
         try:
             result = handler(params)
-            return {"id": request_id, "ok": True, "result": result}
+            response = {"id": request_id, "ok": True, "result": result}
         except Exception as exc:
             logger.exception("Ошибка метода %s", method)
-            return self._error(request_id, "internal_error", str(exc))
+            response = self._error(request_id, "internal_error", str(exc))
+
+        # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
+        try:
+            _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            if not _privacy_on:
+                self._audit_logger.log_request(
+                    method=method,
+                    params=params if isinstance(params, dict) else {},
+                    result=response,
+                    duration_ms=(time.monotonic() - _t0) * 1000,
+                )
+        except Exception:
+            pass  # audit logging никогда не должен ронять IPC-ответ
+
+        return response
 
     _BATCH_MAX_REQUESTS = 50
 
@@ -4061,6 +4103,78 @@ end tell'''
             )
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
+
+    def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Анализирует темп речи по тексту и длительности аудио.
+
+        Параметры:
+            text         — транскрибированный текст (обязательно).
+            duration_sec — длительность аудиозаписи в секундах (float, обязательно).
+
+        Возвращает:
+            words_per_minute           — слов в минуту.
+            chars_per_minute           — символов в минуту.
+            pace_category              — «slow» | «normal» | «fast» | «very_fast».
+            estimated_reading_time_sec — расчётное время чтения при 150 wpm.
+            word_count                 — количество слов.
+            char_count                 — количество символов (без пробелов).
+            duration_sec               — фактическая длительность записи.
+        """
+        text = str(params.get("text", ""))
+        raw_dur = params.get("duration_sec")
+        if raw_dur is None:
+            return {"error": "duration_sec is required"}
+        try:
+            duration_sec = float(raw_dur)
+        except (TypeError, ValueError):
+            return {"error": "duration_sec must be a number"}
+        report = self._speech_pace_analyzer.analyze(text, duration_sec)
+        return report.as_dict()
+
+    # ------------------------------------------------------------------
+    # BulkReprocessor handlers (Wave 1044 — re-wired after Wave 65 removal)
+    # ------------------------------------------------------------------
+
+    def _handle_bulk_reprocess_start(self, params: dict) -> dict:
+        """Запускает массовое перетранскрибирование истории с текущими настройками STT.
+
+        Params:
+            only_low_confidence (bool, optional): перетранскрибировать только записи с
+                confidence < threshold (по умолчанию True).
+            threshold (float, optional): порог confidence [0..1] (по умолчанию 0.7).
+            dry_run (bool, optional): только подсчёт, без реального STT (по умолчанию False).
+            task_id (str, optional): произвольный ID задачи для событий прогресса.
+
+        Returns:
+            dict: total, reprocessed, skipped, errors, cancelled.
+        """
+        only_low_confidence = bool(params.get("only_low_confidence", True))
+        threshold = float(params.get("threshold", 0.7))
+        dry_run = bool(params.get("dry_run", False))
+        task_id = str(params.get("task_id", ""))
+        return self._bulk_reprocessor.reprocess(
+            only_low_confidence=only_low_confidence,
+            threshold=threshold,
+            dry_run=dry_run,
+            task_id=task_id,
+        )
+
+    def _handle_bulk_reprocess_cancel(self, params: dict) -> dict:
+        """Запрашивает отмену текущего запуска BulkReprocessor.
+
+        Returns:
+            dict: {"ok": True}
+        """
+        self._bulk_reprocessor.cancel()
+        return {"ok": True}
+
+    def _handle_bulk_reprocess_status(self, params: dict) -> dict:
+        """Возвращает статус BulkReprocessor: активен ли cancel_event.
+
+        Returns:
+            dict: {"cancel_requested": bool}
+        """
+        return {"cancel_requested": self._bulk_reprocessor._cancel_event.is_set()}
 
     def _handle_export_timeline_svg(self, params: dict[str, Any]) -> dict[str, Any]:
         """Экспортирует таймлайн записей истории в SVG-файл.
