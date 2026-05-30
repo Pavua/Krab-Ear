@@ -1,4 +1,4 @@
-.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-all dispatch-tests service-loc
+.PHONY: test build sign run lint benchmark-llm benchmark-stt clean schemas app verify release reset-tcc clean-worktree-builds audit-orphans audit-handlers audit-duplicate-defs audit-cherry-pick audit-wiring audit-all dispatch-tests service-loc
 
 VENV = .venv_krab_ear
 PYTHON = $(VENV)/bin/python
@@ -108,8 +108,15 @@ audit-duplicate-defs:
 audit-cherry-pick:
 	python3 scripts/audit_cherry_pick_regressions.py $(ARGS)
 
+# Audit for unwired late-injections / decorative-architecture pattern (W1686/W1691 guard).
+# Detects service/collaborator instances assigned to attrs in __init__ but never called.
+# Runs report-only in CI until batch 91 fix PRs (W1687/W1688/W1690) merge;
+# pass ARGS=--fail-on-found to enable strict mode locally once those land.
+audit-wiring:
+	python3 scripts/audit_decorative_wiring.py $(ARGS)
+
 # Run all static audit checks (CI parity — runs same checks as CI guard jobs).
-audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick
+audit-all: audit-orphans audit-duplicate-defs audit-cherry-pick audit-wiring
 	@echo "All audit checks passed."
 
 # Print current service.py line count (quick monolith size gauge).

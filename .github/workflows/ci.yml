@@ -191,3 +191,21 @@ jobs:
         # W1595 (2026-05-29): all 26 regressions fixed — gate is now strict (hard-fail).
         # No user-controlled input is used in this step — no injection risk.
         run: python3 scripts/audit_cherry_pick_regressions.py --fail-on-found
+
+  decorative-wiring-guard:
+    name: Decorative wiring audit (report-only until W1687 lands)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for unwired late-injections (W1686 follow-up)
+        # Detects service/collaborator instances assigned to attributes in __init__ but
+        # never actually called anywhere (decorative-architecture anti-pattern).
+        # W1686 identified 9 confirmed bugs (batch 91 / W1687-W1690 are fixing them).
+        # REPORT-ONLY for now: exits 0 regardless of findings so CI stays green while
+        # the 9 known cases are fixed by W1687/W1688/W1690 fix PRs.
+        # TODO(W1691): flip to --fail-on-found once batch 91 fix PRs merge.
+        # No user-controlled input is used in this step — no injection risk.
+        run: python3 scripts/audit_decorative_wiring.py
+        continue-on-error: true
