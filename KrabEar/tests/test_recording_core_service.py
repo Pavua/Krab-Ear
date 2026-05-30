@@ -932,5 +932,116 @@ class TestPersistLockAtomic(unittest.TestCase):
         store_mock.add_history_item.assert_not_called()
 
 
+class TestPrivacyModeHistoryContext(unittest.TestCase):
+    """W1669 — verify that history_context is never passed to transcribe()
+    when privacy_mode_enabled=True (W1655 F3 HIGH privacy leak fix)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def _make_sr_with_privacy(self, privacy_mode: bool) -> dict:
+        return {
+            "quality_profile": "balanced",
+            "cleanup_profile": "soft",
+            "lang_hint": None,
+            "privacy_mode_enabled": privacy_mode,
+        }
+
+    def test_no_history_context_in_privacy_mode(self):
+        """When privacy_mode_enabled=True, history_context passed to transcribe
+        must be None — store.get_history_page must NOT be called at all."""
+        captured_kwargs: dict = {}
+
+        class _CapturingTranscriber:
+            def transcribe(self, audio, **kwargs):
+                captured_kwargs.update(kwargs)
+                return {"text": "ok", "confidence": 0.9, "engine": "fake"}
+
+        store_mock = MagicMock()
+        store_mock.get_history_page.return_value = ([{"id": "1", "text": "secret"}], None)
+        store_mock.data_dir = Path(self._tmp)
+
+        svc = _make_service(
+            self._tmp,
+            transcriber=_CapturingTranscriber(),
+            extra_kwargs={"store": store_mock},
+        )
+
+        audio = np.zeros(16000, dtype=np.float32)
+        svc._stop_recording_phase_c(
+            audio=audio,
+            duration_sec=1.0,
+            sr=self._make_sr_with_privacy(privacy_mode=True),
+        )
+
+        # history_context must be None (empty list -> None via `if _recent_history`)
+        self.assertIsNone(
+            captured_kwargs.get("history_context"),
+            "history_context must be None in privacy mode",
+        )
+        # store.get_history_page must never have been called
+        store_mock.get_history_page.assert_not_called()
+
+    def test_history_context_present_when_privacy_off(self):
+        """When privacy_mode_enabled=False, history_context is populated from
+        the store (non-empty list passes through)."""
+        captured_kwargs: dict = {}
+
+        class _CapturingTranscriber:
+            def transcribe(self, audio, **kwargs):
+                captured_kwargs.update(kwargs)
+                return {"text": "ok", "confidence": 0.9, "engine": "fake"}
+
+        fake_history = [{"id": "1", "text": "previous transcript"}]
+        store_mock = MagicMock()
+        store_mock.get_history_page.return_value = (fake_history, None)
+        store_mock.data_dir = Path(self._tmp)
+
+        svc = _make_service(
+            self._tmp,
+            transcriber=_CapturingTranscriber(),
+            extra_kwargs={"store": store_mock},
+        )
+
+        audio = np.zeros(16000, dtype=np.float32)
+        svc._stop_recording_phase_c(
+            audio=audio,
+            duration_sec=1.0,
+            sr=self._make_sr_with_privacy(privacy_mode=False),
+        )
+
+        # store.get_history_page must have been called
+        store_mock.get_history_page.assert_called_once()
+        # history_context must be the fetched list
+        self.assertEqual(
+            captured_kwargs.get("history_context"),
+            fake_history,
+            "history_context must contain fetched history when privacy mode is off",
+        )
+
+    def test_transcribe_still_works_with_empty_history_context(self):
+        """Transcribe must succeed and return a valid payload when
+        history_context=None (the privacy-mode path)."""
+
+        class _CapturingTranscriber:
+            def transcribe(self, audio, **kwargs):
+                return {"text": "result", "confidence": 0.85, "engine": "fake"}
+
+        svc = _make_service(
+            self._tmp,
+            transcriber=_CapturingTranscriber(),
+        )
+
+        audio = np.zeros(16000, dtype=np.float32)
+        result = svc._stop_recording_phase_c(
+            audio=audio,
+            duration_sec=1.0,
+            sr=self._make_sr_with_privacy(privacy_mode=True),
+        )
+
+        self.assertIn("transcribe_payload", result)
+        self.assertEqual(result["transcribe_payload"]["text"], "result")
+
+
 if __name__ == "__main__":
     unittest.main()
