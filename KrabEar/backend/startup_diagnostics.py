@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,10 @@ logger = logging.getLogger("KrabEar.Backend.StartupDiagnostics")
 
 # Порог свободного места: критический уровень — 1 ГБ
 DISK_MIN_FREE_GB = 1.0
+
+# Sentinel status used while the background LM Studio probe is still running.
+# Consumers (to_dict, aggregation) treat "pending" like "ok" (non-blocking).
+_LM_STUDIO_PENDING = "pending"
 
 # Минимальная версия Python
 MIN_PYTHON_VERSION = (3, 12)
@@ -97,6 +102,16 @@ class StartupDiagnostics:
         # Late-injected by BackendService after construction (Wave 490).
         # If None, startup.stt_model_cache_miss errors are not pushed to error bus.
         self._error_bus: Any | None = None
+
+        # W1672 (W1615 F2 MED): LM Studio reachability result is populated
+        # asynchronously in a daemon thread so __init__ (and run_all_checks) return
+        # immediately even when LM Studio is offline.
+        self._lm_studio_result: CheckResult | None = None
+        self._lm_studio_lock: threading.Lock = threading.Lock()
+        self._lm_studio_done: threading.Event = threading.Event()
+        # Start the background check immediately so the result is available
+        # as soon as possible (typically within the ~2 s connect timeout).
+        self._start_lm_studio_background_check()
 
     # ------------------------------------------------------------------
     # Публичный метод
@@ -486,8 +501,32 @@ class StartupDiagnostics:
                 duration_ms=(time.monotonic() - t0) * 1000.0,
             )
 
-    def _check_lm_studio_reachable(self) -> CheckResult:
-        """LM Studio доступен (только если LLM_ENABLED=True)."""
+    # ------------------------------------------------------------------
+    # W1672: non-blocking LM Studio reachability
+    # ------------------------------------------------------------------
+
+    def _start_lm_studio_background_check(self) -> None:
+        """Запускает проверку LM Studio в фоновом daemon-потоке.
+
+        Вызывается один раз из __init__.  Повторный вызов перезапускает
+        проверку — полезно для тестов, где нужно сбросить состояние.
+        """
+        t = threading.Thread(
+            target=self._run_lm_studio_check_in_background,
+            name="StartupDiag-LMStudio",
+            daemon=True,
+        )
+        t.start()
+
+    def _run_lm_studio_check_in_background(self) -> None:
+        """Выполняет реальную TCP-проверку LM Studio и сохраняет результат."""
+        result = self._do_lm_studio_check()
+        with self._lm_studio_lock:
+            self._lm_studio_result = result
+        self._lm_studio_done.set()
+
+    def _do_lm_studio_check(self) -> CheckResult:
+        """Синхронная часть проверки LM Studio (вызывается из фонового потока)."""
         t0 = time.monotonic()
         try:
             from core.config import settings
@@ -534,6 +573,43 @@ class StartupDiagnostics:
                 message=f"Не удалось проверить LM Studio: {exc}",
                 duration_ms=(time.monotonic() - t0) * 1000.0,
             )
+
+    def _check_lm_studio_reachable(self) -> CheckResult:
+        """LM Studio reachability check — returns immediately (W1672).
+
+        If the background probe has already completed the real result is
+        returned; otherwise a lightweight "pending" placeholder is returned
+        so that run_all_checks() is never blocked by a slow TCP connect.
+
+        The placeholder has status "ok" (non-critical) so the overall startup
+        status is not degraded just because LM Studio hasn't been probed yet.
+        Callers that want the final result can call wait_lm_studio_check().
+        """
+        with self._lm_studio_lock:
+            result = self._lm_studio_result
+        if result is not None:
+            return result
+        # Background probe is still running — return a pending placeholder.
+        return CheckResult(
+            name="lm_studio",
+            status="ok",
+            message="LM Studio reachability check pending (проверяется в фоне)",
+            duration_ms=0.0,
+            details={"pending": True},
+        )
+
+    def wait_lm_studio_check(self, timeout: float = 3.0) -> CheckResult | None:
+        """Ожидает завершения фонового LM Studio check и возвращает результат.
+
+        Используется в тестах и в _handle_get_startup_diagnostics когда нужен
+        финальный статус (force=True), а не pending-плейсхолдер.
+
+        Возвращает None если таймаут истёк раньше завершения проверки.
+        """
+        if self._lm_studio_done.wait(timeout=timeout):
+            with self._lm_studio_lock:
+                return self._lm_studio_result
+        return None
 
     def _check_disk_space(self) -> CheckResult:
         """Свободного места на диске больше 1 ГБ."""

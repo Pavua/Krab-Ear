@@ -10,6 +10,7 @@ from backend.startup_diagnostics import (
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -361,10 +362,12 @@ class TestCheckAudioDevices(unittest.TestCase):
 
 
 # ===========================================================================
-# 10. LM Studio check
+# 10. LM Studio check — synchronous core (_do_lm_studio_check)
 # ===========================================================================
 
 class TestCheckLmStudio(unittest.TestCase):
+    """Tests for the synchronous _do_lm_studio_check (background-thread body)."""
+
     def setUp(self) -> None:
         self.diag = _make_diag()
 
@@ -372,7 +375,7 @@ class TestCheckLmStudio(unittest.TestCase):
         mock_settings = MagicMock()
         mock_settings.LLM_ENABLED = False
         with patch("core.config.settings", mock_settings):
-            result = self.diag._check_lm_studio_reachable()
+            result = self.diag._do_lm_studio_check()
         self.assertEqual(result.status, "ok")
         self.assertFalse(result.details["enabled"])
 
@@ -383,7 +386,7 @@ class TestCheckLmStudio(unittest.TestCase):
         mock_sock = MagicMock()
         with patch("core.config.settings", mock_settings):
             with patch("socket.create_connection", return_value=mock_sock):
-                result = self.diag._check_lm_studio_reachable()
+                result = self.diag._do_lm_studio_check()
         self.assertEqual(result.status, "ok")
         self.assertTrue(result.details["enabled"])
 
@@ -393,8 +396,142 @@ class TestCheckLmStudio(unittest.TestCase):
         mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
         with patch("core.config.settings", mock_settings):
             with patch("socket.create_connection", side_effect=ConnectionRefusedError()):
-                result = self.diag._check_lm_studio_reachable()
+                result = self.diag._do_lm_studio_check()
         self.assertEqual(result.status, "warning")
+
+
+# ===========================================================================
+# 10b. W1672 — async / non-blocking LM Studio check
+# ===========================================================================
+
+class TestCheckLmStudioAsync(unittest.TestCase):
+    """W1672 (W1615 F2 MED): LM Studio reachability must not block __init__."""
+
+    def _make_diag_with_slow_connect(self, delay: float = 5.0) -> StartupDiagnostics:
+        """Build a StartupDiagnostics whose background probe will sleep for *delay* seconds."""
+        tmpdir = tempfile.mkdtemp()
+        import threading as _threading
+
+        def _slow_connect(*args, **kwargs):  # noqa: ANN001,ANN202
+            _threading.Event().wait(timeout=delay)
+            raise ConnectionRefusedError("simulated offline")
+
+        with patch("socket.create_connection", side_effect=_slow_connect):
+            with patch("core.config.settings") as mock_s:
+                mock_s.LLM_ENABLED = True
+                mock_s.LLM_BASE_URL = "http://localhost:1234/v1"
+                diag = StartupDiagnostics(data_dir=tmpdir)
+        return diag
+
+    def test_lm_studio_check_does_not_block_init(self) -> None:
+        """__init__ and run_all_checks must return in <0.5 s even when LM Studio is offline.
+
+        The background thread may block for up to 2 s (connect timeout) but the
+        caller must not wait for it.
+        """
+        import threading as _threading
+
+        connect_blocked = _threading.Event()
+
+        def _blocking_connect(*args, **kwargs):  # noqa: ANN001,ANN202
+            connect_blocked.set()
+            # Block until the test's timeout fires (much longer than test assertion).
+            _threading.Event().wait(timeout=10.0)
+            raise ConnectionRefusedError("simulated offline")
+
+        tmpdir = tempfile.mkdtemp()
+        t0 = time.monotonic()
+        with patch("backend.startup_diagnostics.socket.create_connection", side_effect=_blocking_connect):
+            with patch("core.config.settings") as mock_s:
+                mock_s.LLM_ENABLED = True
+                mock_s.LLM_BASE_URL = "http://localhost:1234/v1"
+                diag = StartupDiagnostics(data_dir=tmpdir)
+                # run_all_checks must not block either
+                with patch.object(diag, "_check_python_version", return_value=CheckResult("python_version", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_required_packages", return_value=CheckResult("required_packages", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_data_dir_writable", return_value=CheckResult("data_dir_writable", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_socket_path_available", return_value=CheckResult("socket_path", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_ffmpeg_available", return_value=CheckResult("ffmpeg", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_huggingface_token", return_value=CheckResult("hf_token", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_stt_model_cached", return_value=CheckResult("stt_model_cached", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_disk_space", return_value=CheckResult("disk_space", "ok", "ok", 0.1)), \
+                     patch.object(diag, "_check_audio_devices", return_value=CheckResult("audio_devices", "ok", "ok", 0.1)):
+                    report = diag.run_all_checks()
+        elapsed = time.monotonic() - t0
+        # Must complete well under the 2 s TCP timeout
+        self.assertLess(elapsed, 0.5, f"run_all_checks took {elapsed:.3f}s — LM Studio check is still blocking")
+        self.assertIsNotNone(report)
+
+    def test_lm_studio_status_eventually_populated(self) -> None:
+        """Background thread must populate _lm_studio_result after the check completes."""
+        tmpdir = tempfile.mkdtemp()
+        with patch("backend.startup_diagnostics.socket.create_connection", side_effect=ConnectionRefusedError()):
+            with patch("core.config.settings") as mock_s:
+                mock_s.LLM_ENABLED = True
+                mock_s.LLM_BASE_URL = "http://localhost:1234/v1"
+                diag = StartupDiagnostics(data_dir=tmpdir)
+        # Wait for the background thread to finish (should be fast — immediate refuse)
+        result = diag.wait_lm_studio_check(timeout=3.0)
+        self.assertIsNotNone(result, "Background LM Studio check did not complete within timeout")
+        assert result is not None  # for type narrowing
+        self.assertEqual(result.name, "lm_studio")
+        self.assertIn(result.status, ("ok", "warning", "error"))
+        # Specifically: unreachable → warning
+        self.assertEqual(result.status, "warning")
+
+    def test_diagnostics_dict_handles_pending_state(self) -> None:
+        """to_dict() on a report that contains the pending placeholder must not raise."""
+        tmpdir = tempfile.mkdtemp()
+        import threading as _threading
+
+        ready_to_proceed = _threading.Event()
+        probe_can_finish = _threading.Event()
+
+        def _controlled_connect(*args, **kwargs):  # noqa: ANN001,ANN202
+            ready_to_proceed.set()
+            probe_can_finish.wait(timeout=5.0)
+            raise ConnectionRefusedError("simulated offline")
+
+        with patch("backend.startup_diagnostics.socket.create_connection", side_effect=_controlled_connect):
+            with patch("core.config.settings") as mock_s:
+                mock_s.LLM_ENABLED = True
+                mock_s.LLM_BASE_URL = "http://localhost:1234/v1"
+                diag = StartupDiagnostics(data_dir=tmpdir)
+
+        # Wait until the background thread is inside the blocking connect
+        ready_to_proceed.wait(timeout=3.0)
+
+        # At this point the probe is still running — _lm_studio_result should be None
+        with diag._lm_studio_lock:
+            still_pending = diag._lm_studio_result is None
+
+        self.assertTrue(still_pending, "Expected pending state before probe finishes")
+
+        # run_all_checks should work and include a pending lm_studio entry
+        with patch.object(diag, "_check_python_version", return_value=CheckResult("python_version", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_required_packages", return_value=CheckResult("required_packages", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_data_dir_writable", return_value=CheckResult("data_dir_writable", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_socket_path_available", return_value=CheckResult("socket_path", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_ffmpeg_available", return_value=CheckResult("ffmpeg", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_huggingface_token", return_value=CheckResult("hf_token", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_stt_model_cached", return_value=CheckResult("stt_model_cached", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_disk_space", return_value=CheckResult("disk_space", "ok", "ok", 0.1)), \
+             patch.object(diag, "_check_audio_devices", return_value=CheckResult("audio_devices", "ok", "ok", 0.1)):
+            report = diag.run_all_checks(force=True)
+
+        # to_dict must not raise and must contain the lm_studio entry
+        d = report.to_dict()
+        self.assertIsInstance(d, dict)
+        lm_entries = [c for c in d["checks"] if c["name"] == "lm_studio"]
+        self.assertEqual(len(lm_entries), 1)
+        lm_entry = lm_entries[0]
+        # pending placeholder has status "ok" and details["pending"]=True
+        self.assertEqual(lm_entry["status"], "ok")
+        self.assertTrue(lm_entry["details"].get("pending", False))
+
+        # Let the background probe finish cleanly
+        probe_can_finish.set()
+        diag.wait_lm_studio_check(timeout=3.0)
 
 
 # ===========================================================================
