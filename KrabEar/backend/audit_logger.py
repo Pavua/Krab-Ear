@@ -139,7 +139,8 @@ class AuditLogger:
         )
 
         if method in _SENSITIVE_METHODS:
-            params_info: dict[str, Any] = {"redacted": True, "param_count": len(params) if params else 0}
+            # Sensitive methods: emit empty params_keys to prevent param-name leakage.
+            params_info: dict[str, Any] = {"params_keys": []}
         else:
             params_info = {"params_keys": sorted(params.keys()) if params else []}
 

@@ -250,10 +250,11 @@ class TestAdapterBenchmarkMatrix(unittest.TestCase):
         engine_src_path = Path(__file__).resolve().parents[1] / "core" / "engine.py"
         src = engine_src_path.read_text(encoding="utf-8")
 
-        parakeet_pos = src.find("_PARAKEET_MARKER not in self._unavailable_models")
-        sensevoice_pos = src.find("_SENSEVOICE_MARKER not in self._unavailable_models")
-        whisperx_pos = src.find("_WHISPERX_MARKER not in self._unavailable_models")
-        voxtral_pos = src.find("_VOXTRAL_MARKER not in self._unavailable_models")
+        # _is_model_unavailable() replaced direct dict membership check (refactor)
+        parakeet_pos = src.find("_is_model_unavailable(self._PARAKEET_MARKER)")
+        sensevoice_pos = src.find("_is_model_unavailable(self._SENSEVOICE_MARKER)")
+        whisperx_pos = src.find("_is_model_unavailable(self._WHISPERX_MARKER)")
+        voxtral_pos = src.find("_is_model_unavailable(self._VOXTRAL_MARKER)")
 
         self.assertGreater(parakeet_pos, 0, "Parakeet guard not found in engine.py")
         self.assertGreater(sensevoice_pos, 0, "SenseVoice guard not found in engine.py")

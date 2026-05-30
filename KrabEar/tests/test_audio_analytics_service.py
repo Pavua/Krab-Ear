@@ -332,9 +332,11 @@ class TestCheckAudioDuplicate(unittest.TestCase):
             svc.handle_check_audio_duplicate({"audio1": [0.0, 0.1]})
 
     def test_duplicate_detected(self) -> None:
+        # W1125/W1063: equals() replaced compare() — exact-match fingerprint logic.
+        # similarity is now binary (1.0 for match, 0.0 for non-match).
         audio_fp = MagicMock()
         audio_fp.fingerprint.return_value = [1, 2, 3]
-        audio_fp.compare.return_value = 0.98
+        audio_fp.equals.return_value = True
 
         svc = _make_service(audio_fingerprinter=audio_fp)
         result = svc.handle_check_audio_duplicate({
@@ -345,12 +347,12 @@ class TestCheckAudioDuplicate(unittest.TestCase):
         })
 
         self.assertTrue(result["is_duplicate"])
-        self.assertAlmostEqual(result["similarity"], 0.98, places=4)
+        self.assertAlmostEqual(result["similarity"], 1.0, places=4)
 
     def test_not_duplicate_below_threshold(self) -> None:
         audio_fp = MagicMock()
         audio_fp.fingerprint.return_value = [1, 2, 3]
-        audio_fp.compare.return_value = 0.70
+        audio_fp.equals.return_value = False
 
         svc = _make_service(audio_fingerprinter=audio_fp)
         result = svc.handle_check_audio_duplicate({

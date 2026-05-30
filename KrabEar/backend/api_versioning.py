@@ -26,7 +26,7 @@ DEFAULT_VERSION = APIVersion.V1
 DEPRECATED_VERSIONS: dict[APIVersion, str] = {}
 
 # All versions the server understands.
-SUPPORTED_VERSIONS = [APIVersion.V1, APIVersion.V2]
+SUPPORTED_VERSIONS = (APIVersion.V1, APIVersion.V2)
 
 
 def get_api_version(req=None) -> APIVersion:

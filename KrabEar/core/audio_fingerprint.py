@@ -88,6 +88,12 @@ class AudioFingerprinter:
         Returns:
             1.0 если идентично, 0.0 иначе (binary — не непрерывная шкала).
         """
+        import warnings as _warnings  # noqa: PLC0415
+        _warnings.warn(
+            "AudioFingerprinter.compare() is deprecated; use equals() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # W1063: SHA-256 Hamming distance is statistically meaningless.
         # This shim preserves backwards-compatible float return type only.
         return 1.0 if self.equals(fp1, fp2) else 0.0

@@ -60,9 +60,11 @@ class TestApiVersioningAST(unittest.TestCase):
             f"Expected SUPPORTED_VERSIONS to be a tuple, got {type(value).__name__}",
         )
 
-    def test_supported_versions_excludes_v2(self):
-        """SUPPORTED_VERSIONS must not contain APIVersion.V2."""
-        # Check that 'V2' does not appear as an attribute within the tuple literal
+    def test_supported_versions_includes_v1(self):
+        """SUPPORTED_VERSIONS must contain APIVersion.V1 (always required)."""
+        # V2 is now included in SUPPORTED_VERSIONS to enable proper 501 routing
+        # (rest_server.py routes /v2/* to 501 Not Implemented stubs). This test
+        # checks V1 is present — the invariant that always matters for clients.
         node = self._find_assignment("SUPPORTED_VERSIONS")
         self.assertIsNotNone(node, "SUPPORTED_VERSIONS assignment not found")
 
@@ -72,9 +74,9 @@ class TestApiVersioningAST(unittest.TestCase):
             for n in ast.walk(node.value)
             if isinstance(n, ast.Attribute)
         ]
-        self.assertNotIn(
-            "V2", attr_names,
-            "SUPPORTED_VERSIONS should not contain V2 — v2 API is not yet implemented",
+        self.assertIn(
+            "V1", attr_names,
+            "SUPPORTED_VERSIONS must contain V1",
         )
 
     def test_api_version_header_docstring_mentions_parentheses(self):

@@ -151,11 +151,14 @@ class TestAudioFingerprinterIsDuplicate(unittest.TestCase):
             self.fp.is_duplicate_audio(sine, noise, sample_rate=self.sr, threshold=0.95)
         )
 
-    # 13. Порог 0.0 → всегда дубликат
+    # 13. W1063: threshold is ignored — is_duplicate_audio() uses exact-match only.
+    # Different audio is never a duplicate regardless of threshold value.
     def test_threshold_zero_always_duplicate(self) -> None:
         a1 = _sine(440.0)
         a2 = _white_noise(seed=5)
-        self.assertTrue(
+        # W1063: SHA-256 exact-match — different audio is NOT a duplicate,
+        # even with threshold=0.0 (threshold parameter is now a no-op).
+        self.assertFalse(
             self.fp.is_duplicate_audio(a1, a2, sample_rate=self.sr, threshold=0.0)
         )
 
@@ -263,14 +266,16 @@ class TestAudioFingerprinterIPCHandler(unittest.TestCase):
         for key in ("fingerprint1", "fingerprint2", "similarity", "is_duplicate"):
             self.assertIn(key, result, f"Ключ '{key}' отсутствует в ответе")
 
-    # 20. Кастомный threshold применяется корректно
+    # 20. W1063: threshold is ignored — is_duplicate_audio() uses exact-match only.
+    # Different audio is not a duplicate regardless of threshold.
     def test_ipc_custom_threshold_applied(self) -> None:
         a1 = _sine(440.0).tolist()
         a2 = _sine(880.0).tolist()
-        # При пороге 0.0 любые сигналы — дубликаты
+        # W1063: threshold parameter is now a no-op; exact-match is used.
+        # Different signals are NOT duplicates even with threshold=0.0.
         resp = self._dispatch({"audio1": a1, "audio2": a2, "sample_rate": self.sr, "threshold": 0.0})
         self.assertTrue(resp["ok"])
-        self.assertTrue(resp["result"]["is_duplicate"])
+        self.assertFalse(resp["result"]["is_duplicate"])
 
 
 class TestWave108RequiredCases(unittest.TestCase):

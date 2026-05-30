@@ -1449,8 +1449,8 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
     def test_llm_rewriter_none_when_admin_disabled(self):
         """settings.LLM_ENABLED=False → _llm_rewriter is None."""
         from unittest.mock import patch
-        with patch("backend.service.settings") as mock_settings:
-            mock_settings.LLM_ENABLED = False
+        import core.config as _cfg
+        with patch.object(_cfg.settings, "LLM_ENABLED", False):
             from backend.service import BackendService
             service = BackendService(store=self.store)
             self.assertIsNone(service._llm_rewriter)
@@ -1458,18 +1458,10 @@ class BackendServiceLLMInitializationTestCase(unittest.TestCase):
     def test_llm_rewriter_created_when_admin_enabled(self):
         """settings.LLM_ENABLED=True → _llm_rewriter is LLMRewriter instance."""
         from unittest.mock import patch
-        with patch("backend.service.settings") as mock_settings, \
+        import core.config as _cfg
+        with patch.object(_cfg.settings, "LLM_ENABLED", True), \
                 patch("backend.llm_rewriter.requests.get") as mock_get:
-            mock_settings.LLM_ENABLED = True
-            mock_settings.LLM_BASE_URL = "http://localhost:1234/v1"
-            mock_settings.LLM_API_KEY = "sk-test"
-            mock_settings.LLM_MODEL = "test-model"
-            mock_settings.LLM_TIMEOUT_SEC = 4.0
-            mock_settings.LLM_CIRCUIT_FAIL_THRESHOLD = 3
-            mock_settings.LLM_CIRCUIT_INITIAL_RESET_SEC = 60
-            mock_settings.LLM_CIRCUIT_MAX_RESET_SEC = 600
             mock_get.return_value.status_code = 200
-
             from backend.service import BackendService
             from backend.llm_rewriter import LLMRewriter
             service = BackendService(store=self.store)
