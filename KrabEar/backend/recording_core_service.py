@@ -662,10 +662,13 @@ class RecordingCoreService:
                 with self._preview_lock:
                     self._preview_text = preview_text[-900:]
                     self._preview_updated_at = float(duration_sec)
-                event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                    text=preview_text[-900:],
-                    duration_sec=float(duration_sec),
-                ))
+                # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
+                _preview_settings = self._settings_svc.cached_settings()
+                if not bool(_preview_settings.get("privacy_mode_enabled", False)):
+                    event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
+                        text=preview_text[-900:],
+                        duration_sec=float(duration_sec),
+                    ))
                 poll_interval = _POLL_MIN
             else:
                 with self._preview_lock:
@@ -1266,26 +1269,28 @@ class RecordingCoreService:
             "silence_guard_enabled": silence_guard_enabled,
             "background_guard_rejected": background_guard_rejected,
         }
-        event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
-            history_id=item.id,
-            text=final_text,
-            duration_sec=duration_sec,
-            language=tp.get("language"),
-            confidence=tp.get("confidence"),
-        ))
-        if rt_session_id:
-            try:
-                event_bus.emit(
-                    "realtime.final_transcript",
-                    {
-                        "session_id": rt_session_id,
-                        "text": final_text,
-                        "is_partial": False,
-                        "ts": time.time(),
-                    },
-                )
-            except Exception:
-                logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
+        # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
+        if not _privacy_mode:
+            event_bus.emit_typed(EventType.STT_FINAL, SttFinal(
+                history_id=item.id,
+                text=final_text,
+                duration_sec=duration_sec,
+                language=tp.get("language"),
+                confidence=tp.get("confidence"),
+            ))
+            if rt_session_id:
+                try:
+                    event_bus.emit(
+                        "realtime.final_transcript",
+                        {
+                            "session_id": rt_session_id,
+                            "text": final_text,
+                            "is_partial": False,
+                            "ts": time.time(),
+                        },
+                    )
+                except Exception:
+                    logger.debug("Не удалось emit realtime.final_transcript", exc_info=True)
 
         if self._coerce_bool(settings.get("auto_save_transcripts", False), default=False):
             try:
