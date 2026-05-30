@@ -36,7 +36,17 @@ def _module_path(module_name: str) -> Path | None:
 
 
 def _collect_top_level_names(path: Path) -> set[str]:
-    """Return set of names defined at module top-level in a .py file."""
+    """Return set of names defined at module top-level in a .py file.
+
+    Only names that are actually reachable at module scope are collected.
+    Definitions nested inside a class or function body are intentionally
+    excluded — they are attributes/locals, not module-level symbols.
+
+    Control-flow containers (if/try/with/for/while) DO leak names to module
+    scope in Python, so we recurse into their bodies.  ClassDef and
+    FunctionDef/AsyncFunctionDef bodies are opaque walls — we record the
+    class/function *name* itself but do NOT descend into their contents.
+    """
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source, filename=str(path))
@@ -44,32 +54,56 @@ def _collect_top_level_names(path: Path) -> set[str]:
         return set()
 
     names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    names.add(t.id)
-                elif isinstance(t, ast.Tuple):
-                    for elt in ast.walk(t):
-                        if isinstance(elt, ast.Name):
-                            names.add(elt.id)
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name):
-                names.add(node.target.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            # re-exports: `from x import Y` at module level counts as a definition
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    exported = alias.asname if alias.asname else alias.name
-                    if exported != "*":
-                        names.add(exported)
-            else:
-                for alias in node.names:
-                    exported = alias.asname if alias.asname else alias.name.split(".")[0]
-                    names.add(exported)
 
+    def _scan_stmts(stmts: list) -> None:
+        """Collect module-level names from a flat list of AST statements."""
+        for node in stmts:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # Record the name of the definition itself, but do NOT
+                # recurse into the body — inner defs are NOT module-level.
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+                    elif isinstance(t, ast.Tuple):
+                        for elt in ast.walk(t):
+                            if isinstance(elt, ast.Name):
+                                names.add(elt.id)
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                # re-exports: `from x import Y` at module level counts as defined
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        exported = alias.asname if alias.asname else alias.name
+                        if exported != "*":
+                            names.add(exported)
+                else:
+                    for alias in node.names:
+                        exported = alias.asname if alias.asname else alias.name.split(".")[0]
+                        names.add(exported)
+            # Control-flow: these containers leak names into the enclosing
+            # (module) scope, so recurse into their sub-statement lists.
+            elif isinstance(node, (ast.If, ast.For, ast.While, ast.With,
+                                   ast.AsyncFor, ast.AsyncWith)):
+                _scan_stmts(node.body)
+                _scan_stmts(node.orelse)
+            elif isinstance(node, ast.Try):
+                _scan_stmts(node.body)
+                _scan_stmts(node.orelse)
+                _scan_stmts(node.finalbody)
+                for handler in node.handlers:
+                    _scan_stmts(handler.body)
+            elif hasattr(ast, "TryStar") and isinstance(node, ast.TryStar):
+                # Python 3.11+ except* syntax
+                _scan_stmts(node.body)
+                _scan_stmts(node.finalbody)
+                for handler in node.handlers:
+                    _scan_stmts(handler.body)
+
+    _scan_stmts(tree.body)
     return names
 
 
