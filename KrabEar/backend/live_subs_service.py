@@ -70,8 +70,16 @@ class LiveSubsService:
         return None
 
     def stop(self) -> dict[str, Any]:
-        """Flush оставшегося буфера и сброс состояния."""
+        """Flush оставшегося буфера и сброс состояния.
+
+        Если privacy_mode_enabled=True — буфер сбрасывается БЕЗ транскрипции
+        и эмиссии событий (аудио, накопленное до переключения режима, не утекает).
+        """
         with self._lock:
+            if self._settings_get("privacy_mode_enabled", False):
+                self._reset()
+                return {"status": "stopped", "flushed": False, "skipped": True,
+                        "reason": "privacy_mode_active"}
             result = self._flush(sample_rate=16000, target_lang="off") if self._buffer else None
             self._reset()
         return {"status": "stopped", "flushed": result is not None}
