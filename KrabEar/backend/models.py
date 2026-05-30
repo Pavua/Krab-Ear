@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields as dc_fields, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 import uuid
 
@@ -115,7 +115,7 @@ class HistoryItem:
         """Создаёт новую запись с корректным идентификатором и временем."""
         return cls(
             id=str(uuid.uuid4()),
-            ts=datetime.now().isoformat(timespec="seconds"),
+            ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             text=text,
             paste_status=paste_status,
             source_text=source_text.strip(),
