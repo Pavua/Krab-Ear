@@ -66,6 +66,9 @@ class VGWebSocketClient:
                     ssl=_ssl_arg,
                     open_timeout=_VG_WS_DEFAULT_TIMEOUT_SEC,
                     max_size=_VG_WS_MAX_SIZE,
+                    ping_interval=20,   # W1675 F2: detect dead connections
+                    ping_timeout=20,    # W1675 F2: fail fast on unresponsive peer
+                    close_timeout=5,    # W1675 F6: graceful shutdown ≤5 s
                 ) as ws:
                     logger.info("VG WS connected: %s", self.ws_url)
                     backoff = _RECONNECT_BASE_SEC
