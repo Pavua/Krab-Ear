@@ -542,6 +542,7 @@ class TestWave138RecapScheduler(unittest.TestCase):
             tmpdir = Path(tmp)
             sched, _, _ = _make_scheduler(tmpdir, enabled=True)
             sched.start()
+            self.addCleanup(sched.stop)
             thread_before = sched._thread
             sched.start()
             thread_after = sched._thread
