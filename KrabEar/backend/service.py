@@ -468,6 +468,10 @@ class BackendService:
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
         )
+        # W1677 F1 HIGH: wire late-injection so EventBus.emit() actually records
+        # to the replay ring-buffer. Without this, _event_replay stays None and
+        # get_event_log / get_event_stats / replay_events always return empty.
+        event_bus._event_replay = self._event_replay
         self._webhook_manager = WebhookManager(data_dir=self.store.data_dir)
         self._sharing = SharingManager(store=self.store)
         self._merger = RecordingMerger()

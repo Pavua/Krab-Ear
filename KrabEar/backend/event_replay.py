@@ -83,8 +83,21 @@ class EventReplayManager:
         except Exception:
             return False
 
-    def record_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Записывает событие с текущим timestamp.
+    def record_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        ts: Optional[str] = None,
+    ) -> None:
+        """Записывает событие с указанным или текущим timestamp.
+
+        Args:
+            event_type: тип события (например ``"stt.final"``).
+            data: payload события.
+            ts: ISO 8601 UTC timestamp. Если передан — используется как есть,
+                что позволяет сохранить тот же момент времени, который был
+                вычислен в EventBus.emit() (W1673 F4 LOW). Если ``None`` —
+                берётся текущее время (обратная совместимость).
 
         В режиме конфиденциальности (privacy_mode_enabled=True) вместо
         оригинальных данных сохраняются только метаданные-заглушки, чтобы
@@ -96,7 +109,7 @@ class EventReplayManager:
             event_data = data if isinstance(data, dict) else {}
         entry = {
             "type": event_type,
-            "ts": _utc_now_iso(),
+            "ts": ts if ts is not None else _utc_now_iso(),
             "data": event_data,
         }
         with self._lock:
