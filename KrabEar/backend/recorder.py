@@ -53,6 +53,9 @@ class AudioRecorder:
         self._is_recording = False
         self._started_at: float = 0.0
         self._on_audio_level = on_audio_level
+        # W1670: буфер для аудио, собранного при авто-остановке по max-duration.
+        # Устанавливается воркером при MAX_RECORDING_SAMPLES, очищается в start().
+        self._pending_result: tuple[np.ndarray, float] | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -70,14 +73,25 @@ class AudioRecorder:
             self._stop_event.clear()
             self._is_recording = True
             self._started_at = time.monotonic()
+            self._pending_result = None  # W1670: сброс результата предыдущей авто-остановки
             self._thread = threading.Thread(target=self._worker, daemon=True)
             self._thread.start()
             return True
 
     def stop(self, timeout_sec: float = 3.0, trim_tail_ms: int = 0) -> tuple[np.ndarray, float] | None:
-        """Останавливает запись и возвращает (audio, duration)."""
+        """Останавливает запись и возвращает (audio, duration).
+
+        W1670: если запись уже завершена авто-остановкой по MAX_RECORDING_SAMPLES,
+        возвращает накопленный аудио-буфер из _pending_result вместо None.
+        Это предотвращает потерю до ~880 МБ аудио при превышении лимита длительности.
+        """
         with self._lock:
             if not self._is_recording:
+                # W1670: авто-остановка уже сработала — вернуть сохранённый результат
+                pending = self._pending_result
+                if pending is not None:
+                    self._pending_result = None
+                    return pending
                 return None
             self._is_recording = False
             thread = self._thread
@@ -220,6 +234,14 @@ class AudioRecorder:
                                 extra={"max_samples": MAX_RECORDING_SAMPLES},
                             )
                             _max_duration_exceeded = True
+                            # W1670: собрать накопленные чанки в финальный массив и
+                            # сохранить в _pending_result, пока держим лок.
+                            # Это гарантирует, что stop() вернёт аудио вместо None,
+                            # и немедленно освобождает ~880 МБ из _chunks.
+                            duration = max(0.0, time.monotonic() - self._started_at)
+                            chunks_copy = self._chunks
+                            self._chunks = []
+                            self._chunks_total_samples = 0
                         else:
                             self._chunks.append(data.copy())
                             self._chunks_total_samples += chunk_samples
@@ -228,6 +250,13 @@ class AudioRecorder:
                     # call recorder.is_recording / snapshot_rms (which re-acquire
                     # self._lock). threading.Lock is not re-entrant.
                     if _max_duration_exceeded:
+                        # Assemble audio outside the lock (CPU work, no lock needed).
+                        if chunks_copy:
+                            audio = np.concatenate(chunks_copy, axis=0).reshape(-1).astype(np.float32)
+                        else:
+                            audio = np.array([], dtype=np.float32)
+                        with self._lock:
+                            self._pending_result = (audio, duration)
                         self._push_max_duration_error()
                         break
                     if self._on_audio_level is not None:
