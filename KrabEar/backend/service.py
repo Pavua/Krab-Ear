@@ -2402,11 +2402,19 @@ class BackendService:
         }
 
     def _handle_get_metrics_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Снимок метрик реального времени: сессия, LLM, call_assist, конфиг."""
+        """Снимок метрик реального времени: сессия, LLM, call_assist, конфиг, MetricsCollector."""
+        from backend.metrics_collector import metrics as _metrics_collector
         settings = self._cached_settings()
 
         # Active session info
         preview_active = self._recording_core_svc.preview_thread_alive
+
+        # W1685 F3: include MetricsCollector snapshot (latency percentiles + confidence).
+        # get_summary() is thread-safe and returns "waiting_data" status when empty.
+        try:
+            metrics_snapshot = _metrics_collector.get_summary()
+        except Exception:
+            metrics_snapshot = {"status": "unavailable", "total_requests": 0}
 
         return {
             "session": {
@@ -2436,6 +2444,7 @@ class BackendService:
                 "diarization": settings.get("diarization_enabled", False),
                 "network_mode": settings.get("network_mode", "offline_default"),
             },
+            "metrics": metrics_snapshot,
         }
 
     def _handle_list_llm_models(self, params: dict[str, Any]) -> dict[str, Any]:
