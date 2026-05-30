@@ -112,7 +112,6 @@ from backend.shutdown_handler import GracefulShutdownHandler
 from backend.auto_backup import AutoBackupManager, AUTO_BACKUP_INTERVAL_HOURS, AUTO_BACKUP_MAX_COPIES
 from backend.email_sender import EmailSender
 from backend.recap_scheduler import RecapScheduler
-from backend.performance_profiler import profiler as performance_profiler
 from backend.paste_app_memory import PasteAppMemory
 from backend.telegram_bridge import CircuitBreakerOpen, TelegramBridge
 from backend.disk_monitor import DiskSpaceMonitor
@@ -137,7 +136,6 @@ import re
 import signal
 import socket
 import subprocess
-import platform
 import sys
 import threading
 import time
@@ -611,6 +609,28 @@ class BackendService:
         # actually fires instead of silently returning.  _error_bus is guaranteed
         # to exist here — it was initialised ~280 lines above.
         self._startup_diagnostics._error_bus = self._error_bus
+
+        # W1690 (W1686 F9 HIGH): wire HealthCheckService — extraction was done but
+        # delegation was never completed (W746-class lesson).  All 7 IPC health handlers
+        # now delegate to this service; inline duplicates replaced by single-line stubs.
+        from backend.health_check_service import HealthCheckService
+        from backend.metrics_collector import metrics as _metrics_singleton
+        self._health_check_svc = HealthCheckService(
+            store=self.store,
+            health_checker=self._health_checker,
+            startup_diagnostics=self._startup_diagnostics,
+            integrity_checker=self._integrity_checker,
+            llm_probe=self._llm_probe,
+            metrics_collector=_metrics_singleton,
+            transcriber=self.transcriber,
+            llm_rewriter=self._llm_rewriter,
+            settings_svc=self._settings_svc,
+            start_time=self._start_time,
+            app_version=APP_VERSION,
+            recorder=self.recorder,
+            last_stt_engine_ref=self._last_stt_engine_ref,
+        )
+
         logger.info("Krab Ear backend version %s starting up", APP_VERSION)
         try:
             _startup_report = self._startup_diagnostics.run_all_checks()
@@ -1530,18 +1550,8 @@ class BackendService:
         )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-        return {
-            "status": "ok",
-            "service": "krabear-backend",
-            "version": APP_VERSION,
-            "uptime_sec": round(time.monotonic() - self._start_time, 1),
-            "is_recording": bool(getattr(self.recorder, "is_recording", False)),
-            "history_count": history_count,
-        }
+        """Делегирует к HealthCheckService.handle_ping (W1690)."""
+        return self._health_check_svc.handle_ping(params)
 
     def _handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._recording_core_svc.handle_start_recording(params)
@@ -1866,61 +1876,12 @@ class BackendService:
         return {"ok": True, "terms": terms, "count": len(terms), "refreshed": True}
 
     def _handle_get_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает комплексную диагностику: системная информация, STT, LLM, история и кэш настроек."""
-        try:
-            diarization_device = str(self.transcriber.engine._resolve_diarization_device())
-        except Exception:
-            diarization_device = "unknown"
-
-        try:
-            history_count = self.store.count_active_items()
-        except Exception:
-            history_count = -1
-
-        # Агрегированный отчёт профайлера по всем отслеживаемым span'ам (STT/translate/LLM).
-        try:
-            profiler_report = performance_profiler.get_profile_report()
-        except Exception as exc:
-            logger = logging.getLogger("KrabEar.Backend.Service")
-            logger.warning("Не удалось получить отчёт профайлера: %s", exc)
-            profiler_report = {
-                "methods": {},
-                "slowest_methods": [],
-                "total_profiled_time_sec": 0.0,
-                "error": str(exc),
-            }
-
-        return {
-            "system": {
-                "python_version": sys.version,
-                "platform": platform.platform(),
-                "uptime_sec": time.monotonic() - self._start_time,
-            },
-            "stt": {
-                "model_balanced": settings.MODEL_BALANCED,
-                "model_max": settings.MODEL_MAX_CANDIDATES,
-                "quality_profile": self.transcriber.engine.quality_profile,
-                "current_model": self.transcriber.engine.current_model,
-                "diarization_enabled": settings.DIARIZATION_ENABLED,
-                "diarization_device": diarization_device,
-                "last_engine": self._last_stt_engine_ref[0],
-            },
-            "llm": self._llm_rewriter.status() if self._llm_rewriter else {"enabled": False},
-            "history": {
-                "total_items": history_count,
-                "data_dir": str(self.store.data_dir),
-                "transcripts_dir": str(Path(self.store.data_dir) / "transcripts"),
-            },
-            "settings_cache": {
-                "ttl_sec": self._settings_svc._cache_ttl,
-                "cached": self._settings_svc._cache is not None,
-            },
-            "profiler": profiler_report,
-        }
+        """Делегирует к HealthCheckService.handle_get_diagnostics (W1690)."""
+        return self._health_check_svc.handle_get_diagnostics(params)
 
     def _handle_health_check(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Агрегированный health check всех ключевых подсистем бэкенда."""
-        return self._health_checker.check_all()
+        """Делегирует к HealthCheckService.handle_health_check (W1690)."""
+        return self._health_check_svc.handle_health_check(params)
 
     # ------------------------------------------------------------------
     # Phase B.1 — error bus + LLM probe handlers
@@ -2085,32 +2046,8 @@ class BackendService:
         return {"ok": True}
 
     def _handle_handshake(self, params: dict) -> dict:
-        """Swift→backend handshake on connect.
-
-        Verifies version compatibility and returns backend metadata.
-        Swift sends this once immediately after establishing a connection.
-
-        Params:
-            swift_agent_version (str): Swift agent bundle version, e.g. "1.0.0"
-            capabilities (list[str]): declared Swift capabilities,
-                e.g. ["error_bus_consumer", "live_subs", "selection_translator"]
-        """
-        swift_version = params.get("swift_agent_version", "unknown")
-        swift_capabilities = params.get("capabilities", [])
-        logger.info(
-            "IPC handshake: swift_version=%s capabilities=%s",
-            swift_version, swift_capabilities,
-        )
-        # Collect registered method names for capability negotiation.
-        # We can't reference _dispatch (local variable) here, so enumerate
-        # a representative stable subset for phase compatibility checks.
-        return {
-            "ok": True,
-            "backend_version": "1.0.0",
-            "phase_b_capable": True,   # has list_recent_errors, report_paste_failure, etc.
-            "phase_c_capable": True,   # has handshake, report_reconnect
-            "swift_version_ack": swift_version,
-        }
+        """Делегирует к HealthCheckService.handle_handshake (W1690)."""
+        return self._health_check_svc.handle_handshake(params)
 
     def _handle_report_reconnect(self, params: dict) -> dict:
         """Swift→backend reconnect telemetry.
@@ -2249,15 +2186,8 @@ class BackendService:
             logger.debug("binary_drift_check OK: UUIDs match (%s)", bundle_uuid)
 
     def _handle_probe_llm_http(self, params: dict) -> dict:
-        """Однократный ping LM Studio HTTP endpoint. Возвращает reachable, latency_ms, model."""
-        if self._llm_rewriter is None:
-            return {"reachable": False, "latency_ms": 0, "model": None}
-        ok = self._llm_rewriter.warmup()
-        return {
-            "reachable": bool(ok),
-            "latency_ms": getattr(self._llm_rewriter, "_last_latency_ms", 0) or 0,
-            "model": getattr(self._llm_rewriter, "_model", None),
-        }
+        """Делегирует к HealthCheckService.handle_probe_llm_http (W1690)."""
+        return self._health_check_svc.handle_probe_llm_http(params)
 
     def _handle_warmup_stt(self, params: dict) -> dict:
         """Ручной запуск STT warmup — полезен после смены профиля или модели.
@@ -2313,9 +2243,8 @@ class BackendService:
         return self._shutdown_handler.get_shutdown_status()
 
     def _handle_get_startup_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает результаты диагностики при старте бэкенда."""
-        report = self._startup_diagnostics.run_all_checks()
-        return report.to_dict()
+        """Делегирует к HealthCheckService.handle_get_startup_diagnostics (W1690)."""
+        return self._health_check_svc.handle_get_startup_diagnostics(params)
 
     def _handle_get_throttle_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает статистику IPC throttle.
@@ -3156,23 +3085,8 @@ class BackendService:
         return _comparison_view_to_dict(view)
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Проверяет целостность файлов данных Krab Ear."""
-        report = self._integrity_checker.check_integrity(self.store.data_dir)
-        return {
-            "status": report.status,
-            "total_items": report.total_items,
-            "orphaned_tombstones": report.orphaned_tombstones,
-            "invalid_json_lines": report.invalid_json_lines,
-            "checks": [
-                {
-                    "name": c.name,
-                    "status": c.status,
-                    "message": c.message,
-                    "auto_fixable": c.auto_fixable,
-                }
-                for c in report.checks
-            ],
-        }
+        """Делегирует к HealthCheckService.handle_check_integrity (W1690)."""
+        return self._health_check_svc.handle_check_integrity(params)
 
     def _handle_repair_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Исправляет автоматически устраняемые проблемы целостности данных."""
