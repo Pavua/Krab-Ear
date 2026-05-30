@@ -24,15 +24,54 @@ EAR_URL = os.getenv("EAR_URL", "http://127.0.0.1:5005")
 
 
 def _services_available() -> bool:
-    try:
-        if requests:
-            vg_ok = requests.get(f"{VG_URL}/health", timeout=2).ok
-            ear_ok = requests.get(f"{EAR_URL}/health", timeout=2).ok
-        else:
+    """Return True only when both services are up AND reachable with valid auth.
+
+    A 401/403 response means the service is running but we lack credentials —
+    for E2E purposes that is "not available" (tests would fail, not test anything
+    useful). ConnectionError / timeout also yields False (service is down).
+    Only 2xx responses on all probes are treated as "available".
+    """
+    _AUTH_FAIL = {401, 403}
+
+    def _status(url: str) -> int:
+        """Return HTTP status code, or 0 on connection/timeout error."""
+        try:
+            if requests:
+                return requests.get(url, timeout=2).status_code
             import urllib.request
-            vg_ok = urllib.request.urlopen(f"{VG_URL}/health", timeout=2).status == 200
-            ear_ok = urllib.request.urlopen(f"{EAR_URL}/health", timeout=2).status == 200
-        return vg_ok and ear_ok
+            try:
+                return urllib.request.urlopen(url, timeout=2).status
+            except Exception as exc:
+                # urllib raises HTTPError (a subclass of URLError) for 4xx/5xx
+                code = getattr(exc, "code", None)
+                return int(code) if code is not None else 0
+        except Exception:
+            return 0
+
+    try:
+        vg_status = _status(f"{VG_URL}/health")
+        ear_status = _status(f"{EAR_URL}/health")
+
+        # Service down or auth-blocked → skip
+        if vg_status in _AUTH_FAIL or ear_status in _AUTH_FAIL:
+            return False
+        if not (200 <= vg_status < 300 and 200 <= ear_status < 300):
+            return False
+
+        # Health endpoints may not require auth; probe a privileged VG endpoint
+        # to confirm we can actually perform authenticated calls.
+        if requests:
+            probe = requests.post(
+                f"{VG_URL}/v1/sessions",
+                json={},
+                timeout=2,
+            )
+            if probe.status_code in _AUTH_FAIL:
+                return False
+        # If requests not available, skip the privileged probe — we cannot
+        # meaningfully run the tests without it anyway, and the urllib path
+        # already handles 4xx via the code attribute above.
+        return True
     except Exception:
         return False
 
