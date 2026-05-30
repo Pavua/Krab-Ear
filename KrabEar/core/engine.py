@@ -503,8 +503,14 @@ class AudioEngine:
             return {"loaded": False, "latency_ms": latency_ms, "model_name": model_name, "error": str(exc)}
 
     def _llm_rewrite_allowed(self) -> bool:
-        """Runtime check: включён ли LLM rewriter И user runtime toggle."""
+        """Runtime check: включён ли LLM rewriter И user runtime toggle.
+
+        Returns False when privacy_mode_enabled=True to prevent sending text
+        to an external LLM service (W1229 F3 MED fix).
+        """
         if self._llm_rewriter is None:
+            return False
+        if self._settings_get("privacy_mode_enabled", False):
             return False
         return bool(self._settings_get("llm_rewrite_enabled", False))
 

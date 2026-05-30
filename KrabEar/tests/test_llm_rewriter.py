@@ -468,12 +468,13 @@ class LLMRewriterPingTestCase(unittest.TestCase):
         self.assertFalse(self.rewriter.ping())
 
     def test_ping_uses_models_endpoint(self):
+        # LM Studio exposes models at /api/v1/models (not /v1/models) — Wave 826 / PR #396 fix.
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         self.rewriter._session.get = MagicMock(return_value=mock_resp)
         self.rewriter.ping()
         args, _ = self.rewriter._session.get.call_args
-        self.assertEqual(args[0], "http://localhost:1234/v1/models")
+        self.assertEqual(args[0], "http://localhost:1234/api/v1/models")
 
 
 class LLMRewriterStatusTestCase(unittest.TestCase):

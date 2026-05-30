@@ -1471,8 +1471,8 @@ class BackendService:
             "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
             # --- CalendarLinker — auto-link transcriptions to Calendar.app events (W942 MEDIUM-1) ---
             "link_to_calendar_event": self._handle_link_to_calendar_event,  # явно связать запись с текущим событием Calendar
-            "get_calendar_link": self._handle_get_calendar_link_v2,  # получить привязанное событие Calendar для записи
-            "search_by_calendar_event": self._handle_search_by_calendar_event_v2,  # поиск записей по названию события Calendar
+            "get_calendar_link": self._handle_get_calendar_link,  # получить привязанное событие Calendar для записи
+            "search_by_calendar_event": self._handle_search_by_calendar_event,  # поиск записей по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
             "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
             "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
@@ -1487,6 +1487,7 @@ class BackendService:
             "add_stt_hotword": self._stt_mgmt_svc.handle_add_stt_hotword,  # добавить термин в STT hotwords список
             "remove_stt_hotword": self._stt_mgmt_svc.handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
             "list_stt_hotwords": self._stt_mgmt_svc.handle_list_stt_hotwords,  # получить весь список STT hotwords
+            "clear_unavailable_models": self._handle_clear_unavailable_models,  # W1304: сбросить TTL blacklist недоступных STT-моделей
             # --- Recording bookmarks (Cmd+Shift+B) ---
             "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
             "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
@@ -3714,7 +3715,7 @@ end tell'''
         )
         return {"ok": True, "calendar_event": event, "skipped": False, "reason": None}
 
-    def _handle_get_calendar_link_v2(self, params: dict) -> dict:
+    def _handle_get_calendar_link(self, params: dict) -> dict:
         """Возвращает сохранённое событие Calendar для записи или None.
 
         params:
@@ -3722,9 +3723,6 @@ end tell'''
 
         Returns:
           {"ok": bool, "calendar_event": dict | None}
-
-        Note: метод назван _v2 чтобы не конфликтовать с _handle_get_calendar_link,
-        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "get_calendar_link".
         """
         item_id = str(params.get("history_item_id", "")).strip()
         if not item_id:
@@ -3739,7 +3737,7 @@ end tell'''
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "calendar_event": event}
 
-    def _handle_search_by_calendar_event_v2(self, params: dict) -> dict:
+    def _handle_search_by_calendar_event(self, params: dict) -> dict:
         """Ищет записи, связанные с событием Calendar по подстроке в названии.
 
         params:
@@ -3747,9 +3745,6 @@ end tell'''
 
         Returns:
           {"ok": bool, "results": [{"item_id": str, "calendar_event": dict}, ...]}
-
-        Note: метод назван _v2 чтобы не конфликтовать с _handle_search_by_calendar_event,
-        удалённым в Wave 65 batch 3 (PR #418). IPC-ключ — "search_by_calendar_event".
         """
         event_title = str(params.get("event_title", ""))
         try:
@@ -4598,9 +4593,15 @@ def configure_logging(data_dir: Path) -> None:
     else:
         formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
+    from logging.handlers import RotatingFileHandler as _RotatingFileHandler  # noqa: PLC0415
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path, encoding="utf-8"),
+        _RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,  # 5 MB — wave687 log rotation
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ]
     for h in handlers:
         h.setFormatter(formatter)

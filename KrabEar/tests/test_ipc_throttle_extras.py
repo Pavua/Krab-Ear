@@ -41,8 +41,10 @@ class TestHeavyMethodsThrottleAggressively(unittest.TestCase):
         self.assertEqual(_LIMITS["heavy"], 5)
 
     def test_heavy_methods_blocked_after_five(self):
+        # transcribe_paths was removed from HEAVY_METHODS in Wave 65 batch 5
+        # (Swift migrated to transcribe_paths_async).  Use export_history instead.
         throttle = IPCThrottle()
-        method = "transcribe_paths"
+        method = "export_history"
         results = [throttle.check_rate(method) for _ in range(7)]
         allowed = sum(results)
         blocked = results.count(False)
@@ -52,12 +54,12 @@ class TestHeavyMethodsThrottleAggressively(unittest.TestCase):
     def test_all_heavy_methods_share_category_but_independent_buckets(self):
         """Каждый heavy-метод имеет независимый бакет; исчерпание одного не влияет на другой."""
         throttle = IPCThrottle()
-        # Исчерпать transcribe_paths
+        # Исчерпать export_history bucket
         for _ in range(5):
-            throttle.check_rate("transcribe_paths")
-        self.assertFalse(throttle.check_rate("transcribe_paths"))
-        # export_history имеет отдельный бакет — первый вызов разрешён
-        self.assertTrue(throttle.check_rate("export_history"))
+            throttle.check_rate("export_history")
+        self.assertFalse(throttle.check_rate("export_history"))
+        # summarize_text имеет отдельный бакет — первый вызов разрешён
+        self.assertTrue(throttle.check_rate("summarize_text"))
 
 
 class TestMediumMethodsThrottleModerately(unittest.TestCase):
@@ -160,9 +162,10 @@ class TestBurstExceedsCapacityBlocked(unittest.TestCase):
     """Burst сверх capacity — ровно capacity разрешено, остальные заблокированы."""
 
     def test_burst_over_capacity_exact_count(self):
+        # transcribe_paths removed from HEAVY_METHODS in Wave 65 batch 5; use export_history.
         cap = 7
         throttle = IPCThrottle(limits={"heavy": cap, "medium": 30, "light": 120})
-        results = [throttle.check_rate("transcribe_paths") for _ in range(cap + 5)]
+        results = [throttle.check_rate("export_history") for _ in range(cap + 5)]
         self.assertEqual(sum(results), cap)
         self.assertEqual(results.count(False), 5)
 
@@ -177,6 +180,7 @@ class TestConcurrentRequestsSerializeCorrectly(unittest.TestCase):
     """Параллельные запросы: allowed + throttled == total; allowed <= capacity."""
 
     def test_concurrent_heavy_total_consistency(self):
+        # transcribe_paths removed from HEAVY_METHODS in Wave 65 batch 5; use export_history.
         cap = 8
         throttle = IPCThrottle(limits={"heavy": cap, "medium": 30, "light": 120})
         allowed_count = []
@@ -184,7 +188,7 @@ class TestConcurrentRequestsSerializeCorrectly(unittest.TestCase):
 
         def worker():
             for _ in range(5):
-                result = throttle.check_rate("transcribe_paths")
+                result = throttle.check_rate("export_history")
                 with lock:
                     allowed_count.append(result)
 
@@ -200,11 +204,12 @@ class TestConcurrentRequestsSerializeCorrectly(unittest.TestCase):
         self.assertLessEqual(allowed, cap, f"Allowed ({allowed}) must not exceed capacity ({cap})")
 
     def test_concurrent_stats_consistent(self):
+        # transcribe_paths removed from HEAVY_METHODS in Wave 65 batch 5; use export_history.
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 120})
 
         def burst():
             for _ in range(10):
-                throttle.check_rate("transcribe_paths")
+                throttle.check_rate("export_history")
 
         threads = [threading.Thread(target=burst) for _ in range(5)]
         for t in threads:
@@ -215,7 +220,7 @@ class TestConcurrentRequestsSerializeCorrectly(unittest.TestCase):
         stats = throttle.get_throttle_stats()
         total_calls = stats["total_calls"]
         total_throttled = stats["total_throttled"]
-        method_calls = stats["methods"]["transcribe_paths"]["calls"]
+        method_calls = stats["methods"]["export_history"]["calls"]
 
         self.assertEqual(total_calls, 50)
         self.assertEqual(method_calls, 50)
@@ -238,14 +243,15 @@ class TestResetClearsBuckets(unittest.TestCase):
 
     def test_reset_stats_does_not_clear_buckets_refill(self):
         """После сброса статистики бакеты ещё существуют, новые вызовы продолжают работать."""
+        # transcribe_paths removed from HEAVY_METHODS in Wave 65 batch 5; use export_history.
         throttle = IPCThrottle(limits={"heavy": 5, "medium": 30, "light": 120})
         # Исчерпать heavy bucket
         for _ in range(5):
-            throttle.check_rate("transcribe_paths")
+            throttle.check_rate("export_history")
         # Сброс статистики
         throttle.reset_stats()
         # Бакет НЕ сбрасывается — следующий вызов должен быть заблокирован
-        self.assertFalse(throttle.check_rate("transcribe_paths"),
+        self.assertFalse(throttle.check_rate("export_history"),
                          "Bucket should still be empty after reset_stats")
 
     def test_reset_stats_multiple_times_is_idempotent(self):

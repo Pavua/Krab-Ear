@@ -52,6 +52,7 @@ class JsonFormatter(logging.Formatter):
 
 def configure_logging(data_dir: Path) -> None:
     """Настраивает логирование backend в файл и stdout."""
+    from logging.handlers import RotatingFileHandler as _RotatingFileHandler  # noqa: PLC0415
     data_dir.mkdir(parents=True, exist_ok=True)
     log_path = data_dir / "backend.log"
 
@@ -62,7 +63,12 @@ def configure_logging(data_dir: Path) -> None:
 
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_path, encoding="utf-8"),
+        _RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,  # 5 MB — wave687 log rotation
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ]
     for h in handlers:
         h.setFormatter(formatter)

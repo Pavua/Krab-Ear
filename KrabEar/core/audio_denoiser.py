@@ -38,11 +38,13 @@ _STRENGTH_PARAMS: dict[str, dict] = {
 }
 
 # W1322: параметры noisereduce бэкенда по уровням силы.
-# strong-mode включает min_attenuation_db=-12.0 — floor не даёт уничтожить тихую речь.
+# prop_decrease ограничен speech-band floor (W1311 F3):
+# В отличие от spectral gating, noisereduce применяет prop_decrease глобально
+# ко всему спектру — более агрессивно, поэтому значения ниже, чем в _STRENGTH_PARAMS.
 _NOISEREDUCE_PARAMS: dict[str, dict] = {
-    "light":    {"prop_decrease": 0.5,  "stationary": True,  "freq_mask_smooth_hz": 500},
-    "moderate": {"prop_decrease": 0.75, "stationary": True,  "freq_mask_smooth_hz": 500},
-    "strong":   {"prop_decrease": 0.95, "stationary": False, "freq_mask_smooth_hz": 250, "min_attenuation_db": -12.0},  # W1322: floor at -12dB
+    "light":    {"prop_decrease": 0.50, "n_std_thresh_stationary": 1.0},
+    "moderate": {"prop_decrease": 0.85, "n_std_thresh_stationary": 1.5},
+    "strong":   {"prop_decrease": 0.75, "n_std_thresh_stationary": 2.0},
 }
 
 # Количество семплов для оценки noise floor (первые ~200 мс @ 16 кГц)

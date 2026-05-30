@@ -83,14 +83,13 @@ _SENSITIVE_METHODS = frozenset({
     "create_calendar_event",             # params: title, start_time, end_time, notes
     "call_session_create",               # params: phone_number (phone PII)
     "call_session_add_transcript",       # params: text (call transcript)
-    # --- E/F: webhook URLs и аутентификация (могут содержать API-токены/secrets) ---
+    # --- E/F: webhook URLs ---
     "register_webhook",                  # params: url (может быть webhook secret URL)
-    "set_webhook_secret",                # params: secret (HMAC-secret для webhook)
-    "set_rest_auth_token",               # params: Bearer-токен
-    "enable_rest_auth",                  # активирует auth с токеном
-    "disable_rest_auth",                 # деактивирует auth
-    "set_signing_secret",                # params: HMAC-secret для IPC-подписи
-    "configure_request_signing",         # params: signing config с секретами
+    # NOTE: set_webhook_secret / set_rest_auth_token / enable_rest_auth /
+    # disable_rest_auth / set_signing_secret / configure_request_signing
+    # were preemptively listed here but these IPC methods were never wired into
+    # the dispatch table (removed in Wave 65 cleanup). Remove stale entries to
+    # keep this frozenset consistent with the actual dispatch.
 })
 
 _KEEP_DAYS = 7
