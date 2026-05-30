@@ -210,7 +210,10 @@ CONFIRMED_BUGS: list[dict[str, Any]] = [
             "ArchiveManager(store=self.store, "
             "semantic_searcher=self._semantic_searcher)"
         ),
-        "_constructor_absent_kwarg": ("ArchiveManager(", "semantic_searcher"),
+        # W1687: _semantic_searcher is created AFTER _archive_manager in __init__,
+        # so a constructor kwarg is impossible — late-inject is the only option.
+        # Scanner updated to use _literal_absent for the late-inject assignment.
+        "_literal_absent": "_archive_manager._semantic_searcher",
         "_check_file": "backend/service.py",
     },
 ]
