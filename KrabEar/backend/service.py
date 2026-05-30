@@ -321,6 +321,12 @@ class BackendService:
         # Wire error_bus into transcriber for diarization.no_token and related push
         if self.transcriber is not None:
             self.transcriber._error_bus = self._error_bus
+            # W1688 (W1686 F4 fix): also wire into the underlying AudioEngine so
+            # _transcribe_gigaam() can forward it to GigaAMAdapter / subprocess session.
+            # Without this, engine._error_bus stays None and GigaAM worker
+            # timeout/crash errors disappear silently.
+            if getattr(self.transcriber, "engine", None) is not None:
+                self.transcriber.engine._error_bus = self._error_bus
 
         # Wire error_bus into recorder so audio.max_duration_reached /
         # audio.buffer_overflow errors are forwarded to the error bus (W1652 F1 fix).

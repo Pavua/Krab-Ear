@@ -439,5 +439,108 @@ class TestRealSubprocessSmoke(unittest.TestCase):
                 proc.wait(timeout=1.0)
 
 
+# ---------------------------------------------------------------------------
+# W1688 — Test _error_bus propagation (W1686 F4 fix)
+# ---------------------------------------------------------------------------
+
+class TestGigaAMSessionReceivesErrorBus(unittest.TestCase):
+    """W1688: GigaAMAdapter must propagate _error_bus to each spawned session.
+
+    Before the fix, _GigaAMSubprocessSession._error_bus was always None because
+    _get_subprocess_session() never forwarded adapter._error_bus.  Worker
+    timeout/crash errors silently disappeared without reaching the Loud Errors toast.
+    """
+
+    def test_gigaam_session_receives_error_bus(self):
+        """After adapter._error_bus is set, a newly spawned session inherits it."""
+        from core.pipeline.stt_gigaam import GigaAMAdapter
+
+        fake_popen = _FakePopen([_ok_load_response()])
+        fake_error_bus = MagicMock()
+
+        adapter = GigaAMAdapter(
+            device="cpu",
+            mode="rnnt",
+            transport="subprocess",
+            venv_python_path="/usr/bin/python3",
+        )
+        adapter._error_bus = fake_error_bus  # late-inject, as service.py does
+
+        with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
+            with patch("core.pipeline.stt_gigaam.os.path.exists", return_value=True):
+                session = adapter._get_subprocess_session()
+
+        self.assertIs(session._error_bus, fake_error_bus,
+                      "_GigaAMSubprocessSession._error_bus must equal adapter._error_bus")
+
+    def test_error_bus_none_if_adapter_has_no_bus(self):
+        """If adapter._error_bus is None (not yet wired), session also gets None (default)."""
+        from core.pipeline.stt_gigaam import GigaAMAdapter
+
+        fake_popen = _FakePopen([_ok_load_response()])
+
+        adapter = GigaAMAdapter(
+            device="cpu",
+            mode="rnnt",
+            transport="subprocess",
+            venv_python_path="/usr/bin/python3",
+        )
+        # adapter._error_bus == None by default
+
+        with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
+            with patch("core.pipeline.stt_gigaam.os.path.exists", return_value=True):
+                session = adapter._get_subprocess_session()
+
+        self.assertIsNone(session._error_bus,
+                          "Session _error_bus should be None when adapter has no bus")
+
+
+class TestGigaAMWorkerTimeoutPushesError(unittest.TestCase):
+    """W1688: worker timeout must call error_bus.push with stt.gigaam_worker_timeout."""
+
+    def test_gigaam_worker_timeout_pushes_error(self):
+        """_timeout_kill pushes stt.gigaam_worker_timeout to a wired error_bus."""
+        from core.pipeline.stt_gigaam import _GigaAMSubprocessSession
+
+        fake_popen = _FakePopen([_ok_load_response()])
+        fake_error_bus = MagicMock()
+
+        with patch("core.pipeline.stt_gigaam.subprocess.Popen", return_value=fake_popen):
+            sess = _GigaAMSubprocessSession("/fake/py", "/fake/w.py", "rnnt", "cpu")
+            sess.start()
+
+        # Late-inject error_bus (as GigaAMAdapter does after W1688 fix)
+        sess._error_bus = fake_error_bus
+
+        # Stub out the error_bus imports so push receives a real KrabError-like call
+        # without needing the full backend installed.
+        class _FakeKrabError:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        with patch("core.pipeline.stt_gigaam.threading.Timer"):
+            with patch.dict("sys.modules", {
+                "backend.error_bus": MagicMock(KrabError=_FakeKrabError),
+                "backend.error_codes": MagicMock(ERROR_REGISTRY={
+                    "stt.gigaam_worker_timeout": {
+                        "severity": "error",
+                        "user_msg_ru": "GigaAM timeout",
+                        "actionable": False,
+                        "action_id": None,
+                    },
+                }),
+            }):
+                # Manually invoke _timeout_kill — simulates a worker timeout.
+                sess._timeout_kill()
+
+        # error_bus.push must have been called once with a timeout error.
+        self.assertTrue(fake_error_bus.push.called,
+                        "error_bus.push must be called on worker timeout")
+        pushed_obj = fake_error_bus.push.call_args[0][0]
+        # The pushed error must be for stt.gigaam_worker_timeout.
+        self.assertIn("gigaam_worker_timeout", getattr(pushed_obj, "code", ""),
+                      f"Unexpected error code: {getattr(pushed_obj, 'code', None)}")
+
+
 if __name__ == "__main__":
     unittest.main()
