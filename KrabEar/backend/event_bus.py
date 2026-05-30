@@ -97,6 +97,28 @@ class EventBus:
         with self._lock:
             return len(self._subscribers)
 
+    def broadcast_shutdown_sentinel(self) -> int:
+        """Рассылает сигнал завершения (None) всем активным подписчикам.
+
+        Вызывается из GracefulShutdownHandler.shutdown() чтобы SSE/WS-клиенты
+        немедленно закрыли соединение вместо ожидания poll-таймаута (до 15 с).
+
+        Returns:
+            Количество подписчиков, которым был отправлен сигнал.
+        """
+        with self._lock:
+            active = list(self._subscribers)
+        sent = 0
+        for q in active:
+            try:
+                q.put_nowait(None)
+                sent += 1
+            except queue.Full:
+                pass
+        if sent:
+            logger.debug("EventBus: sentinel разослан %d подписчику(-ам)", sent)
+        return sent
+
 
 def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
     """Генератор Server-Sent Events для одного HTTP-клиента.

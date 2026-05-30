@@ -158,7 +158,16 @@ class GracefulShutdownHandler:
             errors.append(f"event_replay: {exc}")
             logger.exception("Ошибка закрытия EventReplayManager при завершении")
 
-        # 7. Закрываем IPC-сокет
+        # 7. Рассылаем sentinel активным SSE/WS-подписчикам — они завершаются сразу
+        #    вместо ожидания poll-таймаута (до 15 с). F3 W1673.
+        try:
+            self._broadcast_event_bus_sentinel(service)
+        except Exception as exc:
+            clean = False
+            errors.append(f"event_bus_sentinel: {exc}")
+            logger.exception("Ошибка рассылки sentinel в EventBus при завершении")
+
+        # 8. Закрываем IPC-сокет
         try:
             self._close_socket(service)
         except Exception as exc:
@@ -166,7 +175,7 @@ class GracefulShutdownHandler:
             errors.append(f"socket: {exc}")
             logger.exception("Ошибка закрытия IPC-сокета при завершении")
 
-        # 7. Сбрасываем накопленные warn-tier батчи в Sentry (ErrorBus.flush_all)
+        # 9. Сбрасываем накопленные warn-tier батчи в Sentry (ErrorBus.flush_all)
         try:
             self._close_error_bus()
         except Exception as exc:
@@ -279,6 +288,30 @@ class GracefulShutdownHandler:
         if callable(close):
             close()
             logger.debug("EventReplayManager закрыт")
+
+    def _broadcast_event_bus_sentinel(self, service: Any) -> None:
+        """Рассылает None-сентинель всем подписчикам EventBus для немедленного закрытия SSE/WS.
+
+        Использует ``event_bus._subscribers`` напрямую через ``broadcast_shutdown_sentinel()``,
+        если метод доступен. Безопасен при отсутствии event_bus на сервисе.
+        """
+        # Try to get event_bus from service attributes first; fall back to global singleton.
+        eb = getattr(service, "_event_bus", None) or getattr(service, "event_bus", None)
+        if eb is None:
+            # Fall back to the module-level singleton used everywhere else.
+            try:
+                import backend.event_bus as _eb_mod
+                eb = _eb_mod.bus
+            except Exception:
+                logger.debug("EventBus sentinel: не удалось импортировать global bus")
+                return
+        broadcast = getattr(eb, "broadcast_shutdown_sentinel", None)
+        if callable(broadcast):
+            sent = broadcast()
+            if sent:
+                logger.info("EventBus sentinel разослан %d подписчику(-ам) при завершении", sent)
+            else:
+                logger.debug("EventBus sentinel: нет активных подписчиков при завершении")
 
     def _close_socket(self, service: Any) -> None:
         """Останавливает IPC-сервер (если зарегистрирован)."""
