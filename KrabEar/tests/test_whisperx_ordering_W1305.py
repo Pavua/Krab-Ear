@@ -21,19 +21,32 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.engine import AudioEngine
 
+
 class _SyncFuture:
     def __init__(self, fn):
-        try: self._r, self._e = fn(), None
-        except BaseException as e: self._r, self._e = None, e
+        try:
+            self._r, self._e = fn(), None
+        except BaseException as e:
+            self._r, self._e = None, e
+
     def result(self, timeout=None):
-        if self._e: raise self._e
+        if self._e:
+            raise self._e
         return self._r
-    def cancel(self): pass
+
+    def cancel(self):
+        pass
+
 
 class _SyncExecutor:
-    def __init__(self, *a, **kw): pass
-    def submit(self, fn, *a, **kw): return _SyncFuture(fn)
-    def shutdown(self, wait=True, **kw): pass
+    def __init__(self, *a, **kw):
+        pass
+
+    def submit(self, fn, *a, **kw):
+        return _SyncFuture(fn)
+
+    def shutdown(self, wait=True, **kw):
+        pass
 
 # ---------------------------------------------------------------------------
 # Helpers
