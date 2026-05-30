@@ -28,7 +28,11 @@ from typing import Any
 
 logger = logging.getLogger("backend.job_tracker")
 
-_PRUNE_CANCEL_EVENT_TTL = 3600.0  # 1 hour — cancel events stuck longer than this get evicted
+# Время (в секундах), на которое cancel_event остаётся доступным после
+# того, как основная запись удалена из _jobs при prune().
+# Даёт воркеру возможность заметить отмену и завершить итерацию.
+# W1182 F2 — zombie MLX worker fix.
+_PRUNE_CANCEL_EVENT_TTL: float = 2.0
 
 
 class JobTracker:
@@ -37,7 +41,8 @@ class JobTracker:
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._cancel_events: dict[str, threading.Event] = {}
-        self._cancel_events_ts: dict[str, float] = {}  # monotonic timestamp when cancel was set
+        # Время eviction для отслеживания grace-period cleanup (W1182 F2).
+        self._evict_times: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def create_job(self, total_files: int) -> str:
@@ -146,7 +151,6 @@ class JobTracker:
             if job.get("status") in ("done", "failed", "cancelled"):
                 return False
             job["cancel_requested"] = True
-            self._cancel_events_ts[job_id] = time.monotonic()
             event = self._cancel_events.get(job_id)
         # Устанавливаем event вне блокировки — Event.set() потокобезопасен.
         if event is not None:
@@ -167,53 +171,71 @@ class JobTracker:
     def prune(
         self,
         max_age_sec: float = 3600,
-        max_running_age_sec: float | None = None,
+        max_running_age_sec: float | None = 7200.0,
     ) -> int:
         """Удаляет давно завершённые задачи (done/failed/cancelled старше max_age_sec).
 
-        Также удаляет задачи в статусе 'running', у которых started_at старше
-        max_running_age_sec (по умолчанию None = не удалять). Это защищает от
-        зависших воркеров, которые никогда не перейдут в терминальный статус.
+        Args:
+            max_age_sec: максимальный возраст (с) для terminal-задач по finished_at.
+            max_running_age_sec: максимальный возраст (с) для задач в статусе «running»
+                по started_at. Защита от зависших воркеров (W965 HIGH). По умолчанию
+                7200 с (2 ч).
 
-        Возвращает количество удалённых задач.
+        Returns:
+            Количество удалённых задач.
 
         Вызывается автоматически из create_job(). Не требует фонового GC-потока.
-        Также очищает соответствующие cancel_events и просроченные cancel event записи.
+
+        W1182 F2 FIX — zombie MLX worker:
+            До eviction устанавливает cancel_event для каждой stale-записи.
+            Worker-поток, держащий ссылку на Event через get_cancel_event(),
+            увидит отмену и завершится — не станет zombie.
+            cancel_events удаляются только через _PRUNE_CANCEL_EVENT_TTL секунд
+            после eviction (grace period).
         """
         now = time.monotonic()
-        threshold = now - max_age_sec
         terminal = {"done", "failed", "cancelled"}
         stale: list[str] = []
 
         with self._lock:
+            # 1. Найти stale terminal-записи.
             for jid, job in self._jobs.items():
                 status = job.get("status")
-                if status in terminal and (job.get("finished_at") or 0.0) < threshold:
-                    stale.append(jid)
+                if status in terminal:
+                    finished_at = job.get("finished_at") or 0.0
+                    if (now - finished_at) > max_age_sec:
+                        stale.append(jid)
                 elif (
                     status == "running"
                     and max_running_age_sec is not None
-                    and (job.get("started_at") or now) < now - max_running_age_sec
+                    and (now - (job.get("started_at") or now)) > max_running_age_sec
                 ):
                     logger.warning(
-                        "prune: evicting stale running job job_id=%s started_at=%.1f age_sec=%.0f",
+                        "job_tracker: evicting stale running job %s (age=%.0fs)",
                         jid,
-                        job.get("started_at", 0.0),
                         now - (job.get("started_at") or now),
                     )
                     stale.append(jid)
 
+            # 2. Для каждой stale-записи: установить cancel_event ДО удаления.
             for jid in stale:
+                event = self._cancel_events.get(jid)
+                if event is not None:
+                    event.set()
                 self._jobs.pop(jid, None)
-                self._cancel_events.pop(jid, None)
-                self._cancel_events_ts.pop(jid, None)
+                # Записываем время eviction для grace-period cleanup.
+                self._evict_times[jid] = now
 
-            # Evict cancel events older than _PRUNE_CANCEL_EVENT_TTL
-            # (covers orphaned events whose job was already removed)
-            cancel_ttl_threshold = now - _PRUNE_CANCEL_EVENT_TTL
-            for jid, evt_ts in list(self._cancel_events_ts.items()):
-                if evt_ts < cancel_ttl_threshold:
-                    self._cancel_events.pop(jid, None)
-                    self._cancel_events_ts.pop(jid, None)
+            # 3. Очищаем cancel_events и evict_times для записей, чей
+            #    grace-period истёк (evict_time + TTL < now).
+            grace_threshold = now - _PRUNE_CANCEL_EVENT_TTL
+            expired_events = [
+                jid
+                for jid, evict_time in self._evict_times.items()
+                if evict_time < grace_threshold
+            ]
+            for jid in expired_events:
+                self._cancel_events.pop(jid, None)
+                self._evict_times.pop(jid, None)
 
         return len(stale)

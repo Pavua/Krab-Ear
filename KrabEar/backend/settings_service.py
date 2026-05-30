@@ -370,6 +370,23 @@ class SettingsService:
                 "key_count": len(params),
             },
         )
+        # W1199 (W1193 F1 HIGH): runtime privacy-mode Sentry disable.
+        # When privacy_mode_enabled flips True via IPC, flush pending Sentry
+        # events and re-init SDK with dsn=None to fully silence telemetry.
+        if params.get("privacy_mode_enabled") is True and not old_settings.get("privacy_mode_enabled"):
+            try:
+                import backend.observability as _obs  # noqa: PLC0415
+                if _obs._sentry_initialized:
+                    try:
+                        import sentry_sdk as _sdk  # noqa: PLC0415
+                        _sdk.flush(timeout=2)
+                        _sdk.init(dsn=None)  # type: ignore[call-overload]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _obs._sentry_initialized = False
+                    _log.info("set_settings: Sentry disabled — privacy_mode_enabled=True")
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("set_settings: failed to disable Sentry for privacy mode: %s", exc)
         # W1341/W1436: hot-reload pydantic settings then fire hooks (single point of truth).
         self._reload_and_fire_hooks(old_settings, settings)
         return result
@@ -593,9 +610,10 @@ class SettingsService:
     def handle_restore_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает настройки из указанного бэкапа и сохраняет их.
 
-        W1435: migrate old-schema backups, validate before save.
-        Returns {"ok": False, "error": "Backup validation failed", "details": [...]}
-        on hard validation errors without calling store.save_settings.
+        W1178: pre-restore backup + validate + ValueError on failure + rollback.
+        W1337 F2: preserve credential fields missing from backup.
+        W1435: migrate old-schema backups before validate.
+        W1437: RLock around save path.
 
         Params:
             backup_id (str): идентификатор бэкапа.
@@ -609,6 +627,13 @@ class SettingsService:
 
         with self._save_lock:  # W1437
             old_settings = self.cached_settings()
+
+            # W1178: take a pre-restore snapshot so restore can be undone on failure
+            try:
+                self._backup.create_backup(old_settings, reason="before_restore")
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("handle_restore_settings_backup: pre-restore backup failed: %s", exc)
+
             restored = self._backup.restore_backup(backup_id)
 
             # W1337 F2: preserve credential fields missing from backup.
@@ -628,17 +653,23 @@ class SettingsService:
             # W1435: migrate old schema before validate
             restored = self._maybe_migrate(restored)
 
-            # W1435: validate restored settings — reject corrupt backups without saving
+            # W1178/W1435: validate restored settings — rollback and raise on hard errors
             vr = self._validator.validate(restored)
             if not vr.valid:
                 _log.warning("handle_restore_settings_backup: corrupt backup %s rejected: %s",
                              backup_id, vr.errors)
-                return {
-                    "ok": False,
-                    "error": "Backup validation failed",
-                    "details": vr.errors,
-                    "backup_id": backup_id,
-                }
+                # W1178: rollback to pre-restore state
+                try:
+                    self.store.save_settings(old_settings)
+                    self.invalidate_cache()
+                except Exception as rollback_exc:  # noqa: BLE001
+                    _log.error(
+                        "handle_restore_settings_backup: rollback failed: %s", rollback_exc
+                    )
+                raise ValueError(
+                    f"Восстановление отклонено — бэкап содержит невалидные настройки: "
+                    f"{'; '.join(vr.errors)}"
+                )
             restored = vr.fixed
 
             self.store.save_settings(restored)

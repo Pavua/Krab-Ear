@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable, Optional
 
 from core.auto_title import AutoTitleGenerator
 from core.emotion_detector import EmotionDetector
@@ -63,7 +63,18 @@ class MetadataEnricher:
         stats = enricher.get_enrichment_stats()
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings_provider: Optional[Callable[[], dict]] = None,
+    ) -> None:
+        """Инициализация обогатителя метаданных.
+
+        Args:
+            settings_provider: опциональный callable, возвращающий текущий dict
+                настроек (runtime). Используется для проверки ``privacy_mode_enabled``.
+                Если ``None`` — приватный режим считается выключенным (W1277 F5).
+        """
+        self._settings_provider = settings_provider
         self._language_detector = LanguageDetector()
         self._emotion_detector = EmotionDetector()
         self._pace_analyzer = SpeechPaceAnalyzer()
@@ -80,7 +91,7 @@ class MetadataEnricher:
     def enrich(
         self,
         item: dict[str, Any],
-        privacy_mode: bool = False,
+        privacy_mode: bool = False,  # kept for backwards compat; overridden by settings_provider
     ) -> dict[str, Any]:
         """Обогащает одну запись истории вычисляемыми метаданными.
 
@@ -148,7 +159,13 @@ class MetadataEnricher:
         # и получаем её ключевые слова как topics.
         # W1277 F5: skip topic extraction in privacy_mode — transcript content
         # must not be processed beyond the minimum required for STT output.
-        topics = [] if privacy_mode else self._extract_topics_for_item(item)
+        # Use settings_provider (runtime) if available, else fall back to parameter.
+        effective_privacy = bool(self._get_runtime_setting("privacy_mode_enabled", privacy_mode))
+        if effective_privacy:
+            topics: list[str] = []
+            logger.debug("MetadataEnricher: topic enrichment skipped (privacy_mode_enabled=True)")
+        else:
+            topics = self._extract_topics_for_item(item)
 
         elapsed = time.monotonic() - t0
         self._enriched_count += 1
@@ -242,6 +259,19 @@ class MetadataEnricher:
         """Извлекает ключевые слова-темы из одной записи."""
         current = self._topic_tracker.get_current_topic([item], last_n=1)
         return current.get("topic_words", [])
+
+    def _get_runtime_setting(self, key: str, default: Any = None) -> Any:
+        """Читает runtime-настройку через settings_provider.
+
+        Если ``settings_provider`` не задан или выбросил исключение,
+        возвращает ``default`` (W1277 F5 — безопасный fallback).
+        """
+        if self._settings_provider is None:
+            return default
+        try:
+            return self._settings_provider().get(key, default)
+        except Exception:
+            return default
 
 
 # ── Вспомогательная функция ──────────────────────────────────────────────────

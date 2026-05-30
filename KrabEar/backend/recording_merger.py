@@ -20,6 +20,12 @@ class RecordingMerger:
 
     Конструктор не требует store — он передаётся явно в каждый метод,
     чтобы упростить тестирование и следовать паттерну других сервисов.
+
+    Атрибут ``recording_chain_mgr`` — поздняя инъекция (late-injection):
+    инициализируется None, устанавливается из BackendService после создания
+    обоих объектов, чтобы избежать циклической зависимости при конструировании.
+    Когда установлен, merge_items автоматически обновляет цепочки при
+    ``delete_originals=True`` (W1278 RC-A MED fix, wave1282).
     """
 
     def __init__(
@@ -29,6 +35,7 @@ class RecordingMerger:
     ) -> None:
         self._transcript_versioner = transcript_versioner
         self._semantic_searcher = semantic_searcher
+        self.recording_chain_mgr: Any | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -78,6 +85,21 @@ class RecordingMerger:
                 logger.warning("semantic_searcher.index_item failed for %s", new_item.id, exc_info=True)
 
         if delete_originals:
+            original_ids = [item.id for item in items]
+
+            # W1282: capture chain memberships BEFORE deletion
+            chain_membership: dict[str, list[str]] = {}
+            if self.recording_chain_mgr is not None:
+                try:
+                    chain_membership = self.recording_chain_mgr.find_chains_containing(
+                        original_ids
+                    )
+                except Exception:
+                    logger.exception(
+                        "merge_items: не удалось получить цепочки для %s — пропускаем обновление",
+                        original_ids,
+                    )
+
             deleted_ids: list[str] = []
             for item in items:
                 if store.delete_history_item(item.id):
@@ -95,6 +117,25 @@ class RecordingMerger:
                             logger.exception(
                                 "merge_items: не удалось удалить версии для id=%s", item.id
                             )
+
+            # W1282: replace originals with merged item in each chain
+            if chain_membership and self.recording_chain_mgr is not None:
+                for chain_id, matched_ids in chain_membership.items():
+                    try:
+                        changed = self.recording_chain_mgr.replace_items_in_chain(
+                            chain_id, matched_ids, new_item.id
+                        )
+                        if changed:
+                            logger.info(
+                                "Цепочка %s: заменены %s → %s",
+                                chain_id, matched_ids, new_item.id,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "merge_items: не удалось обновить цепочку %s — ghost refs остаются",
+                            chain_id,
+                        )
+
             logger.info(
                 "Объединено %d записей → %s; удалено %d оригиналов",
                 len(items),

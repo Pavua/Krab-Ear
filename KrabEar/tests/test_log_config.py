@@ -256,12 +256,18 @@ class TestConfigureLogging(unittest.TestCase):
             self.assertTrue((data_dir / "backend.log").exists())
 
     def test_text_format_handlers_set(self):
+        import logging.handlers as _lh
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             for root in self._call_configure_logging(data_dir, "text"):
                 handler_types = [type(h).__name__ for h in root.handlers]
                 self.assertIn("StreamHandler", handler_types)
-                self.assertIn("FileHandler", handler_types)
+                # RotatingFileHandler IS a FileHandler (wave687 rotation); accept both.
+                file_handler_present = any(
+                    isinstance(h, (logging.FileHandler, _lh.RotatingFileHandler))
+                    for h in root.handlers
+                )
+                self.assertTrue(file_handler_present, f"No file handler found in {handler_types}")
                 # All handlers should have the text formatter
                 for h in root.handlers:
                     fmt = h.formatter
