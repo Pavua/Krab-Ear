@@ -150,6 +150,7 @@ class TestRuntimeSelfRedirect(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self.addCleanup(lambda p=proc: p.poll() is None and (p.kill(), p.wait()))
         try:
             rc = proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -205,6 +206,7 @@ sleep 60  # simulate running app
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self.addCleanup(lambda p=proc: p.poll() is None and (p.kill(), p.wait()))
         try:
             # Give it 2 seconds; if it exits immediately that's a bug
             time.sleep(2.0)
@@ -252,6 +254,7 @@ exit 0
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self.addCleanup(lambda p=proc: p.poll() is None and (p.kill(), p.wait()))
         try:
             rc = proc.wait(timeout=5)
         except subprocess.TimeoutExpired:

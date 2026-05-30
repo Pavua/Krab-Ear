@@ -55,6 +55,32 @@ def _extract_bench_pairs(text: str) -> list[tuple[str, float]]:
     return pairs
 
 
+def pytest_sessionfinish(session: pytest.Session, exitstatus: object) -> None:
+    """Session-end backstop: reap any orphaned MLX/GigaAM subprocess workers.
+
+    This is an xdist-safe safety net — each xdist worker calls this at the end
+    of its own session, after all its tests have finished.  The primary cleanup
+    is the per-test ``addCleanup`` registered in subprocess-spawning tests; this
+    hook is a last-resort backstop in case a test crashes before cleanup runs.
+
+    The pkill pattern matches the gigaam_worker.py launch cmdline:
+        .../venv_gigaam/bin/python -u .../gigaam_worker.py
+    Shell-script stubs spawned by test_runtime_self_redirect.py exit or are
+    killed by their own finally blocks; they do not match this pattern.
+    """
+    import subprocess as _sp
+
+    for pattern in ("gigaam_worker.py", "import sys;ex"):
+        try:
+            _sp.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:  # type: ignore[override]
     """Save [BENCH] results from test stdout into .benchmarks/history.jsonl."""
