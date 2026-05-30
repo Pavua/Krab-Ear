@@ -90,6 +90,12 @@ from backend.recording_chain import RecordingChainManager
 from backend.collection_manager import CollectionManager
 from backend.call_assist_service import CallAssistService
 from backend.audio_analytics_service import AudioAnalyticsService
+from backend.analytics_service import AnalyticsService
+from backend.apple_integration_service import AppleIntegrationService
+from backend.llm_ops_service import LLMOpsService
+from backend.search_and_analysis_service import SearchAndAnalysisService
+from backend.stt_management_service import STTManagementService
+from backend.text_scoring_service import TextScoringService
 from backend.call_session_service import CallSessionService
 from backend.recording_core_service import RecordingCoreService
 from backend.text_processing_service import TextProcessingService
@@ -592,6 +598,43 @@ class BackendService:
             timeout_sec=settings.TELEGRAM_BRIDGE_TIMEOUT_SEC,
             circuit_fail_threshold=settings.TELEGRAM_BRIDGE_CB_FAIL_THRESHOLD,
             circuit_reset_sec=settings.TELEGRAM_BRIDGE_CB_RESET_SEC,
+        )
+        # W1695 Variant B: wire 6 decorative services — fixes W752 wiring guard tests.
+        self._analytics_svc = AnalyticsService(
+            analytics_dashboard=self._analytics_dashboard,
+            sentiment_trends=self._sentiment_trends,
+            activity_calendar=self._activity_calendar,
+            keyword_cloud_gen=self._keyword_cloud_gen,
+            timeline_view=self._timeline_view,
+            store=self.store,
+        )
+        self._apple_integration_svc = AppleIntegrationService(
+            telegram_bridge=self._telegram_bridge,
+            settings_get=self._get_runtime_setting,
+        )
+        self._llm_ops_svc = LLMOpsService(
+            store=self.store,
+            settings_svc=self._settings_svc,
+            transcriber=self.transcriber,
+        )
+        self._search_and_analysis_svc = SearchAndAnalysisService(
+            store=self.store,
+            semantic_searcher=self._semantic_searcher,
+            action_items_extractor=self._action_items_extractor,
+            topic_tracker=self._topic_tracker,
+            recording_insights=self._recording_insights,
+            recording_comparison=self._recording_comparison,
+            stats_report=self._stats_report,
+        )
+        self._stt_mgmt_svc = STTManagementService(
+            settings_svc=self._settings_svc,
+            transcriber=self.transcriber,
+        )
+        self._text_scoring_svc = TextScoringService(
+            llm_rewriter=self._llm_rewriter,
+            term_extractor=self._term_extractor,
+            auto_title_generator=self._auto_title_generator,
+            get_runtime_setting=self._get_runtime_setting,
         )
         # openWakeWord adapter (default disabled via WAKE_WORD_ENGINE setting)
         self._oww_adapter = OpenWakeWordAdapter(data_dir=self.store.data_dir)
@@ -1133,10 +1176,10 @@ class BackendService:
             "get_metrics_dashboard": self._handle_get_metrics_dashboard,  # real-time metrics dashboard snapshot
             "summarize_text": self._text_processing_svc.handle_summarize_text,  # VERIFIED: called from Swift (HistoryPanel)
             "summarize_item": self._text_processing_svc.handle_summarize_item,  # LLM summary для элемента истории по ID
-            "extract_action_items": self._handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
-            "batch_extract_action_items": self._handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
-            "get_pending_action_items": self._handle_get_pending_action_items,  # все items у которых action_items=None
-            "get_last_llm_diff": self._handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
+            "extract_action_items": self._search_and_analysis_svc.handle_extract_action_items,  # LLM извлечение задач/решений/вопросов по item_id
+            "batch_extract_action_items": self._search_and_analysis_svc.handle_batch_extract_action_items,  # пакетное извлечение для нескольких item_id
+            "get_pending_action_items": self._search_and_analysis_svc.handle_get_pending_action_items,  # все items у которых action_items=None
+            "get_last_llm_diff": self._llm_ops_svc.handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,
             "toggle_favorite": self._history.handle_toggle_favorite,
@@ -1196,8 +1239,8 @@ class BackendService:
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
-            "warmup_stt": self._handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
-            "warmup_rewriter": self._handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
+            "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
+            "warmup_rewriter": self._text_scoring_svc.handle_warmup_rewriter,  # явный warmup-probe для "Load Model" кнопки
             "analyze_audio_quality": self._audio_analytics_svc.handle_analyze_audio_quality,  # pre-flight анализ качества аудиофайла
             "analyze_silence": self._audio_analytics_svc.handle_analyze_silence,  # обнаружение тишины и доли речи в аудиофайле
             "get_error_report": self._error_reporter.handle_get_error_report,  # последние ошибки из ring-буфера
@@ -1230,14 +1273,14 @@ class BackendService:
             "list_scheduled_recordings": self._recording_scheduler.handle_list_scheduled_recordings,  # список запланированных записей
             "generate_daily_digest": self._handle_generate_daily_digest,  # ежедневный дайджест транскрипций
             "analyze_quality_trends": self._audio_analytics_svc.handle_analyze_quality_trends,  # анализ трендов качества
-            "compare_periods": self._handle_compare_periods,  # сравнение двух периодов использования
-            "get_activity_calendar": self._handle_get_activity_calendar,  # GitHub-style activity calendar данные
-            "get_recording_insights": self._handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
-            "get_sentiment_trends": self._handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
+            "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
+            "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
+            "get_recording_insights": self._search_and_analysis_svc.handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
+            "get_sentiment_trends": self._analytics_svc.handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
             "repair_integrity": self._handle_repair_integrity,  # исправление проблем целостности данных
-            "extract_terms": self._handle_extract_terms,  # извлечение терминов из текста
+            "extract_terms": self._text_scoring_svc.handle_extract_terms,  # извлечение терминов из текста
             "compare_texts": self._text_processing_svc.handle_compare_texts,  # сравнение двух текстов/транскрипций
             "get_context_memory": self._handle_get_context_memory,  # контекстная память STT: слова и темы из последних транскрибаций
             "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
@@ -1249,7 +1292,7 @@ class BackendService:
             "get_throttle_stats": self._handle_get_throttle_stats,  # статистика IPC throttle: вызовы, отклонения
             "check_audio_duplicate": self._audio_analytics_svc.handle_check_audio_duplicate,  # аудио-фингерпринтинг для обнаружения дубликатов
             "batch": self._handle_batch,  # пакетное выполнение нескольких IPC-методов за один вызов (макс. 50)
-            "get_keyword_cloud": self._handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
+            "get_keyword_cloud": self._analytics_svc.handle_get_keyword_cloud,  # данные облака ключевых слов для визуализации word cloud
             "prepare_share": self._sharing.handle_prepare_share,  # подготовить пакет для шаринга транскрипций
             "list_shared": self._sharing.handle_list_shared,  # список сохранённых пакетов шаринга
             "get_shared": self._sharing.handle_get_shared,  # получить пакет шаринга по share_id
@@ -1257,15 +1300,15 @@ class BackendService:
             "save_transcript_version": self._transcript_versioning.handle_save_transcript_version,  # сохранить новую версию текста транскрипции
             "get_transcript_versions": self._transcript_versioning.handle_get_transcript_versions,  # получить все версии транскрипции по item_id
             "revert_transcript_version": self._transcript_versioning.handle_revert_transcript_version,  # откат транскрипции к указанной версии
-            "generate_auto_title": self._handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
+            "generate_auto_title": self._text_scoring_svc.handle_generate_auto_title,  # автоматическая генерация заголовка для транскрибации
             # форматирование текста под целевое приложение (telegram, notes, email и др.)
             "format_for_paste": self._paste_formatter.handle_format_for_paste,
             "merge_recordings": lambda p: self._merger.handle_merge_recordings(p, self.store),  # объединить несколько записей истории в одну
             "preview_merge": lambda p: self._merger.handle_preview_merge(p, self.store),  # предпросмотр объединения без сохранения
             "list_paste_formatters": self._paste_formatter.handle_list_paste_formatters,  # список доступных форматтеров вставки
             "get_learning_stats": self._handle_get_learning_stats,  # режим изучения языков: статистика прогресса
-            "get_analytics_dashboard": self._handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
-            "get_topic_timeline": self._handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
+            "get_analytics_dashboard": self._analytics_svc.handle_get_analytics_dashboard,  # комплексный дашборд аналитики: все метрики за один вызов
+            "get_topic_timeline": self._search_and_analysis_svc.handle_get_topic_timeline,  # таймлайн смен тем разговора из истории транскрибаций
             "list_config_presets": self._config_presets.handle_list_config_presets,  # список конфигурационных пресетов (встроенных и кастомных)
             "apply_config_preset": self._config_presets.handle_apply_config_preset,  # применить конфигурационный пресет — вернуть settings_patch
             "create_config_preset": self._config_presets.handle_create_config_preset,  # создать кастомный конфигурационный пресет
@@ -1294,8 +1337,8 @@ class BackendService:
             # прогнать текст через настраиваемый конвейер пост-обработки (пробелы, пунктуация, сущности, аббревиатуры, анонимизация)
             "post_process_text": self._text_processing_svc.handle_post_process_text,
             "list_post_process_steps": self._text_processing_svc.handle_list_post_process_steps,  # список доступных шагов пост-обработки текста
-            "compare_recordings": self._handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
-            "select_model": self._handle_select_model,  # умный выбор STT-модели на основе условий записи
+            "compare_recordings": self._search_and_analysis_svc.handle_compare_recordings,  # сравнение нескольких записей side-by-side: матрица сходства, статистика, общие/уникальные слова
+            "select_model": self._stt_mgmt_svc.handle_select_model,  # умный выбор STT-модели на основе условий записи
             "get_smart_vocabulary_suggestions": self._handle_get_smart_vocabulary_suggestions,  # предложения для словаря STT на основе паттернов использования
             "get_startup_diagnostics": self._handle_get_startup_diagnostics,  # диагностика при старте: результаты всех startup-проверок
             # автоматическое обогащение метаданных записи: word_count, emotion, pace, quality, topics и др.
@@ -1304,7 +1347,7 @@ class BackendService:
             "check_duplicate": self._handle_check_duplicate,  # проверка одной транскрипции на дублирование по текстовому сходству
             "run_deduplication": self._handle_run_deduplication,  # полное сканирование истории на дубликаты
             "get_dedup_stats": self._handle_get_dedup_stats,  # статистика дедупликатора: проверено, найдено, символов сохранено
-            "get_timeline_view": self._handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
+            "get_timeline_view": self._analytics_svc.handle_get_timeline_view,  # группировка истории по временным блокам (timeline)
             "get_recent_searches": self._search_history.handle_get_recent_searches,  # последние поисковые запросы пользователя
             "get_popular_searches": self._search_history.handle_get_popular_searches,  # наиболее частые поисковые запросы
             "clear_search_history": self._search_history.handle_clear_search_history,  # очистить историю поисковых запросов
@@ -1312,8 +1355,8 @@ class BackendService:
             "unarchive_items": self._archive_manager.handle_unarchive_items,  # восстановить записи из архива
             "list_archived": self._archive_manager.handle_list_archived,  # список архивированных записей
             "get_archive_stats": self._archive_manager.handle_get_archive_stats,  # статистика архива: количество, размер, oldest/newest
-            "generate_stats_report": self._handle_generate_stats_report,  # полный Markdown-отчёт статистики за период
-            "generate_mini_stats_report": self._handle_generate_mini_stats_report,  # краткий 5-строчный отчёт состояния
+            "generate_stats_report": self._search_and_analysis_svc.handle_generate_stats_report,  # полный Markdown-отчёт статистики за период
+            "generate_mini_stats_report": self._search_and_analysis_svc.handle_generate_mini_stats_report,  # краткий 5-строчный отчёт состояния
             # --- call_assist template management ---
             "call_assist_list_templates": self._call_assist.handle_list_templates,  # список шаблонов быстрых реплик call assist
             "call_assist_add_template": self._call_assist.handle_add_template,  # добавить шаблон быстрой реплики
@@ -1372,20 +1415,20 @@ class BackendService:
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
             # --- Telegram Bridge (Krab Ear → main Krab userbot) ---
-            "send_to_telegram": self._handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
+            "send_to_telegram": self._apple_integration_svc.handle_send_to_telegram,  # отправить транскрипцию в Telegram через main Krab userbot
             # --- Apple Notes integration (Phase D.4) ---
-            "create_apple_note": self._handle_create_apple_note,  # создать заметку в Apple Notes через osascript
+            "create_apple_note": self._apple_integration_svc.handle_create_apple_note,  # создать заметку в Apple Notes через osascript
             # --- Apple Reminders integration (Phase D.4) ---
-            "create_apple_reminder": self._handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
+            "create_apple_reminder": self._apple_integration_svc.handle_create_apple_reminder,  # создать напоминание в Apple Reminders через osascript
             # --- Apple Calendar integration (Phase D.4) ---
-            "create_calendar_event": self._handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
+            "create_calendar_event": self._apple_integration_svc.handle_create_calendar_event,  # создать событие в Apple Calendar через osascript
             # --- CalendarLinker — auto-link transcriptions to Calendar.app events (W942 MEDIUM-1) ---
             "link_to_calendar_event": self._handle_link_to_calendar_event,  # явно связать запись с текущим событием Calendar
             "get_calendar_link": self._handle_get_calendar_link_v2,  # получить привязанное событие Calendar для записи
             "search_by_calendar_event": self._handle_search_by_calendar_event_v2,  # поиск записей по названию события Calendar
             # --- iMessage integration (Phase D.4) ---
-            "send_imessage": self._handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
-            "list_telegram_chats": self._handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
+            "send_imessage": self._apple_integration_svc.handle_send_imessage,  # отправить сообщение через iMessage/SMS через osascript
+            "list_telegram_chats": self._apple_integration_svc.handle_list_telegram_chats,  # получить список доступных чатов Telegram через main Krab userbot
             # --- Phase 3: Call Session CRUD (outbound call automation) ---
             "call_session_create": self._call_session_service.handle_call_session_create,  # создать звонковую сессию
             "call_session_get": self._call_session_service.handle_call_session_get,  # получить сессию по id
@@ -1394,9 +1437,9 @@ class BackendService:
             "call_session_add_transcript": self._call_session_service.handle_call_session_add_transcript,  # добавить реплику в транскрипт
             "call_session_end": self._call_session_service.handle_call_session_end,  # завершить сессию: compute duration, total_cost
             # --- STT hotwords (initial_prompt boost) ---
-            "add_stt_hotword": self._handle_add_stt_hotword,  # добавить термин в STT hotwords список
-            "remove_stt_hotword": self._handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
-            "list_stt_hotwords": self._handle_list_stt_hotwords,  # получить весь список STT hotwords
+            "add_stt_hotword": self._stt_mgmt_svc.handle_add_stt_hotword,  # добавить термин в STT hotwords список
+            "remove_stt_hotword": self._stt_mgmt_svc.handle_remove_stt_hotword,  # удалить термин из STT hotwords списка
+            "list_stt_hotwords": self._stt_mgmt_svc.handle_list_stt_hotwords,  # получить весь список STT hotwords
             # --- Recording bookmarks (Cmd+Shift+B) ---
             "add_bookmark": self._bookmarks.handle_add_bookmark,  # создать закладку на текущей позиции записи
             "list_bookmarks": self._bookmarks.handle_list_bookmarks,  # список закладок для item_id
@@ -1404,13 +1447,13 @@ class BackendService:
             "delete_bookmark": self._bookmarks.handle_delete_bookmark,  # удалить закладку (tombstone)
             "jump_to_bookmark": self._bookmarks.handle_jump_to_bookmark,  # перейти к закладке (эмитит playback.seek)
             # --- Semantic search (opt-in, multilingual embeddings) ---
-            "semantic_search": self._handle_semantic_search,  # семантический поиск по истории через embeddings
-            "semantic_search_status": self._handle_semantic_search_status,  # статус семантического поиска: модель, индекс
-            "semantic_search_reindex": self._handle_semantic_search_reindex,  # переиндексировать всю историю
+            "semantic_search": self._search_and_analysis_svc.handle_semantic_search,  # семантический поиск по истории через embeddings
+            "semantic_search_status": self._search_and_analysis_svc.handle_semantic_search_status,  # статус семантического поиска: модель, индекс
+            "semantic_search_reindex": self._search_and_analysis_svc.handle_semantic_search_reindex,  # переиндексировать всю историю
             # --- LM Studio model discovery ---
-            "list_llm_models": self._handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
+            "list_llm_models": self._llm_ops_svc.handle_list_llm_models,  # список моделей из LM Studio /v1/models (для dropdown в GUI)
             # --- Quick word replacement (Cmd+Shift+R) ---
-            "replace_word_in_last_transcript": self._handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
+            "replace_word_in_last_transcript": self._llm_ops_svc.handle_replace_word_in_last_transcript,  # заменить слово в последней транскрипции без перезаписи
             # --- Privacy audit log ---
             "get_privacy_audit_log": self._handle_get_privacy_audit_log,  # последние записи privacy audit log
             # W957 SECURITY: "clear_privacy_audit_log" INTENTIONALLY REMOVED from IPC dispatch.
@@ -1420,7 +1463,7 @@ class BackendService:
             # unit tests and explicit migration scripts ONLY — they must never be re-added here
             # without mandatory request signing + an explicit ALLOW_PRIVACY_AUDIT_CLEAR=true flag.
             # --- D.2.3: Scored STT routing decision ---
-            "get_stt_routing_decision": self._handle_get_stt_routing_decision,  # scored adapter selection debug
+            "get_stt_routing_decision": self._stt_mgmt_svc.handle_get_stt_routing_decision,  # scored adapter selection debug
             # --- W1284: TimelineExporter IPC (W1279 F3 LOW) ---
             "export_timeline_svg": self._handle_export_timeline_svg,  # экспорт таймлайна в SVG-файл
             "export_timeline_json": self._handle_export_timeline_json,  # экспорт таймлайна в JSON-файл
