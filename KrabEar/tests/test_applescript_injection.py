@@ -30,8 +30,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.service import BackendService, _escape_as_str
+from backend.service import BackendService
 from backend.state_store import StateStore
+
+# W1442 consolidated the former module-level ``_escape_as_str`` into a
+# ``BackendService`` @staticmethod (single source of truth). Tests call it
+# via the class to track that consolidation.
+_escape_as_str = BackendService._escape_as_str
 
 
 # ---------------------------------------------------------------------------
