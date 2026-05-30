@@ -2547,6 +2547,18 @@ class AudioEngine:
             if sess is not None and getattr(sess, "oom_callback", None) is None:
                 sess.oom_callback = self._push_mlx_oom_for_worker
 
+        # W1688 (W1686 F4 fix): wire _error_bus onto adapter so worker timeout/crash
+        # errors reach the Loud Errors toast. Idempotent — already wired is preserved.
+        # GigaAMAdapter._get_subprocess_session() propagates this further to each new
+        # _GigaAMSubprocessSession at spawn time.
+        engine_error_bus = getattr(self, "_error_bus", None)
+        if engine_error_bus is not None and getattr(adapter, "_error_bus", None) is None:
+            adapter._error_bus = engine_error_bus
+            # Propagate to already-spawned session (if any).
+            sess = getattr(adapter, "_subprocess", None)
+            if sess is not None and getattr(sess, "_error_bus", None) is None:
+                sess._error_bus = engine_error_bus
+
         # Нормализуем audio_data в numpy float32
         if isinstance(audio_data, (str, Path)):
             if sf is None:

@@ -108,6 +108,10 @@ class GigaAMAdapter:
         # Optional OOM callback: callable(name: str, rc: int, stderr: str)
         # Set by engine.py after adapter creation to forward OOM events to ErrorBus.
         self._oom_callback: Optional[object] = None
+        # Late-injected ErrorBus (Phase B / W1688). Set by engine.py after adapter
+        # creation. Propagated to each new _GigaAMSubprocessSession so worker
+        # timeout/crash errors reach the Loud Errors toast (W1686 F4 fix).
+        self._error_bus: Optional[object] = None
         # W1216 F2 fix: adapter-level spawn lock prevents concurrent transcribe() calls
         # from both passing the `_subprocess is None` guard and double-spawning workers.
         # Distinct from _GigaAMSubprocessSession._lock (which serialises IPC sends).
@@ -358,6 +362,12 @@ class GigaAMAdapter:
             # Forward OOM callback to session so crash events reach the ErrorBus.
             if self._oom_callback is not None:
                 session.oom_callback = self._oom_callback
+            # W1688 (W1686 F4 fix): propagate adapter-level _error_bus to the session
+            # so worker timeout/crash errors reach the Loud Errors toast.
+            # Without this, _GigaAMSubprocessSession._error_bus stays None forever
+            # even when BackendService wires error_bus onto engine → adapter.
+            if self._error_bus is not None:
+                session._error_bus = self._error_bus
             session.start()  # spawn + load model
             self._subprocess = session
             return session
