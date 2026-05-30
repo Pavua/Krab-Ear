@@ -759,6 +759,7 @@ class RecordingCoreService:
                 value=getattr(self.recorder, "sample_rate", 16000),
                 default=16000, min_value=8000, max_value=192000,
             ),
+            "privacy_mode_enabled": bool(settings.get("privacy_mode_enabled", False)),
         }
 
     def _stop_recording_phase_a(
@@ -934,7 +935,13 @@ class RecordingCoreService:
 
         user_vocabulary = self.vocabulary.load() or []
 
-        _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
+        # W1669: gate history injection on privacy_mode — do not fetch or pass
+        # past transcripts to Whisper initial_prompt when privacy mode is active.
+        _privacy_mode = sr["privacy_mode_enabled"]
+        if _privacy_mode:
+            _recent_history: list = []
+        else:
+            _recent_history, _ = self.store.get_history_page(cursor=None, limit=10)
         _cached_settings_hw = self._settings_svc.cached_settings()
         _stt_hotwords_enabled = bool(_cached_settings_hw.get("stt_hotwords_enabled", True))
         _stt_hotwords: list[str] = (
