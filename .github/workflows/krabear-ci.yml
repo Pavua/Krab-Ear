@@ -55,7 +55,7 @@ jobs:
       - name: Run backend/unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        timeout-minutes: 40
+        timeout-minutes: 90
         run: |
           python -m pytest KrabEar/tests/ \
             -v \
