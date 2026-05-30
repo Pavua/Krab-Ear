@@ -232,17 +232,16 @@ class TestStuckCancelEventEvictedAfterTTL(unittest.TestCase):
         # Verify cancel event is registered
         self.assertIn(jid, tracker._cancel_events_ts)
 
-        # Fake-age the cancel event timestamp beyond TTL
-        tracker._cancel_events_ts[jid] = time.monotonic() - (_PRUNE_CANCEL_EVENT_TTL + 1.0)
-
-        # Also fake-age the job to trigger terminal cleanup
+        # Fake-age the job to trigger terminal cleanup
         tracker.mark_done(jid, items=[], errors=[])
         tracker.update(jid, finished_at=time.monotonic() - 7200.0)
-
+        tracker.prune(max_age_sec=1.0)
+        self.assertIsNone(tracker.get(jid), "Stale done job should be pruned after first prune")
+        # Fake-age the evict timestamp to trigger cancel event cleanup
+        tracker._evict_times[jid] = time.monotonic() - (_PRUNE_CANCEL_EVENT_TTL + 1.0)
         tracker.prune(max_age_sec=1.0)
 
         # Both job and cancel event should be gone
-        self.assertIsNone(tracker.get(jid), "Stale done job should be pruned")
         self.assertNotIn(jid, tracker._cancel_events, "Cancel event should be evicted")
         self.assertNotIn(jid, tracker._cancel_events_ts, "Cancel event ts should be evicted")
 

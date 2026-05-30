@@ -21,7 +21,7 @@ from backend.twilio_adapter import (  # noqa: E402
 
 
 def _make_adapter(
-    account_sid: str = "ACtest123",
+    account_sid: str = "AC" + "a" * 32,
     auth_token: str = "tokentest456",
     from_number: str = "+15550001111",
 ) -> TwilioAdapter:
@@ -103,13 +103,13 @@ class StubModeTestCase(unittest.TestCase):
 
     # 7 — hangup в stub-режиме
     def test_hangup_stub_mode(self) -> None:
-        result = self.adapter.hangup("CA123")
+        result = self.adapter.hangup("CA" + "b" * 32)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "twilio_not_configured")
 
     # 8 — get_call_status в stub-режиме
     def test_get_call_status_stub_mode(self) -> None:
-        result = self.adapter.get_call_status("CA123")
+        result = self.adapter.get_call_status("CA" + "b" * 32)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "twilio_not_configured")
 
@@ -125,7 +125,7 @@ class StubModeTestCase(unittest.TestCase):
 
     # 11 — только sid без token — тоже stub
     def test_partial_credentials_is_stub(self) -> None:
-        a = TwilioAdapter(account_sid="ACxxx", auth_token="")
+        a = TwilioAdapter(account_sid="AC" + "c" * 32, auth_token="")
         self.assertFalse(a.is_configured())
         result = a.dial("+15550001234")
         self.assertFalse(result["ok"])
@@ -157,7 +157,7 @@ class DialTestCase(unittest.TestCase):
         mock_resp = _mock_response(
             201,
             {
-                "sid": "CAabc123",
+                "sid": "CA" + "b" * 32,
                 "status": "queued",
                 "to": "+15550009999",
                 "from": "+15550001111",
@@ -166,8 +166,8 @@ class DialTestCase(unittest.TestCase):
         _set_mock_post(self.adapter, mock_resp)
         result = self.adapter.dial("+15550009999")
         self.assertTrue(result["ok"])
-        self.assertEqual(result["call_id"], "CAabc123")
-        self.assertEqual(result["call_control_id"], "CAabc123")
+        self.assertEqual(result["call_id"], "CA" + "b" * 32)
+        self.assertEqual(result["call_control_id"], "CA" + "b" * 32)
         self.assertEqual(result["to_number"], "+15550009999")
 
     # 15 — невалидный номер возвращает invalid_phone_number без HTTP-запроса
@@ -226,9 +226,9 @@ class HangupTestCase(unittest.TestCase):
     def test_hangup_success(self) -> None:
         _set_mock_post(
             self.adapter,
-            _mock_response(200, {"sid": "CA123", "status": "completed"}),
+            _mock_response(200, {"sid": "CA" + "b" * 32, "status": "completed"}),
         )
-        result = self.adapter.hangup("CA123")
+        result = self.adapter.hangup("CA" + "b" * 32)
         self.assertTrue(result["ok"])
 
     # 21 — hangup с пустым call_control_id → ошибка без запроса
@@ -248,16 +248,16 @@ class GetCallStatusTestCase(unittest.TestCase):
     def test_get_call_status_in_progress(self) -> None:
         _set_mock_get(
             self.adapter,
-            _mock_response(200, {"sid": "CA123", "status": "in-progress"}),
+            _mock_response(200, {"sid": "CA" + "b" * 32, "status": "in-progress"}),
         )
-        result = self.adapter.get_call_status("CA123")
+        result = self.adapter.get_call_status("CA" + "b" * 32)
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "in-progress")
 
     # 23 — HTTP 404 → not_found
     def test_get_call_status_not_found(self) -> None:
         _set_mock_get(self.adapter, _mock_response(404, {"message": "Not found"}))
-        result = self.adapter.get_call_status("CA_missing")
+        result = self.adapter.get_call_status("CA" + "0" * 32)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "not_found")
 
@@ -316,9 +316,9 @@ class BasicAuthTestCase(unittest.TestCase):
 
     # 27 — Basic Auth использует account_sid и auth_token
     def test_basic_auth_uses_account_sid(self) -> None:
-        adapter = _make_adapter(account_sid="ACtest123", auth_token="authtoken456")
+        adapter = _make_adapter(account_sid="AC" + "a" * 32, auth_token="authtoken456")
         auth = adapter._auth()
-        self.assertEqual(auth.username, "ACtest123")
+        self.assertEqual(auth.username, "AC" + "a" * 32)
         self.assertEqual(auth.password, "authtoken456")
 
     # 28 — Content-Type для Twilio — application/x-www-form-urlencoded
@@ -356,7 +356,7 @@ class NetworkFailureTestCase(unittest.TestCase):
         sess_mock.headers = {}
         self.adapter._session = sess_mock
 
-        result = self.adapter.hangup("CA123")
+        result = self.adapter.hangup("CA" + "b" * 32)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "network_error")
 
@@ -367,7 +367,7 @@ class NetworkFailureTestCase(unittest.TestCase):
         sess_mock.headers = {}
         self.adapter._session = sess_mock
 
-        result = self.adapter.get_call_status("CA123")
+        result = self.adapter.get_call_status("CA" + "b" * 32)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "network_error")
 

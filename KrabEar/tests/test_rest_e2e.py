@@ -33,6 +33,7 @@ try:
     _mock_store = MagicMock()
     _mock_store.load_vocabulary.return_value = []
     _mock_store.is_idempotent.return_value = False
+    _mock_store.load_settings.return_value = {}  # wave1212
 
     _mock_transcriber = MagicMock()
 

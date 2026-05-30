@@ -29,6 +29,8 @@ logger = logging.getLogger("KrabEar.Backend.TTS")
 
 # Порог кириллицы для определения RU
 _CYRILLIC_THRESHOLD = 0.30  # >30% символов кириллица -> Russian
+_SILERO_VALID_VOICES: frozenset = frozenset({"baya", "kseniya", "xenia", "eugene", "random"})
+_SILERO_MAX_TEXT_LEN = 5000
 
 
 def _detect_language(text: str) -> str:
@@ -64,6 +66,7 @@ def _load_silero(model_id: str) -> Any | None:
                 model="silero_tts",
                 language="ru",
                 speaker=model_id,
+                trust_repo=True,  # W1215 F1
             )
             _model = _model.to(_device)
             result_box.append((_model, _symbols, _sample_rate, _example_text, _apply_tts, _device))
@@ -208,7 +211,12 @@ class TTSService:
         model, symbols, sample_rate, _example_text, apply_tts, device = silero
         try:
             import numpy as np
-            speaker = voice or settings.TTS_SILERO_VOICE
+            raw_voice = voice or settings.TTS_SILERO_VOICE
+            if raw_voice not in _SILERO_VALID_VOICES:
+                raw_voice = "xenia"
+            speaker = raw_voice
+            if len(text) > _SILERO_MAX_TEXT_LEN:
+                text = text[:_SILERO_MAX_TEXT_LEN]
             audio_tensor = apply_tts(
                 texts=[text],
                 model=model,

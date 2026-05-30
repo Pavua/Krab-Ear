@@ -129,14 +129,15 @@ class TranscriptVersionManager:
             raise ValueError("item_id не может быть пустым")
         if not isinstance(text, str):
             raise ValueError("text должен быть строкой")
+        # W1410 F1: skip empty text
+        if not text or not text.strip():
+            return None
         source = str(source).strip()
         if source not in VALID_SOURCES:
             raise ValueError(f"Недопустимый source {source!r}. Допустимые: {sorted(VALID_SOURCES)}")
-        text_bytes = len(text.encode("utf-8"))
-        if text_bytes > _MAX_TEXT_BYTES:
-            raise ValueError(
-                f"version text {text_bytes} bytes exceeds _MAX_TEXT_BYTES={_MAX_TEXT_BYTES}"
-            )
+        # W1410 F1: truncate instead of raise
+        if len(text.encode("utf-8")) > _MAX_TEXT_BYTES:
+            text = text.encode("utf-8")[:_MAX_TEXT_BYTES - 11].decode("utf-8", errors="ignore") + "[TRUNCATED]"
 
         with self._lock:
             all_records = self._read_all()
@@ -209,13 +210,27 @@ class TranscriptVersionManager:
             KeyError: если указанная версия не найдена.
         """
         target = self.get_version(item_id, version_num)
-        new_version = self.save_version(
-            item_id=item_id,
-            text=target["text"],
-            source="manual",
-        )
-        new_version["reverted_from"] = version_num
-        return new_version
+        revert_text = target["text"]
+        clean_id = str(item_id).strip()
+        if not isinstance(revert_text, str) or not revert_text.strip():
+            raise ValueError("Текст целевой версии пустой — откат невозможен")
+        if len(revert_text.encode("utf-8")) > _MAX_TEXT_BYTES:
+            revert_text = revert_text.encode("utf-8")[:_MAX_TEXT_BYTES - 11].decode("utf-8", errors="ignore") + "[TRUNCATED]"
+        with self._lock:
+            all_records = self._read_all()
+            next_num = self._next_version_num(clean_id, all_records)
+            record: dict[str, Any] = {
+                "item_id": clean_id,
+                "version_num": next_num,
+                "text": revert_text,
+                "source": "manual",
+                "reverted_from": version_num,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._append(record)
+            all_records.append(record)
+            self._enforce_version_cap(clean_id, all_records)
+            return dict(record)
 
     def diff_versions(self, item_id: str, v1: int, v2: int) -> dict[str, Any]:
         """Возвращает текстовый diff между двумя версиями.
@@ -293,6 +308,8 @@ class TranscriptVersionManager:
                 self._rewrite_all(kept)
                 logger.debug("Удалено %d версий для item_id=%r", deleted, item_id)
         return deleted
+
+    purge_versions_for_item = delete_versions_for  # W1259
 
     def cleanup_for_ids(self, item_ids: list[str]) -> int:
         """Каскадно удаляет версии для набора item_ids (bulk cleanup).

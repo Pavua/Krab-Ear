@@ -21,6 +21,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.engine import AudioEngine
 
+class _SyncFuture:
+    def __init__(self, fn):
+        try: self._r, self._e = fn(), None
+        except BaseException as e: self._r, self._e = None, e
+    def result(self, timeout=None):
+        if self._e: raise self._e
+        return self._r
+    def cancel(self): pass
+
+class _SyncExecutor:
+    def __init__(self, *a, **kw): pass
+    def submit(self, fn, *a, **kw): return _SyncFuture(fn)
+    def shutdown(self, wait=True, **kw): pass
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,13 +105,7 @@ def _capture_candidates(engine: AudioEngine, mock_settings: Any) -> list[str]:
         mock_profiler.start_span.return_value.__enter__ = lambda s: s
         mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
         with patch("core.engine._get_available_memory_gb", return_value=16.0):
-            with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                mock_pool = MagicMock()
-                mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                mock_future = MagicMock()
-                mock_future.result.side_effect = RuntimeError("pool unavail")
-                mock_pool.submit.return_value = mock_future
+            with patch("concurrent.futures.ThreadPoolExecutor", _SyncExecutor):
                 try:
                     engine._transcribe_with_fallback_impl(b"audio", "prompt", "en")
                 except (RuntimeError, Exception):
@@ -145,13 +152,7 @@ class TestWhisperXAfterSenseVoiceWhenPresent(unittest.TestCase):
             mock_profiler.start_span.return_value.__enter__ = lambda s: s
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("core.engine._get_available_memory_gb", return_value=16.0):
-                with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("pool stub")
-                    mock_pool.submit.return_value = mock_future
+                with patch("concurrent.futures.ThreadPoolExecutor", _SyncExecutor):
                     try:
                         engine._transcribe_with_fallback_impl(b"audio", "prompt", "en")
                     except (RuntimeError, Exception):
@@ -202,13 +203,7 @@ class TestWhisperXAfterParakeetWhenPresent(unittest.TestCase):
             mock_profiler.start_span.return_value.__enter__ = lambda s: s
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("core.engine._get_available_memory_gb", return_value=16.0):
-                with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("pool stub")
-                    mock_pool.submit.return_value = mock_future
+                with patch("concurrent.futures.ThreadPoolExecutor", _SyncExecutor):
                     try:
                         engine._transcribe_with_fallback_impl(b"audio", "prompt", "en")
                     except (RuntimeError, Exception):
@@ -262,13 +257,7 @@ class TestWhisperXAfterBothWhenBothPresent(unittest.TestCase):
             mock_profiler.start_span.return_value.__enter__ = lambda s: s
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("core.engine._get_available_memory_gb", return_value=16.0):
-                with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("pool stub")
-                    mock_pool.submit.return_value = mock_future
+                with patch("concurrent.futures.ThreadPoolExecutor", _SyncExecutor):
                     try:
                         engine._transcribe_with_fallback_impl(b"audio", "prompt", "en")
                     except (RuntimeError, Exception):
@@ -316,13 +305,7 @@ class TestWhisperXDefaultPositionWhenNeither(unittest.TestCase):
             mock_profiler.start_span.return_value.__enter__ = lambda s: s
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("core.engine._get_available_memory_gb", return_value=16.0):
-                with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("pool stub")
-                    mock_pool.submit.return_value = mock_future
+                with patch("concurrent.futures.ThreadPoolExecutor", _SyncExecutor):
                     try:
                         result = engine._transcribe_with_fallback_impl(b"audio", "prompt", "en")
                     except (RuntimeError, Exception):

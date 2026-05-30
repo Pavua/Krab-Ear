@@ -160,13 +160,14 @@ class TestDeleteHistoryItemRemovesFromSemanticIndex(unittest.TestCase):
         item_id = "item-to-delete"
         store = self._make_store_with_item(item_id)
         mock_searcher = MagicMock()
-        mock_searcher.remove.return_value = True
+        mock_searcher.remove_item.return_value = True
 
         svc = HistoryService(store=store, semantic_searcher=mock_searcher)
         result = svc.handle_delete_history_item({"id": item_id})
 
         self.assertTrue(result.get("deleted"))
-        mock_searcher.remove.assert_called_once_with(item_id)
+        # W1172: history_service calls remove_item() not bare remove()
+        mock_searcher.remove_item.assert_called_once_with(item_id)
 
     def test_delete_history_item_no_searcher_still_works(self):
         """When no semantic_searcher provided, delete succeeds without error."""

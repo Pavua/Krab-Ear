@@ -166,12 +166,7 @@ class TestVoxtralAdapterEnabled(unittest.TestCase):
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("core.engine._get_available_memory_gb", return_value=16.0):
                 with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                    mock_pool = MagicMock()
-                    mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                    mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                    mock_future = MagicMock()
-                    mock_future.result.side_effect = RuntimeError("unavail")
-                    mock_pool.submit.return_value = mock_future
+                    mock_pool_cls.return_value.submit.return_value.result.side_effect = RuntimeError("unavail")
                     with self.assertRaises(RuntimeError):
                         engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
 
@@ -193,12 +188,7 @@ class TestVoxtralAdapterEnabled(unittest.TestCase):
             mock_profiler.start_span.return_value.__enter__ = lambda s: s
             mock_profiler.start_span.return_value.__exit__ = MagicMock(return_value=False)
             with patch("concurrent.futures.ThreadPoolExecutor") as mock_pool_cls:
-                mock_pool = MagicMock()
-                mock_pool_cls.return_value.__enter__ = lambda s: mock_pool
-                mock_pool_cls.return_value.__exit__ = MagicMock(return_value=False)
-                mock_future = MagicMock()
-                mock_future.result.return_value = {"text": "вискер", "segments": [], "language": "ru"}
-                mock_pool.submit.return_value = mock_future
+                mock_pool_cls.return_value.submit.return_value.result.return_value = {"text": "вискер", "segments": [], "language": "ru"}
                 engine._transcribe_with_fallback_impl(b"audio", "prompt", "ru")
 
         self.assertEqual(len(vt_call_count), 0, "Voxtral не должен вызываться если маркер уже недоступен")

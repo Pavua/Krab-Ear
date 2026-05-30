@@ -38,9 +38,10 @@ class ArchiveManager:
     истории. Удалённые из активной истории записи могут быть восстановлены.
     """
 
-    def __init__(self, store: Any, semantic_searcher: Any | None = None) -> None:
+    def __init__(self, store: Any, semantic_searcher: Any | None = None, transcript_versioner: Any | None = None) -> None:
         self._store = store
         self._semantic_searcher = semantic_searcher
+        self._transcript_versioner = transcript_versioner  # W1259
         data_dir = Path(getattr(store, "data_dir", "."))
         self._archive_dir = data_dir / _ARCHIVE_SUBDIR
         self._archive_path = self._archive_dir / _ARCHIVE_FILE
@@ -139,6 +140,11 @@ class ArchiveManager:
                 self._append_ndjson(self._archive_path, item_dict)
                 _store.delete_history_item(clean_id)
                 archived_count += 1
+                if self._transcript_versioner is not None:
+                    try:
+                        self._transcript_versioner.purge_versions_for_item(clean_id)
+                    except Exception:
+                        logger.exception("archive_items: версии id=%s", clean_id)
                 if self._semantic_searcher is not None:
                     try:
                         self._semantic_searcher.remove_item(clean_id)

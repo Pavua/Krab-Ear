@@ -230,6 +230,7 @@ class TestListTelegramChatsReturnsChats(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
@@ -246,6 +247,7 @@ class TestListTelegramChatsReturnsChats(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
@@ -265,6 +267,7 @@ class TestListTelegramChatsOffline(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
@@ -281,6 +284,7 @@ class TestListTelegramChatsOffline(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = True
@@ -299,6 +303,7 @@ class TestBridgeDisabled(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = False
@@ -314,6 +319,7 @@ class TestBridgeDisabled(unittest.TestCase):
         from backend.service import BackendService
         svc = MagicMock()
         svc._telegram_bridge = bridge
+        svc._get_runtime_setting.return_value = False  # W1211
 
         with patch("backend.service.settings") as mock_settings:
             mock_settings.TELEGRAM_BRIDGE_ENABLED = False

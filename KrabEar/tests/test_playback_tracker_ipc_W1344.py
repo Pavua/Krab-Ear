@@ -187,37 +187,28 @@ class TestSaveUsesAtomicTmpRenameRegression(unittest.TestCase):
     """W1336 F5: _save() must use tmp+fsync+rename atomic pattern."""
 
     def test_save_uses_atomic_tmp_rename_pattern(self):
-        """Assert that _save() writes to .tmp then renames to final path."""
+        """Assert that _save() writes to .tmp then renames via os.replace."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tracker = PlaybackTracker(data_dir=tmpdir)
             final_path = Path(tmpdir) / "playback_stats.json"
-            tmp_path = final_path.with_suffix(".tmp")
 
             rename_calls = []
+            import os as _os
+            original_replace = _os.replace
 
-            original_replace = Path.replace
+            def patched_replace(src, dst):
+                rename_calls.append((str(src), str(dst)))
+                return original_replace(src, dst)
 
-            def patched_replace(self_path, target):
-                rename_calls.append((str(self_path), str(target)))
-                return original_replace(self_path, target)
-
-            with patch.object(Path, "replace", patched_replace):
+            with patch("backend.playback_tracker.os.replace", side_effect=patched_replace):
                 tracker.record_playback("atomic_test_item", duration_listened_sec=5.0)
 
-            # At least one rename must have happened
-            self.assertTrue(
-                rename_calls,
-                "_save() must perform at least one atomic rename (tmp → final)",
-            )
-            # The rename must go FROM .tmp TO the actual file
+            self.assertTrue(rename_calls, "_save() must perform at least one atomic rename")
             found = any(
-                src.endswith(".tmp") and dst == str(final_path)
+                ".playback_stats_tmp_" in src and dst == str(final_path)
                 for src, dst in rename_calls
             )
-            self.assertTrue(
-                found,
-                f"Expected rename from .tmp to {final_path}, got: {rename_calls}",
-            )
+            self.assertTrue(found, f"Expected rename from tmp to {final_path}, got: {rename_calls}")
 
     def test_save_calls_fsync(self):
         """Assert that _save() calls os.fsync() to durably flush data."""

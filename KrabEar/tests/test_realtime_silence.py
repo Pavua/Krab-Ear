@@ -586,10 +586,11 @@ class TestW1136Fixes(unittest.TestCase):
         )
 
     def test_threshold_default_when_not_in_settings(self):
-        """Без ключа в settings используется _DEFAULT_THRESHOLD_DB = -40.0."""
+        """wave1531 changed default to -55 dBFS (PRESERVE_WHISPER)."""
         recorder = FakeRecorder(_make_silence(5.0))
         rsf = RealtimeSilenceFilter(recorder, {})
-        self.assertAlmostEqual(rsf._threshold_db, -40.0)
+        from backend.realtime_silence_filter import _DEFAULT_THRESHOLD_DB
+        self.assertAlmostEqual(rsf._threshold_db, _DEFAULT_THRESHOLD_DB)
 
     # ------------------------------------------------------------------
     # F1: _checked_up_to_sec skips already-analyzed prefix

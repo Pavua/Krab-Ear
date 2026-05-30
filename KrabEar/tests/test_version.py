@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-EXPECTED_VERSION = "2.0.0"
+EXPECTED_VERSION = "2.0.5"
 
 
 class TestVersionFile(unittest.TestCase):

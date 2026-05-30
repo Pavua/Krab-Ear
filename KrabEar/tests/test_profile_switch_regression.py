@@ -290,40 +290,11 @@ class MlxLockSerializesTranscribeTestCase(unittest.TestCase):
 
     @patch("core.engine.mlx_whisper")
     def test_non_mlx_config_changes_do_not_block_on_lock(self, mock_mlx):
-        """set_quality_profile не захватывает mlx_lock — не блокирует конфигурацию.
+        """set_quality_profile завершается корректно.
 
-        Это важно для latency: pure Python config changes должны проходить
-        мгновенно, независимо от длинного MLX inference в другом потоке.
+        NOTE: wave1618 added mlx_lock to set_quality_profile for clear_cache() safety.
         """
-        from core.mlx_lock import mlx_lock
-
-        # Захватить MLX lock из другого потока (имитируем активный inference)
-        lock_held = threading.Event()
-        lock_released = threading.Event()
-
-        def hold_lock():
-            with mlx_lock():
-                lock_held.set()
-                lock_released.wait(timeout=1.0)
-
-        holder = threading.Thread(target=hold_lock, daemon=True)
-        holder.start()
-        lock_held.wait(timeout=1.0)  # дождаться, пока lock занят
-
-        # set_quality_profile не должен блокироваться на mlx_lock
-        start = time.monotonic()
         self.engine.set_quality_profile("max")
-        elapsed = time.monotonic() - start
-
-        lock_released.set()
-        holder.join(timeout=1.0)
-
-        self.assertLess(
-            elapsed,
-            0.1,
-            f"set_quality_profile заблокировался на mlx_lock ({elapsed:.3f}s)! "
-            "Profile switch должен быть мгновенным (pure Python, без MLX lock).",
-        )
         self.assertEqual(self.engine.quality_profile, "max")
 
 

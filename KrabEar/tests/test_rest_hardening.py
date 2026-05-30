@@ -167,6 +167,7 @@ class _RestBase(unittest.TestCase):
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
         self.mock_store.add_history_item.return_value = MagicMock(id="hist-w176")
+        self.mock_store.load_settings.return_value = {}  # wave1212
 
         self.mock_transcriber = MagicMock()
         self.mock_transcriber.transcribe.return_value = {
