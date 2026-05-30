@@ -108,3 +108,35 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:  # type: ignore
                 "python": py_ver,
             }
             _append_entry(entry)
+
+
+# ---------------------------------------------------------------------------
+# Wave 1705: disable the background LLM warmup thread during tests.
+#
+# BackendService.__init__ spawns a daemon thread running LLMRewriter.warmup_sync
+# (60 s timeout). With LM Studio offline — the norm in CI/test environments —
+# each of the ~90 BackendService constructions in test_backend_service.py (and
+# every other test that builds a BackendService) leaks a thread that keeps
+# retrying the connection, spams "LLM warmup failed: ConnectionError", and
+# touches the test's already-deleted temp StateStore, raising
+# PytestUnhandledThreadExceptionWarning on history.lock. This slows the suite
+# and adds CI flakiness.
+#
+# Patching warmup_sync to a no-op lets the daemon thread start and exit
+# instantly — no retries, no spam, no dangling store access. Tests that assert
+# real warmup behaviour (test_rewriter_warmup, test_stt_warmup) are skipped via
+# the nodeid guard so their coverage is preserved.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _disable_llm_warmup(request):
+    if "warmup" in request.node.nodeid.lower():
+        yield
+        return
+    try:
+        from unittest.mock import patch
+        from backend.llm_rewriter import LLMRewriter
+
+        with patch.object(LLMRewriter, "warmup_sync", lambda self, **kw: None):
+            yield
+    except Exception:
+        yield
