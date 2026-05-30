@@ -52,6 +52,7 @@ class _SyncExecutor:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_engine(
     *,
     parakeet_marker_unavailable: bool = False,
