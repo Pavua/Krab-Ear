@@ -406,7 +406,11 @@ class BackendService:
             start_time=self._start_time,
         )
         self._session_tracker = SessionTracker(data_dir=self.store.data_dir)
-        self._error_reporter = ErrorReporter()
+        self._error_reporter = ErrorReporter(
+            settings_provider=self._settings_svc.cached_settings,
+        )
+        # W1687 F3 HIGH: wire settings_provider so privacy-mode redaction in
+        # get_error_report is honoured at runtime (was silently skipped before).
         self._usage_tracker = UsageTracker(data_dir=self.store.data_dir)
         self._cost_estimator = CostEstimator()
         self._audio_converter = AudioConverter()
@@ -422,7 +426,12 @@ class BackendService:
             max_copies=AUTO_BACKUP_MAX_COPIES,
             enabled=settings.AUTO_BACKUP_ENABLED,
         )
-        self._export_scheduler = ExportScheduler(data_dir=self.store.data_dir)
+        self._export_scheduler = ExportScheduler(
+            data_dir=self.store.data_dir,
+            settings_provider=self._settings_svc.cached_settings,
+        )
+        # W1687 F6 MED: wire settings_provider so privacy-mode guard in
+        # check_and_export() and runtime schedule changes are honoured.
         # W982: Wire periodic worker thread for ExportScheduler (F1 fix).
         # check_and_export() is a no-op when disabled — cheap to call every 5 min.
         self._export_scheduler_stop = threading.Event()
@@ -445,7 +454,10 @@ class BackendService:
             recap_email_to=settings.RECAP_EMAIL_TO,
             recap_time_hour=settings.RECAP_TIME_HOUR,
             enabled=settings.RECAP_EMAIL_ENABLED,
+            settings_provider=self._settings_svc.cached_settings,
         )
+        # W1687 F5 MED: wire settings_provider so runtime changes to
+        # recap_enabled / recap_time_hour are picked up on each scheduler tick.
         if settings.RECAP_EMAIL_ENABLED:
             self._recap_scheduler.start()
         self._quality_trends = QualityTrendAnalyzer()
@@ -467,7 +479,10 @@ class BackendService:
         self._word_timing_analyzer = WordTimingAnalyzer()
         self._event_replay = EventReplayManager(
             persist_path=self.store.data_dir / "event_replay.ndjson",
+            settings_provider=self._settings_svc.cached_settings,
         )
+        # W1687 F2 HIGH: wire settings_provider so privacy-mode redaction
+        # in get_event_log / replay_events is honoured at runtime.
         # W1677 F1 HIGH: wire late-injection so EventBus.emit() actually records
         # to the replay ring-buffer. Without this, _event_replay stays None and
         # get_event_log / get_event_stats / replay_events always return empty.
@@ -522,6 +537,9 @@ class BackendService:
         self._auto_deduplicator = AutoDeduplicator(settings_provider=self._get_runtime_setting)
         self._search_history = SearchHistoryManager(data_dir=self.store.data_dir)
         self._archive_manager = ArchiveManager(store=self.store)
+        # W1687 F7 MED: wire recording chain manager so archived items are
+        # removed from their chains (ghost references prevented).
+        self._archive_manager._recording_chain_mgr = self._chains
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
@@ -558,6 +576,9 @@ class BackendService:
         )
         # Wire semantic_searcher into HistoryService so deletes remove embeddings (W1426 F2).
         self._history._semantic_searcher = self._semantic_searcher
+        # W1687 F8 MED: wire semantic_searcher into ArchiveManager so that
+        # archive/unarchive operations remove or re-index embeddings respectively.
+        self._archive_manager._semantic_searcher = self._semantic_searcher
         # Late-inject AutoGlossaryBuilder into HistoryService so that
         # add_history_item immediately invalidates the glossary cache (W1288 F1).
         self._history._auto_glossary = self._auto_glossary
@@ -640,6 +661,9 @@ class BackendService:
             data_dir=self.store.data_dir,
         )
         self._disk_monitor.start()
+        # W1687 F1 HIGH: wire error_bus so disk.warn / disk.critical KrabErrors
+        # actually reach the ErrorBus and the Loud Errors UI toast.
+        self._disk_monitor._error_bus = self._error_bus
 
         # Обработчик корректного завершения (регистрация сигналов — через register())
         self._shutdown_handler = GracefulShutdownHandler(data_dir=self.store.data_dir)
