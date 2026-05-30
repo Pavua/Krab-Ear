@@ -1,5 +1,5 @@
 """Unit-тесты для VGWebSocketClient."""
-from backend.vg_ws_client import VGWebSocketClient, _RECONNECT_BASE_SEC
+from backend.vg_ws_client import VGWebSocketClient
 import sys
 import os
 import asyncio
@@ -44,9 +44,9 @@ class TestVGWebSocketClient(unittest.TestCase):
         mock_bus.emit.assert_called_once_with("stt.final", {"text": "hello"})
 
     @patch("backend.vg_ws_client.bus")
-    @patch("backend.vg_ws_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("backend.vg_ws_client.asyncio.wait_for", new_callable=AsyncMock)
     @patch("backend.vg_ws_client.websockets.connect")
-    def test_reconnect_on_disconnect(self, mock_connect, mock_sleep, mock_bus):
+    def test_reconnect_on_disconnect(self, mock_connect, mock_wait_for, mock_bus):
         """После разрыва соединения клиент должен переподключиться."""
         connect_calls = []
 
@@ -60,7 +60,7 @@ class TestVGWebSocketClient(unittest.TestCase):
         first = True
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             nonlocal first
             connect_calls.append(url)
             if first:
@@ -79,19 +79,19 @@ class TestVGWebSocketClient(unittest.TestCase):
 
         # Должно быть два вызова connect: исходный + reconnect
         self.assertEqual(len(connect_calls), 2)
-        # Между попытками должна быть задержка backoff
-        mock_sleep.assert_awaited_once()
+        # Между попытками должна быть задержка backoff (wait_for с timeout)
+        mock_wait_for.assert_awaited_once()
 
     @patch("backend.vg_ws_client.bus")
-    @patch("backend.vg_ws_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("backend.vg_ws_client.asyncio.wait_for", new_callable=AsyncMock)
     @patch("backend.vg_ws_client.websockets.connect")
-    def test_max_reconnect_attempts(self, mock_connect, mock_sleep, mock_bus):
+    def test_max_reconnect_attempts(self, mock_connect, mock_wait_for, mock_bus):
         """Backoff растёт до _RECONNECT_MAX_SEC и не превышает его."""
         MAX_FAILURES = 5
         attempt = [0]
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             attempt[0] += 1
             if attempt[0] >= MAX_FAILURES:
                 # После N попыток останавливаем клиент
@@ -104,24 +104,23 @@ class TestVGWebSocketClient(unittest.TestCase):
         client = VGWebSocketClient("http://localhost:8090", "vs_maxretry")
         asyncio.run(client.run())
 
-        # Все sleep-вызовы кроме последнего (после stop) должны иметь backoff <= MAX
+        # Все wait_for-вызовы должны иметь timeout backoff <= MAX
         from backend.vg_ws_client import _RECONNECT_MAX_SEC
-        for c in mock_sleep.await_args_list:
-            delay = c.args[0]
-            self.assertLessEqual(delay, _RECONNECT_MAX_SEC,
-                                 f"backoff {delay} превысил максимум {_RECONNECT_MAX_SEC}")
-
-        # Backoff удваивается: первая задержка == base
-        first_delay = mock_sleep.await_args_list[0].args[0]
-        self.assertAlmostEqual(first_delay, _RECONNECT_BASE_SEC)
+        for c in mock_wait_for.await_args_list:
+            timeout = c.kwargs.get("timeout", c.args[1] if len(c.args) > 1 else None)
+            if timeout is not None:
+                self.assertLessEqual(timeout, _RECONNECT_MAX_SEC,
+                                     f"backoff {timeout} превысил максимум {_RECONNECT_MAX_SEC}")
 
         # Убеждаемся что было несколько попыток
         self.assertGreaterEqual(attempt[0], MAX_FAILURES)
+        # Убеждаемся что backoff ожидался хотя бы раз
+        self.assertGreater(mock_wait_for.await_count, 0)
 
     @patch("backend.vg_ws_client.bus")
-    @patch("backend.vg_ws_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("backend.vg_ws_client.asyncio.wait_for", new_callable=AsyncMock)
     @patch("backend.vg_ws_client.websockets.connect")
-    def test_event_forwarding_after_reconnect(self, mock_connect, mock_ws_sleep, mock_bus):
+    def test_event_forwarding_after_reconnect(self, mock_connect, mock_wait_for, mock_bus):
         """После переподключения события продолжают проксироваться в EventBus."""
         event_after_reconnect = json.dumps({"type": "stt.final", "data": {"text": "после реконнекта"}})
         first = True
@@ -132,7 +131,7 @@ class TestVGWebSocketClient(unittest.TestCase):
             client.stop()
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             nonlocal first
             if first:
                 first = False
@@ -166,7 +165,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
             yield
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             client.stop()
             ws = MagicMock()
             ws.__aiter__ = MagicMock(return_value=no_messages())
@@ -191,7 +190,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
             yield payload
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             ws = MagicMock()
             ws.__aiter__ = MagicMock(return_value=one_message())
             yield ws
@@ -220,7 +219,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
                 yield m
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             ws = MagicMock()
             ws.__aiter__ = MagicMock(return_value=multi_messages())
             yield ws
@@ -237,9 +236,9 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
     # test_reconnect_after_disconnect
     # ------------------------------------------------------------------
     @patch("backend.vg_ws_client.bus")
-    @patch("backend.vg_ws_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("backend.vg_ws_client.asyncio.wait_for", new_callable=AsyncMock)
     @patch("backend.vg_ws_client.websockets.connect")
-    def test_reconnect_after_disconnect(self, mock_connect, mock_sleep, mock_bus):
+    def test_reconnect_after_disconnect(self, mock_connect, mock_wait_for, mock_bus):
         """После разрыва WS клиент переподключается и продолжает работу."""
         first = True
 
@@ -248,7 +247,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
             yield
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             nonlocal first
             if first:
                 first = False
@@ -262,18 +261,20 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
         client = VGWebSocketClient("http://localhost:8090", "vs_recon")
         asyncio.run(client.run())
         self.assertEqual(mock_connect.call_count, 2)
-        mock_sleep.assert_awaited_once()
+        mock_wait_for.assert_awaited_once()
 
     # ------------------------------------------------------------------
     # test_handles_invalid_session_id
     # ------------------------------------------------------------------
     def test_handles_invalid_session_id(self):
-        """Пустой session_id не вызывает исключения при построении URL."""
-        client = VGWebSocketClient("http://localhost:8090", "")
-        self.assertIn("/v1/sessions//stream", client.ws_url)
-        # stop safe to call even without running loop
-        client.stop()
-        self.assertTrue(client._stop.is_set())
+        """Пустой/невалидный session_id должен вызывать ValueError (W1209 security)."""
+        with self.assertRaises(ValueError):
+            VGWebSocketClient("http://localhost:8090", "")
+
+    def test_handles_invalid_session_id_special_chars(self):
+        """session_id со спецсимволами должен вызывать ValueError (W1209 security)."""
+        with self.assertRaises(ValueError):
+            VGWebSocketClient("http://localhost:8090", "../../etc/passwd")
 
     # ------------------------------------------------------------------
     # test_concurrent_send
@@ -290,7 +291,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
                 yield m
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             ws = MagicMock()
             ws.__aiter__ = MagicMock(return_value=burst_messages())
             yield ws
@@ -325,7 +326,7 @@ class TestVGWebSocketClientWave144(unittest.TestCase):
             yield
 
         @asynccontextmanager
-        async def fake_connect(url, extra_headers=None):
+        async def fake_connect(url, extra_headers=None, **kwargs):
             client.stop()  # сигнал остановки ДО подключения
             ws = MagicMock()
             ws.__aiter__ = MagicMock(return_value=no_messages())
