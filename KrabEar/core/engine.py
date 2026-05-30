@@ -406,6 +406,7 @@ class AudioEngine:
         # отключается через _whisperx_load_error, chain продолжает жить.
         self._whisperx_model = None  # type: ignore[var-annotated]
         self._whisperx_load_error: str | None = None
+        self._whisperx_load_lock: threading.RLock = threading.RLock()
 
         # Voxtral Mini 4B adapter state (Phase 4.4, lazy-loaded).
         # W1474 F1: Инициализируется явно в __init__ для double-checked locking.
