@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +76,73 @@ class HistoryItemLLMFieldsTestCase(unittest.TestCase):
         self.assertEqual(item.cleaned_text, "привет мир")
         self.assertTrue(item.llm_applied)
         self.assertEqual(item.llm_latency_ms, 1500)
+
+
+class TzAwareTimestampTestCase(unittest.TestCase):
+    """W1671: tz-aware UTC timestamps + backward-compat helpers."""
+
+    def test_history_item_timestamp_is_tz_aware(self):
+        """HistoryItem.create() должен производить UTC-aware timestamp (+00:00)."""
+        from backend.models import HistoryItem
+        item = HistoryItem.create(text="тест")
+        self.assertTrue(
+            item.ts.endswith("+00:00"),
+            f"Expected +00:00 suffix, got: {item.ts!r}",
+        )
+        # Must parse as tz-aware datetime
+        dt = datetime.fromisoformat(item.ts)
+        self.assertIsNotNone(dt.tzinfo, "Parsed datetime should be tz-aware")
+        self.assertEqual(dt.utcoffset().total_seconds(), 0)
+
+    def test_timestamp_lexicographic_sort_still_works(self):
+        """Два tz-aware UTC timestamp-а должны сортироваться лексикографически корректно."""
+        from backend.models import HistoryItem
+        import time
+        item_a = HistoryItem.create(text="первый")
+        time.sleep(0.01)  # ensure distinct seconds-precision might differ
+        # Simulate a slightly later timestamp manually to avoid sleep dependency
+        dt_a = datetime.fromisoformat(item_a.ts)
+        dt_b_aware = dt_a.replace(second=(dt_a.second + 1) % 60)
+        ts_b = dt_b_aware.isoformat(timespec="seconds")
+
+        # Both end in +00:00 — strip suffix to get naive str for lex comparison
+        ts_a_naive = item_a.ts[:-6] if item_a.ts.endswith("+00:00") else item_a.ts
+        ts_b_naive = ts_b[:-6] if ts_b.endswith("+00:00") else ts_b
+
+        # Lexicographic order should reflect chronological order
+        self.assertLessEqual(ts_a_naive, ts_b_naive)
+
+    def test_naive_legacy_timestamp_parse_compat(self):
+        """StateStore._parse_ts_to_naive_utc() корректно обрабатывает tz-naive legacy timestamps."""
+        from backend.state_store import StateStore
+
+        # Legacy naive timestamp (pre-W1671)
+        naive_ts = "2026-01-15T14:30:00"
+        result = StateStore._parse_ts_to_naive_utc(naive_ts)
+        self.assertIsNone(result.tzinfo, "Result should be tz-naive")
+        self.assertEqual(result, datetime(2026, 1, 15, 14, 30, 0))
+
+        # New tz-aware UTC timestamp (W1671+)
+        aware_ts = "2026-01-15T14:30:00+00:00"
+        result2 = StateStore._parse_ts_to_naive_utc(aware_ts)
+        self.assertIsNone(result2.tzinfo, "Result should be tz-naive")
+        self.assertEqual(result2, datetime(2026, 1, 15, 14, 30, 0))
+
+        # Both parse to the same naive UTC datetime
+        self.assertEqual(result, result2)
+
+    def test_ts_to_naive_utc_str_strips_offset(self):
+        """StateStore._ts_to_naive_utc_str() должен убирать +00:00 для смешанных сравнений."""
+        from backend.state_store import StateStore
+
+        aware = "2026-05-29T12:00:00+00:00"
+        naive = "2026-05-29T12:00:00"
+        self.assertEqual(StateStore._ts_to_naive_utc_str(aware), naive)
+        self.assertEqual(StateStore._ts_to_naive_utc_str(naive), naive)
+
+        # Z suffix
+        z_ts = "2026-05-29T12:00:00Z"
+        self.assertEqual(StateStore._ts_to_naive_utc_str(z_ts), naive)
 
 
 if __name__ == "__main__":

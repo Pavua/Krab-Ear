@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import logging
@@ -301,7 +301,7 @@ class StateStore:
         for item in reversed(active):
             # Early termination: items are chronological, iterating newest-first.
             # Once item.ts < from_ts, all remaining are even older — stop.
-            if filter_from_ts is not None and item.ts < filter_from_ts:
+            if filter_from_ts is not None and self._ts_to_naive_utc_str(item.ts) < filter_from_ts:
                 break
             if not self._matches_filters(
                 item,
@@ -376,7 +376,7 @@ class StateStore:
         filtered = []
         if needle:
             for item, haystack in recent_index:
-                if filter_from_ts is not None and item.ts < filter_from_ts:
+                if filter_from_ts is not None and self._ts_to_naive_utc_str(item.ts) < filter_from_ts:
                     break
                 if not self._matches_filters(
                     item,
@@ -401,7 +401,7 @@ class StateStore:
         # Early termination при наличии from_ts (хронологический порядок NDJSON).
         filtered = []
         for item in reversed(active):
-            if filter_from_ts is not None and item.ts < filter_from_ts:
+            if filter_from_ts is not None and self._ts_to_naive_utc_str(item.ts) < filter_from_ts:
                 break
             if not self._matches_filters(
                 item,
@@ -502,6 +502,38 @@ class StateStore:
         return parsed.isoformat(timespec="seconds")
 
     @staticmethod
+    def _ts_to_naive_utc_str(ts: str) -> str:
+        """Нормализует ISO-timestamp в tz-naive UTC строку для лексикографического сравнения.
+
+        Обеспечивает обратную совместимость:
+        - tz-naive  «2026-05-29T12:00:00»        → возвращается без изменений
+        - tz-aware  «2026-05-29T12:00:00+00:00»  → «2026-05-29T12:00:00»
+
+        Все старые записи в NDJSON — tz-naive.  Новые (W1671+) — UTC +00:00.
+        Приведение обоих к одному формату позволяет смешанные сравнения.
+        """
+        if ts.endswith("+00:00"):
+            return ts[:-6]
+        if ts.endswith("Z"):
+            return ts[:-1]
+        return ts
+
+    @staticmethod
+    def _parse_ts_to_naive_utc(ts: str) -> datetime:
+        """Парсит ISO-timestamp в tz-naive UTC datetime.
+
+        Tz-aware значения конвертируются в UTC, затем tzinfo убирается.
+        Tz-naive значения считаются уже UTC (legacy-совместимость).
+        """
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            return datetime.min
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
+    @staticmethod
     def _matches_filters(
         item: HistoryItem,
         paste_status: str | None,
@@ -517,9 +549,9 @@ class StateStore:
             return False
         if translation_status is not None and item.translation_status != translation_status:
             return False
-        if from_ts is not None and item.ts < from_ts:
+        if from_ts is not None and StateStore._ts_to_naive_utc_str(item.ts) < from_ts:
             return False
-        if to_ts is not None and item.ts > to_ts:
+        if to_ts is not None and StateStore._ts_to_naive_utc_str(item.ts) > to_ts:
             return False
         return True
 
@@ -654,7 +686,8 @@ class StateStore:
         if days < 1:
             raise ValueError("days must be >= 1")
 
-        threshold_dt = datetime.now() - timedelta(days=days)
+        now_naive = datetime.now()
+        threshold_dt = now_naive - timedelta(days=days)
 
         with self._lock():
             active = self._load_active_items_unlocked()
@@ -662,7 +695,7 @@ class StateStore:
         to_delete = [
             item
             for item in active
-            if item.ts and datetime.fromisoformat(item.ts) < threshold_dt
+            if item.ts and self._parse_ts_to_naive_utc(item.ts) < threshold_dt
         ]
 
         oldest_age_days = None
@@ -671,8 +704,8 @@ class StateStore:
                 (item.ts for item in active if item.ts), default=None
             )
             if oldest_ts_str:
-                oldest_dt = datetime.fromisoformat(oldest_ts_str)
-                oldest_age_days = (datetime.now() - oldest_dt).days
+                oldest_dt = self._parse_ts_to_naive_utc(oldest_ts_str)
+                oldest_age_days = (now_naive - oldest_dt).days
 
         if not dry_run:
             for item in to_delete:
@@ -724,7 +757,7 @@ class StateStore:
                     (item.ts for item in active if item.ts), default=None
                 )
                 if oldest_ts_str:
-                    oldest_dt = datetime.fromisoformat(oldest_ts_str)
+                    oldest_dt = self._parse_ts_to_naive_utc(oldest_ts_str)
                     oldest_age_days = (datetime.now() - oldest_dt).days
         except Exception:
             pass
@@ -767,8 +800,9 @@ class StateStore:
         with self._lock():
             active = self._load_active_items_unlocked()
 
-        today_iso = datetime.now().date().isoformat()
-        last_24h_threshold = datetime.now() - timedelta(hours=24)
+        now_naive = datetime.now()
+        today_iso = now_naive.date().isoformat()
+        last_24h_threshold = now_naive - timedelta(hours=24)
 
         paste_ok = 0
         paste_failed = 0
@@ -818,11 +852,8 @@ class StateStore:
             if is_today:
                 today_count += 1
                 today_text_chars += text_len
-            try:
-                item_dt = datetime.fromisoformat(item.ts)
-            except ValueError:
-                item_dt = None
-            if item_dt is not None and item_dt >= last_24h_threshold:
+            item_dt = self._parse_ts_to_naive_utc(item.ts) if item.ts else None
+            if item_dt is not None and item_dt != datetime.min and item_dt >= last_24h_threshold:
                 last_24h_count += 1
 
         total = len(active)
