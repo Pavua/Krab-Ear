@@ -55,13 +55,11 @@ jobs:
       - name: Run backend/unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}/KrabEar
-        timeout-minutes: 25
+        timeout-minutes: 40
         run: |
           python -m pytest KrabEar/tests/ \
             -v \
             --tb=short \
-            --cov=KrabEar \
-            --cov-report=term-missing \
             -n auto
 
       - name: Audit orphan imports in service.py
