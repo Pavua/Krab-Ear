@@ -134,12 +134,12 @@ class ObsidianSyncManager:
         folder = folder.strip() or _DEFAULT_FOLDER
 
         with self._lock:
-            self._vault_path = p
-            self._folder = folder
-
+            # Validate target dir BEFORE committing _vault_path (W603 fix).
             target_dir = p / folder
             target_dir.mkdir(parents=True, exist_ok=True)
 
+            self._vault_path = p
+            self._folder = folder
             self._save_state()
 
         return {

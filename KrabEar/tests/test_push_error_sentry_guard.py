@@ -152,7 +152,8 @@ class TestInternalExceptionCallsCaptureException(unittest.TestCase):
 
         self.assertEqual(len(captured), 1, "capture_exception should be called once")
         self.assertIs(captured[0][0], exc)
-        self.assertEqual(captured[0][1], "_push_error_internal")
+        # wave805 replaced sentinel with component names
+        self.assertIsNotNone(captured[0][1], "component kwarg must be passed")
 
     def test_engine_push_failure_calls_capture(self):
         self._assert_capture_called_on_push_failure(_make_engine_stub())

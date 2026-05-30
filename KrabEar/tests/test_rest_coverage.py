@@ -43,6 +43,7 @@ try:
     _mock_store.load_vocabulary.return_value = []
     _mock_store.is_idempotent.return_value = False
     _mock_store.add_history_item.return_value = MagicMock(id="hist-test-001")
+    _mock_store.load_settings.return_value = {}  # wave1212
 
     _mock_transcriber = MagicMock()
     _mock_transcriber.transcribe.return_value = {
@@ -509,7 +510,8 @@ class CORSCredentialsHeaderTest(unittest.TestCase):
             headers={"Origin": "http://localhost:3000"},
         )
         allow_creds = resp.headers.get("Access-Control-Allow-Credentials", "")
-        self.assertEqual(allow_creds.lower(), "true")
+        # wave1207: CORS_ORIGINS=* disables credentials
+        self.assertNotEqual(allow_creds.lower(), "true")
 
     def test_vocabulary_cors_allow_credentials(self):
         resp = self.client.get(
@@ -517,7 +519,8 @@ class CORSCredentialsHeaderTest(unittest.TestCase):
             headers={"Origin": "http://app.local:8080"},
         )
         allow_creds = resp.headers.get("Access-Control-Allow-Credentials", "")
-        self.assertEqual(allow_creds.lower(), "true")
+        # wave1207: CORS_ORIGINS=* disables credentials
+        self.assertNotEqual(allow_creds.lower(), "true")
 
     def test_cors_allow_origin_present_on_cross_origin_request(self):
         resp = self.client.get(

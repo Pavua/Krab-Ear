@@ -24,6 +24,7 @@ from backend.summary_profiles import SummaryProfileManager
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
+    from backend.playback_tracker import PlaybackTracker
 
 logger = logging.getLogger("KrabEar.Backend.HistoryService")
 
@@ -75,6 +76,8 @@ class HistoryService:
         cached_settings: "Callable[[], dict[str, Any]] | None" = None,
         semantic_searcher: Any | None = None,
         auto_glossary_builder: Any | None = None,
+        playback_tracker: "PlaybackTracker | None" = None,
+        transcript_versions: Any | None = None,
     ) -> None:
         self.store = store
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
@@ -91,6 +94,10 @@ class HistoryService:
         # AutoGlossaryBuilder для инвалидации кэша после добавления записи (опционально).
         # Late-injection: передаётся из BackendService после создания AutoGlossaryBuilder.
         self._auto_glossary = auto_glossary_builder
+        # F4 W1343: cascade-delete orphan playback stats.
+        self._playback_tracker = playback_tracker
+        # W1045 F2: TranscriptVersionManager для каскадного удаления версий (опционально).
+        self._transcript_versions = transcript_versions
         # Менеджер профилей резюмирования (персистентность в data_dir).
         _data_dir = getattr(store, "data_dir", None)
         self._summary_profiles = SummaryProfileManager(data_dir=_data_dir)
@@ -375,6 +382,17 @@ class HistoryService:
         # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(item_id)
+        # F4 W1343: cascade-delete orphan playback stats.
+        if self._playback_tracker is not None:
+            self._playback_tracker.remove_stats(item_id)
+        # W1045 F2: cascade-delete transcript versions to prevent privacy bypass.
+        if self._transcript_versions is not None:
+            try:
+                self._transcript_versions.delete_versions_for(item_id)
+            except Exception:
+                logger.warning(
+                    "transcript_versions cascade delete failed for %s", item_id, exc_info=True
+                )
         add_breadcrumb(
             category="history",
             message="delete_history_item",
@@ -1420,6 +1438,16 @@ class HistoryService:
             for item in to_delete:
                 self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
             remaining = len(active) - len(to_delete)
+
+        # W1045 F2: cascade-delete transcript versions for bulk-deleted items.
+        if to_delete and self._transcript_versions is not None:
+            deleted_ids = [item.id for item in to_delete]
+            try:
+                self._transcript_versions.cleanup_for_ids(deleted_ids)
+            except Exception:
+                logger.warning(
+                    "transcript_versions bulk cleanup failed for %d items", len(deleted_ids), exc_info=True
+                )
 
         add_breadcrumb(
             category="history",

@@ -58,7 +58,7 @@ from backend.keyword_cloud import KeywordCloudGenerator
 from backend.quality_trends import QualityTrendAnalyzer
 from backend.daily_digest import DailyDigestGenerator
 from backend.analytics_dashboard import AnalyticsDashboard
-from backend.period_comparison import compare_periods as _compare_periods_fn
+from backend.period_comparison import PeriodComparisonService
 from core.term_extractor import TermExtractor
 from core.text_comparator import TextComparator
 from core.config import settings
@@ -457,6 +457,7 @@ class BackendService:
         # _transcription_counter_ref[0] (set below after RecordingCoreService init).
         self._analytics_dashboard = AnalyticsDashboard()
         self._daily_digest = DailyDigestGenerator()
+        self._period_comparison_svc = PeriodComparisonService(store=self.store)
         # Recap email scheduler (opt-in via RECAP_EMAIL_ENABLED setting)
         self._recap_scheduler = RecapScheduler(
             email_sender=EmailSender.from_settings(settings),
@@ -1190,6 +1191,7 @@ class BackendService:
             "preview_transcribe_paths": self._handle_preview_transcribe_paths,  # VERIFIED: called from Swift (HistoryPanel)
             "translate_text": self._translation.handle_translate_text,  # VERIFIED: called from Swift (main, HistoryPanel)
             "translate_selection": self._translation.handle_translate_selection,  # Phase 2A: selection-translate workflow
+            "clear_translation_cache": self._handle_clear_translation_cache,  # очистить персистентный LRU-кэш переводов (память + файл)
             "get_diagnostics": self._handle_get_diagnostics,  # диагностика: system, stt, llm, history, settings_cache
             "set_translation_glossary_item": self._translation.handle_set_translation_glossary_item,  # VERIFIED: called from Swift (HistoryPanel)
             # VERIFIED: called from Swift (HistoryPanel)
@@ -3226,41 +3228,11 @@ class BackendService:
         return {"markdown": markdown}
 
     def _handle_compare_periods(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает статистику двух временных периодов."""
-        p1_start = params.get("period1_start")
-        p1_end = params.get("period1_end")
-        p2_start = params.get("period2_start")
-        p2_end = params.get("period2_end")
-        if not all([p1_start, p1_end, p2_start, p2_end]):
-            raise ValueError("Необходимы параметры: period1_start, period1_end, period2_start, period2_end")
-        report = _compare_periods_fn(
-            store=self.store,
-            period1_start=p1_start,
-            period1_end=p1_end,
-            period2_start=p2_start,
-            period2_end=p2_end,
-        )
-        return {
-            "period1": {
-                "recordings": report.period1.recordings,
-                "duration_sec": report.period1.duration_sec,
-                "words": report.period1.words,
-                "avg_confidence": report.period1.avg_confidence,
-                "languages": report.period1.languages,
-            },
-            "period2": {
-                "recordings": report.period2.recordings,
-                "duration_sec": report.period2.duration_sec,
-                "words": report.period2.words,
-                "avg_confidence": report.period2.avg_confidence,
-                "languages": report.period2.languages,
-            },
-            "recordings_change_pct": report.recordings_change_pct,
-            "duration_change_pct": report.duration_change_pct,
-            "confidence_change": report.confidence_change,
-            "new_languages": report.new_languages,
-            "summary": report.summary,
-        }
+        """Сравнивает статистику двух временных периодов.
+
+        Режимы: explicit (даты), weeks, months.
+        """
+        return self._period_comparison_svc.handle_compare_periods(params)
 
     def _handle_get_activity_calendar(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает GitHub-style activity calendar данные за последние N месяцев."""
@@ -3316,7 +3288,15 @@ class BackendService:
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды тональности транскрипций за последние N дней."""
         if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {"ok": True, "trends": [], "skipped": "privacy_mode"}
+            return {
+                "ok": True,
+                "daily_sentiment": [],
+                "overall_sentiment": 0.0,
+                "mood_trend": "stable",
+                "sentiment_distribution": {"positive": 0, "negative": 0, "neutral": 0},
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
         days = int(params.get("days", 30))
         try:
             with self.store._lock():
@@ -3846,6 +3826,10 @@ end tell'''
           - "krab_unavailable" — если main Krab недоступен (503 / ConnectionError).
           - "circuit_open" — если circuit breaker разомкнут.
         """
+        # W1211 F2: privacy_mode_enabled guard — return empty list without contacting bridge
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": True, "chats": [], "skipped": "privacy_mode"}
+
         if not settings.TELEGRAM_BRIDGE_ENABLED:
             raise RuntimeError("bridge_disabled: Telegram Bridge отключён в настройках")
 

@@ -4,7 +4,7 @@ Covers:
   - init_sentry() returns False (no-op) when privacy_mode_enabled=True.
   - init_sentry() proceeds normally when privacy_mode_enabled=False.
   - handle_translate_text() / handle_translate_selection() force
-    network_mode to "offline_only" when privacy_mode_enabled=True.
+    network_mode to "offline_strict" when privacy_mode_enabled=True.
   - DEFAULT_SETTINGS contains privacy_mode_enabled=False (backward compat).
 """
 
@@ -75,7 +75,7 @@ class TestInitSentryPrivacyMode(unittest.TestCase):
 
 
 class TestTranslationServicePrivacyMode(unittest.TestCase):
-    """handle_translate_text / handle_translate_selection force offline_only on privacy."""
+    """handle_translate_text / handle_translate_selection force offline_strict on privacy."""
 
     def _make_service(self, privacy_mode: bool, initial_network_mode: str = "online_preferred"):
         """Build a TranslationService stub with controlled settings."""
@@ -113,7 +113,7 @@ class TestTranslationServicePrivacyMode(unittest.TestCase):
         return service, translator
 
     def test_translate_text_forces_offline_when_privacy_mode(self):
-        """network_mode=online_preferred, privacy=True → translate called with offline_only."""
+        """network_mode=online_preferred, privacy=True → translate called with offline_strict."""
         service, translator = self._make_service(
             privacy_mode=True, initial_network_mode="online_preferred"
         )
@@ -122,8 +122,8 @@ class TestTranslationServicePrivacyMode(unittest.TestCase):
             "translation_mode": "ru_to_es",
         })
         _, kwargs = translator.translate.call_args
-        self.assertEqual(kwargs.get("network_mode"), "offline_only",
-                         "Privacy mode must force offline_only in translate_text")
+        self.assertEqual(kwargs.get("network_mode"), "offline_strict",
+                         "Privacy mode must force offline_strict in translate_text")
 
     def test_translate_text_keeps_mode_when_privacy_off(self):
         """privacy=False → network_mode preserved from settings."""
@@ -135,12 +135,12 @@ class TestTranslationServicePrivacyMode(unittest.TestCase):
             "translation_mode": "en_to_ru",
         })
         _, kwargs = translator.translate.call_args
-        # Should NOT be overridden to offline_only.
-        self.assertNotEqual(kwargs.get("network_mode"), "offline_only",
-                            "Privacy mode off — should not force offline_only")
+        # Should NOT be overridden to offline_strict.
+        self.assertNotEqual(kwargs.get("network_mode"), "offline_strict",
+                            "Privacy mode off — should not force offline_strict")
 
     def test_translate_selection_forces_offline_when_privacy_mode(self):
-        """Selection translate: privacy=True → offline_only forced."""
+        """Selection translate: privacy=True → offline_strict forced."""
         service, translator = self._make_service(
             privacy_mode=True, initial_network_mode="online_preferred"
         )
@@ -150,8 +150,8 @@ class TestTranslationServicePrivacyMode(unittest.TestCase):
             "target_lang": "es",
         })
         _, kwargs = translator.translate.call_args
-        self.assertEqual(kwargs.get("network_mode"), "offline_only",
-                         "Privacy mode must force offline_only in translate_selection")
+        self.assertEqual(kwargs.get("network_mode"), "offline_strict",
+                         "Privacy mode must force offline_strict in translate_selection")
 
     def test_translate_selection_keeps_mode_when_privacy_off(self):
         """Selection translate: privacy=False → network_mode from settings."""

@@ -32,6 +32,7 @@ from backend.ipc_constants import IPC_PREVIEW_THREAD_TIMEOUT_SEC
 from backend.job_tracker import JobTracker
 from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
+from backend.realtime_silence_filter import RealtimeSilenceFilter
 from backend.transcript_writer import TranscriptWriter
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
@@ -89,6 +90,9 @@ class RecordingCoreService:
         self._last_stt_engine_ref = last_stt_engine_ref
         self._auto_deduplicator = auto_deduplicator
 
+        # Wired by BackendService after init (same pattern as llm_rewriter._error_bus).
+        self._error_bus: Any = None
+
         # Serializes history persistence in phase_e to prevent double-write races
         self._persist_lock = threading.Lock()
 
@@ -106,11 +110,26 @@ class RecordingCoreService:
         self._rt_partial: RealtimePartialTranscriber | None = None
         self._rt_session_id: str = ""
 
+        # Realtime silence filter state (W1325 F1 HIGH wiring)
+        self._rsf: RealtimeSilenceFilter | None = None
+        self._last_silence_ranges: list[tuple[float, float]] = []
+
         # Async transcription jobs
         self._job_tracker = JobTracker()
 
         # Allow test monkey-patching of audio input enumeration
         self._list_audio_inputs = RecordingCoreService._list_audio_inputs_static
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _get_runtime_setting(self, key: str, default: Any) -> Any:
+        """Read a setting from the live cached_settings dict."""
+        try:
+            return self._settings_svc.cached_settings().get(key, default)
+        except Exception:
+            return default
 
     # ------------------------------------------------------------------ #
     # Public accessors (BackendService may read these for diagnostics)    #
@@ -190,26 +209,38 @@ class RecordingCoreService:
             quality_profile = str(settings.get("quality_profile", "balanced"))
             self._start_preview_worker(quality_profile=quality_profile)
         if bool(settings.get("realtime_partial_enabled", True)):
-            import uuid as _uuid
-            self._rt_session_id = _uuid.uuid4().hex
-            _interval = float(settings.get("rt_partial_interval_sec", 3.0))
-            _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
-            _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
-            try:
-                self._rt_partial = RealtimePartialTranscriber(
-                    transcriber=self.transcriber,
-                    recorder=self.recorder,
-                    event_bus=event_bus,
-                    interval_sec=_interval,
-                    buffer_sec=_buffer,
-                )
-                self._rt_partial.start(
-                    session_id=self._rt_session_id,
-                    sample_rate=_sample_rate,
-                )
-            except Exception:
-                logger.exception("Не удалось запустить RealtimePartialTranscriber")
-                self._rt_partial = None
+            if self._get_runtime_setting("privacy_mode_enabled", False):
+                logger.info("RealtimePartialTranscriber не запущен: privacy_mode_enabled=True")
+            else:
+                import uuid as _uuid
+                self._rt_session_id = _uuid.uuid4().hex
+                _interval = float(settings.get("rt_partial_interval_sec", 3.0))
+                _buffer = float(settings.get("rt_partial_buffer_sec", 8.0))
+                _sample_rate = int(getattr(self.recorder, "sample_rate", 16000))
+                _settings_svc = self._settings_svc
+
+                def _privacy_getter() -> bool:
+                    try:
+                        return bool(_settings_svc.cached_settings().get("privacy_mode_enabled", False))
+                    except Exception:
+                        return False
+
+                try:
+                    self._rt_partial = RealtimePartialTranscriber(
+                        transcriber=self.transcriber,
+                        recorder=self.recorder,
+                        event_bus=event_bus,
+                        interval_sec=_interval,
+                        buffer_sec=_buffer,
+                        privacy_getter=_privacy_getter,
+                    )
+                    self._rt_partial.start(
+                        session_id=self._rt_session_id,
+                        sample_rate=_sample_rate,
+                    )
+                except Exception:
+                    logger.exception("Не удалось запустить RealtimePartialTranscriber")
+                    self._rt_partial = None
 
         # W930 CRITICAL fix: wire SessionTracker start — skip in privacy mode
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
@@ -226,6 +257,19 @@ class RecordingCoreService:
             except Exception:
                 logger.warning("SessionTracker.start_session завершился с ошибкой (не критично)", exc_info=True)
 
+        # W1325 F1 HIGH: wire RealtimeSilenceFilter (default OFF)
+        self._rsf = None
+        if bool(settings.get("realtime_silence_filter_enabled", False)):
+            try:
+                self._rsf = RealtimeSilenceFilter(
+                    recorder=self.recorder,
+                    settings=settings,
+                    event_bus_emit=event_bus.emit,
+                )
+                self._rsf.start()
+            except Exception:
+                logger.exception("Не удалось запустить RealtimeSilenceFilter")
+                self._rsf = None
         return {"status": "recording"}
 
     def handle_stop_recording(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -253,6 +297,8 @@ class RecordingCoreService:
 
         # Phase C: STT execution
         phase_c = self._stop_recording_phase_c(audio, duration_sec, sr)
+        if "early_return" in phase_c:
+            return phase_c["early_return"]
         transcribe_payload = phase_c["transcribe_payload"]
 
         # Phase D: post-processing
@@ -792,6 +838,18 @@ class RecordingCoreService:
             finally:
                 self._rt_partial = None
 
+        # W1325 F1 HIGH: stop RSF and capture silence_ranges
+        _silence_ranges: list[tuple[float, float]] = []
+        if self._rsf is not None:
+            try:
+                _silence_ranges = self._rsf.stop() or []
+            except Exception:
+                logger.exception("Ошибка при остановке RealtimeSilenceFilter")
+                _silence_ranges = []
+            finally:
+                self._rsf = None
+        self._last_silence_ranges = _silence_ranges
+
         stop_tail_trim_ms = self._coerce_bounded(
             value=params.get("stop_tail_trim_ms", settings.get("stop_tail_trim_ms", 180)),
             default=180,
@@ -999,15 +1057,56 @@ class RecordingCoreService:
             },
         )
 
-        transcribe_payload = self.transcriber.transcribe(
-            audio,
-            quality_profile=quality_profile,
-            cleanup_profile=cleanup_profile,
-            lang_hint=lang_hint,
-            extra_vocabulary=user_vocabulary if user_vocabulary else None,
-            history_context=_recent_history if _recent_history else None,
-            stt_hotwords=_combined_hotwords,
-        )
+        _phase_c_settings = self._settings_svc.cached_settings()
+        _diarize_enabled = _phase_c_settings.get("diarization_enabled", False)
+        _sil_ranges = getattr(self, "_last_silence_ranges", None) or None
+        try:
+            transcribe_payload = self.transcriber.transcribe(
+                audio,
+                quality_profile=quality_profile,
+                cleanup_profile=cleanup_profile,
+                lang_hint=lang_hint,
+                extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                history_context=_recent_history if _recent_history else None,
+                stt_hotwords=_combined_hotwords,
+                settings=_phase_c_settings,
+                diarize=_diarize_enabled if _diarize_enabled else None,
+                silence_ranges=_sil_ranges,
+            )
+        except Exception as _stt_exc:
+            logger.exception("phase_c: STT crashed", extra={"quality_profile": quality_profile})
+            audio_recovery_path = None
+            try:
+                import uuid as _uuid
+                import soundfile as _sf
+                _rec_id = _uuid.uuid4().hex
+                _failed_dir = Path(self.store.data_dir) / "failed_recordings"
+                _failed_dir.mkdir(parents=True, exist_ok=True)
+                _sf.write(str(_failed_dir / f"{_rec_id}.wav"), audio, int(getattr(self.recorder, "sample_rate", 16000)))
+                audio_recovery_path = str(Path("failed_recordings") / f"{_rec_id}.wav")
+            except Exception as _pe:
+                logger.warning("phase_c: failed to persist recovery audio: %s", _pe)
+            if self._error_bus is not None:
+                try:
+                    from backend.error_bus import KrabError
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone as _tz
+                    _e = ERROR_REGISTRY.get("stt.transcribe_failed", {})
+                    self._error_bus.push(KrabError(
+                        severity=_e.get("severity", "error"), component="stt",
+                        code="stt.transcribe_failed",
+                        message_user=_e.get("user_msg_ru", "STT: ошибка"),
+                        message_debug=f"{type(_stt_exc).__name__}: {_stt_exc}",
+                        timestamp=datetime.now(_tz.utc),
+                        context={"quality_profile": quality_profile, "exc_type": type(_stt_exc).__name__},
+                        actionable=False, action_id=None,
+                    ))
+                except Exception:
+                    pass
+            return {"early_return": {"ok": False, "error": "stt_failed",
+                                     "error_detail": str(_stt_exc),
+                                     "audio_recovery_path": audio_recovery_path,
+                                     "status": "stt_failed"}}
 
         return {"transcribe_payload": transcribe_payload}
 
@@ -1169,6 +1268,9 @@ class RecordingCoreService:
         # all heavy IO (STT, LLM, translation) runs outside.
         _dedup_enabled = bool(settings.get("auto_dedup_enabled", False))
         _privacy_mode = bool(settings.get("privacy_mode_enabled", False))
+        if _privacy_mode:
+            logger.info("privacy_mode: recording persisted with privacy_mode=True",
+                        extra={"duration_sec": round(float(duration_sec), 2)})
         with self._persist_lock:
             if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
                 try:
@@ -1210,26 +1312,53 @@ class RecordingCoreService:
                 except Exception:
                     logger.exception("AutoDedup: check_duplicate завершился с исключением, продолжаем запись")
 
-            item = self.store.add_history_item(
-                text=display_text,
-                paste_status="failed",
-                source_text=text,
-                translated_text=translated_text,
-                translation_mode=translation.mode,
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-                translation_status=translation_status,
-                translation_engine=translation.engine,
-                cleaned_text=tp.get("cleaned_text", ""),
-                llm_applied=bool(tp.get("llm_applied", False)),
-                llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
-                diarization=diarization_data,
-                audio_duration_sec=duration_sec if duration_sec else None,
-                confidence=confidence if confidence else None,
-                emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
-                word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
-                speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
-            )
+            try:
+                item = self.store.add_history_item(
+                    text=display_text,
+                    paste_status="failed",
+                    source_text=text,
+                    translated_text=translated_text,
+                    translation_mode=translation.mode,
+                    source_lang=translation.source_lang,
+                    target_lang=translation.target_lang,
+                    translation_status=translation_status,
+                    translation_engine=translation.engine,
+                    cleaned_text=tp.get("cleaned_text", ""),
+                    llm_applied=bool(tp.get("llm_applied", False)),
+                    llm_latency_ms=int(tp.get("llm_latency_ms", 0) or 0),
+                    diarization=diarization_data,
+                    audio_duration_sec=duration_sec if duration_sec else None,
+                    confidence=confidence if confidence else None,
+                    emotion=tp.get("emotion") if isinstance(tp.get("emotion"), str) else None,
+                    word_timestamps=tp.get("word_timestamps") if isinstance(tp.get("word_timestamps"), list) else None,
+                    speaker_turns=tp.get("speaker_turns") if isinstance(tp.get("speaker_turns"), list) else None,
+                    privacy_mode=_privacy_mode,
+                )
+            except OSError as _disk_exc:
+                import errno as _errno
+                _is_enospc = getattr(_disk_exc, "errno", None) == _errno.ENOSPC
+                _reason = "disk_full" if _is_enospc else "io_error"
+                logger.error("Phase E: disk error %s: %s", _reason, _disk_exc)
+                try:
+                    from backend.error_codes import ERROR_REGISTRY
+                    from datetime import datetime, timezone
+                    _e = ERROR_REGISTRY.get("history.write_fail", {})
+                    event_bus.emit("krab.error", {
+                        "severity": _e.get("severity", "critical"), "component": "history",
+                        "code": "history.write_fail",
+                        "message_user": _e.get("user_msg_ru", "Не удалось сохранить"),
+                        "message_debug": f"OSError errno={getattr(_disk_exc, 'errno', None)}: {_disk_exc}",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "context": {"reason": _reason},
+                    })
+                except Exception:
+                    pass
+                return {"ok": False, "status": "persist_failed", "reason": _reason,
+                        "transcript_text": text, "duration_sec": duration_sec,
+                        "quality_profile": sr["quality_profile"],
+                        "cleanup_profile": sr["cleanup_profile"],
+                        "translation_status": translation_status, "history_id": None,
+                        "stop_tail_trim_ms": stop_tail_trim_ms}
         self._clipboard_history.append({
             "text": final_text,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1281,6 +1410,7 @@ class RecordingCoreService:
             "silence_detected": silence_detected,
             "silence_guard_enabled": silence_guard_enabled,
             "background_guard_rejected": background_guard_rejected,
+            "privacy_mode": _privacy_mode,
         }
         # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
         if not _privacy_mode:

@@ -14,6 +14,7 @@ import re as _re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
@@ -134,6 +135,9 @@ def _short_model_name(model: str) -> str:
 
 
 logger = logging.getLogger("KrabEar.Engine")
+
+# Module-level flag: emit pipeline_v2 warning only once.
+_pipeline_v2_warned: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -381,24 +385,33 @@ class AudioEngine:
         self._unavailable_models: dict[str, float] = {}
         self._diarization_pipeline: Pipeline | None = None
         self._diarization_load_error: str | None = None
+        self._diarization_load_lock: threading.RLock = threading.RLock()
 
         # SenseVoice adapter state (lazy-loaded FunASR pipeline).
         # Если funasr не установлен или модель не грузится — адаптер навсегда
         # отключается через _sensevoice_load_error, whisper chain продолжает жить.
         self._sensevoice_model = None  # type: ignore[var-annotated]
         self._sensevoice_load_error: str | None = None
+        self._sensevoice_load_lock: threading.RLock = threading.RLock()
 
         # Parakeet-TDT-1.1B adapter state (lazy-loaded NeMo ASR model).
         # Если nemo не установлен или модель не грузится — адаптер навсегда
         # отключается через _parakeet_load_error, whisper chain продолжает жить.
         self._parakeet_model = None  # type: ignore[var-annotated]
         self._parakeet_load_error: str | None = None
+        self._parakeet_load_lock: threading.RLock = threading.RLock()
 
         # WhisperX adapter state (Phase 4.3, lazy-loaded).
         # Если whisperx не установлен или модель не грузится — адаптер навсегда
         # отключается через _whisperx_load_error, chain продолжает жить.
         self._whisperx_model = None  # type: ignore[var-annotated]
         self._whisperx_load_error: str | None = None
+
+        # Voxtral Mini 4B adapter state (Phase 4.4, lazy-loaded).
+        # W1474 F1: Инициализируется явно в __init__ для double-checked locking.
+        self._voxtral_model = None  # type: ignore[var-annotated]
+        self._voxtral_load_error: str | None = None
+        self._voxtral_load_lock: threading.RLock = threading.RLock()
 
         # D.10a: LLM rewriter integration
         self._llm_rewriter = llm_rewriter
@@ -431,8 +444,6 @@ class AudioEngine:
         # skip_gigaam_warmup=True используется REST-сервером чтобы не создавать дубликат
         # subprocess'а — он проксирует через BackendService IPC (Wave 69).
         if getattr(settings, "STT_GIGAAM_ENABLED", False) and not skip_gigaam_warmup:
-            import threading
-
             def _warmup_bg() -> None:
                 try:
                     self._router.warmup_gigaam()
@@ -765,6 +776,34 @@ class AudioEngine:
                     pass
 
         start_time = time.time()
+
+        # --- pipeline_v2 opt-in gate (W1263 F1) ---
+        _pipeline_v2_enabled = False
+        try:
+            _pipeline_v2_enabled = bool(
+                getattr(settings, "PIPELINE_V2_ENABLED", None)
+                if getattr(settings, "PIPELINE_V2_ENABLED", None) is not None
+                else getattr(settings, "PIPELINE_V2", False)
+            )
+        except Exception:
+            pass
+        if _pipeline_v2_enabled:
+            global _pipeline_v2_warned
+            if not _pipeline_v2_warned:
+                logger.warning("pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated.")
+                _pipeline_v2_warned = True
+            try:
+                from core.pipeline.bridge import transcribe_v2 as _transcribe_v2
+                return _transcribe_v2(
+                    engine=self, audio_input=audio_data,
+                    llm_rewriter=getattr(self, "_llm_rewriter", None),
+                    translator=getattr(self, "_translator", None),
+                    cleanup_profile=cleanup_profile, is_preview=is_preview,
+                    domain=domain, extra_vocabulary=extra_vocabulary, lang_hint=lang_hint,
+                )
+            except Exception as _v2_exc:
+                logger.warning("pipeline_v2 failed (%s), falling back", _v2_exc)
+
         resolved_lang = self._resolve_language(lang_hint) if lang_hint is not None else settings.TRANSCRIBE_LANGUAGE
 
         try:
@@ -1817,12 +1856,12 @@ class AudioEngine:
         # Маркер вставляется на позицию 2 (после balanced и SenseVoice marker если они есть).
         # При сбое маркер помечается как недоступный, chain продолжается на whisper'ах.
         if settings.WHISPERX_ENABLED and not self._is_model_unavailable(self._WHISPERX_MARKER):
-            # Находим позицию вставки: сразу за последним adapter-маркером или после balanced.
+            # W1303 F1: WhisperX goes AFTER Parakeet AND SenseVoice (wave1305 fix).
+            _wx_anchor_markers = {self._PARAKEET_MARKER, self._SENSEVOICE_MARKER}
             insert_pos = 1
             for i, c in enumerate(candidates):
-                if c == self._SENSEVOICE_MARKER:
+                if c in _wx_anchor_markers:
                     insert_pos = i + 1
-                    break
             candidates = candidates[:insert_pos] + [self._WHISPERX_MARKER] + candidates[insert_pos:]
 
         # --- Voxtral adapter: позиция 5 (после WhisperX, перед max-candidates) ---
@@ -2140,6 +2179,11 @@ class AudioEngine:
                 "(установите: pip install funasr)"
             )
             raise RuntimeError(self._sensevoice_load_error)
+        with self._sensevoice_load_lock:
+            if self._sensevoice_model is not None:
+                return self._sensevoice_model
+            if self._sensevoice_load_error:
+                raise RuntimeError(self._sensevoice_load_error)
         with _profiler.start_span(f"model_load_{_short_model_name(settings.SENSEVOICE_MODEL)}"):
             try:
                 # device='mps' не поддерживается funasr'ом стабильно; cpu — безопасный
@@ -2530,47 +2574,50 @@ class AudioEngine:
     # При VOXTRAL_REASONING_ENABLED=True возвращает reasoning: str (summary/Q&A).
 
     def _load_voxtral_model(self) -> Any:
-        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен."""
-        # Совместимость с тестами через AudioEngine.__new__() (без __init__).
+        """Ленивая загрузка Voxtral pipeline. Raises если mistral-inference недоступен.
+
+        W1474 F1: Double-checked locking через _voxtral_load_lock (threading.RLock)
+        предотвращает двойную загрузку (~2-3 GB) при конкурентных IPC-вызовах.
+        """
+        # Fast-path без блокировки — если модель уже загружена.
         if getattr(self, "_voxtral_model", None) is not None:
             return self._voxtral_model
-        if getattr(self, "_voxtral_load_error", None):
-            raise RuntimeError(self._voxtral_load_error)
-        if not _voxtral_available:
-            self._voxtral_load_error = (
-                "mistral-inference не установлен — Voxtral adapter недоступен "
-                "(установите: pip install mistral-inference)"
-            )
-            raise RuntimeError(self._voxtral_load_error)
-
-        # W1223/W1535 security: validate repo against allowlist before download.
-        try:
-            _validate_voxtral_repo(settings.VOXTRAL_MODEL)
-        except ValueError as exc:
-            self._voxtral_load_error = (
-                f"Voxtral repo не разрешён (допустимы только allowlist repos): {exc}"
-            )
-            raise RuntimeError(self._voxtral_load_error)
-
-        with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
-            try:
-                from huggingface_hub import snapshot_download  # type: ignore
-                model_path = snapshot_download(repo_id=settings.VOXTRAL_MODEL)
-                tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
-                model = _VoxtralTransformer.from_folder(model_path)
-                self._voxtral_model = (model, tokenizer)
-            except Exception as exc:
-                self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
+        # Acquire lock for slow-path (double-checked locking pattern)
+        with getattr(self, "_voxtral_load_lock", threading.RLock()):
+            # Re-check после получения блокировки
+            if getattr(self, "_voxtral_model", None) is not None:
+                return self._voxtral_model
+            if getattr(self, "_voxtral_load_error", None):
                 raise RuntimeError(self._voxtral_load_error)
+            if not _voxtral_available:
+                self._voxtral_load_error = (
+                    "mistral-inference не установлен — Voxtral adapter недоступен "
+                    "(установите: pip install mistral-inference)"
+                )
+                raise RuntimeError(self._voxtral_load_error)
+
+            # W1223/W1535 security: validate repo against allowlist before download.
+            try:
+                _validate_voxtral_repo(settings.VOXTRAL_MODEL)
+            except ValueError as exc:
+                self._voxtral_load_error = (
+                    f"Voxtral repo не разрешён (допустимы только allowlist repos): {exc}"
+                )
+                raise RuntimeError(self._voxtral_load_error)
+
+            with _profiler.start_span(f"model_load_voxtral_{_short_model_name(settings.VOXTRAL_MODEL)}"):
+                try:
+                    from huggingface_hub import snapshot_download  # type: ignore
+                    model_path = snapshot_download(repo_id=settings.VOXTRAL_MODEL)
+                    tokenizer = _VoxtralTokenizer.from_file(str(Path(model_path) / "tokenizer.model.v3"))
+                    model = _VoxtralTransformer.from_folder(model_path)
+                    self._voxtral_model = (model, tokenizer)
+                except Exception as exc:
+                    self._voxtral_load_error = f"Не удалось загрузить Voxtral: {exc}"
+                    raise RuntimeError(self._voxtral_load_error)
 
         logger.info("Voxtral модель загружена: %s", settings.VOXTRAL_MODEL)
         return self._voxtral_model
-
-    # --- GigaAM-RNNT adapter (Sber salute-developers, Phase 4 RU specialist) ---
-    # GigaAM v2-RNNT (244M) — Conformer-based модель для русской речи.
-    # ~3.8% WER на Common Voice RU vs ~9.8% у whisper-large-v3.
-    # Работает через PyTorch MPS (не MLX) — mlx_lock НЕ нужен.
-    # Активируется только если STT_GIGAAM_ENABLED=True И detected lang == "ru".
 
     def _transcribe_gigaam(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
         """Транскрибация через GigaAM-RNNT v2 (русскоязычный STT, Sber).
@@ -2824,13 +2871,16 @@ class AudioEngine:
             tokens, _ = tokenizer.encode_chat_completion(completion_request)
             input_ids = tokens.tokens
 
-            out_tokens, _ = _voxtral_generate(
-                input_ids,
-                model,
-                max_tokens=_VOXTRAL_MAX_TOKENS,
-                temperature=0.0,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
+            # W1219 F1: serialize Voxtral MLX inference through mlx_lock to prevent
+            # concurrent GPU access SIGSEGV (mistral_inference uses MLX ops).
+            with mlx_lock():
+                out_tokens, _ = _voxtral_generate(
+                    input_ids,
+                    model,
+                    max_tokens=_VOXTRAL_MAX_TOKENS,
+                    temperature=0.0,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
 
             raw_output = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens)
 
@@ -3044,23 +3094,23 @@ class AudioEngine:
         if self._diarization_load_error:
             raise RuntimeError(self._diarization_load_error)
 
-        hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
+            hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
 
-        # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
-        # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
-        # Span фиксируется только при первом реальном load'е (guard выше гарантирует
-        # что повторные вызовы сразу возвращают кэш).
-        with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
-            try:
-                kwargs = {"token": hf_token} if hf_token else {}
-                self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
-            except Exception as e:
-                self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
-                raise RuntimeError(self._diarization_load_error)
-            diarization_device = self._resolve_diarization_device()
-            self._diarization_pipeline.to(diarization_device)
-            logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
-            return self._diarization_pipeline
+            # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
+            # Если HF_HUB_OFFLINE=1, модель загружается из кэша без token.
+            # Span фиксируется только при первом реальном load'е (guard выше гарантирует
+            # что повторные вызовы сразу возвращают кэш).
+            with _profiler.start_span(f"model_load_{_short_model_name(settings.DIARIZATION_MODEL)}"):
+                try:
+                    kwargs = {"token": hf_token} if hf_token else {}
+                    self._diarization_pipeline = Pipeline.from_pretrained(settings.DIARIZATION_MODEL, **kwargs)
+                except Exception as e:
+                    self._diarization_load_error = f"Не удалось загрузить pyannote pipeline: {e}"
+                    raise RuntimeError(self._diarization_load_error)
+                diarization_device = self._resolve_diarization_device()
+                self._diarization_pipeline.to(diarization_device)
+                logger.info("Diarization pipeline загружен на устройство %s", diarization_device)
+                return self._diarization_pipeline
 
     @staticmethod
     def _resolve_diarization_device() -> torch.device:

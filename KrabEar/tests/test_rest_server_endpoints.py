@@ -47,6 +47,7 @@ try:
     _import_store.load_vocabulary.return_value = []
     _import_store.is_idempotent.return_value = False
     _import_store.add_history_item.return_value = MagicMock(id="hist-test-001")
+    _import_store.load_settings.return_value = {}  # wave1212
 
     _import_transcriber = MagicMock()
     _import_transcriber.transcribe.return_value = {
@@ -102,6 +103,7 @@ class _RestBase(unittest.TestCase):
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
         self.mock_store.add_history_item.return_value = MagicMock(id="hist-base-001")
+        self.mock_store.load_settings.return_value = {}  # wave1212
 
         self.mock_transcriber = MagicMock()
         self.mock_transcriber.transcribe.return_value = {

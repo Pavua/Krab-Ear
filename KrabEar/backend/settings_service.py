@@ -611,6 +611,20 @@ class SettingsService:
             old_settings = self.cached_settings()
             restored = self._backup.restore_backup(backup_id)
 
+            # W1337 F2: preserve credential fields missing from backup.
+            current = self.cached_settings()
+            dropped_fields = sorted(
+                field for field in self._SENSITIVE_FIELDS
+                if current.get(field) and not restored.get(field)
+            )
+            if dropped_fields:
+                for field in dropped_fields:
+                    restored[field] = current[field]
+                _log.warning(
+                    "handle_restore_settings_backup: backup '%s' missing credentials %s",
+                    backup_id, dropped_fields,
+                )
+
             # W1435: migrate old schema before validate
             restored = self._maybe_migrate(restored)
 
@@ -633,7 +647,11 @@ class SettingsService:
             _log.info("handle_restore_settings_backup: restored from %s", backup_id)
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, restored)
-            return {"restored_settings": restored, "backup_id": backup_id}
+            result: dict = {"restored_settings": restored, "backup_id": backup_id}
+            if dropped_fields:
+                result["warning"] = "credentials_dropped"
+                result["dropped_fields"] = dropped_fields
+            return result
 
     def handle_create_manual_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Создаёт ручной бэкап текущих настроек с произвольной причиной.

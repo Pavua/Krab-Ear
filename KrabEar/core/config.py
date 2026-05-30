@@ -881,6 +881,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "stt_en_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_es_primary_model": "mlx-community/whisper-large-v3-mlx",
     "stt_other_primary_model": "mlx-community/whisper-large-v3-mlx",
+    # --- Phase 4 pipeline (pipeline_v2) ---
+    "pipeline_v2_enabled": False,
     # --- Audio-level Language ID (AudioLanguageID) ---
     # Encoder-only mlx-whisper forward pass для автодетекции языка аудио (~50ms).
     # Включено по умолчанию; используется router'ом когда hint_language=None.

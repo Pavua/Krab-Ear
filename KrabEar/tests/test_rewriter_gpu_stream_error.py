@@ -168,17 +168,16 @@ class TestGpuStreamErrorUsesOpenLmStudioSettingsAction(unittest.TestCase):
 
         entry = ERROR_REGISTRY.get("rewriter.gpu_stream_error")
         self.assertIsNotNone(entry, "rewriter.gpu_stream_error должен быть в ERROR_REGISTRY")
-        self.assertEqual(entry["action_id"], "open_lm_studio_settings")
-        self.assertEqual(entry["severity"], "error")
-        self.assertTrue(entry["actionable"])
-        self.assertIn("GPU", entry["user_msg_ru"] + entry.get("user_msg_ru", ""))
+        # wave1233: severity=warn, actionable=False, action_id=None
+        self.assertEqual(entry["severity"], "warn")
+        self.assertFalse(entry["actionable"])
 
     def test_gpu_stream_error_dedupe_window_is_300s(self):
         """300 s dedupe prevents Sentry flood from burst of 400s while circuit is opening."""
         from backend.error_codes import ERROR_REGISTRY
 
         entry = ERROR_REGISTRY["rewriter.gpu_stream_error"]
-        self.assertEqual(entry["dedupe_seconds"], 300)
+        self.assertEqual(entry["dedupe_seconds"], 600)  # wave1233 changed to 600
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import logging
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from core.engine import AudioEngine
+from core.mlx_lock import mlx_lock
 
 if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
@@ -57,6 +58,7 @@ class Transcriber:
         diarize: bool | None = None,
         skip_vad_prefilter: bool = False,
         silence_ranges: list[tuple[float, float]] | None = None,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         """Транскрибирует аудио с учётом выбранного профиля и контекста.
 
@@ -95,13 +97,17 @@ class Transcriber:
             diarize=diarize,
             skip_vad_prefilter=skip_vad_prefilter,
             silence_ranges=silence_ranges,
+            progress_callback=progress_callback,
         )
 
     def transcribe_preview(self, audio_data: Any, quality_profile: str = "balanced") -> dict[str, Any]:
-        """Быстрая транскрибация для realtime-превью (всегда в balanced режиме)."""
-        # Preview всегда идёт в balanced для минимальной задержки
-        self.engine.set_quality_profile("balanced")
-        return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
+        """Быстрая транскрибация для realtime-превью (всегда в balanced режиме).
+
+        Оборачивается в mlx_lock() для атомарности (W1364 fix).
+        """
+        with mlx_lock():
+            self.engine.set_quality_profile("balanced")
+            return self.engine.transcribe(audio_data, cleanup_profile="soft", is_preview=True)
 
     # ------------------------------------------------------------------
     # Phase B.1 — error_bus integration (late-injection, same as LLMRewriter)

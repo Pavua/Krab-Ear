@@ -344,6 +344,9 @@ class SemanticSearcher:
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
 
+    # W1172: alias for backward compat
+    remove = remove_item
+
 
 def keyword_fallback_search(
     query: str,
