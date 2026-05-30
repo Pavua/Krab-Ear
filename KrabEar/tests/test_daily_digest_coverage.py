@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import sys
 import unittest
-from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -27,14 +26,8 @@ from backend.daily_digest import DailyDigest, DailyDigestGenerator  # noqa: E402
 
 def _mock_store(*items):
     """Возвращает mock-store с заданными items."""
-
-    @contextmanager
-    def _lock():
-        yield
-
     store = Mock()
-    store._lock = _lock
-    store._load_active_items_unlocked.return_value = list(items)
+    store._load_active_items_with_lock.return_value = list(items)
     return store
 
 

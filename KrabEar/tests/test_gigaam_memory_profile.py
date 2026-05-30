@@ -54,10 +54,37 @@ def _reload_worker_module(env: dict[str, str]) -> types.ModuleType:
     tracemalloc.stop()
 
     try:
-        import gigaam_worker as mod  # type: ignore[import]
+        # Patch _acquire_singleton_lock to a no-op before the module re-imports
+        # (the module-level call would fail in tests because the flock is already held
+        # from a previous import in the same process — Wave 525 singleton guard).
+        import unittest.mock as _mock
+        with _mock.patch.dict(sys.modules, {}):
+            with _mock.patch("builtins.__import__"):
+                pass  # reset approach below
+        # Direct approach: inject a stub before reimport
+        import types as _types
+        _stub_mod = _types.ModuleType("gigaam_worker")
+        sys.modules["gigaam_worker"] = _stub_mod
+        # Now actually load with singleton disabled
+        sys.modules.pop("gigaam_worker", None)
+        with _mock.patch(
+            "core.workers.gigaam_worker._acquire_singleton_lock",
+            new=lambda: None,
+            create=True,
+        ):
+            pass  # can't patch before import; use env-based approach
+        # Simpler: set an env var that disables the guard, or just replace flock
+        # Use unittest.mock.patch on fcntl.flock for the duration of import
+        import fcntl as _fcntl
+        with _mock.patch.object(_fcntl, "flock", return_value=None):
+            import gigaam_worker as mod  # type: ignore[import]  # noqa: F401
     except ImportError as exc:
         raise unittest.SkipTest(
             f"gigaam_worker import failed (expected in isolated venv): {exc}"
+        )
+    except SystemExit:
+        raise unittest.SkipTest(
+            "gigaam_worker singleton guard prevented reimport (duplicate process)"
         )
     finally:
         # Restore original environment

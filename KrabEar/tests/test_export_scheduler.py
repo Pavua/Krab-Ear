@@ -80,7 +80,9 @@ class TestExportSchedulerConfigure(unittest.TestCase):
     def test_configure_output_dir_custom(self):
         custom_dir = str(self.data_dir / "my_exports")
         result = self.scheduler.configure(fmt="json", output_dir=custom_dir)
-        self.assertEqual(result["output_dir"], custom_dir)
+        # compare resolved paths to handle macOS /tmp → /private/tmp symlink
+        from pathlib import Path
+        self.assertEqual(Path(result["output_dir"]).resolve(), Path(custom_dir).resolve())
 
     def test_configure_output_dir_none(self):
         result = self.scheduler.configure(fmt="json", output_dir=None)
@@ -280,7 +282,9 @@ class TestGetScheduleStatus(unittest.TestCase):
         custom = str(self.data_dir / "exports_custom")
         self.scheduler.configure(fmt="json", output_dir=custom)
         status = self.scheduler.get_schedule_status()
-        self.assertEqual(status["output_dir"], custom)
+        # compare resolved paths to handle macOS /tmp → /private/tmp symlink
+        from pathlib import Path
+        self.assertEqual(Path(status["output_dir"]).resolve(), Path(custom).resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +471,7 @@ class TestIpcIntegration(unittest.TestCase):
             mock_settings.IPC_THROTTLE_ENABLED = False
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
+            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
             svc = BackendService(store=store)
         return svc
 
@@ -554,6 +559,7 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
             mock_settings.IPC_THROTTLE_ENABLED = False
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
+            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
             svc = BackendService(store=store)
         return svc
 
@@ -608,6 +614,7 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
             mock_settings.IPC_THROTTLE_ENABLED = False
             mock_settings.IPC_SIGNING_ENABLED = False
             mock_settings.PIPELINE_V2 = False
+            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
             svc = BackendService(store=store)
 
         # Stop the background thread immediately so it doesn't race.

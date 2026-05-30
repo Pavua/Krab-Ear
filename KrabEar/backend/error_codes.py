@@ -650,31 +650,33 @@ ERROR_REGISTRY: dict[str, _Entry] = {
 
     # ── Wave 82 / W905 F2: startup + process codes ───────────────────────────
 
-    # system.proc_cmdline_permission — /proc/*/cmdline (or macOS equivalent) not
-    # readable due to missing entitlement / sandboxing. Affects startup_diagnostics
-    # and system_monitor process-listing. No recovery action possible from UI.
+    # system.proc_cmdline_permission — psutil.process_iter() raised PermissionError
+    # or SystemError when reading process cmdline on macOS Sequoia (KERN_PROCARGS2
+    # blocked for sandboxed processes). Causes silent failure of memory analytics.
     "system.proc_cmdline_permission": {
-        "user_msg_ru": "Нет прав на чтение информации о процессах. Некоторые диагностики недоступны.",
+        "user_msg_ru": (
+            "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2). "
+            "Аналитика памяти недоступна."
+        ),
         "actionable": False,
         "action_id": None,
         "action_label": "",
-        "severity": "warn",
+        "severity": "error",
         "dedupe_seconds": 3600,
     },
 
-    # startup.stt_model_cache_miss — STT model files are not yet present in
-    # HuggingFace cache at startup (first launch or cache cleared). Whisper
-    # and GigaAM adapters require cache pre-population; without it they fall
-    # back to the next model in chain. Info severity — this resolves
-    # automatically on next transcription once the model downloads. Dedupe
-    # 3600s so it surfaces only once per hour.
+    # startup.stt_model_cache_miss — Whisper HF model not found in local cache.
+    # First transcription will stall for several minutes while downloading.
+    # Recurring on 2026-05-22/23. Dedupe 86400s (1 day) — one toast per startup cycle.
     "startup.stt_model_cache_miss": {
-        "user_msg_ru": "STT модель ещё не загружена в кэш HuggingFace",
+        "user_msg_ru": (
+            "Модель Whisper отсутствует в кэше — первая транскрибация задержится на минуты."
+        ),
         "actionable": False,
         "action_id": None,
         "action_label": "",
         "severity": "warn",
-        "dedupe_seconds": 3600,
+        "dedupe_seconds": 86400,
     },
 
     # ── Wave 306: LM Studio Metal GPU stream context lost ─────────────────────

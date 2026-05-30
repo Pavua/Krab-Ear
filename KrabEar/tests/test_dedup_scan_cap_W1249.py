@@ -181,13 +181,12 @@ class TestMissingTsTreatedAsOldest(unittest.TestCase):
 
 
 class TestRunDedupReturnsJobIdImmediately(unittest.TestCase):
-    """Test that handle_run_deduplication returns a job_id immediately."""
+    """Test that handle_run_deduplication returns a synchronous result (W1540 reverted async)."""
 
     def test_run_dedup_returns_job_id_immediately(self) -> None:
-        """handle_run_deduplication must return immediately with ok=True and job_id."""
+        """handle_run_deduplication returns synchronous dedup result dict (W1540 contract)."""
         deduplicator = AutoDeduplicator()
 
-        # Build a store that is slow (simulated with a blocking call that we won't actually wait for)
         slow_store = MagicMock()
         slow_store.get_history_page.return_value = ([], None)
 
@@ -195,14 +194,13 @@ class TestRunDedupReturnsJobIdImmediately(unittest.TestCase):
         result = deduplicator.handle_run_deduplication({"_store": slow_store, "threshold": 0.9})
         elapsed = time.monotonic() - start
 
-        # Must return immediately (well under 1 second for an async-offloaded call)
-        self.assertLess(elapsed, 5.0, "handle_run_deduplication must return near-instantly")
+        # Must complete quickly for empty store
+        self.assertLess(elapsed, 5.0, "handle_run_deduplication must complete quickly")
 
-        # Result must contain ok=True and a job_id
-        self.assertTrue(result.get("ok"), f"Expected ok=True, got: {result}")
-        self.assertIn("job_id", result)
-        self.assertIsInstance(result["job_id"], str)
-        self.assertTrue(result["job_id"].startswith("dedup-"))
+        # W1540: synchronous result contains dedup stats fields (not async job_id)
+        self.assertIn("total_scanned", result, f"Expected dedup result fields, got: {result}")
+        self.assertIn("duplicate_groups", result)
+        self.assertIn("duplicates", result)
 
     def test_run_dedup_async_job_created_in_registry(self) -> None:
         """After calling run_deduplication_async, the job appears in the registry."""
@@ -238,7 +236,7 @@ class TestRunDedupReturnsJobIdImmediately(unittest.TestCase):
         self.assertIsNotNone(state["result"])
 
     def test_run_dedup_returns_job_id_via_handle_method(self) -> None:
-        """handle_run_deduplication returns ok+job_id immediately (unit, no BackendService)."""
+        """handle_run_deduplication returns sync dedup result (W1540 reverted async)."""
         deduplicator = AutoDeduplicator()
         mock_store = MagicMock()
         mock_store.get_history_page.return_value = ([], None)
@@ -247,10 +245,10 @@ class TestRunDedupReturnsJobIdImmediately(unittest.TestCase):
             {"_store": mock_store, "threshold": 0.9}
         )
 
-        self.assertTrue(result.get("ok"), f"Expected ok=True, got: {result}")
-        self.assertIn("job_id", result)
-        self.assertIsInstance(result["job_id"], str)
-        self.assertTrue(result["job_id"].startswith("dedup-"))
+        # W1540: synchronous result has dedup stats fields
+        self.assertIn("total_scanned", result, f"Expected dedup fields, got: {result}")
+        self.assertIn("duplicates", result)
+        self.assertIsInstance(result["duplicates"], list)
 
 
 class TestDedupProgressReturnsStatus(unittest.TestCase):
@@ -289,17 +287,13 @@ class TestDedupProgressReturnsStatus(unittest.TestCase):
             deduplicator.handle_dedup_progress({})
 
     def test_dedup_progress_via_handle_method(self) -> None:
-        """handle_run_deduplication + handle_dedup_progress round-trip (unit, no BackendService)."""
+        """run_deduplication_async + handle_dedup_progress round-trip (W1540: use async directly)."""
         deduplicator = AutoDeduplicator()
         mock_store = MagicMock()
         mock_store.get_history_page.return_value = ([], None)
 
-        # Start a dedup job
-        start_result = deduplicator.handle_run_deduplication(
-            {"_store": mock_store, "threshold": 0.9}
-        )
-        self.assertTrue(start_result.get("ok"))
-        job_id = start_result["job_id"]
+        # W1540: handle_run_deduplication is now synchronous; use run_deduplication_async for async
+        job_id = deduplicator.run_deduplication_async(store=mock_store)
 
         # Poll progress
         progress = deduplicator.handle_dedup_progress({"job_id": job_id})

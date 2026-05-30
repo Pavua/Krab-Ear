@@ -532,6 +532,25 @@ class BackendService:
         self._sentiment_trends = SentimentTrendAnalyzer(detector=self._emotion_detector)
         self._topic_tracker = TopicTracker()
         self._data_migrator = DataMigrator()
+        # W1034: auto-migrate history schema at startup
+        try:
+            if self._data_migrator.check_migration_needed(self.store.data_dir):
+                _plan = self._data_migrator.get_migration_plan(self.store.data_dir)
+                logger.info("data_migrator: migration needed — plan: %s", _plan)
+                _mig_result = self._data_migrator.migrate(self.store.data_dir)
+                logger.info(
+                    "data_migrator: migration complete %s → %s "
+                    "(migrated=%d skipped=%d backup=%s)",
+                    _mig_result.from_version,
+                    _mig_result.to_version,
+                    _mig_result.items_migrated,
+                    _mig_result.items_skipped,
+                    _mig_result.backup_path,
+                )
+            else:
+                logger.debug("data_migrator: schema up-to-date, no migration needed")
+        except Exception:
+            logger.exception("data_migrator: startup migration failed (continuing with current schema)")
         self._abbreviation_expander = AbbreviationExpander(data_dir=self.store.data_dir)
         self._text_processing_svc = TextProcessingService(
             readability_scorer=self._readability_scorer,
@@ -1254,6 +1273,7 @@ class BackendService:
             "report_reconnect": self._handle_report_reconnect,  # Swift→backend reconnect telemetry: pushes ipc.reconnect info event
             "list_recent_errors": self._handle_list_recent_errors,  # ring-буфер KrabError: последние N ошибок
             "clear_recent_errors": self._handle_clear_recent_errors,  # очистить ring-буфер ошибок
+            "get_audit_log": self._handle_get_audit_log,  # последние записи IPC audit log; privacy_mode блокирует
             "handle_error_action": self._handle_handle_error_action,  # выполнить actionable-действие из toast/diagnostics
             "probe_llm_http": self._handle_probe_llm_http,  # однократный ping LM Studio HTTP endpoint
             "warmup_stt": self._stt_mgmt_svc.handle_warmup_stt,  # ручной запуск STT warmup (после смены профиля/модели)
@@ -1277,6 +1297,9 @@ class BackendService:
             "add_to_collection": self._collections.handle_add_to_collection,  # добавить запись истории в коллекцию
             "remove_from_collection": self._collections.handle_remove_from_collection,  # удалить запись из коллекции
             "list_normalization_profiles": self._handle_list_normalization_profiles,  # список профилей нормализации текста
+            "add_normalization_profile": self._handle_add_normalization_profile,  # добавить пользовательский профиль нормализации
+            "remove_normalization_profile": self._handle_remove_normalization_profile,  # удалить пользовательский профиль нормализации
+            "apply_normalization_profile": self._handle_apply_normalization_profile,  # применить профиль нормализации к тексту
             "get_collection_items": self._collections.handle_get_collection_items,  # получить записи истории из коллекции
             "start_chain": self._chains.handle_start_chain,  # начать цепочку связанных записей
             "add_to_chain": self._chains.handle_add_to_chain,  # добавить запись в цепочку
@@ -1293,6 +1316,7 @@ class BackendService:
             "compare_periods": self._analytics_svc.handle_compare_periods,  # сравнение двух периодов использования
             "get_activity_calendar": self._analytics_svc.handle_get_activity_calendar,  # GitHub-style activity calendar данные
             "get_recording_insights": self._search_and_analysis_svc.handle_get_recording_insights,  # эвристические инсайты по записям (Wave 54: alias was wrongly pointed at _handle_get_recording_stats)
+            "get_daily_insight": self._handle_get_daily_insight,  # один наиболее релевантный инсайт за сегодня (W1274 F3)
             "get_sentiment_trends": self._analytics_svc.handle_get_sentiment_trends,  # анализ трендов тональности транскрипций за N дней
 
             "check_integrity": self._handle_check_integrity,  # проверка целостности данных
@@ -1343,6 +1367,7 @@ class BackendService:
             "check_migration": self._data_migrator.handle_check_migration,  # проверка необходимости миграции данных
             "run_migration": self._data_migrator.handle_run_migration,  # выполнение миграции данных между версиями
             "expand_abbreviations": self._text_processing_svc.handle_expand_abbreviations,  # раскрытие аббревиатур в тексте транскрипции
+            "add_abbreviation": self._text_processing_svc.handle_add_abbreviation,  # добавить пользовательскую аббревиатуру
             "remove_abbreviation": self._text_processing_svc.handle_remove_abbreviation,  # удалить аббревиатуру
             "list_abbreviations": self._text_processing_svc.handle_list_abbreviations,  # список аббревиатур для языка
             "profile_noise": self._audio_analytics_svc.handle_profile_noise,  # профилирование фонового шума: тип, уровень, SNR, рекомендации
@@ -1724,6 +1749,34 @@ class BackendService:
         """Возвращает список всех профилей нормализации текста."""
         return {"profiles": self._norm_profiles.list_profiles()}
 
+    def _handle_add_normalization_profile(self, params: dict) -> dict:
+        """Добавляет пользовательский профиль нормализации текста."""
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен")
+        rules = list(params.get("rules", []))
+        description = str(params.get("description", ""))
+        overwrite = bool(params.get("overwrite", False))
+        profile = self._norm_profiles.add_profile(name, rules, description, overwrite=overwrite)
+        return {"profile": profile.to_dict()}
+
+    def _handle_remove_normalization_profile(self, params: dict) -> dict:
+        """Удаляет пользовательский профиль нормализации текста."""
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise ValueError("Параметр 'name' обязателен")
+        removed = self._norm_profiles.remove_profile(name)
+        return {"removed": removed, "name": name}
+
+    def _handle_apply_normalization_profile(self, params: dict) -> dict:
+        """Применяет профиль нормализации к тексту и возвращает результат."""
+        text = str(params.get("text", ""))
+        profile_name = str(params.get("profile_name", "")).strip()
+        if not profile_name:
+            raise ValueError("Параметр 'profile_name' обязателен")
+        normalized = self._norm_profiles.apply_profile(text, profile_name)
+        return {"text": normalized, "profile_name": profile_name}
+
     def _handle_get_system_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о системных ресурсах: CPU, RAM, диск, GPU."""
         return self._system_monitor.get_system_info()
@@ -2013,6 +2066,34 @@ class BackendService:
         n = self._error_bus.clear()
         return {"cleared": n}
 
+    def _handle_get_audit_log(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает последние записи IPC audit log для операторов/отладки.
+
+        Параметры:
+            days_back — количество дней для выборки (default 7, range 1–90).
+            limit     — максимальное число записей (default 200).
+
+        Возвращает:
+            entries — список записей {ts, method, params_keys, success, duration_ms}.
+            reason  — «privacy_mode» когда данные недоступны.
+        """
+        # Privacy mode: возвращаем пустой ответ без утечки метаданных
+        if self._cached_settings().get("privacy_mode_enabled", False):
+            return {"ok": True, "entries": [], "reason": "privacy_mode"}
+
+        raw_days = params.get("days_back", 7)
+        try:
+            days_back = int(raw_days)
+        except (TypeError, ValueError):
+            days_back = 7
+        days_back = max(1, min(days_back, 90))
+
+        limit = int(params.get("limit", 200))
+        limit = max(1, min(limit, 1000))
+
+        entries = self._audit_logger.get_audit_log(limit=limit)
+        return {"ok": True, "entries": entries}
+
     def _handle_send_diagnostics_to_sentry(self, params: dict) -> dict:
         """Отправляет последние N ошибок в Sentry — последние 20 как breadcrumbs, остальные в extras.
 
@@ -2065,7 +2146,14 @@ class BackendService:
         # proc_cmdline raises PermissionError → wrapped as SystemError by the
         # psutil C ext, which bubbles out before any inner try/except. Iterate
         # bare and fetch fields manually under a wide except.
-        for proc in psutil.process_iter():
+        try:
+            proc_iter = list(psutil.process_iter())
+        except (PermissionError, SystemError, OSError) as exc:
+            # Wave 490: Sequoia KERN_PROCARGS2 blocks process_iter at the top level.
+            # Push system.proc_cmdline_permission and return gracefully.
+            self._push_proc_cmdline_permission_error(exc)
+            return {"ok": True, "processes": []}
+        for proc in proc_iter:
             try:
                 cmd = " ".join(proc.cmdline() or [])
                 if any(s in cmd for s in ("KrabEarAgent", "KrabEar/backend/service.py", "gigaam_worker")):
@@ -2084,6 +2172,36 @@ class BackendService:
                 continue
 
         return {"ok": True, "processes": matches}
+
+    def _push_proc_cmdline_permission_error(self, exc: Exception) -> None:
+        """Push system.proc_cmdline_permission error to error_bus. Never raises.
+
+        Wave 490: Sequoia KERN_PROCARGS2 blocks psutil.process_iter() with
+        PermissionError/SystemError. Push once per hour (dedupe_seconds=3600).
+        """
+        try:
+            from backend.error_bus import KrabError
+            from backend.error_codes import ERROR_REGISTRY
+            from datetime import datetime, timezone
+            entry = ERROR_REGISTRY.get("system.proc_cmdline_permission", {})
+            err = KrabError(
+                severity="error",
+                component="system",
+                code="system.proc_cmdline_permission",
+                message_user=entry.get(
+                    "user_msg_ru",
+                    "Не удалось прочитать список процессов (Sequoia блокирует KERN_PROCARGS2).",
+                ),
+                message_debug=f"psutil.process_iter raised {type(exc).__name__}: {exc}",
+                timestamp=datetime.now(timezone.utc),
+                context={"exc_type": type(exc).__name__, "exc_msg": str(exc)},
+                actionable=entry.get("actionable", False),
+                action_id=entry.get("action_id"),
+            )
+            if hasattr(self, "_error_bus") and self._error_bus is not None:
+                self._error_bus.push(err)
+        except Exception:
+            pass  # never raise from error reporting path
 
     def _handle_handle_error_action(self, params: dict) -> dict:
         """Выполняет actionable-действие по action_id из toast/diagnostics кнопки."""
@@ -3167,8 +3285,7 @@ class BackendService:
         """Генерирует эвристические инсайты по записям за последние N дней."""
         days = int(params.get("days", 7))
         try:
-            with self.store._lock():
-                items = self.store._load_active_items_unlocked()
+            items = self.store._load_active_items_with_lock()
         except Exception:
             items = []
         insights = self._recording_insights.generate_insights(items, days=days)
@@ -3176,6 +3293,24 @@ class BackendService:
             "insights": [i.to_dict() for i in insights],
             "count": len(insights),
             "days": days,
+        }
+
+    def _handle_get_daily_insight(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Возвращает один наиболее релевантный инсайт за сегодня (W1274 F3).
+
+        Privacy gate: если privacy_mode_enabled=True — возвращает пустой результат
+        без обращения к истории записей.
+        """
+        if self._cached_settings().get("privacy_mode_enabled"):
+            return {"insight": None, "privacy_mode": True}
+        try:
+            items = self.store._load_active_items_with_lock()
+        except Exception:
+            items = []
+        insight = self._recording_insights.get_daily_insight(items)
+        return {
+            "insight": insight.to_dict() if insight is not None else None,
+            "privacy_mode": False,
         }
 
     def _handle_get_sentiment_trends(self, params: dict[str, Any]) -> dict[str, Any]:
