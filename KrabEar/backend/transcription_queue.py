@@ -18,6 +18,17 @@
 # Unit tests remain in KrabEar/tests/test_transcription_queue.py for future resurrection.
 # To re-activate: add a daemon worker thread in BackendService that polls process_next()
 # and dispatches via _transcribe_paths_core, then restore the 4 IPC entries.
+#
+# Memory-leak fixes (W1722):
+#   BUG 1 — _jobs grew without bound: terminal-state jobs (completed/failed/cancelled)
+#            are now evicted after TERMINAL_RETENTION_SECONDS (default 3600 s = 1 h) OR
+#            when the total terminal-job count exceeds TERMINAL_MAX_COUNT (100).  The
+#            eviction runs under the existing lock inside _evict_terminal_jobs(), called
+#            at the start of every state-transition that can produce a terminal job.
+#   BUG 2 — mark_completed() accepted arbitrarily large result dicts.  Results whose
+#            JSON-serialised size exceeds RESULT_MAX_BYTES (512 KiB) are truncated to a
+#            stub {"truncated": True, "original_bytes": N} to prevent a single large
+#            transcription result from pinning megabytes of RAM per job.
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -43,6 +55,16 @@ STATUS_CANCELLED = "cancelled"
 PRIORITY_MIN = 1
 PRIORITY_MAX = 10
 PRIORITY_DEFAULT = 5
+
+# Terminal-job eviction parameters (BUG 1 fix)
+# Keep completed/failed/cancelled jobs for at most 1 hour after finishing.
+TERMINAL_RETENTION_SECONDS: int = 3600
+# Hard cap: never keep more than this many terminal jobs in memory at once.
+TERMINAL_MAX_COUNT: int = 100
+
+# Result size guard (BUG 2 fix)
+# JSON-encoded result bytes above this threshold are replaced with a stub.
+RESULT_MAX_BYTES: int = 512 * 1024  # 512 KiB
 
 
 class TranscriptionJob:
@@ -69,6 +91,9 @@ class TranscriptionJob:
         self.created_at_iso: str = datetime.now(timezone.utc).isoformat()
         self.started_at_iso: str | None = None
         self.finished_at_iso: str | None = None
+        # Monotonic clock timestamp set when job enters a terminal state; used by
+        # the eviction sweep (_evict_terminal_jobs) for time-based retention.
+        self.finished_at_monotonic: float | None = None
         self.error: str | None = None
         self.result: dict[str, Any] | None = None
 
@@ -100,8 +125,13 @@ class TranscriptionQueue:
 
     def __init__(self, persist_path: Optional[Path] = None) -> None:
         self._lock = threading.Lock()
-        # Все задания по job_id
+        # Все задания по job_id.
+        # Active (pending/processing) jobs live here indefinitely.
+        # Terminal (completed/failed/cancelled) jobs are evicted by
+        # _evict_terminal_jobs() — see TERMINAL_RETENTION_SECONDS / TERMINAL_MAX_COUNT.
         self._jobs: dict[str, TranscriptionJob] = {}
+        # Insertion-ordered set of terminal job_ids; used for O(1) oldest-first eviction.
+        self._terminal_order: OrderedDict[str, None] = OrderedDict()
         self._persist_path: Optional[Path] = persist_path
         if self._persist_path is not None:
             self._load()
@@ -153,8 +183,15 @@ class TranscriptionQueue:
                 # Восстанавливаем оригинальный job_id и метаданные времени
                 job.job_id = data["job_id"]
                 job.created_at_iso = data.get("created_at", job.created_at_iso)
-                # status оставляем pending (только pending сохраняются)
+                # status оставляем pending (только pending сохраняются).
+                # INVARIANT: only pending jobs are persisted today; if terminal-job
+                # persistence is ever added, restored terminal jobs MUST also be
+                # registered into _terminal_order here — otherwise they will never
+                # be evicted by _evict_terminal_jobs and the memory leak re-opens.
+                # Defensive guard: register any accidentally-restored terminal job now.
                 self._jobs[job.job_id] = job
+                if job.status not in (STATUS_PENDING, STATUS_PROCESSING):
+                    self._terminal_order[job.job_id] = None
                 restored += 1
             except Exception as exc:
                 logger.warning(
@@ -163,6 +200,79 @@ class TranscriptionQueue:
                 )
         if restored:
             logger.info("TranscriptionQueue: восстановлено %d pending-заданий из %s", restored, self._persist_path)
+
+    # ------------------------------------------------------------------
+    # Internal — eviction (BUG 1 fix, W1722)
+    # ------------------------------------------------------------------
+
+    def _evict_terminal_jobs(self) -> None:
+        """Evict terminal-state jobs that have exceeded the retention window or count cap.
+
+        Must be called under self._lock.  Runs in O(k) where k is the number of
+        jobs evicted — typically 0 or 1 per call, so it is negligibly cheap.
+
+        Strategy (dual):
+          1. Time-based: evict any terminal job whose finished_at_monotonic is older
+             than TERMINAL_RETENTION_SECONDS.  This guarantees status queries work
+             for at least one hour after completion.
+          2. Count-based: if more than TERMINAL_MAX_COUNT terminal jobs remain after
+             time-based eviction, drop the oldest ones (by insertion order in
+             _terminal_order) until the cap is satisfied.
+
+        Both thresholds are applied on every state transition that creates a terminal
+        job so the dict never grows beyond O(TERMINAL_MAX_COUNT + active_jobs).
+        """
+        now = time.monotonic()
+        cutoff = now - TERMINAL_RETENTION_SECONDS
+
+        # 1. Time-based pass — evict expired entries (oldest first in _terminal_order)
+        expired: list[str] = []
+        for jid in self._terminal_order:
+            job = self._jobs.get(jid)
+            if job is None:
+                # Stale reference — clean up bookkeeping.
+                expired.append(jid)
+                continue
+            finished = job.finished_at_monotonic
+            if finished is None or finished <= cutoff:
+                expired.append(jid)
+            else:
+                # OrderedDict preserves insertion order; once we hit a non-expired
+                # entry all subsequent ones are also newer (FIFO insertion).
+                break
+
+        for jid in expired:
+            self._jobs.pop(jid, None)
+            self._terminal_order.pop(jid, None)
+
+        # 2. Count-based cap — evict oldest until we are within TERMINAL_MAX_COUNT.
+        count_evicted = 0
+        while len(self._terminal_order) > TERMINAL_MAX_COUNT:
+            oldest_jid, _ = self._terminal_order.popitem(last=False)
+            self._jobs.pop(oldest_jid, None)
+            count_evicted += 1
+
+        # Summary log — fires whenever *any* eviction occurred (time-based, count-based,
+        # or both).  A single line after both passes avoids per-entry log spam and ensures
+        # the message is emitted even when only the count cap fires (no expired entries).
+        total_evicted = len(expired) + count_evicted
+        if total_evicted:
+            logger.debug(
+                "TranscriptionQueue: evicted %d terminal job(s) "
+                "(time-based=%d count-based=%d)",
+                total_evicted, len(expired), count_evicted,
+            )
+
+    def _register_terminal(self, job: "TranscriptionJob") -> None:
+        """Record that *job* has just entered a terminal state.
+
+        Must be called under self._lock, immediately after setting job.status.
+        Sets finished_at_monotonic, appends job_id to _terminal_order, then
+        triggers _evict_terminal_jobs to enforce retention limits.
+        """
+        job.finished_at_monotonic = time.monotonic()
+        self._terminal_order[job.job_id] = None
+        self._evict_terminal_jobs()
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -209,6 +319,7 @@ class TranscriptionQueue:
                 return False
             job.status = STATUS_CANCELLED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
+            self._register_terminal(job)
             self._save()
         logger.debug("Задание отменено: job_id=%s", job_id)
         return True
@@ -287,17 +398,47 @@ class TranscriptionQueue:
         Args:
             job_id: Идентификатор задания.
             result: Опциональный словарь с результатами транскрипции.
+                    Results whose JSON-encoded size exceeds RESULT_MAX_BYTES are
+                    replaced with a compact stub to prevent large dicts from
+                    pinning memory indefinitely (BUG 2 fix, W1722).
 
         Returns:
             True если статус успешно изменён, False если задание не найдено.
         """
+        # BUG 2 guard: truncate oversized result before storing (outside the lock
+        # to avoid holding the lock during json.dumps on a potentially large dict).
+        # TOCTOU note: the job could be completed-then-evicted between this size-check
+        # and the lock acquisition below, in which case mark_completed returns False
+        # even though the result was valid.  This is intentional and acceptable —
+        # evicted jobs are considered expired; the caller should treat False as
+        # "job no longer tracked" rather than a data error.
+        stored_result = result
+        if result is not None:
+            try:
+                encoded = json.dumps(result, ensure_ascii=False)
+                original_bytes = len(encoded.encode("utf-8"))
+                if original_bytes > RESULT_MAX_BYTES:
+                    logger.warning(
+                        "TranscriptionQueue: result for job_id=%s is %d bytes "
+                        "(limit %d) — storing truncation stub",
+                        job_id, original_bytes, RESULT_MAX_BYTES,
+                    )
+                    stored_result = {"truncated": True, "original_bytes": original_bytes}
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "TranscriptionQueue: could not measure result size for job_id=%s: %s "
+                    "— storing as-is",
+                    job_id, exc,
+                )
+
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return False
             job.status = STATUS_COMPLETED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
-            job.result = result
+            job.result = stored_result
+            self._register_terminal(job)
             self._save()
         return True
 
@@ -320,6 +461,7 @@ class TranscriptionQueue:
             job.status = STATUS_FAILED
             job.finished_at_iso = datetime.now(timezone.utc).isoformat()
             job.error = error or "Неизвестная ошибка"
+            self._register_terminal(job)
             self._save()
         return True
 
