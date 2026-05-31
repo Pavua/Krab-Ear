@@ -580,6 +580,10 @@ class BackendService:
         # W1687 F7 MED: wire recording chain manager so archived items are
         # removed from their chains (ghost references prevented).
         self._archive_manager._recording_chain_mgr = self._chains
+        # W1730: wire recording chain manager into HistoryService so that
+        # delete_history_item cascades ghost-ref removal AND purge_all_data
+        # calls delete_all_chains() — previously only ArchiveManager had this wire.
+        self._history._recording_chain_mgr = self._chains
         self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
         self._call_session_service = CallSessionService(
             store=self._call_session_store,
@@ -1237,6 +1241,7 @@ class BackendService:
             "repaste_item": self._history.handle_repaste_item,
             "get_clipboard_history": self._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
             "cleanup_old_history": self._history.handle_cleanup_old_history,  # удаляет записи старше N дней
+            "purge_all_data": self._history.handle_purge_all_data,  # W1730: полная очистка всех данных (история + цепочки + embeddings)
             "get_storage_info": self._history.handle_get_storage_info,  # размер файлов данных
             "get_transcripts_path": self._history.handle_get_transcripts_path,  # путь к папке транскриптов
             "backup_history": self._history.handle_backup_history,  # создаёт timestamped-резервную копию истории

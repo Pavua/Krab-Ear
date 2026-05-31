@@ -113,6 +113,7 @@ def build_dispatch_table(
         "repaste_item": svc._history.handle_repaste_item,
         "get_clipboard_history": svc._history.handle_get_clipboard_history,  # история буфера обмена: последние N вставленных транскрипций
         "cleanup_old_history": svc._history.handle_cleanup_old_history,  # удаляет записи старше N дней
+        "purge_all_data": svc._history.handle_purge_all_data,  # W1730: полная очистка всех данных (история + цепочки + embeddings)
         "get_storage_info": svc._history.handle_get_storage_info,  # размер файлов данных
         "get_transcripts_path": svc._history.handle_get_transcripts_path,  # путь к папке транскриптов
         "backup_history": svc._history.handle_backup_history,  # создаёт timestamped-резервную копию истории

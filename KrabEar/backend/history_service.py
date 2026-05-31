@@ -1465,6 +1465,83 @@ class HistoryService:
         )
         return {"deleted_count": len(to_delete), "remaining": remaining}
 
+    def handle_purge_all_data(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Полная очистка всех пользовательских данных (privacy-purge / wipe-all).
+
+        Удаляет ВСЕ записи истории (без временного порога), а также:
+          - все цепочки записей (recording_chains.json) — W1730
+          - семантический индекс (embeddings), если подключён
+          - версии транскрипций, если подключён менеджер версий
+
+        Каждый дополнительный шаг защищён try/except — ошибка в одном шаге
+        не прерывает остальные (privacy-purge должен быть атомарным для истории).
+
+        Возвращает:
+            history_deleted (int): количество удалённых записей истории
+            chains_deleted (int): количество удалённых цепочек (0 если N/A)
+            semantic_purged (bool): True если семантический индекс очищен
+        """
+        # --- 1. Удалить все записи истории ---
+        with self.store._lock():
+            active = self.store._load_active_items_unlocked()
+            for item in active:
+                self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
+            history_deleted = len(active)
+
+        # --- 2. Каскадная очистка версий транскрипций ---
+        if active and self._transcript_versions is not None:
+            deleted_ids = [item.id for item in active]
+            try:
+                self._transcript_versions.cleanup_for_ids(deleted_ids)
+            except Exception:
+                logger.warning(
+                    "purge_all_data: transcript_versions cleanup failed", exc_info=True
+                )
+
+        # --- 3. W1730: очистить все цепочки записей ---
+        chains_deleted = 0
+        if self._recording_chain_mgr is not None:
+            try:
+                chains_deleted = self._recording_chain_mgr.delete_all_chains()
+            except Exception:
+                logger.warning(
+                    "purge_all_data: delete_all_chains failed", exc_info=True
+                )
+
+        # --- 4. Очистить семантический индекс ---
+        semantic_purged = False
+        if self._semantic_searcher is not None:
+            try:
+                self._semantic_searcher.purge_all()
+                semantic_purged = True
+            except Exception:
+                logger.warning(
+                    "purge_all_data: semantic_searcher.purge_all failed", exc_info=True
+                )
+
+        add_breadcrumb(
+            category="history",
+            message="purge_all_data",
+            level="info",
+            data={
+                "history_deleted": history_deleted,
+                "chains_deleted": chains_deleted,
+                "semantic_purged": semantic_purged,
+            },
+        )
+        logger.info(
+            "purge_all_data: history=%d chains=%d semantic_purged=%s",
+            history_deleted,
+            chains_deleted,
+            semantic_purged,
+        )
+        return {
+            "ok": True,
+            "history_deleted": history_deleted,
+            "chains_deleted": chains_deleted,
+            "semantic_purged": semantic_purged,
+        }
+
     def handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о размере файлов данных Krab Ear.
 
