@@ -25,6 +25,9 @@ from backend.transcription_queue import (
     STATUS_FAILED,
     STATUS_CANCELLED,
     PRIORITY_DEFAULT,
+    TERMINAL_MAX_COUNT,
+    TERMINAL_RETENTION_SECONDS,
+    RESULT_MAX_BYTES,
 )
 
 
@@ -667,6 +670,274 @@ class TestTranscriptionQueuePersistence(unittest.TestCase):
         self.assertEqual(errors, [], f"Исключения при конкурентном save: {errors}")
         # Все задания должны быть в очереди
         self.assertEqual(q.get_queue_stats()["pending"], 10)
+
+
+class TestTranscriptionQueueEvictionW1722(unittest.TestCase):
+    """W1722 — BUG 1: _jobs must not grow without bound (terminal-job eviction)."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    # ------------------------------------------------------------------
+    # Fail-before tests (verify the invariants we are enforcing)
+    # ------------------------------------------------------------------
+
+    def test_terminal_count_bounded_after_many_completions(self):
+        """After N >> TERMINAL_MAX_COUNT completions, _jobs stays within cap.
+
+        This test would FAIL on the unpatched code (dict grows to 500 entries).
+        With the fix it must pass (_jobs <= TERMINAL_MAX_COUNT + active).
+        """
+        n = 500  # well above TERMINAL_MAX_COUNT (100)
+        for i in range(n):
+            jid = self.queue.enqueue(f"/tmp/audio_{i}.mp3")
+            self.queue.mark_completed(jid, result={"text": f"transcript {i}"})
+
+        with self.queue._lock:
+            total_in_dict = len(self.queue._jobs)
+
+        # No active (pending/processing) jobs remain — only terminal entries subject
+        # to the cap.  The dict should be at most TERMINAL_MAX_COUNT.
+        self.assertLessEqual(
+            total_in_dict,
+            TERMINAL_MAX_COUNT,
+            f"_jobs has {total_in_dict} entries after {n} completions "
+            f"(cap={TERMINAL_MAX_COUNT}) — unbounded growth detected",
+        )
+
+    def test_terminal_count_bounded_after_many_failures(self):
+        """Same invariant for failed jobs (mark_failed path)."""
+        n = 300
+        for i in range(n):
+            jid = self.queue.enqueue(f"/tmp/audio_{i}.mp3")
+            self.queue.mark_failed(jid, error="test error")
+
+        with self.queue._lock:
+            total_in_dict = len(self.queue._jobs)
+
+        self.assertLessEqual(total_in_dict, TERMINAL_MAX_COUNT)
+
+    def test_terminal_count_bounded_after_many_cancellations(self):
+        """Same invariant for cancelled jobs (cancel path)."""
+        n = 200
+        for i in range(n):
+            jid = self.queue.enqueue(f"/tmp/audio_{i}.mp3")
+            self.queue.cancel(jid)
+
+        with self.queue._lock:
+            total_in_dict = len(self.queue._jobs)
+
+        self.assertLessEqual(total_in_dict, TERMINAL_MAX_COUNT)
+
+    # ------------------------------------------------------------------
+    # Pass-after tests (recent jobs remain queryable within retention window)
+    # ------------------------------------------------------------------
+
+    def test_recently_completed_job_still_queryable(self):
+        """A job completed moments ago must still be accessible via get_status.
+
+        Ensures we don't over-evict: the retention window (1 h by default) keeps
+        freshly-finished jobs available for status polling by the caller.
+        """
+        # Enqueue 200 jobs and complete them all — fills well past the cap.
+        jids = []
+        for i in range(200):
+            jids.append(self.queue.enqueue(f"/tmp/audio_{i}.mp3"))
+        for jid in jids:
+            self.queue.mark_completed(jid, result={"text": "ok"})
+
+        # The LAST batch of TERMINAL_MAX_COUNT jobs should still be in the dict
+        # (count-cap evicts oldest first).
+        surviving = jids[-TERMINAL_MAX_COUNT:]
+        for jid in surviving:
+            status = self.queue.get_status(jid)
+            self.assertNotEqual(
+                status.get("error"), "not_found",
+                f"Recently completed job {jid} was evicted prematurely",
+            )
+
+    def test_old_jobs_evicted_before_new_ones(self):
+        """Count-cap evicts oldest-first; newest terminal jobs survive."""
+        # Fill exactly TERMINAL_MAX_COUNT + 10 terminal jobs.
+        overflow = 10
+        all_jids = []
+        for i in range(TERMINAL_MAX_COUNT + overflow):
+            jid = self.queue.enqueue(f"/tmp/audio_{i}.mp3")
+            all_jids.append(jid)
+        for jid in all_jids:
+            self.queue.mark_completed(jid)
+
+        # The first `overflow` jobs (oldest) should have been evicted.
+        for jid in all_jids[:overflow]:
+            status = self.queue.get_status(jid)
+            self.assertEqual(
+                status.get("error"), "not_found",
+                f"Old job {jid} should have been evicted by count cap",
+            )
+
+        # The last TERMINAL_MAX_COUNT jobs should still be present.
+        for jid in all_jids[overflow:]:
+            status = self.queue.get_status(jid)
+            self.assertNotEqual(status.get("error"), "not_found",
+                                f"Recent job {jid} should not be evicted yet")
+
+    def test_time_based_eviction_respects_retention(self):
+        """Jobs whose finished_at_monotonic is past the retention window are evicted.
+
+        We patch finished_at_monotonic backward in time to simulate expiry without
+        actually sleeping TERMINAL_RETENTION_SECONDS.
+        """
+        jid = self.queue.enqueue("/tmp/audio.mp3")
+        self.queue.mark_completed(jid)
+
+        # Confirm it is present immediately after completion.
+        status = self.queue.get_status(jid)
+        self.assertNotEqual(status.get("error"), "not_found")
+
+        # Wind the finished_at_monotonic back past the retention window.
+        import time as _time
+        with self.queue._lock:
+            job = self.queue._jobs.get(jid)
+            if job is not None:
+                job.finished_at_monotonic = (
+                    _time.monotonic() - TERMINAL_RETENTION_SECONDS - 1
+                )
+            # Trigger eviction by adding one more terminal job (which calls
+            # _evict_terminal_jobs internally).
+
+        jid2 = self.queue.enqueue("/tmp/audio2.mp3")
+        self.queue.mark_completed(jid2)
+
+        # The manually-expired job should now be gone.
+        status = self.queue.get_status(jid)
+        self.assertEqual(
+            status.get("error"), "not_found",
+            "Expired job should be evicted after retention window passes",
+        )
+
+    def test_terminal_order_tracks_all_terminal_statuses(self):
+        """_terminal_order is updated for completed, failed, and cancelled jobs."""
+        jid_c = self.queue.enqueue("/tmp/c.mp3")
+        jid_f = self.queue.enqueue("/tmp/f.mp3")
+        jid_x = self.queue.enqueue("/tmp/x.mp3")
+
+        self.queue.mark_completed(jid_c)
+        self.queue.mark_failed(jid_f)
+        self.queue.cancel(jid_x)
+
+        with self.queue._lock:
+            keys = list(self.queue._terminal_order.keys())
+
+        self.assertIn(jid_c, keys)
+        self.assertIn(jid_f, keys)
+        self.assertIn(jid_x, keys)
+
+    def test_active_jobs_not_affected_by_count_cap(self):
+        """Active (pending/processing) jobs are never evicted by the count cap."""
+        # Fill terminal cap completely.
+        for i in range(TERMINAL_MAX_COUNT + 50):
+            jid = self.queue.enqueue(f"/tmp/terminal_{i}.mp3")
+            self.queue.mark_completed(jid)
+
+        # Now add a pending and a processing job.
+        pending_jid = self.queue.enqueue("/tmp/active_pending.mp3")
+        processing_jid = self.queue.enqueue("/tmp/active_processing.mp3")
+        self.queue.process_next()  # moves one to processing
+
+        # Both active jobs must still be present regardless of cap pressure.
+        pending_status = self.queue.get_status(pending_jid)
+        processing_status = self.queue.get_status(processing_jid)
+
+        # One of them transitioned to processing; the other is pending.
+        statuses = {pending_status.get("status"), processing_status.get("status")}
+        self.assertTrue(
+            statuses.issubset({STATUS_PENDING, STATUS_PROCESSING}),
+            f"Active jobs must not be evicted: {pending_status}, {processing_status}",
+        )
+
+
+class TestTranscriptionQueueResultSizeGuardW1722(unittest.TestCase):
+    """W1722 — BUG 2: oversized result dicts must be truncated in mark_completed."""
+
+    def setUp(self):
+        self.queue = TranscriptionQueue()
+
+    def test_normal_result_stored_verbatim(self):
+        """Small result dicts (well under RESULT_MAX_BYTES) are stored as-is."""
+        jid = self.queue.enqueue("/tmp/audio.mp3")
+        result = {"text": "hello world", "confidence": 0.99}
+        self.queue.mark_completed(jid, result=result)
+
+        status = self.queue.get_status(jid)
+        self.assertEqual(status["result"], result)
+        self.assertNotIn("truncated", status.get("result", {}))
+
+    def test_oversized_result_replaced_by_stub(self):
+        """A result whose JSON encoding exceeds RESULT_MAX_BYTES becomes a stub.
+
+        This test would NOT fail on unpatched code (it stores the big dict);
+        with the fix the stored result must be the truncation stub.
+        """
+        # Build a result slightly larger than the limit.
+        big_text = "x" * (RESULT_MAX_BYTES + 1024)
+        big_result = {"text": big_text}
+
+        jid = self.queue.enqueue("/tmp/big.mp3")
+        self.queue.mark_completed(jid, result=big_result)
+
+        status = self.queue.get_status(jid)
+        stored = status.get("result")
+        self.assertIsNotNone(stored, "result should not be None after mark_completed")
+        self.assertTrue(
+            stored.get("truncated") is True,
+            f"Expected truncation stub, got: {str(stored)[:200]}",
+        )
+        self.assertIn("original_bytes", stored,
+                      "stub must record the original byte count")
+        self.assertGreater(stored["original_bytes"], RESULT_MAX_BYTES)
+
+    def test_stub_original_bytes_is_accurate(self):
+        """original_bytes in the stub must match the actual JSON-encoded size."""
+        import json as _json
+        big_text = "y" * (RESULT_MAX_BYTES + 2048)
+        big_result = {"text": big_text}
+        expected_bytes = len(_json.dumps(big_result, ensure_ascii=False).encode("utf-8"))
+
+        jid = self.queue.enqueue("/tmp/big2.mp3")
+        self.queue.mark_completed(jid, result=big_result)
+
+        stored = self.queue.get_status(jid)["result"]
+        self.assertEqual(stored["original_bytes"], expected_bytes)
+
+    def test_none_result_stored_as_none(self):
+        """mark_completed(result=None) must not trigger size guard logic."""
+        jid = self.queue.enqueue("/tmp/audio.mp3")
+        self.queue.mark_completed(jid, result=None)
+
+        status = self.queue.get_status(jid)
+        self.assertIsNone(status["result"])
+
+    def test_borderline_result_not_truncated(self):
+        """A result exactly at RESULT_MAX_BYTES must NOT be truncated."""
+        import json as _json
+        # Build a result whose encoded size is exactly RESULT_MAX_BYTES.
+        # We use a simple string key and fill the value to hit the limit.
+        # JSON overhead: '{"text": "..."}' = 11 bytes of structure.
+        overhead = len(_json.dumps({"text": ""}).encode("utf-8"))
+        fill_len = RESULT_MAX_BYTES - overhead
+        borderline_result = {"text": "a" * fill_len}
+        encoded_size = len(_json.dumps(borderline_result, ensure_ascii=False).encode("utf-8"))
+        # Verify our arithmetic (should equal RESULT_MAX_BYTES exactly).
+        self.assertEqual(encoded_size, RESULT_MAX_BYTES)
+
+        jid = self.queue.enqueue("/tmp/border.mp3")
+        self.queue.mark_completed(jid, result=borderline_result)
+
+        stored = self.queue.get_status(jid)["result"]
+        self.assertNotIn(
+            "truncated", stored,
+            "Borderline result (exactly at limit) must NOT be truncated",
+        )
 
 
 if __name__ == "__main__":
