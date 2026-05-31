@@ -173,10 +173,21 @@ class VoiceActivityDetector:
 
     @staticmethod
     def _compute_frame_rms(audio: np.ndarray, frame_size: int) -> np.ndarray:
-        """Вычисляет RMS для каждого фрейма."""
-        n_samples = len(audio)
+        """Вычисляет RMS для каждого фрейма.
+
+        NaN/Inf-сэмплы заменяются нулями перед вычислением (BUG2 fix): частично
+        повреждённый буфер не должен обнулять весь результат детекции.
+        """
+        # Санирование: NaN/Inf → 0.0 (не влияет на нормальные буферы)
+        audio_clean = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+        if not np.all(audio == audio_clean):
+            logger.warning(
+                "VAD: аудио содержит NaN/Inf сэмплы — заменены нулями (%d сэмплов)",
+                int(np.sum(~np.isfinite(audio))),
+            )
+        n_samples = len(audio_clean)
         n_frames = max(n_samples // frame_size, 1)
-        frames = np.array_split(audio, n_frames)
+        frames = np.array_split(audio_clean, n_frames)
         rms_values = []
         for f in frames:
             if len(f) > 0:
@@ -217,6 +228,12 @@ class VoiceActivityDetector:
 
         onset_frames: N подряд идущих «речевых» фреймов → начало сегмента.
         offset_frames: M подряд идущих «тихих» фреймов → конец сегмента.
+
+        BUG1 fix: если аудио заканчивается во время ожидания offset_frames
+        (т.е. consecutive_silence < offset_frames на конце массива), накопленные
+        тихие фреймы-«хвост» помечаются False — они никогда не были подтверждены
+        следующим speech onset. Легитимный межсловный bridging (когда после паузы
+        следует новая речь) НЕ затрагивается: там reset срабатывает через onset-ветку.
         """
         n = len(is_speech)
         result = np.zeros(n, dtype=bool)
@@ -249,6 +266,15 @@ class VoiceActivityDetector:
                             result[trail_start: i + 1] = False
                         in_speech = False
                         consecutive_silence = 0
+
+        # BUG1 fix: обрезаем незакрытый хвост тишины на конце массива.
+        # Если аудио закончилось в состоянии in_speech с consecutive_silence > 0,
+        # то фреймы [n - consecutive_silence : n] были помечены True, но за ними
+        # не последовало ни одного speech-фрейма для «подтверждения» bridging.
+        # Откатываем их обратно в False.
+        if in_speech and consecutive_silence > 0:
+            tail_start = n - consecutive_silence
+            result[tail_start:] = False
 
         return result
 
