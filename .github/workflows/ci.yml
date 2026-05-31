@@ -11,6 +11,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      swift: ${{ steps.filter.outputs.swift }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            swift:
+              - 'native/**'
+
   python:
     name: Python ${{ matrix.python-version }}
     runs-on: macos-latest
@@ -132,6 +146,8 @@ jobs:
 
   swift:
     name: Swift agent build
+    needs: changes
+    if: ${{ needs.changes.outputs.swift == 'true' }}
     runs-on: macos-latest
 
     steps:

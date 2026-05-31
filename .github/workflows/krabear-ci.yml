@@ -10,6 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      swift: ${{ steps.filter.outputs.swift }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            swift:
+              - 'native/**'
+
   backend-tests:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +97,8 @@ jobs:
 
 
   swift-build:
+    needs: changes
+    if: ${{ needs.changes.outputs.swift == 'true' }}
     runs-on: macos-latest
     steps:
       - name: Checkout
