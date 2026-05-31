@@ -251,28 +251,35 @@ class EmailSender:
 
         Создаёт письмо и сразу отправляет его через настроенный аккаунт Mail.app.
         Требует настроенных учётных записей в Mail.app; может открыть окно Mail.app.
+
+        Безопасность: to/subject/body передаются как argv-аргументы osascript,
+        а не интерполируются в текст скрипта, что предотвращает AppleScript-инъекцию
+        через transcript-derived данные (W1747).
         """
-        escaped_to = to.replace('"', '\\"')
-        escaped_subject = subject.replace('"', '\\"').replace("\\n", " ")
         # Mail.app принимает plain-text; конвертируем HTML в текст для простоты
         plain_body = self._strip_html(body_html)
-        escaped_body = plain_body.replace('"', '\\"').replace("\n", "\\n")
 
-        script = textwrap.dedent(f'''\
-            tell application "Mail"
-                set newMessage to make new outgoing message with properties \\
-                    {{subject:"{escaped_subject}", content:"{escaped_body}", \\
-                    visible:false}}
-                tell newMessage
-                    make new to recipient with properties {{address:"{escaped_to}"}}
+        # Значения передаются как отдельные argv-аргументы (item 1/2/3 of argv),
+        # а не интерполируются в строковые литералы AppleScript — инъекция невозможна.
+        script = textwrap.dedent('''\
+            on run argv
+                set theTo to item 1 of argv
+                set theSubject to item 2 of argv
+                set theBody to item 3 of argv
+                tell application "Mail"
+                    set newMessage to make new outgoing message with properties \\
+                        {subject:theSubject, content:theBody, visible:false}
+                    tell newMessage
+                        make new to recipient with properties {address:theTo}
+                    end tell
+                    send newMessage
                 end tell
-                send newMessage
-            end tell
+            end run
         ''')
 
         try:
             result = subprocess.run(
-                ["osascript", "-e", script],
+                ["osascript", "-e", script, to, subject, plain_body],
                 capture_output=True,
                 text=True,
                 timeout=30,

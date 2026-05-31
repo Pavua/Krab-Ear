@@ -194,7 +194,11 @@ class TestMailAppFallback(unittest.TestCase):
     """Mail.app backend calls osascript with correct script and handles errors."""
 
     def test_mail_app_fallback(self):
-        """backend_name='mail_app' invokes osascript; success = no exception raised."""
+        """backend_name='mail_app' invokes osascript; success = no exception raised.
+
+        Post-W1747: values are passed as argv elements, not interpolated into
+        the script text.  cmd structure: [osascript, -e, <script>, to, subject, body]
+        """
         sender = EmailSender(backend_name="mail_app")
         fake_proc = MagicMock()
         fake_proc.returncode = 0
@@ -204,9 +208,11 @@ class TestMailAppFallback(unittest.TestCase):
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd[0], "osascript")
-        script_arg = mock_run.call_args[0][0][-1]
-        self.assertIn("Mail", script_arg)
-        self.assertIn("r@x.com", script_arg)
+        # Script text (cmd[2]) must reference Mail.app; values are in later argv elements
+        script_text = cmd[2]
+        self.assertIn("Mail", script_text)
+        # Recipient is passed as a discrete argv element (cmd[3]), NOT in the script text
+        self.assertEqual(cmd[3], "r@x.com")
 
     def test_mail_app_osascript_failure_raises_runtime_error(self):
         """Non-zero osascript exit must raise RuntimeError."""
