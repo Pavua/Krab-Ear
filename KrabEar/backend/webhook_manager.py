@@ -9,8 +9,10 @@
 - Статистику доставки на webhook.
 - SSRF-защита (при регистрации И при каждой отправке):
   - Блокируются localhost, RFC1918, link-local и mDNS адреса.
-  - Нестандартные нотации IP (decimal/octal/hex/IPv6-mapped) нормализуются
-    через ipaddress.ip_address() + socket.getaddrinfo — http://2130706433/ невозможен.
+  - Нестандартные нотации IP (decimal/octal/hex/IPv6-mapped) защищены через
+    socket.getaddrinfo: ipaddress.ip_address() принимает только canonical dotted/colon
+    нотацию и выбрасывает ValueError на decimal/hex/octal; getaddrinfo резолвит эти
+    нотации в canonical IP, который затем проверяется _is_ip_safe() — http://2130706433/ невозможен.
   - DNS-rebinding: hostname резолвится заново при КАЖДОЙ отправке; все resolved
     IP проверяются — приватный адрес → отказ даже если регистрация прошла.
 - Защита от redirect-SSRF (W1349 F1): allow_redirects=False — все 3xx трактуются
@@ -97,13 +99,27 @@ def _is_ip_safe(ip_str: str) -> tuple[bool, str | None]:
 def _resolve_and_check_host(host: str, strict: bool = False) -> tuple[bool, str | None]:
     """Resolve *host* via getaddrinfo and check every resolved IP.
 
-    BUG 2 fix: first tries ipaddress.ip_address(host) to normalise non-standard
-    notations (decimal, hex, octal, IPv6-mapped) before DNS lookup.  This catches
-    bypasses like:
-      http://2130706433/        → 127.0.0.1
-      http://0x7f000001/        → 127.0.0.1
-      http://[::ffff:127.0.0.1]/ → IPv6-mapped loopback
-      http://[::ffff:169.254.169.254]/ → IPv6-mapped metadata
+    BUG 2 fix: two-stage check handles all non-standard IP notations:
+
+    Stage 1 — ipaddress.ip_address(host): handles canonical dotted-decimal IPv4
+    (e.g. "127.0.0.1"), standard IPv6 (e.g. "::1"), and IPv6-mapped IPv4 notation
+    (e.g. "::ffff:127.0.0.1", "::ffff:169.254.169.254").  It does NOT parse
+    decimal-encoded (2130706433), hex-encoded (0x7f000001), or octal-encoded
+    (017700000001) addresses — those raise ValueError and fall through to stage 2.
+
+    Stage 2 — socket.getaddrinfo(host): the OS resolver handles ALL alternate
+    encodings including decimal/hex/octal (e.g. http://2130706433/ → 127.0.0.1).
+    The resolved canonical IP is then validated by _is_ip_safe().
+
+    WARNING: the socket.getaddrinfo() fallback (stage 2) is load-bearing for SSRF
+    protection against decimal/hex/octal-encoded IPs.  Do NOT remove it — removing
+    getaddrinfo would silently re-open the bypass for those notations.
+
+    Together these two stages catch bypasses like:
+      http://2130706433/           → 127.0.0.1  (decimal — caught by getaddrinfo)
+      http://0x7f000001/           → 127.0.0.1  (hex     — caught by getaddrinfo)
+      http://[::ffff:127.0.0.1]/  → IPv6-mapped loopback (caught by ipaddress)
+      http://[::ffff:169.254.169.254]/ → IPv6-mapped metadata (caught by ipaddress)
 
     BUG 1 fix (DNS rebinding): called at both registration time and fire time
     (_post_once).  At fire time, ``strict=True`` is passed — a DNS resolution
@@ -113,13 +129,15 @@ def _resolve_and_check_host(host: str, strict: bool = False) -> tuple[bool, str 
 
     Returns (is_safe, reason).
     """
-    # Step 1: try literal IP parse (handles decimal/hex/octal/IPv6-mapped).
-    # ipaddress.ip_address() normalises all notations to canonical form.
+    # Step 1: try literal IP parse (handles canonical dotted IPv4, standard IPv6,
+    # and IPv6-mapped IPv4 like ::ffff:127.0.0.1).
+    # NOTE: ipaddress.ip_address() raises ValueError for decimal/hex/octal-encoded
+    # IPs (e.g. 2130706433, 0x7f000001) — those fall through to step 2.
     try:
         ip = ipaddress.ip_address(host)
         return _is_ip_safe(str(ip))
     except ValueError:
-        pass  # not a literal — fall through to DNS resolution
+        pass  # not a canonical literal — fall through to DNS resolution
 
     # Step 2: DNS resolve → check every A/AAAA record.
     try:
@@ -151,7 +169,8 @@ def _is_safe_webhook_url(url: str, allow_local: bool = False, strict: bool = Fal
     - IPv6 loopback (::1) и link-local
     - Cloud metadata (169.254.169.254, fd00:ec2::254)
     - Нестандартные нотации IP: decimal (2130706433), hex (0x7f000001),
-      IPv6-mapped (::ffff:127.0.0.1) — BUG 2 fix: нормализация через ipaddress
+      IPv6-mapped (::ffff:127.0.0.1) — BUG 2 fix: нормализация через getaddrinfo
+      (decimal/hex/octal) и ipaddress (IPv6-mapped); getaddrinfo load-bearing для SSRF
     - Схемы кроме http/https
 
     BUG 1 (DNS rebinding) и BUG 2 (IP notation bypass) оба исправлены через
