@@ -5,8 +5,10 @@ sounddevice мокируется — реальный микрофон не ну
 
 from __future__ import annotations
 
+import importlib
 import sys
 import os
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +18,35 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+
+def _ensure_real_sounddevice() -> None:
+    """W1749: reload sounddevice if a bare stub was leaked by a prior test.
+
+    pytest-xdist workers run multiple test files in the same Python process.
+    Some tests (e.g. test_pipeline_v2_gate_W1275.py) install a bare
+    types.ModuleType stub for 'sounddevice' in sys.modules to avoid the
+    portaudio import.  The conftest _purge_leaked_module_stubs fixture removes
+    these stubs AFTER each test, but the purge runs AFTER the tearDown of the
+    polluting test — which means tests in files that start BEFORE the purge
+    fires may receive the bare stub.
+
+    The bare stub has no 'InputStream' attribute, so
+    ``patch("sounddevice.InputStream", ...)`` raises AttributeError.
+
+    Fix: in each setUp that depends on the real sounddevice, detect the bare
+    stub and forcibly remove it so that the next import gets the real module.
+    """
+    sd = sys.modules.get("sounddevice")
+    if sd is None:
+        return
+    # A real sounddevice module always has 'InputStream'.
+    # If it's missing, we're looking at a bare stub.
+    if not hasattr(sd, "InputStream"):
+        del sys.modules["sounddevice"]
+        # Also remove 'backend.recorder' so it re-imports sounddevice fresh.
+        sys.modules.pop("backend.recorder", None)
+
 
 from backend.recorder import AudioRecorder  # noqa: E402
 
@@ -32,6 +63,10 @@ def _make_mock_stream(chunk_size: int = 1600) -> MagicMock:
 
 
 class AudioRecorderStateTest(unittest.TestCase):
+
+    def setUp(self) -> None:
+        # W1749: reload sounddevice if a bare stub was leaked by a prior xdist test.
+        _ensure_real_sounddevice()
 
     def test_initial_state_not_recording(self) -> None:
         """Новый рекордер не должен быть в состоянии записи."""
@@ -147,6 +182,10 @@ class AudioRecorderGetAudioTest(unittest.TestCase):
 
 class AudioRecorderDeviceParamsTest(unittest.TestCase):
     """Проверка device selection через конструктор (sample_rate, channels)."""
+
+    def setUp(self) -> None:
+        # W1749: reload sounddevice if a bare stub was leaked by a prior xdist test.
+        _ensure_real_sounddevice()
 
     def test_default_sample_rate(self) -> None:
         rec = AudioRecorder()
