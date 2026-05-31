@@ -594,10 +594,15 @@ class SettingsExportImportTestCase(unittest.TestCase):
             self.assertEqual(saved.get("quality_profile"), "max")
 
     def test_import_missing_file_raises(self):
-        """handle_import_settings raises FileNotFoundError for missing file."""
+        """handle_import_settings raises FileNotFoundError for missing file.
+
+        W1759: путь должен быть в allowlist (/tmp), иначе срабатывает
+        _validate_settings_path (RuntimeError) до проверки существования файла.
+        Используем /tmp — в allowlist; файл не существует → FileNotFoundError.
+        """
         svc, _ = _make_ss()
         with self.assertRaises(FileNotFoundError):
-            svc.handle_import_settings({"file": "/nonexistent/path/settings.json"})
+            svc.handle_import_settings({"file": "/tmp/krab_ear_nonexistent_test_w1759.json"})
 
     def test_import_invalid_json_raises_value_error(self):
         """handle_import_settings raises ValueError for malformed JSON."""

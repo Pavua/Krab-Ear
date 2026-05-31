@@ -174,9 +174,12 @@ class TestImportSettings(unittest.TestCase):
         self.assertEqual(result["skipped"], 2)
 
     def test_import_raises_on_missing_file(self):
+        # W1759: путь должен быть в allowlist (/tmp), иначе сначала сработает
+        # проверка allowlist (RuntimeError), а не FileNotFoundError.
+        # Используем /tmp — в allowlist; файл не существует → FileNotFoundError.
         svc = self._svc()
         with self.assertRaises(FileNotFoundError):
-            svc.handle_import_settings({"file": "/nonexistent/path/settings.json"})
+            svc.handle_import_settings({"file": "/tmp/krab_ear_nonexistent_test_w1759.json"})
 
     def test_import_raises_on_invalid_json(self):
         svc = self._svc()
