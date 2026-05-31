@@ -60,7 +60,8 @@ jobs:
           python -m pytest KrabEar/tests/ \
             -v \
             --tb=short \
-            -n auto
+            -n 2 \
+            -p no:cacheprovider
 
       - name: Audit orphan imports in service.py
         run: python3 scripts/audit_orphan_imports.py
