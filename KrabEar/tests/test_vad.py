@@ -357,5 +357,186 @@ class TestVADRequiredCoverage(unittest.TestCase):
             self.assertLessEqual(res.speech_ratio, 1.0)  # type: ignore[union-attr]
 
 
+class TestVADWave1712Fixes(unittest.TestCase):
+    """Wave 1712 regression tests: trailing-silence leak + NaN/Inf sanitization.
+
+    Tests are designed to FAIL on the buggy code and PASS after fixes.
+    """
+
+    # ------------------------------------------------------------------
+    # BUG 1 — trailing silence leak in _apply_hysteresis
+    # ------------------------------------------------------------------
+
+    def test_trailing_silence_not_marked_speech(self):
+        """BUG1: [1,1,1,0,0,0] with offset=4 must NOT absorb trailing silence.
+
+        Before fix: result was [T,T,T,T,T,T] — 3 silent tail frames absorbed.
+        After fix:  result is  [T,T,T,F,F,F].
+        """
+        vad = VoiceActivityDetector(onset_frames=1, offset_frames=4)
+        is_speech = np.array([True, True, True, False, False, False])
+        result = vad._apply_hysteresis(is_speech)
+
+        # Speech frames preserved
+        self.assertTrue(result[0])
+        self.assertTrue(result[1])
+        self.assertTrue(result[2])
+
+        # Trailing silence must stay False — was the bug
+        self.assertFalse(result[3], "Trailing silence frame 3 must be False")
+        self.assertFalse(result[4], "Trailing silence frame 4 must be False")
+        self.assertFalse(result[5], "Trailing silence frame 5 must be False")
+
+    def test_trailing_silence_total_speech_not_inflated(self):
+        """BUG1: detect() total_speech_sec must not include trailing silence.
+
+        Construct audio: 3 loud frames (~90 ms @16 kHz with frame_ms=30)
+        followed by 3 silent frames. With offset=4 (must wait 4 silent frames
+        to close segment), the trailing 3 silence frames would previously be
+        absorbed into the speech segment, inflating total_speech_sec.
+        """
+        sr = 16000
+        frame_ms = 30
+        frame_size = int(sr * frame_ms / 1000)  # 480 samples
+
+        # 3 speech frames of loud tone
+        t = np.linspace(0, frame_ms * 3 / 1000, frame_size * 3, endpoint=False)
+        speech_part = (0.6 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        # 3 silence frames
+        silence_part = np.zeros(frame_size * 3, dtype=np.float32)
+        audio = np.concatenate([speech_part, silence_part])
+
+        vad = VoiceActivityDetector(
+            margin_db=6.0,
+            onset_frames=1,
+            offset_frames=4,  # offset > available trailing silence
+            min_speech_duration_sec=0.01,
+        )
+        result = vad.detect(audio, sr, frame_ms=frame_ms)
+
+        # With trailing silence trimmed, speech_ratio must be ≤ 0.5
+        # (speech ≤ half of total, not more)
+        self.assertLessEqual(
+            result.speech_ratio, 0.55,
+            f"speech_ratio={result.speech_ratio:.3f} is too high — trailing silence leaked",
+        )
+
+    def test_bridging_gap_shorter_than_offset_still_bridges(self):
+        """BUG1: speech-gap-speech where gap < offset must still bridge (no over-trim).
+
+        [1,1,0,0,1,1] with offset=4 → all frames True (gap=2 < offset=4 → bridged).
+        """
+        vad = VoiceActivityDetector(onset_frames=1, offset_frames=4)
+        is_speech = np.array([True, True, False, False, True, True])
+        result = vad._apply_hysteresis(is_speech)
+
+        # All 6 frames must be True — gap bridged
+        self.assertTrue(
+            result.all(),
+            f"Bridging failed: {result.tolist()} — gap within offset must stay True",
+        )
+
+    def test_bridging_gap_at_least_offset_splits_correctly(self):
+        """BUG1 sanity: gap >= offset should produce two separate segments.
+
+        [1,1,0,0,0,0,1,1] with offset=3 → gap=4 >= offset → split, middle False.
+        """
+        vad = VoiceActivityDetector(onset_frames=1, offset_frames=3)
+        is_speech = np.array([True, True, False, False, False, False, True, True])
+        result = vad._apply_hysteresis(is_speech)
+
+        # First two frames: speech
+        self.assertTrue(result[0])
+        self.assertTrue(result[1])
+        # Gap frames must be False
+        self.assertFalse(result[2])
+        self.assertFalse(result[3])
+        self.assertFalse(result[4])
+        self.assertFalse(result[5])
+        # Second speech burst
+        self.assertTrue(result[6])
+        self.assertTrue(result[7])
+
+    # ------------------------------------------------------------------
+    # BUG 2 — NaN/Inf audio silently zeroes out detection
+    # ------------------------------------------------------------------
+
+    def test_nan_audio_does_not_zero_speech_detection(self):
+        """BUG2: audio with NaN frames must still detect real speech nearby.
+
+        Before fix: any NaN propagated through np.mean → frame_rms=NaN →
+        all comparisons False → speech_ratio=0, segments=[].
+        After fix: NaN sanitized → real speech still detected.
+        """
+        sr = 16000
+        import math
+
+        # Real speech: 0.5 s loud tone
+        t = np.linspace(0, 0.5, int(sr * 0.5), endpoint=False)
+        speech = (0.5 * np.sin(2 * math.pi * 440 * t)).astype(np.float32)
+
+        # NaN chunk in the middle (0.1 s)
+        nan_chunk = np.full(int(sr * 0.1), float("nan"), dtype=np.float32)
+
+        audio = np.concatenate([speech, nan_chunk, speech])
+
+        vad = VoiceActivityDetector(margin_db=8.0, onset_frames=2, offset_frames=3)
+        result = vad.detect(audio, sr)
+
+        self.assertGreater(
+            result.speech_ratio, 0.0,
+            "NaN audio silently zeroed speech_ratio — BUG2 not fixed",
+        )
+        self.assertGreater(
+            len(result.speech_segments), 0,
+            "NaN audio produced zero segments — real speech was discarded",
+        )
+
+    def test_inf_audio_does_not_zero_speech_detection(self):
+        """BUG2: audio with Inf frames must still detect real speech nearby."""
+        sr = 16000
+        import math
+
+        t = np.linspace(0, 0.5, int(sr * 0.5), endpoint=False)
+        speech = (0.5 * np.sin(2 * math.pi * 440 * t)).astype(np.float32)
+        inf_chunk = np.full(int(sr * 0.05), float("inf"), dtype=np.float32)
+
+        audio = np.concatenate([speech, inf_chunk, speech])
+
+        vad = VoiceActivityDetector(margin_db=8.0, onset_frames=2, offset_frames=3)
+        result = vad.detect(audio, sr)
+
+        self.assertGreater(
+            result.speech_ratio, 0.0,
+            "Inf audio silently zeroed speech_ratio — BUG2 not fixed",
+        )
+
+    def test_all_nan_audio_returns_empty_gracefully(self):
+        """BUG2: fully-NaN buffer must return empty VADResult, not crash."""
+        sr = 16000
+        audio = np.full(sr, float("nan"), dtype=np.float32)
+        vad = VoiceActivityDetector()
+        result = vad.detect(audio, sr)
+        self.assertIsInstance(result, VADResult)
+        self.assertAlmostEqual(result.speech_ratio, 0.0, places=2)
+        self.assertEqual(len(result.speech_segments), 0)
+
+    def test_speech_ratio_bounds_with_nan(self):
+        """BUG2: speech_ratio must stay in [0, 1] even with NaN samples."""
+        sr = 16000
+        import math
+
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        speech = (0.5 * np.sin(2 * math.pi * 440 * t)).astype(np.float32)
+        # Sprinkle NaN every 100 samples
+        speech[::100] = float("nan")
+
+        vad = VoiceActivityDetector()
+        result = vad.detect(speech, sr)
+
+        self.assertGreaterEqual(result.speech_ratio, 0.0)
+        self.assertLessEqual(result.speech_ratio, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
