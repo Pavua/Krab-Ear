@@ -39,10 +39,13 @@ logger = logging.getLogger("KrabEar.Backend.AudioAnalytics")
 # policy used by RecordingCoreService.handle_transcribe_paths.
 
 
-def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> None:
+def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> Path:
     """Raise ValueError if *p* resolves outside the audio-read allowlist.
 
     Allowed roots: data_dir (if provided), home, /tmp, tempdir.
+
+    Returns:
+        The resolved Path (safe to open without re-deriving — avoids TOCTOU).
     """
     resolved = Path(p).expanduser().resolve()
     allowed: list[Path] = [
@@ -53,8 +56,8 @@ def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> None:
     if data_dir is not None:
         allowed.append(data_dir.resolve())
 
-    if any(str(resolved).startswith(str(root)) for root in allowed):
-        return
+    if any(resolved == root or resolved.is_relative_to(root) for root in allowed):
+        return resolved
 
     raise ValueError(
         f"audio analytics: путь {resolved!s} находится за пределами разрешённых директорий. "
@@ -225,15 +228,16 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        _validate_audio_read_path(file_path, self._data_dir)  # W1736
+        resolved = _validate_audio_read_path(file_path, self._data_dir)  # W1736 — returns resolved Path
 
         import soundfile as sf  # lazy import
 
-        path = Path(file_path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(f"Аудиофайл не найден: {path}")
+        # W1736 Fix 3: read through the SAME resolved path the validator checked
+        # (avoid TOCTOU: expanduser() without resolve() could follow a late symlink swap)
+        if not resolved.exists():
+            raise FileNotFoundError(f"Аудиофайл не найден: {resolved}")
 
-        audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
+        audio_data, sample_rate = sf.read(str(resolved), dtype="float32", always_2d=False)
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()

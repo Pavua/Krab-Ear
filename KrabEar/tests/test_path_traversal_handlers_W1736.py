@@ -293,5 +293,149 @@ class TestInputSanitizerDeleted(unittest.TestCase):
             importlib.import_module("backend.input_sanitizer")
 
 
+
+# ---------------------------------------------------------------------------
+# NEW (reviewer fix): Audio sibling-prefix bypass — is_relative_to vs startswith
+# ---------------------------------------------------------------------------
+
+class TestAudioSiblingPrefixBypass(unittest.TestCase):
+    """Regression: startswith('/tmp') admitted '/tmp_evil/x.wav' — is_relative_to rejects it.
+
+    These tests FAIL before the fix (startswith) and PASS after (is_relative_to).
+    """
+
+    def test_tmp_sibling_rejected(self) -> None:
+        """/private/tmp_evil/x.wav must be rejected — tmp_evil is NOT under /tmp."""
+        tmp_root = Path("/tmp").resolve()
+        # Build sibling by appending "_evil" to the resolved tmp name
+        sibling = tmp_root.parent / (tmp_root.name + "_evil") / "x.wav"
+        with self.assertRaises(ValueError):
+            _validate_audio_read_path(str(sibling), data_dir=None)
+
+    def test_home_sibling_rejected(self) -> None:
+        """A path whose name starts with home but is a sibling must be rejected."""
+        home = Path.home().resolve()
+        sibling = home.parent / (home.name + "_evil") / "x.wav"
+        with self.assertRaises(ValueError):
+            _validate_audio_read_path(str(sibling), data_dir=None)
+
+    def test_data_dir_sibling_rejected(self) -> None:
+        """data_dir sibling outside all allowed roots must be rejected.
+
+        We use /private/var which is NOT in the allowlist so the sibling stays out.
+        """
+        parent = Path("/private/var/krab_test_w1736_unit")
+        data_dir = parent / "krab"
+        # sibling shares the string prefix of data_dir but is NOT under it
+        sibling = parent / (data_dir.name + "_evil") / "r.wav"
+        with self.assertRaises(ValueError):
+            _validate_audio_read_path(str(sibling), data_dir=data_dir)
+
+    def test_tmp_exact_child_allowed(self) -> None:
+        """/tmp child is still allowed after fix (regression guard)."""
+        p = Path("/tmp") / "krab_test_w1736_exact.wav"
+        _validate_audio_read_path(str(p), data_dir=None)
+
+    def test_home_exact_child_allowed(self) -> None:
+        """Exact child of home is allowed after fix (regression guard)."""
+        p = Path.home() / "Downloads" / "test_w1736.wav"
+        _validate_audio_read_path(str(p), data_dir=None)
+
+
+# ---------------------------------------------------------------------------
+# NEW (reviewer fix): ../ escape reject for each main handler
+# ---------------------------------------------------------------------------
+
+class TestDotDotEscapeHandlers(unittest.TestCase):
+    """../ escapes must be rejected for export_settings, import_settings, restore_history."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_export_settings_dotdot_escape_rejected(self) -> None:
+        """export_settings dotdot path to .ssh/authorized_keys must be rejected."""
+        svc = _make_settings_svc(self._tmp.name)
+        evil = str(
+            Path.home() / "Library" / "Application Support" / "KrabEar"
+            / ".." / ".." / ".." / ".ssh" / "authorized_keys"
+        )
+        with self.assertRaises(RuntimeError):
+            svc.handle_export_settings({"file": evil})
+
+    def test_import_settings_dotdot_escape_rejected(self) -> None:
+        """import_settings with /tmp/../etc/hosts must be rejected."""
+        svc = _make_settings_svc(self._tmp.name)
+        with self.assertRaises(RuntimeError):
+            svc.handle_import_settings({"file": "/tmp/../etc/hosts"})
+
+    def test_restore_history_dotdot_escape_rejected(self) -> None:
+        """restore_history with backups/../../etc must be rejected."""
+        from backend.history_service import HistoryService
+        from backend.state_store import StateStore
+        store = StateStore(Path(self._tmp.name) / "data")
+        svc = HistoryService(store=store)
+        data_dir = Path(store.data_dir)
+        evil_path = str(data_dir / "backups" / ".." / ".." / "etc")
+        with self.assertRaises(RuntimeError):
+            svc.handle_restore_history({"backup_path": evil_path})
+
+
+# ---------------------------------------------------------------------------
+# NEW (reviewer fix): restore_history symlink escape rejected
+# ---------------------------------------------------------------------------
+
+class TestRestoreHistorySymlinkEscape(unittest.TestCase):
+    """A symlink inside backups/ pointing outside data_dir must be rejected."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_symlink_inside_backups_to_etc_rejected(self) -> None:
+        """Symlink <data_dir>/backups/evil -> /etc must be rejected."""
+        from backend.history_service import HistoryService
+        from backend.state_store import StateStore
+        store = StateStore(Path(self._tmp.name) / "data")
+        svc = HistoryService(store=store)
+        data_dir = Path(store.data_dir)
+        backups_dir = data_dir / "backups"
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        evil_link = backups_dir / "evil_etc"
+        try:
+            evil_link.symlink_to("/etc")
+        except (OSError, NotImplementedError):
+            self.skipTest("Cannot create symlinks on this filesystem")
+        self.addCleanup(lambda: evil_link.unlink(missing_ok=True))
+        with self.assertRaises(RuntimeError):
+            svc.handle_restore_history({"backup_path": str(evil_link)})
+
+
+# ---------------------------------------------------------------------------
+# NEW (reviewer fix): export_settings no-side-effect on reject
+# ---------------------------------------------------------------------------
+
+class TestExportSettingsNoSideEffectOnReject(unittest.TestCase):
+    """A rejected export_settings call must NOT create or modify the target file."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_evil_file_unchanged_after_reject(self) -> None:
+        """The /etc target must be absent (or unchanged) after a rejected call."""
+        svc = _make_settings_svc(self._tmp.name)
+        evil_path = "/etc/krab_test_w1736_no_such_file"
+        # Ensure it doesn't exist beforehand (it's in /etc so it shouldn't)
+        assert not Path(evil_path).exists(), f"{evil_path} unexpectedly exists"
+        with self.assertRaises(RuntimeError):
+            svc.handle_export_settings({"file": evil_path})
+        # Must not have been created
+        self.assertFalse(
+            Path(evil_path).exists(),
+            "Rejected export must not create the file",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

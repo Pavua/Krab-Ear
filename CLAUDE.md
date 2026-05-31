@@ -111,7 +111,6 @@ Decorative-architecture guard: `scripts/audit_decorative_wiring.py --strict` run
 - **`backend/feature_flags.py`** — `FeatureFlags`: runtime on/off flags for experimental features.
 - **`backend/hotword_detector.py`** — `HotwordDetector`: scan transcripts for trigger words.
 - **`backend/html_report.py`** — `HTMLReportGenerator`: standalone HTML analytics report.
-- **`backend/input_sanitizer.py`** — `InputSanitizer`: validate and sanitize IPC params.
 - **`backend/ipc_throttle.py`** — `IPCThrottle`: per-method rate limiting (token bucket) for heavy IPC calls.
 - **`backend/keyword_cloud.py`** — `KeywordCloudGenerator`: word-cloud data (count, weight, font_size) from history.
 - **`backend/language_learning.py`** — `LanguageLearningManager`: bilingual vocabulary extraction and flashcard generation.
