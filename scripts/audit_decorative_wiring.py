@@ -216,6 +216,30 @@ CONFIRMED_BUGS: list[dict[str, Any]] = [
         "_literal_absent": "_archive_manager._semantic_searcher",
         "_check_file": "backend/service.py",
     },
+    {
+        # W1714 regression guard: wave1431 silently dropped settings_get from
+        # LiveSubsService(...) — privacy guards became dead code.  HIGH because
+        # it leaks system-audio STT in privacy mode.
+        "id": "W1714",
+        "severity": "HIGH",
+        "module": "backend/live_subs_service.py",
+        "class_name": "LiveSubsService",
+        "field": "settings_get (constructor kwarg)",
+        "issue": (
+            "LiveSubsService is instantiated without settings_get= kwarg in "
+            "BackendService.__init__. The constructor defaults to "
+            "`lambda k, d: d`, so privacy_mode_enabled is always False — "
+            "handle_ingest and stop() privacy guards are dead in production. "
+            "System-audio PCM is decoded and transcribed regardless of the "
+            "user's privacy_mode_enabled setting (W1147 F2/F5 HIGH leak)."
+        ),
+        "fix": (
+            "Pass settings_get=self._get_runtime_setting to the "
+            "LiveSubsService(...) call in BackendService.__init__."
+        ),
+        "_constructor_absent_kwarg": ("LiveSubsService(", "settings_get"),
+        "_check_file": "backend/service.py",
+    },
 ]
 
 
