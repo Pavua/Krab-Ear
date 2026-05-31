@@ -183,8 +183,15 @@ class TranscriptionQueue:
                 # Восстанавливаем оригинальный job_id и метаданные времени
                 job.job_id = data["job_id"]
                 job.created_at_iso = data.get("created_at", job.created_at_iso)
-                # status оставляем pending (только pending сохраняются)
+                # status оставляем pending (только pending сохраняются).
+                # INVARIANT: only pending jobs are persisted today; if terminal-job
+                # persistence is ever added, restored terminal jobs MUST also be
+                # registered into _terminal_order here — otherwise they will never
+                # be evicted by _evict_terminal_jobs and the memory leak re-opens.
+                # Defensive guard: register any accidentally-restored terminal job now.
                 self._jobs[job.job_id] = job
+                if job.status not in (STATUS_PENDING, STATUS_PROCESSING):
+                    self._terminal_order[job.job_id] = None
                 restored += 1
             except Exception as exc:
                 logger.warning(
@@ -239,14 +246,22 @@ class TranscriptionQueue:
             self._terminal_order.pop(jid, None)
 
         # 2. Count-based cap — evict oldest until we are within TERMINAL_MAX_COUNT.
+        count_evicted = 0
         while len(self._terminal_order) > TERMINAL_MAX_COUNT:
             oldest_jid, _ = self._terminal_order.popitem(last=False)
             self._jobs.pop(oldest_jid, None)
-            if expired:
-                logger.debug(
-                    "TranscriptionQueue: evicted %d terminal jobs (time+count caps)",
-                    len(expired),
-                )
+            count_evicted += 1
+
+        # Summary log — fires whenever *any* eviction occurred (time-based, count-based,
+        # or both).  A single line after both passes avoids per-entry log spam and ensures
+        # the message is emitted even when only the count cap fires (no expired entries).
+        total_evicted = len(expired) + count_evicted
+        if total_evicted:
+            logger.debug(
+                "TranscriptionQueue: evicted %d terminal job(s) "
+                "(time-based=%d count-based=%d)",
+                total_evicted, len(expired), count_evicted,
+            )
 
     def _register_terminal(self, job: "TranscriptionJob") -> None:
         """Record that *job* has just entered a terminal state.
@@ -392,6 +407,11 @@ class TranscriptionQueue:
         """
         # BUG 2 guard: truncate oversized result before storing (outside the lock
         # to avoid holding the lock during json.dumps on a potentially large dict).
+        # TOCTOU note: the job could be completed-then-evicted between this size-check
+        # and the lock acquisition below, in which case mark_completed returns False
+        # even though the result was valid.  This is intentional and acceptable —
+        # evicted jobs are considered expired; the caller should treat False as
+        # "job no longer tracked" rather than a data error.
         stored_result = result
         if result is not None:
             try:

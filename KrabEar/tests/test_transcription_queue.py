@@ -802,9 +802,9 @@ class TestTranscriptionQueueEvictionW1722(unittest.TestCase):
                 job.finished_at_monotonic = (
                     _time.monotonic() - TERMINAL_RETENTION_SECONDS - 1
                 )
-            # Trigger eviction by adding one more terminal job (which calls
-            # _evict_terminal_jobs internally).
 
+        # Trigger eviction by completing a second job — mark_completed calls
+        # _register_terminal → _evict_terminal_jobs internally.
         jid2 = self.queue.enqueue("/tmp/audio2.mp3")
         self.queue.mark_completed(jid2)
 
@@ -831,6 +831,36 @@ class TestTranscriptionQueueEvictionW1722(unittest.TestCase):
         self.assertIn(jid_c, keys)
         self.assertIn(jid_f, keys)
         self.assertIn(jid_x, keys)
+
+    def test_eviction_summary_log_fires_on_count_cap_only(self):
+        """Eviction debug log fires even when only the count cap triggers.
+
+        Before the fix the logger.debug was inside the while-loop AND guarded by
+        ``if expired:``, so it stayed silent for pure count-cap evictions (no
+        time-expired jobs).  After the fix the single summary line fires whenever
+        total_evicted > 0, regardless of which pass caused the eviction.
+        """
+        from unittest.mock import patch
+
+        # Confirm no jobs have a past-retention finished_at_monotonic — only the
+        # count cap should fire here.
+        with patch.object(
+            self.queue.__class__,
+            "_evict_terminal_jobs",
+            wraps=self.queue._evict_terminal_jobs,
+        ):
+            with self.assertLogs("KrabEar.Backend.TranscriptionQueue", level="DEBUG") as cm:
+                # Fill exactly one past the cap so count-cap evicts one entry.
+                for i in range(TERMINAL_MAX_COUNT + 1):
+                    jid = self.queue.enqueue(f"/tmp/log_test_{i}.mp3")
+                    self.queue.mark_completed(jid)
+
+        # At least one eviction summary message must appear.
+        eviction_msgs = [m for m in cm.output if "evicted" in m and "terminal" in m]
+        self.assertTrue(
+            len(eviction_msgs) >= 1,
+            f"Expected eviction summary log but got: {cm.output[:5]}",
+        )
 
     def test_active_jobs_not_affected_by_count_cap(self):
         """Active (pending/processing) jobs are never evicted by the count cap."""
