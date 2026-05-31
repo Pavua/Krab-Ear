@@ -8,13 +8,14 @@
 - Персистентность реестра в {data_dir}/webhooks.json (chmod 0600).
 - Статистику доставки на webhook.
 - SSRF-защита (при регистрации И при каждой отправке):
-  - Блокируются localhost, RFC1918, link-local и mDNS адреса.
+  - Блокируются localhost, RFC1918, link-local, CGNAT (100.64.0.0/10), mDNS и cloud-metadata адреса.
   - Нестандартные нотации IP (decimal/octal/hex/IPv6-mapped) защищены через
     socket.getaddrinfo: ipaddress.ip_address() принимает только canonical dotted/colon
     нотацию и выбрасывает ValueError на decimal/hex/octal; getaddrinfo резолвит эти
     нотации в canonical IP, который затем проверяется _is_ip_safe() — http://2130706433/ невозможен.
-  - DNS-rebinding: hostname резолвится заново при КАЖДОЙ отправке; все resolved
-    IP проверяются — приватный адрес → отказ даже если регистрация прошла.
+  - DNS-rebinding полностью закрыт через IP-pinning (Gap 4 fix W1721):
+    hostname резолвится ОДИН РАЗ, validated IP передаётся в pinned connection
+    handler — urllib не выполняет повторную DNS-резолюцию при connect().
 - Защита от redirect-SSRF (W1349 F1): allow_redirects=False — все 3xx трактуются
   как ошибка, redirect не следуется. Злоумышленник не может зарегистрировать
   https://attacker.com/redir → 302 → http://127.0.0.1/admin обход.
@@ -33,6 +34,8 @@ import os
 import socket
 import threading
 import time
+import http.client
+import ssl
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -67,6 +70,12 @@ _METADATA_IPS: frozenset[str] = frozenset({
     "fd00:ec2::254",     # AWS IPv6 IMDS
 })
 
+# Gap 1 fix (W1721): CGNAT 100.64.0.0/10 is neither private nor reserved in Python's
+# ipaddress module (RFC 6598 Shared Address Space).  Block it explicitly so carrier-grade
+# NAT addresses cannot be used to reach internal services via a carrier's NAT gateway.
+# The IPv6-mapped form ::ffff:100.64.x.x is handled by checking ipv4_mapped on IPv6Address.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
 
 def _is_ip_safe(ip_str: str) -> tuple[bool, str | None]:
     """Check whether a single resolved or literal IP string is safe.
@@ -93,6 +102,14 @@ def _is_ip_safe(ip_str: str) -> tuple[bool, str | None]:
         return False, f"reserved IP blocked ({canonical})"
     if ip.is_unspecified:
         return False, f"unspecified IP blocked ({canonical})"
+    # Gap 1 fix (W1721): CGNAT 100.64.0.0/10 (RFC 6598) — Python marks it neither
+    # private nor reserved; block explicitly.  Also unwrap IPv6-mapped addresses
+    # (::ffff:100.64.x.x) — ipaddress exposes the inner IPv4 via .ipv4_mapped.
+    check_v4: ipaddress.IPv4Address | ipaddress.IPv6Address = ip
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        check_v4 = ip.ipv4_mapped
+    if isinstance(check_v4, ipaddress.IPv4Address) and check_v4 in _CGNAT_NETWORK:
+        return False, f"CGNAT/shared-address-space IP blocked ({canonical})"
     return True, None
 
 
@@ -140,15 +157,29 @@ def _resolve_and_check_host(host: str, strict: bool = False) -> tuple[bool, str 
         pass  # not a canonical literal — fall through to DNS resolution
 
     # Step 2: DNS resolve → check every A/AAAA record.
+    # Gap 2 fix (W1721): broaden the catch to cover ALL resolution errors, not just
+    # socket.gaierror.  socket.getaddrinfo can raise:
+    #   UnicodeError  — invalid IDNA hostname (e.g. surrogate characters)
+    #   OverflowError — port/address value out of OS range
+    #   OSError       — base of socket.gaierror; catch for safety
+    #   ValueError    — unexpected input to getaddrinfo
+    # None of these are subclasses of socket.gaierror, so they propagated out of the
+    # guard before this fix — reaching the downstream broad `except Exception` in
+    # _deliver_with_retry rather than triggering a fail-closed decision here.
+    # Gap 3 fix (W1721): fail-closed at registration time too (strict=False) — a host
+    # whose DNS cannot be resolved at registration is rejected immediately rather than
+    # deferred to fire-time.  The only exception is a purposeful opt-in via allow_local
+    # (handled upstream in _is_safe_webhook_url before reaching here).
     try:
         infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        if strict:
-            # Fire-time: cannot confirm safety — block
-            return False, f"DNS resolution failed for {host!r}: {exc}"
-        # Registration-time: transient failure — allow through; fire-time will check
-        logger.debug("WebhookManager: DNS resolution failed for %r at registration (%s) — deferring to fire-time check", host, exc)
-        return True, None
+    except (socket.gaierror, UnicodeError, OSError, ValueError) as exc:
+        # Always fail-closed: at fire-time (strict=True) AND at registration (strict=False).
+        # Registering an unresolvable host opens a gap where fire-time may receive a
+        # transiently valid IP after an attacker engineers a brief DNS outage window.
+        reason = f"DNS resolution failed for {host!r}: {exc}"
+        logger.debug("WebhookManager: %s (fail-closed at %s)", reason,
+                     "fire-time" if strict else "registration")
+        return False, reason
 
     for _family, _type, _proto, _canonname, sockaddr in infos:
         ip_str = sockaddr[0]  # (ip, port[, flow[, scope]])
@@ -227,6 +258,114 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 # Keep old name as alias for backwards compatibility with existing tests
 _SafeRedirectHandler = _NoRedirectHandler
+
+
+# ---------------------------------------------------------------------------
+# IP-pinning: close the TOCTOU DNS-rebinding window (Gap 4 fix, W1721)
+# ---------------------------------------------------------------------------
+# urllib resolves the hostname independently when it opens the TCP connection,
+# creating a check-vs-connect race: we validate getaddrinfo result #1, then
+# urllib does getaddrinfo result #2 (which may differ with TTL=0 rebinding).
+#
+# Fix: resolve the hostname ONCE in _post_once, validate the result, then
+# connect using the pinned IP directly.  The original hostname is preserved
+# as the HTTP Host header and the TLS server_hostname so that cert validation
+# and SNI still work correctly against the intended server's certificate.
+#
+# This completely closes the rebinding window — urllib never re-resolves.
+
+
+def _resolve_pinned_ip(host: str, port: int, scheme: str) -> tuple[str, socket.AddressFamily]:
+    """Resolve *host* to the first safe IP, returning (ip_str, address_family).
+
+    Raises ValueError if resolution fails or every resolved IP is blocked.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OSError, ValueError) as exc:
+        raise ValueError(f"DNS resolution failed for {host!r}: {exc}") from exc
+
+    if not infos:
+        raise ValueError(f"No addresses resolved for {host!r}")
+
+    for family, _type, _proto, _canonname, sockaddr in infos:
+        ip_str = sockaddr[0]
+        safe, reason = _is_ip_safe(ip_str)
+        if not safe:
+            raise ValueError(
+                f"Pinned IP {ip_str!r} for {host!r} blocked: {reason}"
+            )
+        return ip_str, family
+
+    raise ValueError(f"All resolved IPs for {host!r} were blocked")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects to a pre-validated IP, not a re-resolved hostname.
+
+    The Host header and (for HTTPS) TLS SNI / server_hostname retain the original
+    hostname so certificate validation works as expected.
+    """
+
+    def __init__(self, host: str, port: int | None, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, port, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        # Connect to the pinned IP (already validated) instead of re-resolving the hostname.
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port),
+            self.timeout,
+            self.source_address,
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection variant — pins IP, preserves SNI/cert validation on original hostname."""
+
+    def __init__(self, host: str, port: int | None, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, port, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        # Create raw TCP socket to the pinned IP.
+        raw_sock = socket.create_connection(
+            (self._pinned_ip, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        # Wrap in TLS — server_hostname=self.host preserves SNI and cert validation
+        # against the ORIGINAL hostname, not the IP.
+        ctx = self._context if hasattr(self, "_context") and self._context else ssl.create_default_context()
+        self.sock = ctx.wrap_socket(raw_sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """urllib handler that injects the pre-pinned IP into every new connection."""
+
+    def __init__(self, pinned_ip: str) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+
+    def http_open(self, req):  # type: ignore[override]
+        return self.do_open(
+            lambda host, **kw: _PinnedHTTPConnection(host, None, self._pinned_ip, **kw),
+            req,
+        )
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    """urllib HTTPS handler that injects the pre-pinned IP into every new connection."""
+
+    def __init__(self, pinned_ip: str) -> None:
+        super().__init__()
+        self._pinned_ip = pinned_ip
+
+    def https_open(self, req):  # type: ignore[override]
+        return self.do_open(
+            lambda host, **kw: _PinnedHTTPSConnection(host, None, self._pinned_ip, **kw),
+            req,
+        )
 
 
 class WebhookManager:
@@ -561,12 +700,16 @@ class WebhookManager:
     def _post_once(self, url: str, body: bytes, secret: str, allow_local: bool = False) -> int:
         """Выполняет один HTTP POST. Возвращает HTTP status code.
 
-        BUG 1 fix (DNS rebinding — fire-time re-validation): immediately before
-        opening the connection, re-run _is_safe_webhook_url (which internally calls
-        _resolve_and_check_host → socket.getaddrinfo).  This catches DNS rebinding:
-        the attacker registers a webhook URL whose DNS resolves to a public IP at
-        registration time, then re-points DNS to 169.254.169.254 or 127.0.0.1
-        before the webhook fires.  Re-validating here blocks the attack.
+        Gap 4 fix (W1721) — IP-pinning closes TOCTOU DNS-rebinding window:
+        Previously the fire-time SSRF guard called getaddrinfo (resolution #1) and
+        validated the result, but then urllib called getaddrinfo again independently
+        (resolution #2) when opening the TCP connection.  With TTL=0 rebinding, #2
+        could return a different (internal) address.
+
+        Fix: _resolve_pinned_ip() resolves and validates ONCE, then
+        _PinnedHTTP[S]Handler injects the validated IP into every HTTPConnection.connect()
+        call so urllib never re-resolves.  The original hostname is preserved for the
+        HTTP Host header and TLS SNI/server_hostname so cert validation still works.
 
         W1349 F1 fix: использует _NoRedirectHandler (allow_redirects=False) — все 3xx
         возвращаются как статус без следования редиректу, предотвращая SSRF через
@@ -575,16 +718,30 @@ class WebhookManager:
 
         Raises:
             URLError / Exception при сетевой ошибке.
-            ValueError: если URL не проходит fire-time SSRF re-check (DNS rebinding caught).
+            ValueError: если URL не проходит fire-time SSRF check или DNS resolve fails.
         """
-        # BUG 1 fix: re-validate URL (re-resolve hostname) at fire time with strict=True.
-        # strict=True means DNS resolution failure is treated as a block, not a pass-through.
+        parsed = urlparse(url)
+        scheme = parsed.scheme  # "http" or "https"
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+
         if not allow_local:
-            safe, reason = _is_safe_webhook_url(url, allow_local=False, strict=True)
-            if not safe:
+            # Gap 4 fix: resolve and validate in ONE call; the returned pinned_ip is used
+            # for the actual TCP connection — urllib will not re-resolve.
+            # _resolve_pinned_ip raises ValueError (fail-closed) on any DNS / safety error.
+            try:
+                pinned_ip, _ = _resolve_pinned_ip(host, port, scheme)
+            except ValueError as exc:
                 raise ValueError(
-                    f"WebhookManager: fire-time SSRF check failed for {url!r}: {reason}"
-                )
+                    f"WebhookManager: fire-time SSRF check failed for {url!r}: {exc}"
+                ) from exc
+            # Build handlers: pinned connection handler + no-redirect handler.
+            if scheme == "https":
+                conn_handler: urllib.request.BaseHandler = _PinnedHTTPSHandler(pinned_ip)
+            else:
+                conn_handler = _PinnedHTTPHandler(pinned_ip)
+        else:
+            conn_handler = None  # type: ignore[assignment]
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",
@@ -599,7 +756,10 @@ class WebhookManager:
         # W1349 F1: _NoRedirectHandler blocks ALL 3xx redirects (allow_redirects=False).
         # HTTPError with the 3xx code is raised — caught below and returned as status.
         redirect_handler = _NoRedirectHandler()
-        opener = urllib.request.build_opener(redirect_handler)
+        handlers: list[urllib.request.BaseHandler] = [redirect_handler]
+        if conn_handler is not None:
+            handlers.append(conn_handler)
+        opener = urllib.request.build_opener(*handlers)
         try:
             with opener.open(req, timeout=_REQUEST_TIMEOUT_SEC) as resp:
                 # F2: ограничиваем чтение тела ответа (64 KB)

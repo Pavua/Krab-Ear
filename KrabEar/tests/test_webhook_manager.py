@@ -86,7 +86,7 @@ class WebhookManagerCRUDTestCase(unittest.TestCase):
 
     # 8 — реестр персистируется на диск и загружается заново
     def test_persistence_survives_reload(self) -> None:
-        wid = self._mgr.register_webhook("https://persist.test/hook", events=["stt.final"])
+        wid = self._mgr.register_webhook("https://persist.test/hook", events=["stt.final"], allow_local=True)
         # Создаём новый экземпляр из той же директории
         mgr2 = _make_manager(self._tmpdir)
         ids = [h["webhook_id"] for h in mgr2.list_webhooks()]
@@ -366,19 +366,20 @@ class WebhookManagerIPCTestCase(unittest.TestCase):
             "url": "https://ipc.test/hook",
             "events": ["stt.final"],
             "secret": "s3cr3t",
+            "webhook_allow_local": True,
         })
         self.assertIn("webhook_id", result)
         self.assertIsInstance(result["webhook_id"], str)
 
     # 24 — handle_unregister_webhook возвращает {"removed": true}
     def test_ipc_unregister(self) -> None:
-        wid = self._mgr.register_webhook("https://ipc.test/hook", events=[])
+        wid = self._mgr.register_webhook("https://ipc.test/hook", events=[], allow_local=True)
         result = self._mgr.handle_unregister_webhook({"webhook_id": wid})
         self.assertTrue(result["removed"])
 
     # 25 — handle_list_webhooks возвращает список
     def test_ipc_list(self) -> None:
-        self._mgr.register_webhook("https://ipc.test/hook", events=[])
+        self._mgr.register_webhook("https://ipc.test/hook", events=[], allow_local=True)
         result = self._mgr.handle_list_webhooks({})
         self.assertIn("webhooks", result)
         self.assertEqual(len(result["webhooks"]), 1)
@@ -531,7 +532,7 @@ class WebhookManagerConcurrentFireTestCase(unittest.TestCase):
     # 35 — несколько fire_webhook из разных потоков не падают
     def test_concurrent_fire_does_not_block(self) -> None:
         for i in range(3):
-            self._mgr.register_webhook(f"https://example{i}.com/hook", events=[])
+            self._mgr.register_webhook(f"https://example{i}.com/hook", events=[], allow_local=True)
 
         call_count = [0]
         lock = threading.Lock()
@@ -562,7 +563,7 @@ class WebhookManagerConcurrentFireTestCase(unittest.TestCase):
         def register_loop():
             for i in range(5):
                 try:
-                    self._mgr.register_webhook(f"https://reg{i}.com/hook", events=[])
+                    self._mgr.register_webhook(f"https://reg{i}.com/hook", events=[], allow_local=True)
                 except Exception as e:
                     errors.append(e)
 
@@ -611,9 +612,9 @@ class WebhookManagerURLValidationTestCase(unittest.TestCase):
         wid = self._mgr.register_webhook("http://example.com/hook", events=[])
         self.assertIsNotNone(wid)
 
-    # 42 — https:// принимается
+    # 42 — https:// принимается (must use a resolvable domain; gap 3 fix)
     def test_https_url_accepted(self) -> None:
-        wid = self._mgr.register_webhook("https://secure.example.com/hook", events=[])
+        wid = self._mgr.register_webhook("https://example.com/hook", events=[])
         self.assertIsNotNone(wid)
 
     # 43 — javascript: URL вызывает ValueError (SSRF / injection guard)

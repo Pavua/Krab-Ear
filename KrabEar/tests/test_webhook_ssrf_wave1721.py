@@ -341,9 +341,9 @@ class ExistingSSRFNotRegressedTestCase(unittest.TestCase):
         self.assertFalse(safe)
 
     def test_public_url_still_accepted(self) -> None:
-        # example.com is a real domain that resolves.  hooks.example.com doesn't resolve
-        # but under strict=False (registration time) DNS failures are allowed through.
-        safe, reason = _is_safe_webhook_url("https://hooks.example.com/notify", strict=False)
+        # Gap 3 fix (W1721): DNS failures are now fail-closed at registration too.
+        # Use a real resolvable domain (example.com) for this test.
+        safe, reason = _is_safe_webhook_url("https://example.com/notify", strict=False)
         self.assertTrue(safe, f"Expected safe=True, got reason={reason!r}")
         self.assertIsNone(reason)
 

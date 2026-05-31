@@ -106,15 +106,16 @@ class SSRFGuardFunctionTestCase(unittest.TestCase):
         self.assertFalse(safe)
         self.assertIsNotNone(reason)
 
-    # 13 — публичный https URL принят
+    # 13 — публичный https URL принят (must be a host that actually resolves;
+    # gap 3 fix makes DNS-fail fail-closed)
     def test_public_https_accepted(self) -> None:
-        safe, reason = _is_safe_webhook_url("https://hooks.example.com/notify")
+        safe, reason = _is_safe_webhook_url("https://example.com/notify")
         self.assertTrue(safe)
         self.assertIsNone(reason)
 
     # 14 — публичный http URL принят
     def test_public_http_accepted(self) -> None:
-        safe, reason = _is_safe_webhook_url("http://webhook.site/abc123")
+        safe, reason = _is_safe_webhook_url("http://example.com/abc123")
         self.assertTrue(safe)
         self.assertIsNone(reason)
 
@@ -171,9 +172,9 @@ class SSRFGuardRegisterTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._mgr.register_webhook("http://openclaw.local:18789/hook", events=[])
 
-    # 23 — register_webhook с публичным URL работает
+    # 23 — register_webhook с публичным URL работает (must resolve; use real domain)
     def test_register_public_url_works(self) -> None:
-        wid = self._mgr.register_webhook("https://hooks.example.com/notify", events=[])
+        wid = self._mgr.register_webhook("https://example.com/notify", events=[])
         self.assertIsInstance(wid, str)
         self.assertTrue(len(wid) > 0)
 
