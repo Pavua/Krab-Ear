@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
@@ -64,6 +64,7 @@ class SearchAndAnalysisService:
         recording_insights: Any,
         recording_comparison: Any,
         stats_report: Any,
+        settings_get: Optional[Callable[[str, Any], Any]] = None,
     ) -> None:
         """
         Args:
@@ -75,6 +76,9 @@ class SearchAndAnalysisService:
             recording_insights:   RecordingInsightsGenerator — эвристические инсайты.
             recording_comparison: RecordingComparison — side-by-side сравнение.
             stats_report:         StatsReportGenerator — Markdown-отчёты статистики.
+            settings_get:         callable(key, default) → Any — runtime settings lookup
+                                  (передаётся как BackendService._get_runtime_setting).
+                                  Используется для privacy_mode_enabled guard.
         """
         self._store = store
         self._semantic_searcher = semantic_searcher
@@ -83,6 +87,7 @@ class SearchAndAnalysisService:
         self._recording_insights = recording_insights
         self._recording_comparison = recording_comparison
         self._stats_report = stats_report
+        self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
 
     # ================================================================== #
     # Кластер 1 — Семантический поиск                                     #
@@ -369,11 +374,27 @@ class SearchAndAnalysisService:
     def handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC: compare_recordings — сравнение нескольких записей side-by-side.
 
+        Privacy guard (W1408 F1 — restored W1710): когда privacy_mode_enabled=True
+        возвращает пустой ответ без доступа к тексту транскрипций.
+
         Params:
             item_ids (list[str]): список item_id для сравнения (обязательный).
         Returns:
             Словарь с матрицей сходства, статистикой, общими/уникальными словами.
         """
+        # W1408 F1 privacy guard — восстановлен в W1710 после cherry-pick drop
+        if self._settings_get("privacy_mode_enabled", False):
+            return {
+                "items": [],
+                "text_similarity_matrix": [],
+                "duration_comparison": {},
+                "confidence_comparison": {},
+                "language_distribution": {},
+                "common_words": [],
+                "unique_words_per_item": [],
+                "reason": "privacy_mode_active",
+                "privacy_mode_active": True,
+            }
         from backend.recording_comparison import _view_to_dict as _comparison_view_to_dict
         item_ids = params.get("item_ids")
         if not isinstance(item_ids, list) or not item_ids:

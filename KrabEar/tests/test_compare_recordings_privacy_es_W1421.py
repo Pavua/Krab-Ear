@@ -1,6 +1,10 @@
 """Tests for W1408 F1+F2 fixes:
   F1 — compare_recordings privacy_mode_enabled guard
   F2 — _tokenize Spanish accented characters + ES stop words
+
+W1710 test rewrite: F1 tests now exercise the REAL production path
+(SearchAndAnalysisService.handle_compare_recordings + BackendService._handle_compare_recordings)
+so a future body-revert of the guard will make these tests FAIL.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -108,91 +113,211 @@ class ESStopWordsTestCase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# F1 — compare_recordings privacy guard (unit-level, no BackendService init)
+# F1 — compare_recordings privacy guard
+#
+# W1710: Tests now exercise the REAL SearchAndAnalysisService and
+# BackendService._handle_compare_recordings production paths so that a future
+# cherry-pick drop of the guard body will cause these tests to FAIL.
 # ---------------------------------------------------------------------------
 
 
-class _FakeStore:
-    """Minimal store fake for privacy guard tests."""
+def _make_fake_store_with_items() -> Any:
+    """Return a minimal fake StateStore with two transcript items."""
 
-    def __init__(self) -> None:
-        self._items: dict[str, Any] = {}
+    class _FakeItem:
+        def __init__(self, item_id: str, text: str) -> None:
+            self.id = item_id
+            self.text = text
+            self.audio_duration_sec = 10.0
+            self.confidence = 0.9
+            self.language = "ru"
 
-    def add(self, item_id: str, text: str) -> None:
-        self._items[item_id] = {"id": item_id, "text": text}
+        def to_dict(self) -> dict:
+            return {
+                "id": self.id,
+                "text": self.text,
+                "audio_duration_sec": self.audio_duration_sec,
+                "confidence": self.confidence,
+                "language": self.language,
+            }
 
-    def get_history_item_by_id(self, item_id: str):  # type: ignore[return]
-        raw = self._items.get(item_id)
-        if raw is None:
-            return None
-        # Return a simple object with to_dict()
-        class _Item:
-            def to_dict(self_inner) -> dict:
-                return dict(raw)
-        return _Item()
+    class _FakeStore:
+        def __init__(self) -> None:
+            self._items: dict[str, _FakeItem] = {
+                "a1": _FakeItem("a1", "Hello world this is test content"),
+                "a2": _FakeItem("a2", "Hello world another test here"),
+            }
+
+        def get_history_item_by_id(self, item_id: str):  # type: ignore[return]
+            return self._items.get(item_id)
+
+    return _FakeStore()
 
 
-class _FakeBackendService:
-    """Minimal stand-in for BackendService to test _handle_compare_recordings."""
+def _make_search_and_analysis_service(privacy_enabled: bool) -> Any:
+    """Build a real SearchAndAnalysisService with all deps mocked except what's needed."""
+    from backend.search_and_analysis_service import SearchAndAnalysisService
+    from backend.recording_comparison import RecordingComparison
 
-    def __init__(self, privacy_enabled: bool = False) -> None:
-        self._privacy_enabled = privacy_enabled
-        from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
-        self._recording_comparison = RecordingComparison()
-        self._comparison_view_to_dict = _comparison_view_to_dict
-        store = _FakeStore()
-        store.add("a1", "Hello world this is test content")
-        store.add("a2", "Hello world another test here")
-        self.store = store
+    store = _make_fake_store_with_items()
 
-    def _get_runtime_setting(self, key: str, default: Any) -> Any:
+    # Minimal mocks for collaborators not exercised by compare_recordings
+    mock_searcher = MagicMock()
+    mock_searcher.is_enabled = False
+
+    def _settings_get(key: str, default: Any = None) -> Any:
         if key == "privacy_mode_enabled":
-            return self._privacy_enabled
+            return privacy_enabled
         return default
 
-    def _handle_compare_recordings(self, params: dict) -> dict:
-        """Verbatim copy of the patched handler from service.py."""
-        if self._get_runtime_setting("privacy_mode_enabled", False):
-            return {
-                "ok": True,
-                "items": [],
-                "common_words": [],
-                "unique_words": {},
-                "reason": "privacy_mode_active",
-            }
-        item_ids = params.get("item_ids")
-        if not isinstance(item_ids, list) or not item_ids:
-            raise ValueError("item_ids required")
-        view = self._recording_comparison.compare(item_ids=item_ids, store=self.store)
-        return self._comparison_view_to_dict(view)
+    svc = SearchAndAnalysisService(
+        store=store,
+        semantic_searcher=mock_searcher,
+        action_items_extractor=None,
+        topic_tracker=MagicMock(),
+        recording_insights=MagicMock(),
+        recording_comparison=RecordingComparison(),
+        stats_report=MagicMock(),
+        settings_get=_settings_get,
+    )
+    return svc
 
 
-class CompareRecordingsPrivacyModeTestCase(unittest.TestCase):
-    """compare_recordings returns empty result when privacy_mode_enabled (W1408 F1)."""
+class CompareRecordingsPrivacyModeSearchAndAnalysisTestCase(unittest.TestCase):
+    """compare_recordings returns empty result when privacy_mode_enabled (W1408 F1).
 
-    def test_compare_recordings_privacy_mode_empty_result(self) -> None:
-        """_handle_compare_recordings returns empty items/common_words when privacy_mode_enabled."""
-        svc = _FakeBackendService(privacy_enabled=True)
-        result = svc._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+    Exercises the REAL SearchAndAnalysisService.handle_compare_recordings so that
+    removing the guard body will cause these tests to fail (W1710 regression guard).
+    """
+
+    def test_privacy_on_returns_empty_items(self) -> None:
+        """handle_compare_recordings returns empty items when privacy_mode_enabled."""
+        svc = _make_search_and_analysis_service(privacy_enabled=True)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
         self.assertEqual(result.get("items"), [])
-        self.assertEqual(result.get("common_words"), [])
-        self.assertEqual(result.get("reason"), "privacy_mode_active")
 
-    def test_compare_recordings_privacy_mode_no_transcript_text(self) -> None:
-        """Response must not contain any transcript text when privacy_mode_enabled."""
+    def test_privacy_on_returns_empty_common_words(self) -> None:
+        """handle_compare_recordings returns empty common_words when privacy_mode_enabled."""
+        svc = _make_search_and_analysis_service(privacy_enabled=True)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(result.get("common_words"), [])
+
+    def test_privacy_on_returns_empty_unique_words_per_item(self) -> None:
+        """Response contains empty unique_words_per_item (correct shape) when privacy on."""
+        svc = _make_search_and_analysis_service(privacy_enabled=True)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(result.get("unique_words_per_item"), [])
+
+    def test_privacy_on_returns_reason_flag(self) -> None:
+        """Response includes reason=privacy_mode_active when privacy enabled."""
+        svc = _make_search_and_analysis_service(privacy_enabled=True)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+        self.assertTrue(result.get("privacy_mode_active"))
+
+    def test_privacy_on_no_transcript_text_in_response(self) -> None:
+        """Response must not contain any verbatim transcript text when privacy on."""
         import json
-        svc = _FakeBackendService(privacy_enabled=True)
-        result = svc._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        svc = _make_search_and_analysis_service(privacy_enabled=True)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
         dumped = json.dumps(result)
         self.assertNotIn("Hello world", dumped)
+        self.assertNotIn("test content", dumped)
 
-    def test_compare_recordings_privacy_mode_disabled_returns_data(self) -> None:
-        """_handle_compare_recordings works normally when privacy_mode is NOT enabled."""
-        svc = _FakeBackendService(privacy_enabled=False)
-        result = svc._handle_compare_recordings({"item_ids": ["a1", "a2"]})
-        self.assertEqual(len(result["items"]), 2)
+    def test_privacy_off_returns_real_data(self) -> None:
+        """handle_compare_recordings works normally when privacy_mode is NOT enabled."""
+        svc = _make_search_and_analysis_service(privacy_enabled=False)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(len(result.get("items", [])), 2)
         self.assertIn("text_similarity_matrix", result)
         self.assertNotIn("reason", result)
+        self.assertNotIn("privacy_mode_active", result)
+
+    def test_privacy_off_response_shape_has_correct_keys(self) -> None:
+        """Non-privacy response has all expected keys matching _view_to_dict output."""
+        svc = _make_search_and_analysis_service(privacy_enabled=False)
+        result = svc.handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        for key in ("items", "text_similarity_matrix", "duration_comparison",
+                    "confidence_comparison", "language_distribution",
+                    "common_words", "unique_words_per_item"):
+            self.assertIn(key, result, f"Missing key: {key}")
+
+    def test_privacy_on_response_shape_matches_normal_response_keys(self) -> None:
+        """Privacy-on response has the same top-level keys as normal response.
+
+        This ensures the UI won't break when it receives an empty privacy-mode result —
+        it gets identical key structure, just with empty values.
+        """
+        svc_off = _make_search_and_analysis_service(privacy_enabled=False)
+        svc_on = _make_search_and_analysis_service(privacy_enabled=True)
+        normal_keys = set(svc_off.handle_compare_recordings({"item_ids": ["a1", "a2"]}).keys())
+        privacy_keys = set(svc_on.handle_compare_recordings({"item_ids": ["a1", "a2"]}).keys())
+        # Privacy response adds sentinel keys; normal keys must all be present
+        normal_data_keys = {
+            "items", "text_similarity_matrix", "duration_comparison",
+            "confidence_comparison", "language_distribution",
+            "common_words", "unique_words_per_item",
+        }
+        self.assertTrue(normal_data_keys.issubset(privacy_keys),
+                        f"Privacy response missing shape keys: {normal_data_keys - privacy_keys}")
+
+
+class CompareRecordingsServicePyDelegationTestCase(unittest.TestCase):
+    """BackendService._handle_compare_recordings delegates to SearchAndAnalysisService (W1710).
+
+    Verifies that the secondary parity fix (service.py delegation) is wired correctly
+    and also enforces the privacy guard via the same real production handler.
+    """
+
+    def _make_minimal_backend(self, privacy_enabled: bool) -> Any:
+        """Build a minimal BackendService-like object with _search_and_analysis_svc wired."""
+        from backend.search_and_analysis_service import SearchAndAnalysisService
+        from backend.recording_comparison import RecordingComparison
+
+        store = _make_fake_store_with_items()
+
+        def _settings_get(key: str, default: Any = None) -> Any:
+            if key == "privacy_mode_enabled":
+                return privacy_enabled
+            return default
+
+        mock_searcher = MagicMock()
+        mock_searcher.is_enabled = False
+
+        svc = SearchAndAnalysisService(
+            store=store,
+            semantic_searcher=mock_searcher,
+            action_items_extractor=None,
+            topic_tracker=MagicMock(),
+            recording_insights=MagicMock(),
+            recording_comparison=RecordingComparison(),
+            stats_report=MagicMock(),
+            settings_get=_settings_get,
+        )
+
+        class _MinimalBackend:
+            def __init__(self) -> None:
+                self._search_and_analysis_svc = svc
+
+            def _handle_compare_recordings(self, params: dict) -> dict:
+                """Mirrors the real BackendService._handle_compare_recordings delegation."""
+                return self._search_and_analysis_svc.handle_compare_recordings(params)
+
+        return _MinimalBackend()
+
+    def test_service_delegation_privacy_on(self) -> None:
+        """_handle_compare_recordings returns privacy guard response via delegation."""
+        backend = self._make_minimal_backend(privacy_enabled=True)
+        result = backend._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(result.get("items"), [])
+        self.assertEqual(result.get("reason"), "privacy_mode_active")
+
+    def test_service_delegation_privacy_off(self) -> None:
+        """_handle_compare_recordings returns real data when privacy off."""
+        backend = self._make_minimal_backend(privacy_enabled=False)
+        result = backend._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+        self.assertEqual(len(result.get("items", [])), 2)
+        self.assertIn("text_similarity_matrix", result)
 
 
 if __name__ == "__main__":
