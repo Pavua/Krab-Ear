@@ -466,6 +466,119 @@ class TestWave136Required(unittest.TestCase):
         self.assertEqual(len(set(sigs)), 12)
 
 
+class TestWave1733NonceFloodResistance(unittest.TestCase):
+    """Wave 1733 regression: verify HMAC before consuming nonce.
+
+    Before the fix, verify_request registered the nonce BEFORE checking
+    the signature, allowing unauthenticated attackers to exhaust the
+    MAX_NONCES=1000 store with garbage-signature requests.
+
+    After the fix, a nonce is only spent when the HMAC is valid.
+    """
+
+    def setUp(self) -> None:
+        self.signer = RequestSigner()
+        self.secret = RequestSigner.generate_secret()
+
+    # ------------------------------------------------------------------
+    # 16. Invalid signature does NOT consume a nonce
+    # ------------------------------------------------------------------
+    def test_invalid_signature_does_not_consume_nonce(self) -> None:
+        """Bad-sig request with nonce X → nonce_count stays 0; valid request
+        with same nonce X then succeeds; replaying it is rejected."""
+        nonce_x = "wave1733_nonce_aabbccdd"
+        ts = time.time()
+
+        # Compute a valid signature, then corrupt it
+        signed = self.signer.sign_request("ping", {}, self.secret,
+                                          timestamp=ts, nonce=nonce_x)
+        last = signed.signature[-1]
+        bad_char = "0" if last != "0" else "1"
+        bad_sig = signed.signature[:-1] + bad_char
+
+        # Bad-sig call: must return False AND must NOT consume the nonce
+        result_bad = self.signer.verify_request(
+            "ping", {}, bad_sig, self.secret,
+            timestamp=ts, nonce=nonce_x,
+        )
+        self.assertFalse(result_bad, "Bad signature must be rejected")
+        self.assertEqual(
+            self.signer.nonce_count(), 0,
+            "A failed (bad-sig) verify_request must not consume a nonce slot",
+        )
+
+        # Now a valid request with the SAME nonce must succeed (nonce was free)
+        result_valid = self.signer.verify_request(
+            "ping", {}, signed.signature, self.secret,
+            timestamp=ts, nonce=nonce_x,
+        )
+        self.assertTrue(result_valid, "Valid request must succeed after bad-sig attempt")
+        self.assertEqual(self.signer.nonce_count(), 1)
+
+        # Replay the valid request — must be rejected
+        result_replay = self.signer.verify_request(
+            "ping", {}, signed.signature, self.secret,
+            timestamp=ts, nonce=nonce_x,
+        )
+        self.assertFalse(result_replay, "Replay of valid request must be rejected")
+
+    # ------------------------------------------------------------------
+    # 17. Flood resistance: 2000 bad-sig calls leave nonce store empty
+    # ------------------------------------------------------------------
+    def test_flood_resistance_bad_sigs_do_not_fill_nonce_store(self) -> None:
+        """2000 verify_request calls with distinct nonces but garbage signatures
+        must leave nonce_count() == 0 (none consumed)."""
+        import secrets as _secrets
+        ts = time.time()
+        for _ in range(2000):
+            nonce = _secrets.token_hex(16)
+            result = self.signer.verify_request(
+                "ping", {}, "deadbeef" * 8, self.secret,
+                timestamp=ts, nonce=nonce,
+            )
+            self.assertFalse(result)
+
+        self.assertEqual(
+            self.signer.nonce_count(), 0,
+            "2000 bad-sig requests must not fill the nonce store",
+        )
+
+    # ------------------------------------------------------------------
+    # 18. Concurrent same-nonce race: exactly one valid thread wins
+    # ------------------------------------------------------------------
+    def test_concurrent_same_nonce_exactly_one_wins(self) -> None:
+        """Two concurrent valid requests sharing the same nonce: exactly one
+        must return True and the other False (no double-spend)."""
+        import threading
+
+        signed = self.signer.sign_request("ping", {}, self.secret)
+        outcomes = []
+        barrier = threading.Barrier(2)
+
+        def worker() -> None:
+            barrier.wait()  # start both threads simultaneously
+            result = self.signer.verify_request(
+                signed.method, signed.params, signed.signature, self.secret,
+                timestamp=signed.timestamp, nonce=signed.nonce,
+            )
+            outcomes.append(result)
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(
+            sorted(outcomes), [False, True],
+            "Exactly one concurrent request with the same nonce must succeed",
+        )
+        # Nonce store should hold exactly one entry
+        self.assertEqual(self.signer.nonce_count(), 1)
+
+
 # ---------------------------------------------------------------------------
 # Вспомогательный метод для тестов — добавляем к RequestSigner через monkey-patch
 # ---------------------------------------------------------------------------

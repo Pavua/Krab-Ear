@@ -132,10 +132,14 @@ class RequestSigner:
     ) -> bool:
         """Верифицирует подпись запроса.
 
-        Проверки (все должны пройти):
+        Проверки выполняются в следующем порядке:
         1. Временно́е окно: |now - timestamp| <= TIMESTAMP_WINDOW_SEC.
-        2. Nonce уникален (не был использован ранее).
-        3. HMAC-SHA256 подпись совпадает (constant-time compare).
+        2. HMAC-SHA256 подпись совпадает (constant-time compare).
+           Если подпись неверна — возвращаем False БЕЗ касания хранилища nonce'ов.
+        3. Только если подпись верна — проверяем и регистрируем nonce (replay protection).
+
+        Такой порядок предотвращает атаку на исчерпание nonce-хранилища:
+        неаутентифицированный запрос с неверной подписью не расходует слот nonce.
 
         Args:
             method: Имя IPC-метода.
@@ -148,24 +152,29 @@ class RequestSigner:
         Returns:
             True если запрос прошёл все проверки, False иначе.
         """
-        # 1. Проверка временно́го окна
+        # 1. Проверка временно́го окна (быстрый отсев устаревших запросов)
         if timestamp is not None:
             now = time.time()
             if abs(now - timestamp) > TIMESTAMP_WINDOW_SEC:
                 return False
 
-        # 2. Проверка уникальности nonce
+        # 2. Вычисляем ожидаемую подпись и сравниваем constant-time.
+        #    Хранилище nonce'ов НЕ трогаем до подтверждения подписи.
+        ts = timestamp if timestamp is not None else 0.0
+        nc = nonce if nonce is not None else ""
+        expected = self._compute_signature(method, params, secret, ts, nc)
+        if not hmac.compare_digest(expected, signature):
+            return False
+
+        # 3. Подпись верна — теперь проверяем и регистрируем nonce (replay protection).
+        #    Держим lock только на check-and-register, не во время хэширования.
         if nonce is not None:
             with self._lock:
                 if nonce in self._nonce_set:
                     return False  # replay attack
                 self._register_nonce(nonce)
 
-        # 3. Вычисляем ожидаемую подпись и сравниваем constant-time
-        ts = timestamp if timestamp is not None else 0.0
-        nc = nonce if nonce is not None else ""
-        expected = self._compute_signature(method, params, secret, ts, nc)
-        return hmac.compare_digest(expected, signature)
+        return True
 
     # ------------------------------------------------------------------
     # Вспомогательные методы
