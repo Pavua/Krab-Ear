@@ -7,6 +7,7 @@ from backend.event_bus import EventBus
 
 import queue
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -280,6 +281,153 @@ def _make_timeout_then_stop_queue():
             return None  # сигнал завершения
 
     return _OneTimeoutQueue()
+
+
+class TestShutdownSentinelOnFullQueue(unittest.TestCase):
+    """W1716 BUG 1: sentinel must be delivered even when the subscriber queue is full.
+
+    Before the fix, broadcast_shutdown_sentinel() did q.put_nowait(None) and
+    swallowed queue.Full — so a slow SSE consumer whose queue had filled to
+    _QUEUE_MAXSIZE never received the sentinel and stalled for the full
+    _SSE_POLL_TIMEOUT_SEC (15 s) instead of disconnecting immediately.
+    """
+
+    def test_sentinel_delivered_when_queue_full(self) -> None:
+        """Sentinel arrives even if the queue was filled to capacity before shutdown."""
+        from backend.event_bus import _QUEUE_MAXSIZE
+
+        bus = EventBus()
+        q = bus.subscribe()
+
+        # Fill queue to the brim with regular events
+        for i in range(_QUEUE_MAXSIZE):
+            q.put_nowait({"type": "audio.level", "ts": "t", "data": {"i": i}})
+
+        self.assertTrue(q.full(), "Pre-condition: queue must be full before the call")
+
+        # broadcast_shutdown_sentinel must drain then put the sentinel
+        sent = bus.broadcast_shutdown_sentinel()
+        self.assertEqual(sent, 1, "Sentinel should have been sent to the 1 subscriber")
+
+        # The sentinel (None) must be the only item left in the queue now
+        sentinel = q.get_nowait()
+        self.assertIsNone(sentinel, "Sentinel (None) must be the item in the queue after drain")
+
+        # Queue should be empty afterwards
+        with self.assertRaises(queue.Empty):
+            q.get_nowait()
+
+    def test_sentinel_delivered_to_multiple_full_queues(self) -> None:
+        """All full subscriber queues are drained and each receives the sentinel."""
+        from backend.event_bus import _QUEUE_MAXSIZE
+
+        bus = EventBus()
+        q1 = bus.subscribe()
+        q2 = bus.subscribe()
+
+        for i in range(_QUEUE_MAXSIZE):
+            q1.put_nowait({"type": "fill", "ts": "t", "data": {}})
+            q2.put_nowait({"type": "fill", "ts": "t", "data": {}})
+
+        sent = bus.broadcast_shutdown_sentinel()
+        self.assertEqual(sent, 2)
+
+        self.assertIsNone(q1.get_nowait())
+        self.assertIsNone(q2.get_nowait())
+
+    def test_sentinel_count_correct_for_empty_queues(self) -> None:
+        """When queues are NOT full the return value is still correct."""
+        bus = EventBus()
+        bus.subscribe()
+        bus.subscribe()
+        bus.subscribe()
+
+        sent = bus.broadcast_shutdown_sentinel()
+        self.assertEqual(sent, 3)
+
+
+class TestSseStreamEmptyFilter(unittest.TestCase):
+    """W1716 BUG 2: an empty-after-parse event_filter must mean 'receive all',
+    not 'receive nothing' (silent blackhole).
+
+    Before the fix, event_filter=',' or event_filter=' ' produced allowed=set()
+    (empty set, not None).  The guard `event["type"] not in allowed` was then True
+    for every event, so the SSE stream silently discarded all events and yielded
+    only keepalives.
+    """
+
+    def _collect_first_event(self, event_filter: str) -> str | None:
+        """Run sse_stream with the given filter, emit one event, return the chunk."""
+        import time
+        from backend.event_bus import sse_stream
+
+        bus = EventBus()
+        result: list[str] = []
+
+        def _run() -> None:
+            gen = sse_stream(bus, event_filter=event_filter)
+            try:
+                result.append(next(gen))
+            finally:
+                gen.close()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        time.sleep(0.05)  # give the thread time to subscribe
+
+        bus.emit("stt.final", {"text": "hello"})
+        t.join(timeout=5.0)
+
+        return result[0] if result else None
+
+    def test_comma_only_filter_receives_all(self) -> None:
+        """event_filter=',' (comma only) must NOT blackhole — events pass through."""
+        chunk = self._collect_first_event(",")
+        self.assertIsNotNone(chunk, "No chunk received — events were silently blackholed")
+        self.assertIn("stt.final", chunk)
+
+    def test_whitespace_filter_receives_all(self) -> None:
+        """event_filter=' ' (spaces only) must NOT blackhole — events pass through."""
+        chunk = self._collect_first_event("  ")
+        self.assertIsNotNone(chunk, "No chunk received — events were silently blackholed")
+        self.assertIn("stt.final", chunk)
+
+    def test_comma_separated_blanks_receives_all(self) -> None:
+        """event_filter=' , , ' (all blank tokens) must NOT blackhole."""
+        chunk = self._collect_first_event(" , , ")
+        self.assertIsNotNone(chunk, "No chunk received — events were silently blackholed")
+        self.assertIn("stt.final", chunk)
+
+    def test_valid_filter_still_filters(self) -> None:
+        """A non-empty valid filter must still filter out non-matching events."""
+        import time
+        from backend.event_bus import sse_stream
+
+        bus = EventBus()
+        received: list[str] = []
+
+        def _run() -> None:
+            gen = sse_stream(bus, event_filter="stt.failed")
+            try:
+                for chunk in gen:
+                    received.append(chunk)
+                    break
+            finally:
+                gen.close()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        time.sleep(0.05)
+
+        # Emit a non-matching event — should be filtered
+        bus.emit("stt.final", {"text": "filtered out"})
+        # Emit matching event — should get through
+        bus.emit("stt.failed", {"reason": "timeout"})
+
+        t.join(timeout=5.0)
+
+        self.assertEqual(len(received), 1)
+        self.assertIn("stt.failed", received[0])
 
 
 if __name__ == "__main__":
