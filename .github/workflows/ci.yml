@@ -146,13 +146,13 @@ jobs:
           # mis-attributed the dead worker to a random victim test.
           set +e
           mapfile -t files < <(ls KrabEar/tests/test_*.py | sort)
-          n=${#files[@]}; chunk=$(( (n + 3) / 4 )); rc=0; failed=""
-          echo "Total test files: $n, chunk size: $chunk"
+          n=${#files[@]}; nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0; failed=""
+          echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
           reap() { pkill -9 -f "import sys;ex" 2>/dev/null || true; pkill -9 -f "mlx_subprocess" 2>/dev/null || true; pkill -9 -f "gigaam_worker" 2>/dev/null || true; }
-          for i in 0 1 2 3; do
+          for i in $(seq 0 $((nchunks - 1))); do
             sub=("${files[@]:$((i*chunk)):$chunk}")
             [ ${#sub[@]} -eq 0 ] && continue
-            echo "::group::pytest chunk $((i+1))/4 (${#sub[@]} files)"
+            echo "::group::pytest chunk $((i+1))/$nchunks (${#sub[@]} files)"
             python -m pytest "${sub[@]}" --tb=short -q -p no:xdist -p no:cacheprovider
             crc=$?
             echo "::endgroup::"
