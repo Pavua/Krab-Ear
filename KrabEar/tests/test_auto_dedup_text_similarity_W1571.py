@@ -23,7 +23,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.auto_deduplication import (  # noqa: E402
+from backend.auto_deduplication import (  # noqa: E402,F401
     AutoDeduplicator,
     _text_similarity,
     _JACCARD_LOW,
@@ -97,15 +97,17 @@ class TestCheckDuplicateUsesJaccard(unittest.TestCase):
     def test_check_duplicate_threshold_boundary_at_085(self):
         """check_duplicate reports duplicate when _text_similarity returns exactly 0.85.
 
-        _SIMILARITY_THRESHOLD = 0.85 — at-threshold scores must trigger duplicate.
+        _TIER1_ROUTING_THRESHOLD = 0.85 (renamed from _SIMILARITY_THRESHOLD in W1711) —
+        at-threshold scores must trigger duplicate.
         """
         dedup = AutoDeduplicator()
 
-        # Verify class attribute exists and is 0.85
+        # Verify class attribute exists and is 0.85.
+        # W1711 renamed _SIMILARITY_THRESHOLD → _TIER1_ROUTING_THRESHOLD; use the new name.
         self.assertEqual(
-            dedup._SIMILARITY_THRESHOLD,
+            dedup._TIER1_ROUTING_THRESHOLD,
             0.85,
-            "_SIMILARITY_THRESHOLD must be 0.85",
+            "_TIER1_ROUTING_THRESHOLD must be 0.85",
         )
 
         now = _now()
@@ -119,17 +121,22 @@ class TestCheckDuplicateUsesJaccard(unittest.TestCase):
 
         import backend.auto_deduplication as _mod
 
-        # Patch _text_similarity to return exactly 0.85 (boundary value)
+        # Patch _text_similarity to return exactly 0.85 (boundary value).
+        # W1711: _TIER1_ROUTING_THRESHOLD = 0.85 is the tier-1 routing boundary.
+        # To declare a duplicate at exactly 0.85 we must pass threshold=0.85
+        # (DEFAULT_DEDUP_THRESHOLD=0.9 would require sim>=0.9 to confirm).
         with patch.object(_mod, "_text_similarity", return_value=0.85):
             result = dedup.check_duplicate(
                 text=base,
                 timestamp=_iso(now),
                 store=store,
+                threshold=0.85,
             )
 
         self.assertTrue(
             result.is_duplicate,
-            "similarity == 0.85 (== _SIMILARITY_THRESHOLD) must be flagged as duplicate",
+            "similarity == 0.85 (== _TIER1_ROUTING_THRESHOLD) must be flagged as duplicate "
+            "when threshold=0.85 is passed",
         )
         self.assertAlmostEqual(result.similarity, 0.85, places=4)
 
@@ -216,15 +223,20 @@ class TestCheckDuplicateUsesJaccard(unittest.TestCase):
 
 
 class TestSimilarityThresholdAttribute(unittest.TestCase):
-    """Class attribute _SIMILARITY_THRESHOLD exists and is tunable."""
+    """Class attribute _TIER1_ROUTING_THRESHOLD (formerly _SIMILARITY_THRESHOLD) exists."""
 
     def test_similarity_threshold_class_attribute(self):
-        """AutoDeduplicator must have _SIMILARITY_THRESHOLD = 0.85 as class attribute."""
+        """AutoDeduplicator must have _TIER1_ROUTING_THRESHOLD = 0.85 as class attribute.
+
+        W1711 renamed _SIMILARITY_THRESHOLD → _TIER1_ROUTING_THRESHOLD to make the
+        tier-1/tier-2 routing intent unambiguous.
+        """
         self.assertTrue(
-            hasattr(AutoDeduplicator, "_SIMILARITY_THRESHOLD"),
-            "AutoDeduplicator must have class attribute _SIMILARITY_THRESHOLD",
+            hasattr(AutoDeduplicator, "_TIER1_ROUTING_THRESHOLD"),
+            "AutoDeduplicator must have class attribute _TIER1_ROUTING_THRESHOLD "
+            "(renamed from _SIMILARITY_THRESHOLD in W1711)",
         )
-        self.assertEqual(AutoDeduplicator._SIMILARITY_THRESHOLD, 0.85)
+        self.assertEqual(AutoDeduplicator._TIER1_ROUTING_THRESHOLD, 0.85)
 
     def test_time_window_class_attribute(self):
         """AutoDeduplicator must have _TIME_WINDOW_SECONDS = 60 as class attribute."""
