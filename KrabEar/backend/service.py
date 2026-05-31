@@ -303,7 +303,8 @@ class BackendService:
                 or new.get("stt_gigaam_hf_token", "") != old.get("stt_gigaam_hf_token", "")
             )
             if _changed:
-                self._propagate_hf_token_to_env()
+                # overwrite=True: GUI-токен изменился — перезаписываем env и инвалидируем pipeline
+                self._propagate_hf_token_to_env(overwrite=True)
         self._settings_svc.register_after_save_hook(_on_hf_token_saved)
 
         # Best-effort STT warmup — pre-loads Whisper model in background before
@@ -865,35 +866,88 @@ class BackendService:
             logger.exception("Не удалось инициализировать ActionItemsExtractor: %s", exc)
             return None
 
-    def _propagate_hf_token_to_env(self) -> None:
+    def _propagate_hf_token_to_env(self, overwrite: bool = False) -> None:
         """W1755: копирует hf_token / stt_gigaam_hf_token из runtime settings.json в os.environ.
 
         pyannote Pipeline.from_pretrained и транскрайбер читают HF_TOKEN из os.environ, а не из
         settings.json — поэтому токен из GUI никогда не доходил до дирайзации → 401 «no token».
-        Вызывается при старте и из after_save hook (set_settings) чтобы токен работал без рестарта.
+        Вызывается при старте (overwrite=False) и из after_save hook (overwrite=True) чтобы
+        токен работал без рестарта.
 
-        Приоритет: существующий os.environ["HF_TOKEN"] (явно заданный в среде или через
-        KRAB_EAR_HF_TOKEN) побеждает над GUI-токеном — setdefault-семантика.
+        Приоритет (overwrite=False / init): существующий os.environ["HF_TOKEN"] побеждает —
+        setdefault-семантика.  overwrite=True (after_save hook): перезаписывает env чтобы
+        новый GUI-токен вступил в силу немедленно.
+
+        Источник: hf_token (общий) имеет приоритет над stt_gigaam_hf_token для generic ключей
+        (gigaam-специфичный токен может не иметь прав на pyannote gating → spurious 401).
         Значение токена НИКОГДА не логируется.
         """
-        import os as _os
         _hf = self._get_runtime_setting("hf_token", "").strip()
         _gigaam = self._get_runtime_setting("stt_gigaam_hf_token", "").strip()
-        # Берём первый непустой из GUI-полей (gigaam-специфичный приоритетнее общего, если задан)
-        _token = _gigaam or _hf
+        # Общий hf_token предпочтителен для generic env-ключей.
+        # stt_gigaam_hf_token — фолбэк когда hf_token пустой.
+        _token = _hf or _gigaam
+        _token_source = "generic" if _hf else "gigaam"
         if not _token:
             return
         _env_keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
         _propagated: list[str] = []
-        for _k in _env_keys:
-            if not _os.environ.get(_k):
-                _os.environ[_k] = _token
-                _propagated.append(_k)
+        try:
+            for _k in _env_keys:
+                if overwrite or not os.environ.get(_k):
+                    os.environ[_k] = _token
+                    _propagated.append(_k)
+        except Exception as exc:  # noqa: BLE001
+            # Например, null-byte в токене вызывает ValueError в os.environ[k]=value.
+            # Не логируем сам токен — только тип ошибки.
+            logger.warning(
+                "hf_token env propagation failed",
+                extra={"error": type(exc).__name__},
+            )
+            return
         if _propagated:
             logger.info(
                 "hf token propagated to env",
-                extra={"source": "runtime_settings", "keys": ",".join(_propagated)},
+                extra={
+                    "source": "runtime_settings",
+                    "keys": ",".join(_propagated),
+                    "token_source": _token_source,
+                    "overwrite": overwrite,
+                },
             )
+        # При overwrite=True инвалидируем кэшированный diarization pipeline — новый токен
+        # будет использован при следующем вызове без рестарта.
+        if overwrite and _propagated:
+            _engine = getattr(getattr(self, "transcriber", None), "engine", None)
+            if _engine is not None:
+                _diar_lock = getattr(_engine, "_diarization_lock", None)
+                if _diar_lock is not None:
+                    try:
+                        with _diar_lock:
+                            _engine._diarization_pipeline = None
+                            logger.info(
+                                "diarization pipeline invalidated after hf_token change",
+                                extra={"token_source": _token_source},
+                            )
+                    except Exception as exc2:  # noqa: BLE001
+                        logger.warning(
+                            "diarization pipeline invalidation failed",
+                            extra={"error": type(exc2).__name__},
+                        )
+                else:
+                    # TODO(W1755): engine._diarization_lock absent — invalidate without lock
+                    try:
+                        _engine._diarization_pipeline = None
+                        logger.info(
+                            "diarization pipeline invalidated (no lock) after hf_token change",
+                            extra={"token_source": _token_source},
+                        )
+                    except Exception as exc2:  # noqa: BLE001
+                        logger.warning(
+                            "hf_token changed but diarization pipeline invalidation failed — "
+                            "restart required to apply new token",
+                            extra={"error": type(exc2).__name__},
+                        )
 
     def _cached_settings(self) -> dict[str, Any]:
         """Делегирует к SettingsService. Обратная совместимость."""

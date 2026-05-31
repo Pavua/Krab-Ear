@@ -15,10 +15,8 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -135,17 +133,21 @@ class HfTokenPropagationTestCase(unittest.TestCase):
 
     # ----------------------------------------------------------------- gigaam
 
-    def test_gigaam_token_used_when_both_set(self):
-        """stt_gigaam_hf_token имеет приоритет над hf_token если оба заданы."""
+    def test_generic_token_wins_over_gigaam_when_both_set(self):
+        """W1755 hardening: hf_token (generic) имеет приоритет над stt_gigaam_hf_token.
+
+        gigaam-специфичный токен может не иметь прав на pyannote gating (spurious 401).
+        Поэтому general hf_token должен попадать в generic env-ключи.
+        """
         svc = _StubService({
             "hf_token": "hf_generic",
             "stt_gigaam_hf_token": "hf_gigaam_specific",
         })
         svc._propagate_hf_token_to_env()
 
-        # gigaam-специфичный токен должен попасть в env
+        # generic токен должен попасть в env (не gigaam-специфичный)
         for k in _ENV_KEYS:
-            self.assertEqual(os.environ.get(k), "hf_gigaam_specific")
+            self.assertEqual(os.environ.get(k), "hf_generic")
 
     def test_generic_token_used_when_gigaam_empty(self):
         """Когда stt_gigaam_hf_token пустой, используется hf_token."""
@@ -219,6 +221,97 @@ class HfTokenAfterSaveHookTestCase(unittest.TestCase):
 
         for k in _ENV_KEYS:
             self.assertEqual(os.environ.get(k), "hf_NEW")
+
+
+class HfTokenOverwriteTestCase(unittest.TestCase):
+    """W1755 hardening: overwrite=True обновляет os.environ при смене токена через set_settings.
+
+    Проверяет что after_save hook (overwrite=True) действительно перезаписывает env когда
+    токен меняется, а init (overwrite=False) сохраняет setdefault-семантику.
+    """
+
+    def setUp(self):
+        self._env_snapshot = _save_env()
+        for k in _ENV_KEYS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        _restore_env(self._env_snapshot)
+
+    def test_overwrite_true_updates_env_on_token_change(self):
+        """overwrite=True: смена tok_A → tok_B обновляет os.environ до tok_B."""
+        # Шаг 1: init-вызов устанавливает tok_A
+        svc = _StubService({"hf_token": "hf_TOKEN_A"})
+        svc._propagate_hf_token_to_env(overwrite=False)
+        for k in _ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_TOKEN_A", f"{k} should be TOKEN_A after init")
+
+        # Шаг 2: пользователь меняет токен — после_save hook вызывается с overwrite=True
+        svc._runtime["hf_token"] = "hf_TOKEN_B"
+        svc._propagate_hf_token_to_env(overwrite=True)
+        for k in _ENV_KEYS:
+            self.assertEqual(
+                os.environ.get(k), "hf_TOKEN_B",
+                f"{k} should be TOKEN_B after overwrite=True",
+            )
+
+    def test_overwrite_false_does_not_replace_existing_env(self):
+        """overwrite=False (init): существующий env-токен НЕ перезаписывается GUI-токеном."""
+        os.environ["HF_TOKEN"] = "existing_from_shell"
+        svc = _StubService({"hf_token": "hf_FROM_GUI"})
+        svc._propagate_hf_token_to_env(overwrite=False)
+        # Существующий токен должен сохраниться
+        self.assertEqual(os.environ["HF_TOKEN"], "existing_from_shell")
+
+    def test_overwrite_true_replaces_all_three_keys(self):
+        """overwrite=True: все три HF env-ключа получают новое значение."""
+        # Устанавливаем все три ключа со старым значением
+        for k in _ENV_KEYS:
+            os.environ[k] = "hf_OLD"
+
+        svc = _StubService({"hf_token": "hf_NEW"})
+        svc._propagate_hf_token_to_env(overwrite=True)
+        for k in _ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_NEW", f"{k} should be hf_NEW")
+
+    def test_generic_hf_token_preferred_over_gigaam_for_env_keys(self):
+        """W1755 hardening: hf_token (generic) имеет приоритет над stt_gigaam_hf_token.
+
+        gigaam-специфичный токен может не иметь прав на pyannote gating → spurious 401.
+        Поэтому generic hf_token должен попадать в env-ключи, а не gigaam-токен.
+        """
+        svc = _StubService({
+            "hf_token": "hf_GENERIC",
+            "stt_gigaam_hf_token": "hf_GIGAAM_ONLY",
+        })
+        svc._propagate_hf_token_to_env()
+        for k in _ENV_KEYS:
+            self.assertEqual(
+                os.environ.get(k), "hf_GENERIC",
+                f"{k} should be GENERIC (not GIGAAM)",
+            )
+
+    def test_gigaam_token_fallback_when_generic_empty(self):
+        """stt_gigaam_hf_token используется как фолбэк когда hf_token пустой."""
+        svc = _StubService({
+            "hf_token": "",
+            "stt_gigaam_hf_token": "hf_GIGAAM_FALLBACK",
+        })
+        svc._propagate_hf_token_to_env()
+        for k in _ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_GIGAAM_FALLBACK", f"{k} should be GIGAAM_FALLBACK")
+
+    def test_null_byte_token_does_not_raise(self):
+        """Null-byte в токене (ValueError из os.environ) перехватывается без raise."""
+        svc = _StubService({"hf_token": "hf_" + chr(0) + "invalid"})
+        # Должно завершиться без исключения
+        try:
+            svc._propagate_hf_token_to_env(overwrite=True)
+        except Exception as exc:
+            self.fail(f"_propagate_hf_token_to_env raised unexpectedly: {exc}")
+        # env не должен содержать мусор
+        for k in _ENV_KEYS:
+            self.assertNotEqual(os.environ.get(k), "hf_" + chr(0) + "invalid")
 
 
 if __name__ == "__main__":
