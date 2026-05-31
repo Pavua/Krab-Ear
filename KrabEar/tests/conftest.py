@@ -143,6 +143,75 @@ def _disable_llm_warmup(request):
 
 
 # ---------------------------------------------------------------------------
+# Wave 1748: suppress startup diagnostics error-bus pushes during tests.
+#
+# BackendService.__init__ calls startup_diagnostics.run_all_checks() which
+# (in CI) pushes startup.stt_model_cache_miss and other startup warnings to
+# the service's own _error_bus.  Tests that assert list_recent_errors == []
+# on a fresh BackendService fail because the ring buffer is non-empty.
+#
+# Patching run_all_checks to return a minimal "ready" report keeps the
+# diagnostics wiring intact while suppressing the CI-specific warnings.
+# Tests that explicitly exercise startup_diagnostics are excluded via nodeid.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _suppress_startup_diagnostics(request):
+    """Suppress startup diagnostic error-bus pushes during most tests.
+
+    Also suppresses the LM Studio background reachability check started in
+    StartupDiagnostics.__init__.  With ~90 BackendService instances in
+    test_backend_service.py, 90 simultaneous background threads firing
+    network probes causes intermittent CI failures (resource exhaustion +
+    spurious warmup log noise).  Patching to a no-op eliminates the leak.
+    """
+    if "startup_diagnostics" in request.node.nodeid.lower():
+        yield
+        return
+    try:
+        from unittest.mock import patch, MagicMock
+        from backend.startup_diagnostics import StartupDiagnostics
+
+        _fake_report = MagicMock()
+        _fake_report.status = "ready"
+        _fake_report.errors = []
+        _fake_report.warnings = []
+        _fake_report.startup_time_ms = 0.0
+        _fake_report.checks = []
+
+        with patch.object(StartupDiagnostics, "run_all_checks", return_value=_fake_report), \
+             patch.object(StartupDiagnostics, "_start_lm_studio_background_check",
+                          lambda self: None):
+            yield
+    except Exception:
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Wave 1748: reset global ErrorBus ring-buffer + WarnBatcher state after each
+# test.  BackendService wires a per-instance ErrorBus, but the module-level
+# singleton (backend.event_bus.bus / backend.error_bus module state) can
+# accumulate entries across tests in the same xdist worker.  The ring buffer
+# is cleared via .clear() which handles the deque + dedupe dict + WarnBatcher.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_error_bus_singleton():
+    """Clear the module-level ErrorBus ring buffer after each test."""
+    yield
+    try:
+        import sys as _sys
+        _ebus_mod = _sys.modules.get("backend.error_bus")
+        if _ebus_mod is not None:
+            _bus_singleton = getattr(_ebus_mod, "bus", None)
+            if _bus_singleton is not None and hasattr(_bus_singleton, "clear"):
+                try:
+                    _bus_singleton.clear()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Wave 1746: stub-purge backstop fixture.
 #
 # Many tests install bare ModuleType stubs or MagicMock objects into
@@ -160,12 +229,16 @@ def _disable_llm_warmup(request):
 #   real modules that tests legitimately cached.
 #
 # Package roots (bare "backend", "core", "contracts") are never removed — only
-# dotted sub-modules.  A small set of external names that tests are also
-# allowed to replace permanently is excluded (mlx, mlx.core, sentry_sdk,
-# sounddevice, websockets) — those are handled by the tests that own them.
+# dotted sub-modules.
+#
+# Wave 1748: "sounddevice" REMOVED from the never-purge list so that bare
+# ModuleType stubs (no InputStream) installed by test_pipeline_v2_gate_W1275.py
+# are cleaned up.  Purging the bare stub causes the next import to reload the
+# real sounddevice (which IS installed in CI via requirements.txt), restoring
+# the InputStream attribute needed by test_recorder.py.
 # ---------------------------------------------------------------------------
 _STUB_PURGE_PREFIXES = ("backend.", "core.", "contracts.")
-_STUB_PURGE_EXTERNAL = frozenset({"sounddevice", "websockets", "mlx", "mlx.core", "sentry_sdk"})
+_STUB_PURGE_EXTERNAL = frozenset({"websockets", "mlx", "mlx.core", "sentry_sdk"})
 
 
 @pytest.fixture(autouse=True)
@@ -194,3 +267,18 @@ def _purge_leaked_module_stubs():
         is_mock = isinstance(mod, (Mock, MagicMock))
         if is_bare_stub or is_mock:
             del sys.modules[name]
+
+    # Wave 1748: also purge bare "sounddevice" stub (was in _STUB_PURGE_EXTERNAL,
+    # now handled separately so the logic stays readable).
+    _sd = sys.modules.get("sounddevice")
+    if _sd is not None:
+        import types as _types
+        from unittest.mock import Mock as _Mock, MagicMock as _MagicMock
+        _is_sd_bare = (
+            isinstance(_sd, _types.ModuleType)
+            and getattr(_sd, "__file__", None) is None
+            and getattr(getattr(_sd, "__spec__", None), "origin", None) in (None, "")
+        )
+        _is_sd_mock = isinstance(_sd, (_Mock, _MagicMock))
+        if _is_sd_bare or _is_sd_mock:
+            del sys.modules["sounddevice"]

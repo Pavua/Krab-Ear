@@ -149,7 +149,10 @@ class TestWsConnection(unittest.TestCase):
         bus.emit("stt.final", {"text": "Мир", "confidence": 0.90})
 
         stop_event.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        # W1748: broadcast shutdown sentinel so _handle_ws_connection exits
+        # immediately instead of waiting for the next 0.05 s poll timeout.
+        bus.broadcast_shutdown_sentinel()
+        thread.join(timeout=2.0)
 
         self.assertEqual(len(received_events), 2)
         self.assertEqual(received_events[0]["type"], "stt.final")
@@ -190,7 +193,10 @@ class TestWsConnection(unittest.TestCase):
         bus.emit("stt.final", {"text": "Test", "confidence": 0.85})  # pass
 
         stop_event.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        # W1748: broadcast shutdown sentinel so _handle_ws_connection exits
+        # immediately instead of waiting for the next 0.05 s poll timeout.
+        bus.broadcast_shutdown_sentinel()
+        thread.join(timeout=2.0)
 
         self.assertEqual(len(received_events), 1)
         self.assertEqual(received_events[0]["type"], "stt.final")
@@ -232,7 +238,10 @@ class TestWsConnection(unittest.TestCase):
         bus.emit("translation", {"result": "B"})               # pass
 
         stop_event.wait(timeout=1.0)
-        thread.join(timeout=1.0)
+        # W1748: broadcast shutdown sentinel so _handle_ws_connection exits
+        # immediately instead of waiting for the next 0.05 s poll timeout.
+        bus.broadcast_shutdown_sentinel()
+        thread.join(timeout=2.0)
 
         self.assertEqual(set(received_types), {"stt.final", "translation"})
         self.assertNotIn("stt.failed", received_types)

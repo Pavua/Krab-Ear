@@ -469,6 +469,14 @@ class TestAtexitHookRegistered(unittest.TestCase):
 class TestNoModuleLevelAudioEngineLoad(unittest.TestCase):
     """Module import must not trigger real MLX/GigaAM/torch model loading."""
 
+    def setUp(self):
+        # W1748: another test file running in the same xdist worker may have
+        # replaced _rest_mod.engine with a MagicMock (which auto-creates
+        # _unavailable_models on attribute access).  Reset to our controlled
+        # stub before running the isolation checks.
+        if _REST_AVAILABLE and _rest_mod is not None:
+            _rest_mod.engine = _mock_engine
+
     def test_no_module_level_audio_engine_load(self):
         """The module-level engine must not have triggered real MLX model loading.
 

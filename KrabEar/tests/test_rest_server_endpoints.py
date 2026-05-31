@@ -374,9 +374,36 @@ class TranscribeInvalidQualityProfileTest(_RestBase):
 # 7. GET /v1/events — SSE endpoint
 # ===========================================================================
 
+
+def _fake_sse_stream_endpoint(*args, **kwargs):
+    """Finite SSE generator for test_rest_server_endpoints — exits immediately.
+
+    W1748 / W1746: the real sse_stream() blocks for ≥15 s per iteration
+    (poll timeout on the internal queue) and never terminates without an
+    external shutdown signal.  Under pytest-xdist -n 2, this causes the
+    xdist worker process to appear to crash (gw0 node down: Not properly
+    terminated) when the test function returns while the generator is still
+    blocking.  Replacing sse_stream with this one-shot stub lets SSE endpoint
+    tests verify headers/status/cache-control without hanging the worker.
+    """
+    yield ": keepalive\n\n"
+
+
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
 class SSEEventsEndpointTest(_RestBase):
     """GET /v1/events → response is text/event-stream."""
+
+    def setUp(self):
+        super().setUp()
+        # W1748: patch sse_stream to a finite stub so the xdist worker does not
+        # block on the 15-second poll timeout inside the real generator.
+        self._p_sse = patch("backend.rest_server.sse_stream",
+                            side_effect=_fake_sse_stream_endpoint)
+        self._p_sse.start()
+
+    def tearDown(self):
+        self._p_sse.stop()
+        super().tearDown()
 
     def test_events_returns_200(self):
         # Close the SSE stream immediately by reading zero bytes
