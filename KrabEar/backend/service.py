@@ -23,7 +23,7 @@ from backend.auto_deduplication import AutoDeduplicator
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
 from backend.smart_vocabulary import SmartVocabularyBuilder
-from backend.recording_comparison import RecordingComparison, _view_to_dict as _comparison_view_to_dict
+from backend.recording_comparison import RecordingComparison
 from backend.playback_tracker import PlaybackTracker
 from backend.speaker_statistics import SpeakerStatisticsAnalyzer
 from backend.obsidian_sync import ObsidianSyncManager
@@ -658,6 +658,7 @@ class BackendService:
             recording_insights=self._recording_insights,
             recording_comparison=self._recording_comparison,
             stats_report=self._stats_report,
+            settings_get=self._get_runtime_setting,
         )
         self._stt_mgmt_svc = STTManagementService(
             settings_svc=self._settings_svc,
@@ -3310,12 +3311,12 @@ class BackendService:
         return self._sentiment_trends.to_dict(report)
 
     def _handle_compare_recordings(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сравнивает несколько записей side-by-side."""
-        item_ids = params.get("item_ids")
-        if not isinstance(item_ids, list) or not item_ids:
-            raise ValueError("Параметр item_ids обязателен (список строк)")
-        view = self._recording_comparison.compare(item_ids=item_ids, store=self.store)
-        return _comparison_view_to_dict(view)
+        """Сравнивает несколько записей side-by-side.
+
+        Privacy guard parity (W1408 F1 — restored W1710): делегирует в
+        SearchAndAnalysisService, который содержит каноническую реализацию с guard.
+        """
+        return self._search_and_analysis_svc.handle_compare_recordings(params)
 
     def _handle_check_integrity(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_check_integrity (W1690)."""
