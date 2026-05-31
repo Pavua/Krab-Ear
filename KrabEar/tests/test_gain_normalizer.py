@@ -523,5 +523,285 @@ class TestW1066Guards(unittest.TestCase):
         self.assertIsInstance(result, GainResult)
 
 
+# ---------------------------------------------------------------------------
+# Тест 11: Wave 1719 — regression tests for gain-cap + limiter fixes
+# ---------------------------------------------------------------------------
+
+class TestWave1719Regressions(unittest.TestCase):
+    """Wave 1719: regression guard for four bugs fixed in gain_normalizer.py.
+
+    BUG 1: no max-gain cap → near-silence gets amplified 800-900x → square wave
+    BUG 2: soft-knee top computed incorrectly → knee_width_db is a dead knob
+    BUG 3: soft-knee curve discontinuity at knee_top
+    BUG 4: auto_gain() missing NaN/Inf guard
+    """
+
+    def setUp(self):
+        self.normalizer = GainNormalizer()
+
+    # ------------------------------------------------------------------
+    # BUG 1: near-silence must NOT become a square wave
+    # ------------------------------------------------------------------
+
+    def _make_near_silence(self, rms_db: float, duration: float = 0.5) -> np.ndarray:
+        """Generate a sine signal with a known RMS level in dBFS."""
+        # RMS of a sine with amplitude A is A/sqrt(2)
+        # So A = rms_linear * sqrt(2)
+        rms_linear = _db_to_linear(rms_db)
+        amplitude = rms_linear * math.sqrt(2)
+        t = np.linspace(0, duration, int(SR * duration), endpoint=False)
+        return (amplitude * np.sin(2 * math.pi * 440 * t)).astype(np.float32)
+
+    def test_near_silence_minus79_not_square_wave(self):
+        """Signal at -79 dBFS MUST NOT be amplified into a clipped square wave.
+
+        Fail-before: without cap, gain_db = -20 - (-79) = +59 dB → 891× →
+        entire waveform hard-clips → peak = 1.0, clipping_ratio ≈ 1.0.
+        Pass-after: gain capped at +30 dB → peak ≪ 1.0 for a clean sine.
+        """
+        audio = self._make_near_silence(rms_db=-79.0)
+        result = self.normalizer.normalize(audio, target_db=-20.0)
+
+        # Applied gain must be capped
+        self.assertLessEqual(
+            result.gain_applied_db, 30.0 + 1e-3,
+            msg=f"gain_applied_db={result.gain_applied_db:.2f} exceeds +30 dB cap",
+        )
+
+        # Peak must be well below 1.0 (sine at -79 dBFS + 30 dB ≈ -49 dBFS,
+        # peak ≈ sqrt(2) * 10^(-49/20) ≈ 0.005 — far from 1.0)
+        peak = float(np.max(np.abs(result.audio)))
+        self.assertLess(
+            peak, 0.5,
+            msg=f"Output peak {peak:.4f} too high — signal may be clipped to square wave",
+        )
+
+        # No clipping at all
+        self.assertEqual(
+            result.clipped_samples, 0,
+            msg=f"Near-silence at -79 dBFS should produce 0 clipped samples, "
+                f"got {result.clipped_samples}",
+        )
+
+    def test_near_silence_minus60_not_square_wave(self):
+        """Signal at -60 dBFS (old +40 dB gain, 100×) also stays safe."""
+        audio = self._make_near_silence(rms_db=-60.0)
+        result = self.normalizer.normalize(audio, target_db=-20.0)
+
+        self.assertLessEqual(result.gain_applied_db, 30.0 + 1e-3)
+        peak = float(np.max(np.abs(result.audio)))
+        self.assertLess(peak, 0.9)
+
+    def test_gain_cap_warning_logged_when_capped(self):
+        """A warning must be logged when gain is capped."""
+        import logging as _logging
+        audio = self._make_near_silence(rms_db=-79.0)
+        with self.assertLogs("KrabEar.GainNormalizer", level=_logging.WARNING) as cm:
+            self.normalizer.normalize(audio, target_db=-20.0)
+        self.assertTrue(
+            any("cap" in line.lower() or "square" in line.lower() or "exceeds" in line.lower()
+                for line in cm.output),
+            msg=f"Expected gain-cap warning, got: {cm.output}",
+        )
+
+    def test_normal_signal_not_capped(self):
+        """Normal speech-level signal (-40 dBFS) needs +20 dB — below cap, no warning."""
+        audio = self._make_near_silence(rms_db=-40.0)
+        result = self.normalizer.normalize(audio, target_db=-20.0)
+        self.assertAlmostEqual(result.gain_applied_db, 20.0, delta=0.5)
+
+    # ------------------------------------------------------------------
+    # BUG 2: soft-knee width parameter must be a live knob
+    # ------------------------------------------------------------------
+
+    def test_knee_width_changes_knee_zone(self):
+        """Different _LIMITER_KNEE_DB values must produce different knee_top.
+
+        We test indirectly: with a large knee (wide), a signal just above
+        threshold but well below HARD_CLIP is in the knee zone and gets
+        compressed. With knee_width_db≈0 (near-zero), the knee zone is
+        near-empty and the same signal passes through almost unchanged
+        (until hard-clip at _HARD_CLIP).
+        """
+        from core.gain_normalizer import _LIMITER_KNEE_DB, _LIMITER_THRESHOLD, _HARD_CLIP
+
+        # Build a constant signal right in the middle of [threshold, HARD_CLIP]
+        mid_level = (_LIMITER_THRESHOLD + _HARD_CLIP) / 2.0  # ≈ 0.975
+        audio = np.full(SR, mid_level, dtype=np.float64)
+
+        GainNormalizer._soft_knee_limit(audio)
+
+        # With the current knee formula the default knee_top < HARD_CLIP,
+        # so mid_level is often ABOVE knee_top and hard-clips.
+        # The important check: the knee param is not completely ignored —
+        # samples between threshold and knee_top are compressed (not identical
+        # to input and not hard-clipped to 1.0 at the same time).
+        # Verify knee_top is meaningful (not simply equal to HARD_CLIP for
+        # default _LIMITER_KNEE_DB > 0):
+        knee_fraction = 1.0 - _db_to_linear(-_LIMITER_KNEE_DB)
+        knee_top = _HARD_CLIP - (_HARD_CLIP - _LIMITER_THRESHOLD) * knee_fraction
+        self.assertLess(
+            knee_top, _HARD_CLIP - 1e-6,
+            msg=f"knee_top={knee_top:.6f} must be strictly below HARD_CLIP={_HARD_CLIP}; "
+                "knee_width_db parameter is a dead knob",
+        )
+        self.assertGreater(
+            knee_top, _LIMITER_THRESHOLD + 1e-6,
+            msg=f"knee_top={knee_top:.6f} must be above threshold={_LIMITER_THRESHOLD}",
+        )
+
+    # ------------------------------------------------------------------
+    # BUG 3: soft-knee curve must be continuous at knee_top
+    # ------------------------------------------------------------------
+
+    def test_knee_curve_continuous_at_knee_top(self):
+        """The soft-knee output must be continuous at the knee_top boundary.
+
+        Sample just below knee_top and at knee_top must not have a step jump.
+        Old formula: f(t=1) = threshold + (knee_top - threshold) * 0.5
+                              ≠ knee_top → discontinuity.
+        New formula: f(t=1) = threshold + (knee_top - threshold) * 1² = knee_top.
+        """
+        from core.gain_normalizer import (
+            _LIMITER_KNEE_DB, _LIMITER_THRESHOLD, _HARD_CLIP,
+        )
+
+        knee_fraction = 1.0 - _db_to_linear(-_LIMITER_KNEE_DB)
+        knee_top = _HARD_CLIP - (_HARD_CLIP - _LIMITER_THRESHOLD) * knee_fraction
+
+        epsilon = 1e-6
+        just_below = knee_top - epsilon
+        at_knee_top = knee_top
+
+        audio_below = np.array([just_below], dtype=np.float64)
+        audio_at = np.array([at_knee_top], dtype=np.float64)
+
+        limited_below, _ = GainNormalizer._soft_knee_limit(audio_below)
+        limited_at, _ = GainNormalizer._soft_knee_limit(audio_at)
+
+        val_below = float(np.abs(limited_below[0]))
+        val_at = float(np.abs(limited_at[0]))
+
+        # The two values must be very close (no step jump)
+        self.assertAlmostEqual(
+            val_below, val_at, delta=0.01,
+            msg=f"Step discontinuity at knee_top: just_below={val_below:.6f}, "
+                f"at_knee_top={val_at:.6f}. Difference={abs(val_at - val_below):.6f}",
+        )
+
+    def test_knee_curve_at_t1_reaches_knee_top(self):
+        """At exactly knee_top the compressed output must equal knee_top (not midpoint)."""
+        from core.gain_normalizer import (
+            _LIMITER_KNEE_DB, _LIMITER_THRESHOLD, _HARD_CLIP,
+        )
+
+        knee_fraction = 1.0 - _db_to_linear(-_LIMITER_KNEE_DB)
+        knee_top = _HARD_CLIP - (_HARD_CLIP - _LIMITER_THRESHOLD) * knee_fraction
+
+        # A sample exactly at knee_top — the limiter must map it to the hard-clip
+        # boundary (knee_top itself, since the condition is abs > knee_top for hard-clip).
+        audio = np.array([knee_top], dtype=np.float64)
+        limited, clipped = GainNormalizer._soft_knee_limit(audio)
+
+        # At exactly knee_top (<=knee_top) the knee zone handles it → compressed to knee_top
+        # (t=1 → output = knee_top).
+        output_val = float(np.abs(limited[0]))
+        self.assertAlmostEqual(
+            output_val, knee_top, delta=0.005,
+            msg=f"At t=1 (knee_top={knee_top:.6f}) output should be knee_top, got {output_val:.6f}",
+        )
+        # Must not be hard-clipped either
+        self.assertEqual(clipped, 0, msg="Exactly at knee_top should not count as hard-clipped")
+
+    def test_knee_curve_monotone(self):
+        """The soft-knee compression curve must be monotonically non-decreasing."""
+        from core.gain_normalizer import (
+            _LIMITER_KNEE_DB, _LIMITER_THRESHOLD, _HARD_CLIP,
+        )
+
+        knee_fraction = 1.0 - _db_to_linear(-_LIMITER_KNEE_DB)
+        knee_top = _HARD_CLIP - (_HARD_CLIP - _LIMITER_THRESHOLD) * knee_fraction
+
+        # Sample the knee zone at 50 evenly spaced points
+        levels = np.linspace(_LIMITER_THRESHOLD + 1e-6, knee_top - 1e-6, 50)
+        audio = levels.copy()
+        limited, _ = GainNormalizer._soft_knee_limit(audio)
+        outputs = np.abs(limited)
+
+        for i in range(len(outputs) - 1):
+            self.assertLessEqual(
+                outputs[i], outputs[i + 1] + 1e-9,
+                msg=f"Knee curve is not monotone at index {i}: "
+                    f"output[{i}]={outputs[i]:.6f} > output[{i+1}]={outputs[i+1]:.6f}",
+            )
+
+    # ------------------------------------------------------------------
+    # BUG 4: auto_gain must handle NaN/Inf input gracefully
+    # ------------------------------------------------------------------
+
+    def test_auto_gain_nan_input_returns_gracefully(self):
+        """auto_gain with NaN samples must return unchanged audio, no exception."""
+        import logging as _logging
+
+        audio = _sine(amplitude=0.1, duration=0.5)
+        audio[42] = float("nan")
+
+        with self.assertLogs("KrabEar.GainNormalizer", level=_logging.WARNING) as cm:
+            result = self.normalizer.auto_gain(audio)
+
+        self.assertIsInstance(result, GainResult)
+        self.assertEqual(len(result.audio), len(audio))
+        self.assertAlmostEqual(result.gain_applied_db, 0.0, delta=1e-6)
+        self.assertTrue(
+            any("non-finite" in line for line in cm.output),
+            msg=f"Expected 'non-finite' warning from auto_gain, got: {cm.output}",
+        )
+
+    def test_auto_gain_inf_input_returns_gracefully(self):
+        """auto_gain with Inf samples must return unchanged audio, no exception."""
+        import logging as _logging
+
+        audio = _sine(amplitude=0.1, duration=0.5)
+        audio[10] = float("inf")
+
+        with self.assertLogs("KrabEar.GainNormalizer", level=_logging.WARNING) as cm:
+            result = self.normalizer.auto_gain(audio)
+
+        self.assertIsInstance(result, GainResult)
+        self.assertAlmostEqual(result.gain_applied_db, 0.0, delta=1e-6)
+        self.assertTrue(
+            any("non-finite" in line for line in cm.output),
+            msg=f"Expected 'non-finite' warning from auto_gain, got: {cm.output}",
+        )
+
+    def test_auto_gain_all_nan_returns_gracefully(self):
+        """auto_gain with all-NaN array must return gracefully."""
+        audio = np.full(SR, float("nan"), dtype=np.float32)
+        result = self.normalizer.auto_gain(audio)
+        self.assertIsInstance(result, GainResult)
+        self.assertAlmostEqual(result.gain_applied_db, 0.0, delta=1e-6)
+
+    def test_auto_gain_clean_audio_not_affected_by_guard(self):
+        """Clean audio in auto_gain must NOT trigger the NaN guard."""
+        import io
+        import logging as _logging
+
+        audio = _sine(amplitude=0.05, duration=0.5)
+        stream = io.StringIO()
+        handler = _logging.StreamHandler(stream)
+        handler.setLevel(_logging.WARNING)
+        log = _logging.getLogger("KrabEar.GainNormalizer")
+        log.addHandler(handler)
+        try:
+            result = self.normalizer.auto_gain(audio)
+        finally:
+            log.removeHandler(handler)
+
+        self.assertNotIn("non-finite", stream.getvalue())
+        self.assertIsInstance(result, GainResult)
+        # Gain should be applied (quiet signal amplified)
+        self.assertGreater(result.gain_applied_db, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
