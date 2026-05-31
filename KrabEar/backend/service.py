@@ -218,6 +218,13 @@ class BackendService:
         self.translator._translation_cache = self._translation_cache
         # W1500 — wire runtime settings getter for privacy-mode detection
         self.translator._settings_getter = self._get_runtime_setting
+        # W1755 — wire runtime settings getter to LLMRewriter for privacy-mode detection in
+        # fix_punctuation_only() / summarize().  Previously _settings_getter was initialized to
+        # None and NEVER assigned on the rewriter instance (only the translator was wired at
+        # W1500), making the privacy guard dead: with privacy_mode_enabled=True the rewriter
+        # still POSTed transcript text to LM Studio.  Mirror the translator pattern exactly.
+        if self._llm_rewriter is not None:
+            self._llm_rewriter._settings_getter = self._get_runtime_setting
         self._start_time: float = time.monotonic()
         self._settings_svc = SettingsService(store=self.store)
         # Hot-propagate api_key changes to the running LLMRewriter without restart.
@@ -284,6 +291,20 @@ class BackendService:
                         "AudioLanguageID cache evict failed: %s", exc
                     )
         self._settings_svc.register_after_save_hook(_on_settings_saved_lang_id)
+
+        # W1755 — propagate runtime hf_token/stt_gigaam_hf_token to os.environ so that
+        # pyannote diarization finds HF_TOKEN at startup.  A GUI token change (set_settings)
+        # also re-runs propagation via the after_save hook below so no restart is needed.
+        self._propagate_hf_token_to_env()
+
+        def _on_hf_token_saved(old: dict, new: dict) -> None:
+            _changed = (
+                new.get("hf_token", "") != old.get("hf_token", "")
+                or new.get("stt_gigaam_hf_token", "") != old.get("stt_gigaam_hf_token", "")
+            )
+            if _changed:
+                self._propagate_hf_token_to_env()
+        self._settings_svc.register_after_save_hook(_on_hf_token_saved)
 
         # Best-effort STT warmup — pre-loads Whisper model in background before
         # first dictation, eliminating the 1–3 s cold-start latency the user feels
@@ -843,6 +864,36 @@ class BackendService:
         except Exception as exc:
             logger.exception("Не удалось инициализировать ActionItemsExtractor: %s", exc)
             return None
+
+    def _propagate_hf_token_to_env(self) -> None:
+        """W1755: копирует hf_token / stt_gigaam_hf_token из runtime settings.json в os.environ.
+
+        pyannote Pipeline.from_pretrained и транскрайбер читают HF_TOKEN из os.environ, а не из
+        settings.json — поэтому токен из GUI никогда не доходил до дирайзации → 401 «no token».
+        Вызывается при старте и из after_save hook (set_settings) чтобы токен работал без рестарта.
+
+        Приоритет: существующий os.environ["HF_TOKEN"] (явно заданный в среде или через
+        KRAB_EAR_HF_TOKEN) побеждает над GUI-токеном — setdefault-семантика.
+        Значение токена НИКОГДА не логируется.
+        """
+        import os as _os
+        _hf = self._get_runtime_setting("hf_token", "").strip()
+        _gigaam = self._get_runtime_setting("stt_gigaam_hf_token", "").strip()
+        # Берём первый непустой из GUI-полей (gigaam-специфичный приоритетнее общего, если задан)
+        _token = _gigaam or _hf
+        if not _token:
+            return
+        _env_keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
+        _propagated: list[str] = []
+        for _k in _env_keys:
+            if not _os.environ.get(_k):
+                _os.environ[_k] = _token
+                _propagated.append(_k)
+        if _propagated:
+            logger.info(
+                "hf token propagated to env",
+                extra={"source": "runtime_settings", "keys": ",".join(_propagated)},
+            )
 
     def _cached_settings(self) -> dict[str, Any]:
         """Делегирует к SettingsService. Обратная совместимость."""
